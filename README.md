@@ -73,3 +73,10 @@ daemon soft-degrades when any are absent.
 ## License
 
 Apache-2.0.
+
+## Development
+
+An 80-column limit is enforced by a tracked pre-commit hook. Enable it once
+per clone:
+
+    git config core.hooksPath .githooks
