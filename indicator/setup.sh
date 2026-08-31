@@ -1,6 +1,6 @@
 #!/bin/sh
 # setup.sh - set up session-mgr-indicator (the SNI tray icon for usher's
-# window-placement mode) for the CURRENT user. Standalone: just run `./setup.sh`.
+# window-placement mode) for the CURRENT user. Standalone: run `./setup.sh`.
 # An integrator (a provisioning system) delegates to it via `setup.sh install` /
 # `setup.sh check`, so the steps are identical whether or not one drives it.
 #
@@ -12,7 +12,8 @@
 #
 # All userspace: NO sudo. Idempotent (safe to re-run; adopts what exists). Needs
 # python3 and, for the service, a systemd --user manager. A tray HOST (waybar's
-# tray, or any desktop's) and `session-mgr` on PATH are runtime needs. Overrides:
+# tray, or any desktop's) and `session-mgr` on PATH are runtime needs.
+# Overrides:
 #   SMI_VENV   venv dir   (default ~/.venvs/session-mgr-indicator)
 #   SMI_BIN    bin dir    (default ~/.local/bin)
 #   SMI_SKIP_BUILD  adopt an existing venv (the test's stub) instead of pip

@@ -80,7 +80,7 @@ do_check() {
   if [ -x "$_bin/session-mgr" ]; then ok "$_bin/session-mgr"
   else bad "$_bin/session-mgr missing"; fi
   if command -v mux >/dev/null 2>&1; then ok "mux present (terminal restore)"
-  else warn "mux absent -- the mux plugin's terminal restore degrades (soft)"; fi
+  else warn "mux absent -- the mux plugin's terminal restore degrades"; fi
 }
 
 _U="usage: setup.sh [install|indicator [V]|all|uninstall|check|test|version]"

@@ -11,8 +11,8 @@ hand-written placement rules it records where windows actually are and puts them
 back. The one command
 .B session-mgr
 is both the login daemon and its controller. Placement is AGGRESSIVE for a
-window after login (or a re-arm), then STEADY \(en a reopened window just appears
-where you are; the opt-in
+window after login (or a re-arm), then STEADY \(en a reopened window just
+appears where you are; the opt-in
 .I session/include
 anchors keep snapping back even then, and
 .I session/exclude
@@ -51,17 +51,17 @@ Show the URL-normalization rules and how live windows resolve.
 .B selftest
 Offline unit checks (no compositor).
 .SH IDENTITY AND PLUGINS
-A window is matched to its saved slot by (app_id, key). App-SPECIFIC identity and
-respawn live in PLUGINS. Three ship built in \(en the volatile window title is
-never the key:
+A window is matched to its saved slot by (app_id, key). App-SPECIFIC identity
+and respawn live in PLUGINS. Three ship built in \(en the volatile window title
+is never the key:
 .TP
 .B chrome
-keys a Chrome/Chromium window by its active-tab URL (read from the browser's SNSS
-session file), normalized to host/path.
+keys a Chrome/Chromium window by its active-tab URL (read from the browser's
+SNSS session file), normalized to host/path.
 .TP
 .B mux
-keys a mux terminal by its tmux SESSION name and respawns it with \fBmux go\fR (a
-soft dependency: absent \fBmux\fR degrades to a no-op).
+keys a mux terminal by its tmux SESSION name and respawns it with \fBmux go\fR
+(a soft dependency: absent \fBmux\fR degrades to a no-op).
 .TP
 .B kitty
 keys any other kitty terminal by its shell's working directory (from /proc) and

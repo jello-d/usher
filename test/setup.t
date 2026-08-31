@@ -17,7 +17,7 @@ run() {
 }
 
 # install: the console script + the man page are linked; the indicator is NOT
-# (that is the `indicator` verb, kept out so a host wiring it gets no duplicate).
+# (that is the `indicator` verb, kept out so a host wiring it gets no dupe).
 run install >/dev/null 2>&1 || fail "install errored"
 [ "$(readlink "$BIN/session-mgr")" = "$VENV/bin/session-mgr" ] \
   || fail "session-mgr not symlinked to the venv console script"

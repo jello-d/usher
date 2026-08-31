@@ -21,8 +21,8 @@ actually are and puts them back where you left them. The one command
 How to identify and respawn a given app's windows lives in a **plugin**. Three
 ship built in — none uses the volatile title:
 
-- **chrome** — keys a Chrome/Chromium window by its **active-tab URL** (read from
-  the browser's own SNSS session file), normalized to host/path.
+- **chrome** — keys a Chrome/Chromium window by its **active-tab URL** (read
+  from the browser's own SNSS session file), normalized to host/path.
 - **mux** — keys a [mux](https://github.com/jello-d/mux) terminal by its tmux
   **session** name and respawns it with `mux go`. `mux` is a *soft* dependency:
   if it is absent the plugin degrades to a no-op.
@@ -61,7 +61,7 @@ session_restore = session-mgr watch
 
 ## Config
 
-- `~/.config/session/exclude` — `<app-regex> :: <title-regex>` never-place rules.
+- `~/.config/session/exclude` — `<app-regex> :: <title-regex>` never-place list.
 - `~/.config/session/include` — the same shape; the steady-state anchor list.
 - `~/.config/session/identity` — `<url-regex> :: <canonical>` URL-normalization
   rules for the chrome plugin (e.g. collapse a Gmail path to a stable id).

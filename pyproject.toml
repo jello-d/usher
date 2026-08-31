@@ -1,7 +1,7 @@
 [project]
 name = "usher"
 version = "0.1.0"
-description = "Record the Wayland window layout and place windows back -- a plugin-based session manager for wlroots/Wayfire."
+description = "Record and restore the Wayland window layout (wlroots/Wayfire)"
 requires-python = ">=3.9"
 dependencies = ["wayfire==3.2"]
 classifiers = ["License :: OSI Approved :: Apache Software License"]
