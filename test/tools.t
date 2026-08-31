@@ -1,8 +1,7 @@
 #!/bin/sh
 # test/tools.t - every shipped script parses: the Python modules under
 # py_compile (the engine + the indicator), the shell scripts under sh -n.
-# Catches a syntax
-# regression before it ships.
+# Catches a syntax regression before it ships.
 . "$(dirname "$0")/lib.sh"
 harness_init tools
 
