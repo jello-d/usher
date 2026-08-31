@@ -1,0 +1,14 @@
+[project]
+name = "session-mgr-indicator"
+version = "0.1.0"
+description = "Optional SNI tray indicator for usher (session-mgr) placement mode"
+requires-python = ">=3.9"
+dependencies = ["dbus-next>=0.2.3", "Pillow>=9"]
+classifiers = ["License :: OSI Approved :: Apache Software License"]
+
+[project.scripts]
+session-mgr-indicator = "session_mgr_indicator.__main__:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"

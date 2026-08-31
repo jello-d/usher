@@ -1,0 +1,39 @@
+# session/exclude -- windows session never captures and never places.
+#
+# session records where your windows sit and puts them back on restart. A few
+# windows must be exempt: transient states that should open wherever you
+# currently are (a blank New Tab, the Chrome profile picker), not be dragged to
+# a remembered spot. This file is that repository -- grow it as you meet more.
+#
+# One rule per line, always the same shape:
+#
+#   <app-regex> :: <title-regex>
+#
+# BOTH fields are required. Each is a Python regex matched with re.search, so
+# it is UNANCHORED (a substring test) -- add ^...$ to pin it, exactly as the
+# work boundary's own ^\[WORK does. Use .* for "any" in either field:
+#
+#   .* :: ^New Tab$          any app, whose title is exactly "New Tab"
+#   ^google-chrome$ :: .*    every google-chrome window
+#
+# A window matching ANY rule here is never recorded and never moved. A line
+# beginning with # is a comment; blank lines are ignored. `session exclude`
+# prints the rules as loaded and flags any bad line. Edits apply AUTOMATICALLY:
+# the running watcher re-reads this file within a second of saving.
+#
+# NOTE: the work/personal boundary (titles starting "[WORK") is NOT here -- it
+# is a hardcoded safety wall inside session, not a tunable. Never rely on this
+# file for it.
+
+# Chrome transient states: blank tabs and the pre-load window title. A stored
+# "New Tab" would drag every future new tab to one spot; a bare "Google Chrome"
+# entry (worn briefly before a page title loads) would fight every window
+# mid-load. Chrome sometimes appends " - Google Chrome", hence the optional
+# suffix. Covers google-chrome and chromium.
+google-chrome|chromium :: ^Google Chrome$
+google-chrome|chromium :: ^New Tab( - Google Chrome)?$
+google-chrome|chromium :: ^New Incognito Tab( - Google Chrome)?$
+google-chrome|chromium :: ^Sign in
+google-chrome|chromium :: ^Settings -.* Google Chrome$
+
+org.gnome.Loupe :: ^.*$

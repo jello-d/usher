@@ -1,0 +1,30 @@
+# session/include -- the ANCHOR list: windows session-mgr keeps placing even in
+# the CONSERVATIVE steady state.
+#
+# session-mgr places AGGRESSIVELY for the first few minutes after login (or a
+# `session-mgr aggressive` kick) -- it puts every known window back as it opens,
+# which is what lets Chrome fire up and settle into place. Once it ages into
+# STEADY state it stops teleporting: a window you reopen just appears where you
+# are and STAYS. This file is the opt-in exception -- the few windows you want
+# snapped back to their remembered workspace even in steady state.
+#
+# Default is FOLLOW-ME: an empty file anchors nothing, so nothing gets dragged
+# around mid-session. Add entries only for windows you genuinely want pinned.
+#
+# One rule per line, same shape as session/exclude:
+#
+#   <app-regex> :: <title-regex>
+#
+# BOTH fields required. Each is a Python regex matched with re.search
+# (UNANCHORED -- a substring test); use '.*' for "any", add ^...$ to pin.
+# Lines starting with # are comments; blanks ignored. exclude still WINS: a
+# window matching both is never placed. Edits apply live (the watcher
+# reloads on save). `session-mgr include` shows the rules as loaded.
+#
+# Examples (commented -- uncomment/adapt as you find your anchors). Prefer a
+# unique app_id (an app or a Chrome --app/PWA) over a shared-app title, which
+# churns with tabs:
+#   A messaging app -- always snap back to its workspace:
+# Slack :: .*
+#   A Gmail PWA window (distinct app_id from generic chrome):
+# .*[Gg]mail.* :: .*

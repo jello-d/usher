@@ -1,0 +1,97 @@
+.TH USHER 1 "2026" "usher 0.1.0" "User Commands"
+.SH NAME
+usher \- record the Wayland window layout and place windows back
+.SH SYNOPSIS
+.B session-mgr
+.I watch | capture | restore | resume | stop | status | plugins | selftest ...
+.SH DESCRIPTION
+.B usher
+seats windows into a steady arrangement on a wlroots/Wayfire session. Instead of
+hand-written placement rules it records where windows actually are and puts them
+back. The one command
+.B session-mgr
+is both the login daemon and its controller. Placement is AGGRESSIVE for a
+window after login (or a re-arm), then STEADY \(en a reopened window just appears
+where you are; the opt-in
+.I session/include
+anchors keep snapping back even then, and
+.I session/exclude
+lists windows never to place.
+.PP
+An optional
+.B session-mgr-indicator
+tray icon shows the placement mode and toggles it on a left-click (the
+.I indicator
+sub-package).
+.SH VERBS
+.TP
+.B watch
+The daemon (started at login): record continuously, place on map. Re-running it
+reloads a running instance.
+.TP
+.B capture
+Snapshot the current layout into the store now.
+.TP
+.B restore " [--dry-run] [--only S]"
+Place the stored layout onto the live session.
+.TP
+.B resume
+Start/reload in ADOPT mode (adopt the current layout as baseline; do not
+restore).
+.TP
+.B status
+The daemon's mode + seconds until it settles.
+.TP
+.B plugins
+List the loaded window plugins (built-in + user).
+.TP
+.B identity
+Show the URL-normalization rules and how live windows resolve.
+.TP
+.B selftest
+Offline unit checks (no compositor).
+.SH IDENTITY AND PLUGINS
+A window is matched to its saved slot by (app_id, key). App-SPECIFIC identity and
+respawn live in PLUGINS. Three ship built in \(en the volatile window title is
+never the key:
+.TP
+.B chrome
+keys a Chrome/Chromium window by its active-tab URL (read from the browser's SNSS
+session file), normalized to host/path.
+.TP
+.B mux
+keys a mux terminal by its tmux SESSION name and respawns it with \fBmux go\fR (a
+soft dependency: absent \fBmux\fR degrades to a no-op).
+.TP
+.B kitty
+keys any other kitty terminal by its shell's working directory (from /proc) and
+respawns it as a shell there.
+.PP
+A user adds a plugin as a
+.I *.py
+file in
+.I ~/.config/session/plugins/
+defining a top-level
+.B PLUGIN
+object \(en see the shipped
+.I share/usher/plugins/example.py .
+Each plugin claims an app's windows
+.RB ( owns )
+and may implement
+.BR identity ", " transient ", " window_id ", and " relaunch_missing ,
+each taking a normalized view
+.RB ( v["app"] ", " v["title"] ", " v["pid"] ).
+.SH FILES
+.TP
+.I ~/.config/session/{exclude,include,identity}
+never-place rules, steady-state anchors, and URL-normalization rules.
+.TP
+.I ~/.config/session/plugins/*.py
+user window plugins.
+.TP
+.I ~/.local/state/session-layout/
+the layout store (current snapshot, history, knowledge base).
+.SH SEE ALSO
+.BR mux (1)
+.SH LICENSE
+Apache-2.0.

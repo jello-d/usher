@@ -1,0 +1,23 @@
+# session/identity -- URL-normalization rules for Chrome window identity.
+#
+# session-mgr keys each Chrome window's placement on its ACTIVE-TAB URL (read
+# from Chrome's SNSS session file), not its title -- the title carries volatile
+# noise (unread counts like "Inbox (7)", the active tab, live page updates) that
+# broke restore. A URL is normalized to "host/path" with the query and fragment
+# dropped, which already kills most of that churn.
+#
+# This file collapses URLs whose PATH is also volatile down to a stable id. Each
+# rule is one line:
+#
+#     <url-regex> :: <canonical-id>
+#
+# The left side is a Python regex matched (re.search, UNANCHORED) against the
+# normalized "host/path"; the right side is the LITERAL id every matching window
+# collapses to (not a regex). First matching rule wins. A line starting with #
+# is a comment; blanks are ignored. Edits apply live (the watcher reloads on
+# save). Show the loaded rules + how live Chrome windows resolve with
+# `session-mgr identity`.
+#
+# Gmail rewrites its path with message ids as you read mail, so pin it to one id
+# so the window keeps its place regardless of which thread is open.
+^mail\.google\.com :: mail.google.com
