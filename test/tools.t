@@ -8,7 +8,7 @@ harness_init tools
 _bad=0
 for _f in "$HERE/session_mgr.py" \
           "$HERE/indicator/session_mgr_indicator/__main__.py" \
-          "$HERE/share/usher/plugins"/*.py; do
+          "$HERE/share/plugins"/*.py; do
   [ -e "$_f" ] || continue
   python3 -m py_compile "$_f" 2>/dev/null \
     || { echo "  py: $_f" >&2; _bad=1; }

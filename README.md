@@ -30,8 +30,8 @@ ship built in — none uses the volatile title:
   (from `/proc`) and respawns it as a shell there.
 
 Add your own: drop a `*.py` file into `~/.config/session/plugins/` defining a
-top-level `PLUGIN` object. See [`share/usher/plugins/example.py`](
-share/usher/plugins/example.py). Each plugin claims an app's windows (`owns`) and
+top-level `PLUGIN` object. See [`share/plugins/example.py`](
+share/plugins/example.py). Each plugin claims an app's windows (`owns`) and
 may implement `identity` / `transient` / `window_id` / `relaunch_missing`, each
 taking a normalized view (`v["app"]`, `v["title"]`, `v["pid"]`).
 
@@ -67,7 +67,7 @@ session_restore = session-mgr watch
   rules for the chrome plugin (e.g. collapse a Gmail path to a stable id).
 - `~/.config/session/plugins/*.py` — user window plugins.
 
-Example defaults ship in [`share/usher/session/`](share/usher/session/). The
+Example defaults ship in [`share/session/`](share/session/). The
 daemon soft-degrades when any are absent.
 
 ## License
