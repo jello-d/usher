@@ -1,8 +1,8 @@
 CLAUDE.md
+CLAUDE.local.md
+.claude/
 __pycache__/
 *.pyc
 *.egg-info/
 build/
 dist/
-CLAUDE.local.md
-.claude/
