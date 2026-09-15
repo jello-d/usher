@@ -32,8 +32,21 @@ reloads a running instance.
 .B capture
 Snapshot the current layout into the store now.
 .TP
-.B restore " [--dry-run] [--only S]"
-Place the stored layout onto the live session.
+.B restore " [--dry-run] [--only S] [--from SPEC]"
+Place the stored layout onto the live session. Without
+.B --from
+this is the learned knowledge base for the current display profile.
+.B --from
+restores a stored SNAPSHOT instead:
+.I latest
+is the newest rolled snapshot (undo a shuffle you just made), while
+.IR today ,
+.I yesterday
+or a
+.I YYYY-MM-DD
+is that day's FIRST snapshot, the stable "how it looked that morning".
+.B --from list
+shows what is available.
 .TP
 .B resume
 Start/reload in ADOPT mode (adopt the current layout as baseline; do not

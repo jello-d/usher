@@ -23,6 +23,9 @@ actually are and puts them back where you left them. The one command
   failing that everything shares one `default` profile).
 - **It will tell you what it is doing.** `session-mgr doctor` reports the store,
   the cross-tool contracts, and per window what would happen and why.
+- **Go back to a past layout.** A daily milestone and a rolling history are
+  kept, so `session-mgr restore --from yesterday` (or `latest`, or a date) puts
+  the desk back the way it was; `--from list` shows what is available.
 
 ## Plugins
 

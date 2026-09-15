@@ -1525,6 +1525,84 @@ def launch_missing(*_):
     return n
 
 
+# --- restoring from a stored snapshot ---------------------------------------
+# persist() has always rolled a history ring and a daily milestone, and NOTHING
+# ever read either one: 14 days of "how the desk looked that morning" sat on
+# disk with no way to ask for it back. These are the read side.
+
+def entries_from_snapshot(snap):
+    """kb-shaped entries from a stored snapshot, so a milestone can drive the
+    same placement path the knowledge base does.
+
+    Keys come from saved_key (the recorded identity), NOT from re-deriving
+    them: the windows are long dead, so /proc-derived identities like kitty's
+    cannot be recomputed. A snapshot written before the `key` field existed
+    degrades to what its raw title yields, which for terminals will simply not
+    match anything -- honest, and better than matching the wrong window."""
+    windows = snap.get("windows", [])
+    counts = Counter(w.get("app_id", "") for w in windows)
+    out = []
+    for w in windows:
+        app = w.get("app_id", "")
+        if is_unique(app, counts):
+            out.append(kb_entry(w, w.get("title", ""), True, snap["time"]))
+            continue
+        key = saved_key(w)
+        if key:
+            out.append(kb_entry(w, key, False, snap["time"]))
+    return out
+
+
+def _spec_to_date(spec, today=None):
+    """The milestone DATE a --from spec names, or None if it names none."""
+    today = today or date.today()
+    if spec == "today":
+        return today.isoformat()
+    if spec == "yesterday":
+        return date.fromordinal(today.toordinal() - 1).isoformat()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", spec):
+        return spec
+    return None
+
+
+def _available():
+    miles = sorted(os.path.basename(p)[:-5] for p in
+                   glob.glob(os.path.join(STATE, "milestones", "*.json")))
+    hist = sorted(glob.glob(os.path.join(STATE, "history", "*.json")))
+    return miles, hist
+
+
+def resolve_snapshot(spec):
+    """(label, snapshot) for a --from spec. `latest` is the newest rolled
+    snapshot (undo a shuffle you just made); a date -- or today/yesterday --
+    is that day's FIRST snapshot, the stable 'how it looked that morning'."""
+    miles, hist = _available()
+    if spec in ("list", ""):
+        print("milestones: " + (", ".join(miles) or "(none)"))
+        print(f"history:    {len(hist)} rolled snapshot(s); `--from latest`"
+              " is the newest")
+        sys.exit(0)
+    if spec == "latest":
+        if not hist:
+            sys.exit("session-mgr: no history snapshots yet")
+        path, label = hist[-1], "latest (history)"
+    else:
+        d = _spec_to_date(spec)
+        if d is None:
+            sys.exit(f"session-mgr: unknown --from '{spec}' (want: latest, "
+                     f"today, yesterday, or YYYY-MM-DD). Have: "
+                     f"{', '.join(miles) or 'no milestones yet'}")
+        path, label = os.path.join(STATE, "milestones", f"{d}.json"), d
+        if not os.path.exists(path):
+            sys.exit(f"session-mgr: no milestone for {d}. Have: "
+                     f"{', '.join(miles) or 'none'}")
+    try:
+        with open(path) as f:
+            return label, json.load(f)
+    except (OSError, ValueError) as e:
+        sys.exit(f"session-mgr: cannot read {path}: {e}")
+
+
 def match(live, entries):
     """Greedily match each live window to a knowledge entry, consume-once. An
     app_id-keyed entry matches on app_id alone (unique-app_id apps whose title
@@ -1587,9 +1665,15 @@ def apply_invert(sock, view_id):
         logline(f"invert store write error: {e}")
 
 
-def do_restore(dry, only=None):
+def do_restore(dry, only=None, source=None):
     sock = WayfireSocket()
-    entries = list(load_knowledge().values())
+    if source is None:
+        entries = list(load_knowledge().values())
+        print(f"from the knowledge base (profile {profile_id()})")
+    else:
+        label, snap = source
+        entries = entries_from_snapshot(snap)
+        print(f"from milestone {label} ({len(entries)} remembered window(s))")
     live = sock.list_views(filter_mapped_toplevel=True)
     outs = {o["name"]: o for o in sock.list_outputs()}
 
@@ -2636,6 +2720,35 @@ def selftest():
           1_800_000_002)
     ck("learn-keeps-kitty-cwd", "kitty\x00kitty:/tmp" in _kb)
 
+    # --from spec resolution (pure half; the file lookup is driven by `list`)
+    _t = date(2026, 3, 1)
+    ck("spec-today", _spec_to_date("today", _t) == "2026-03-01")
+    ck("spec-yesterday",     # crosses a month boundary, which is the point
+       _spec_to_date("yesterday", _t) == "2026-02-28")
+    ck("spec-date", _spec_to_date("2025-12-31", _t) == "2025-12-31")
+    ck("spec-junk", _spec_to_date("lastweek", _t) is None)
+    ck("spec-not-a-date", _spec_to_date("2026-3-1", _t) is None)
+
+    # a milestone becomes placement entries keyed by the RECORDED identity
+    _snap = {"time": 1_800_000_000, "windows": [
+        {"app_id": "kitty", "title": "usher:1⠀⠀⠀⠀[manifestor]",
+         "key": "mux@manifestor:usher", "output": "DP-1",
+         "workspace": [1.0, 1.0], "pos": [0.0, 0.0], "size": [800.0, 600.0]},
+        {"app_id": "kitty", "title": "x:1⠀⠀⠀⠀[manifold]",
+         "key": "mux@manifold:x", "output": "DP-1",
+         "workspace": [1.0, 1.0], "pos": [0.0, 0.0], "size": [800.0, 600.0]},
+        {"app_id": "signal", "title": "Signal", "key": "Signal",
+         "output": "DP-1", "workspace": [1.0, 1.0], "pos": [0.0, 0.0],
+         "size": [800.0, 600.0]}]}
+    _e = entries_from_snapshot(_snap)
+    ck("milestone-entries", len(_e) == 3)
+    ck("milestone-keys",
+       sorted(x["title"] for x in _e if x["app_id"] == "kitty")
+       == ["mux@manifestor:usher", "mux@manifold:x"])
+    # signal is the only window of its app here, so it keys by app_id alone
+    ck("milestone-unique",
+       [x["appid_only"] for x in _e if x["app_id"] == "signal"] == [True])
+
     # display profiles: the id is a filename, and a monitor set must map to the
     # SAME id every time or a layout is lost on every replug.
     _o = lambda n, w, h: {"name": n, "geometry": {"width": w, "height": h}}
@@ -2719,7 +2832,12 @@ def main():
         if "--only" in args:
             k = args.index("--only")
             only = args[k + 1] if k + 1 < len(args) else None
-        do_restore(dry="--dry-run" in args, only=only)
+        source = None
+        if "--from" in args:      # a stored milestone instead of the live kb
+            k = args.index("--from")
+            source = resolve_snapshot(args[k + 1] if k + 1 < len(args)
+                                      else "list")
+        do_restore(dry="--dry-run" in args, only=only, source=source)
     elif verb == "watch":         # start, or reload if running -- RESTORE mode
         arm_adopt(False)
         do_watch(launch="--no-launch" not in args)
@@ -2811,7 +2929,8 @@ def main():
         except (OSError, ValueError):
             sys.exit("session-mgr: no status (watcher not running?)")
     else:
-        print("usage: session-mgr capture | restore [--dry-run] [--only S] | "
+        print("usage: session-mgr capture | "
+              "restore [--dry-run] [--only S] [--from SPEC] | "
               "watch [--no-launch] | resume | stop | launch | aggressive | "
               "settle | toggle | status | exclude | include | identity | "
               "plugins | doctor | selftest",
