@@ -1158,10 +1158,19 @@ def learn(kb, groups, windows, when):
     # that cycled sessions leaves the old titles in the store, where they would
     # relaunch as phantom windows or yank a different window that later shows
     # that session. Drop any mux-terminal entry no live window shows.
-    live_terms = {w["title"] for w in windows
+    #
+    # BOTH sides must be IDENTITIES. A kb entry's "title" field is the KEY-title
+    # (kb_entry stamps identity(), not the window title), so comparing it to raw
+    # window titles never matched and this block deleted every terminal entry it
+    # had just written, on every pass -- terminals were therefore never placed
+    # at all. And the entry is selected by its KEY SHAPE, not by is_mux_term on
+    # that key: is_mux_term only asks "kitty, with a colon?", which a
+    # kitty:<cwd> key also satisfies, so the mux purge was sweeping plain kitty
+    # windows out too.
+    live_terms = {identity(w) for w in windows
                   if is_mux_term(w["app_id"], w["title"])}
     for k in [k for k, v in kb.items()
-              if is_mux_term(v.get("app_id", ""), v.get("title", ""))
+              if MUX_KEY_RE.match(v.get("title", ""))
               and v.get("title") not in live_terms]:
         del kb[k]
     prune_kb(kb, when)
@@ -2321,6 +2330,35 @@ def selftest():
     _r = mux_go_command("wf", "manifold")
     ck("go-remote", _r.startswith("ssh -t manifold ") and "sh -lc" in _r
        and "mux go" in _r)
+
+    # learn() must KEEP the entry it just wrote for a live terminal. Its mux
+    # purge once compared kb keys (identities) against raw window titles, so it
+    # deleted every terminal entry on the same pass that created it, and
+    # terminals were never placed at all. Nothing else here would catch that.
+    def LW(vid, title, app="kitty"):
+        return {"id": vid, "app_id": app, "title": title, "pid": -1,
+                "output": "DP-1", "workspace": [1.0, 1.0],
+                "pos": [0.0, 0.0], "size": [800.0, 600.0]}
+
+    _kb, _groups = {}, {}
+    learn(_kb, _groups, [LW(1, "usher:main⠀⠀⠀⠀[manifestor]"),
+                         LW(2, "tackup:main⠀⠀⠀⠀[manifold]")], 1_800_000_000)
+    ck("learn-keeps-live-mux",
+       sorted(v["title"] for v in _kb.values())
+       == ["mux@manifestor:usher", "mux@manifold:tackup"])
+    # a terminal whose window is gone IS dropped (the point of the purge)
+    learn(_kb, _groups, [LW(1, "usher:main⠀⠀⠀⠀[manifestor]")],
+          1_800_000_001)
+    ck("learn-drops-absent-mux",
+       [v["title"] for v in _kb.values()] == ["mux@manifestor:usher"])
+    # ...but a kitty:<cwd> entry is NOT swept by the mux purge (it merely has a
+    # colon in it, which is all is_mux_term ever tested for)
+    _kb["kitty\x00kitty:/tmp"] = {"app_id": "kitty", "title": "kitty:/tmp",
+                                  "last_seen": 1_800_000_001,
+                                  "appid_only": False}
+    learn(_kb, _groups, [LW(1, "usher:main⠀⠀⠀⠀[manifestor]")],
+          1_800_000_002)
+    ck("learn-keeps-kitty-cwd", "kitty\x00kitty:/tmp" in _kb)
 
     # CONTRACT with mux: `mux resume --list` must stay BARE NAMES, one per line.
     # This is the guard the old `mux ls` scrape lacked -- a cosmetic change over
