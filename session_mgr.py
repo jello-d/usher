@@ -997,6 +997,26 @@ class ChromePlugin(WindowPlugin):
     def identity(self, v):
         return chrome_url_for(v["title"])
 
+    def relaunch_missing(self, saved, live):
+        """Start the browser if the last session had Chrome windows and none
+        is running now. Chrome restores its OWN windows, but only once
+        something starts it -- so on a login where nothing did, usher was
+        leaving the largest part of the desk shut. It launches the browser and
+        nothing more: which windows come back stays Chrome's business."""
+        if not any(w.get("app_id") in CHROME_APPS for w in saved):
+            return 0
+        if any(_pview(v)["app"] in CHROME_APPS for v in live):
+            return 0
+        exe = next((shutil.which(c) for c in
+                    ("google-chrome", "google-chrome-stable", "chromium",
+                     "chromium-browser") if shutil.which(c)), None)
+        if not exe:
+            return 0
+        subprocess.Popen([exe], start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f"launch  {os.path.basename(exe)}", flush=True)
+        return 1
+
 
 class MuxPlugin(WindowPlugin):
     """mux-attached kitty terminals -- a kitty window wearing a mux
@@ -1328,8 +1348,14 @@ def mux_go_command(session, host=None):
         mux = os.path.expanduser("~/.local/bin/mux")
         return f"{shlex.quote(mux)} go {shlex.quote(session)}"
     inner = f"mux go {shlex.quote(session)}"
-    return (f"ssh -t {shlex.quote(host)} "
-            f"{shlex.quote('sh -lc ' + shlex.quote(inner))}")
+    remote = shlex.quote("sh -lc " + shlex.quote(inner))
+    # If the far box is asleep or off-network the window would otherwise just
+    # sit at a bare shell, looking like usher opened a terminal for no reason.
+    # Say which host could not be reached; the window is kept either way, since
+    # it is a perfectly good terminal and closing it would hide the failure.
+    msg = f"usher: could not reach {host} -- 'mux go {session}' not started"
+    return (f"ssh -t {shlex.quote(host)} {remote} "
+            f"|| echo {shlex.quote(msg)} >&2")
 
 
 def spawn_term(session, host=None):
@@ -1804,10 +1830,15 @@ def _doctor_relaunch(out, snap, live):
     saved = snap.get("windows", [])
     lk = live_keys(live)
     known = mux_session_set()
+    chrome_up = any(_pview(v)["app"] in CHROME_APPS for v in live)
+    chrome_note = ("Chrome restores its own" if chrome_up
+                   else "browser NOT running: usher starts it, Chrome"
+                        " restores its own")
     for w in saved:
         app, key = w.get("app_id", ""), saved_key(w)
         if app in CHROME_APPS:
-            out(f"  self       {app:14} {key[:44]}  (Chrome restores itself)")
+            out(f"  {'self' if chrome_up else 'START':10} {app:14}"
+                f" {key[:36]:36}  ({chrome_note})")
             continue
         m = MUX_KEY_RE.match(key)
         if m:
@@ -1832,6 +1863,17 @@ def _doctor_relaunch(out, snap, live):
                 out(f"  RELAUNCH   {key[:44]}  (kitty --directory {cwd})")
             continue
         out(f"  none       {app:14} {key[:44]}  (no plugin respawns this)")
+    # Two kitty windows in one directory share a key, so only ONE slot is
+    # remembered and the other silently loses its place. Keying on the running
+    # program instead would be worse -- the key would change every time a
+    # command started or exited -- so the limitation stands, but it should at
+    # least be VISIBLE, with the escape hatch named.
+    dupes = Counter(saved_key(w) for w in saved
+                    if w.get("app_id") == "kitty")
+    for key, n in dupes.items():
+        if n > 1 and key.startswith("kitty:"):
+            out(f"  COLLISION  {key[:44]}  {n} windows share this key; one"
+                " slot is remembered (name one: settitle)")
 
 
 def _doctor_placement(out, kb, live, outs):
@@ -2690,6 +2732,17 @@ def selftest():
     _r = mux_go_command("wf", "manifold")
     ck("go-remote", _r.startswith("ssh -t manifold ") and "sh -lc" in _r
        and "mux go" in _r)
+    # an unreachable box must SAY so, not leave a bare shell looking like usher
+    # opened a terminal for no reason
+    ck("go-remote-reports-failure",
+       "|| echo" in _r and "could not reach manifold" in _r)
+
+    # chrome relaunch: only when the last session had Chrome and none is up
+    _ch = ps["chrome"]
+    ck("chrome-no-saved", _ch.relaunch_missing([], []) == 0)
+    ck("chrome-already-live",
+       _ch.relaunch_missing([{"app_id": "google-chrome"}],
+                            [V("google-chrome", "x")]) == 0)
 
     # learn() must KEEP the entry it just wrote for a live terminal. Its mux
     # purge once compared kb keys (identities) against raw window titles, so it
