@@ -1257,6 +1257,17 @@ def spawn_term(session, host=None):
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def _load_snapshot():
+    """The last snapshot, or None if there is not a readable one. The single
+    reader of current.json, so relaunch and doctor always look at the same
+    thing."""
+    try:
+        with open(os.path.join(STATE, "current.json")) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
 def saved_key(w):
     """The identity a saved snapshot window was recorded under. Prefers the
     `key` snapshot() now stores; falls back to re-deriving it for a snapshot
@@ -1404,11 +1415,7 @@ def launch_missing(*_):
     the last snapshot + the live views ONCE and hands both to each plugin's
     relaunch_missing; sums the counts. Chrome self-restores (its plugin returns
     0); mux reopens terminals. (The unused arg keeps the old call sites.)"""
-    try:
-        saved = json.load(
-            open(os.path.join(STATE, "current.json"))).get("windows", [])
-    except (OSError, ValueError):
-        saved = []
+    saved = (_load_snapshot() or {}).get("windows", [])
     try:
         live = WayfireSocket().list_views(filter_mapped_toplevel=True)
     except Exception:
@@ -1492,12 +1499,19 @@ def do_restore(dry, only=None):
 
     pairs, unlive, unlayout = match(live, entries)
     acted = 0
+    unplaceable = []
     for lv, e in pairs:
         if only and (only not in (lv.get("title") or "")) \
                 and (only not in app_of(lv)):
             continue
         o = outs.get(e["output"])
         if not o:
+            # The window matched a remembered slot on an output that is NOT
+            # attached right now (undocked, a monitor off, a different desk).
+            # Nothing sane to do with it, but SAY SO: skipping in silence is
+            # how a layout learned on another monitor set looks like usher
+            # simply not working. See `doctor` and the per-profile store.
+            unplaceable.append((lv, e))
             continue
         geom = target_geometry(e, o)
         g = lv.get("geometry", {}) or {}
@@ -1524,12 +1538,169 @@ def do_restore(dry, only=None):
 
     print(f"matched {len(pairs)}/{len(live)}  unmatched-live {len(unlive)}  "
           f"unmatched-layout {len(unlayout)}  "
+          f"unplaceable {len(unplaceable)}  "
           f"{'acted ' + str(acted) if not dry else ''}")
     for lv in unlive:
         print(f"  UNMATCHED-LIVE   {app_of(lv)[:20]:20} | "
               f"{lv.get('title','')[:42]}")
     for e in unlayout:
         print(f"  UNMATCHED-LAYOUT {e['app_id'][:20]:20} | {e['title'][:42]}")
+    have = ", ".join(sorted(outs)) or "none"
+    for lv, e in unplaceable:
+        print(f"  UNPLACEABLE      {app_of(lv)[:20]:20} | saved on "
+              f"{e['output']}, not attached (have: {have})")
+
+
+# --- doctor: say out loud what this thing is and is not doing ---------------
+# Every failure this tool has had was SILENT: the store looked healthy, Chrome
+# kept restoring itself, and the parts that had stopped working stopped saying
+# anything at all. `doctor` is the standing answer to "is it actually doing the
+# thing?" -- it reports the store, the cross-tool contracts, and, per window,
+# what would happen and WHY. A zero-kitty knowledge base is obvious here.
+
+def _doctor_store(out):
+    kb = load_knowledge()
+    counts = Counter(k.split("\x00", 1)[0] for k in kb)
+    out("== store ==")
+    out(f"  state dir    {STATE}")
+    try:
+        schema = open(os.path.join(STATE, "knowledge.schema")).read().strip()
+    except OSError:
+        schema = "(unstamped)"
+    out(f"  knowledge    {len(kb)} entr{'y' if len(kb) == 1 else 'ies'}"
+        f"  (schema {schema}, current {KB_SCHEMA})")
+    for app, n in counts.most_common():
+        out(f"                 {app or '(blank app-id)':32} {n}")
+    if not counts.get("kitty"):
+        out("  NOTE         no kitty entries: terminals are not being"
+            " remembered, so they cannot be placed")
+    snap = _load_snapshot()
+    if snap is None:
+        out("  snapshot     current.json MISSING -- nothing to relaunch from")
+    else:
+        age = int(time.time()) - snap.get("time", 0)
+        out(f"  snapshot     {len(snap.get('windows', []))} window(s),"
+            f" {age}s old")
+    return kb, snap
+
+
+def _doctor_contracts(out):
+    """The cross-tool assumptions. These are the ones that break in SILENCE,
+    because they live in another repo's output format."""
+    rc = 0
+    out("== contracts ==")
+    mux = os.path.expanduser("~/.local/bin/mux")
+    if not os.path.exists(mux):
+        out(f"  [WARN] mux absent ({mux}); terminal relaunch degrades to a"
+            " no-op")
+        return rc
+    out(f"  [OK]   mux present ({mux})")
+    names = mux_session_set()
+    bad = [s for s in names if not re.fullmatch(r"[^\s:]+", s)]
+    if bad:
+        out(f"  [FAIL] `mux resume --list` is not bare names: {bad[:3]}")
+        out("         relaunch will match NOTHING (this exact break has"
+            " happened before)")
+        rc = 1
+    else:
+        out(f"  [OK]   `mux resume --list` -> {len(names)} bare name(s)")
+    return rc
+
+
+def _doctor_relaunch(out, snap, live):
+    """Per saved window: would it come back, and if not, why not."""
+    out("== saved windows -> relaunch ==")
+    if snap is None:
+        return
+    saved = snap.get("windows", [])
+    lk = live_keys(live)
+    known = mux_session_set()
+    for w in saved:
+        app, key = w.get("app_id", ""), saved_key(w)
+        if app in CHROME_APPS:
+            out(f"  self       {app:14} {key[:44]}  (Chrome restores itself)")
+            continue
+        m = MUX_KEY_RE.match(key)
+        if m:
+            host, sess = m.group(1), m.group(2)
+            if key in lk:
+                out(f"  live       {key[:56]}")
+            elif host == LOCAL_HOST and sess not in known:
+                out(f"  skip       {key[:44]}  (mux no longer knows"
+                    f" '{sess}')")
+            else:
+                how = (f"mux go {sess}" if host == LOCAL_HOST
+                       else f"ssh {host} -> mux go {sess}")
+                out(f"  RELAUNCH   {key[:44]:44}  {how}")
+            continue
+        if key.startswith("kitty:"):
+            cwd = key[len("kitty:"):]
+            if key in lk:
+                out(f"  live       {key[:56]}")
+            elif not os.path.isdir(cwd):
+                out(f"  skip       {key[:44]}  (directory is gone)")
+            else:
+                out(f"  RELAUNCH   {key[:44]}  (kitty --directory {cwd})")
+            continue
+        out(f"  none       {app:14} {key[:44]}  (no plugin respawns this)")
+
+
+def _doctor_placement(out, kb, live, outs):
+    """Per live window: does it match a remembered slot, and is that slot's
+    output actually attached."""
+    out("== live windows -> placement ==")
+    pairs, unlive, _ = match(live, list(kb.values()))
+    for lv, e in pairs:
+        where = f"{e['output']} ws{tuple(e['workspace'])}"
+        if e["output"] in outs:
+            out(f"  placeable  {app_of(lv)[:14]:14} {e['title'][:34]:34}"
+                f" -> {where}")
+        else:
+            out(f"  UNPLACEABLE {app_of(lv)[:13]:13} {e['title'][:34]:34}"
+                f" -> {where} NOT ATTACHED")
+    for lv in unlive:
+        out(f"  unmatched  {app_of(lv)[:14]:14} {lv.get('title','')[:34]}")
+
+
+def do_doctor():
+    """The whole report. Returns an exit code: non-zero only for a CONTRACT
+    breach, which is the class of fault that otherwise shows no symptom."""
+    lines = []
+
+    def out(s):
+        lines.append(s)
+
+    kb, snap = _doctor_store(out)
+    out("== plugins ==")
+    for p in plugins():
+        hooks = [h for h in ("owns", "identity", "transient", "window_id",
+                             "relaunch_missing")
+                 if h in getattr(type(p), "__dict__", {})]
+        out(f"  {getattr(p, 'name', '?'):10} {', '.join(hooks)}")
+    rc = _doctor_contracts(out)
+    live, outs = [], {}
+    out("== compositor ==")
+    if WayfireSocket is None:
+        # The import is guarded so this module runs anywhere; say which of the
+        # two "no compositor" cases this is, since the fixes differ entirely.
+        out("  pywayfire NOT IMPORTABLE -- run this from the venv"
+            " (~/.venvs/usher/bin/python), not the system python3")
+    else:
+        try:
+            sock = WayfireSocket()
+            live = sock.list_views(filter_mapped_toplevel=True)
+            outs = {o["name"]: o for o in sock.list_outputs()}
+            out(f"  outputs      {', '.join(sorted(outs))}")
+        except Exception as e:
+            out(f"  NOT REACHABLE ({e}) -- set WAYFIRE_SOCKET, or there is"
+                " no session")
+    if not live:
+        out("  (live checks below are skipped; store checks above stand)")
+    _doctor_relaunch(out, snap, live)
+    if live:
+        _doctor_placement(out, kb, live, outs)
+    print("\n".join(lines))
+    return rc
 
 
 # Layout-significant events: re-snapshot AND roll the history/milestone ring.
@@ -2477,6 +2648,8 @@ def main():
             print(f"{getattr(p, 'name', '?'):10} {', '.join(hooks)}")
         print(f"# {len(plugins())} plugin(s); user dir {PLUGIN_DIR}",
               file=sys.stderr)
+    elif verb == "doctor":        # what is it doing, and what is it NOT doing
+        sys.exit(do_doctor())
     elif verb == "selftest":      # offline unit checks (no compositor needed)
         sys.exit(selftest())
     elif verb in ("aggressive", "settle", "toggle"):
@@ -2512,7 +2685,7 @@ def main():
         print("usage: session-mgr capture | restore [--dry-run] [--only S] | "
               "watch [--no-launch] | resume | stop | launch | aggressive | "
               "settle | toggle | status | exclude | include | identity | "
-              "plugins | selftest",
+              "plugins | doctor | selftest",
               file=sys.stderr)
         sys.exit(2)
 
