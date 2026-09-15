@@ -48,8 +48,31 @@ List the loaded window plugins (built-in + user).
 .B identity
 Show the URL-normalization rules and how live windows resolve.
 .TP
+.B doctor
+Report what usher is and is not doing: the store (entries per app, the display
+profile, schema), the plugin registry, the cross-tool contracts, and per window
+what would be relaunched or placed and WHY not. Exits non-zero on a contract
+breach.
+.TP
 .B selftest
 Offline unit checks (no compositor).
+.SH DISPLAY PROFILES
+A placement only means anything on the monitors it was learned on, so the
+knowledge base is keyed by the CONNECTED DISPLAY SET: docked and undocked
+remember separate layouts rather than overwriting one another, and a window
+whose remembered output is not attached is reported
+.B UNPLACEABLE
+rather than skipped in silence.
+.PP
+.BR hwdp (1)
+supplies the profile id when it is installed (a soft dependency). Without it
+the id is derived from the outputs the last snapshot saw, and failing that
+everything shares one
+.I default
+profile, which is the historical behaviour. Override with
+.BR SESSION_PROFILE .
+A pre-profile store is adopted into the current profile once, so no learned
+placement is lost on upgrade.
 .SH IDENTITY AND PLUGINS
 A window is matched to its saved slot by (app_id, key). App-SPECIFIC identity
 and respawn live in PLUGINS. Three ship built in \(en the volatile window title

@@ -1,0 +1,28 @@
+#!/bin/sh
+# hwdp-changed - re-place windows when the MONITOR SET changes.
+#
+# usher keys its remembered layout by the connected display set (see
+# `session-mgr doctor`, the `profile` line), so plugging or unplugging a
+# monitor switches which layout is the right one. Nothing in the compositor
+# tells usher that happened: it sees windows being shuffled by the output
+# change and, in steady state, leaves them where they land.
+#
+# hwdp does know, and runs every executable in its `changed.d` hook dir on a
+# display change. So this is the one line that connects the two:
+#
+#   aggressive  re-arm placement, so windows still settling after the output
+#               change get put where the NEW profile wants them
+#   restore     place what is already on screen, now, against the new profile
+#
+# Both are no-ops when the new profile has nothing learned yet, which is the
+# correct first encounter with a new desk: usher watches and learns it instead.
+#
+# Install with `setup.sh hooks` (or let `setup.sh install` do it when hwdp's
+# hook dir is already present). Safe to run by hand.
+set -eu
+
+command -v session-mgr >/dev/null 2>&1 || exit 0
+
+session-mgr aggressive >/dev/null 2>&1 || :
+session-mgr restore >/dev/null 2>&1 || :
+exit 0

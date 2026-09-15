@@ -38,10 +38,12 @@ shell's CWD from /proc (`kitty:<cwd>`, respawned as a shell there). See
 WindowPlugin, plugins(), identity(), and learn().
 """
 import glob
+import hashlib
 import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import struct
 import subprocess
@@ -232,6 +234,98 @@ STATE = os.path.join(
 LAUNCHED = os.path.join(STATE, ".launched")
 HISTORY_KEEP = 20      # recent snapshots retained under history/
 MILESTONE_DAYS = 14    # daily milestones retained under milestones/
+
+
+# --- display PROFILE: one remembered layout per monitor set -----------------
+# A placement only means anything on the monitors it was learned on. With ONE
+# flat store, docking and undocking overwrite each other's layout, and a window
+# whose output is absent is simply unplaceable -- which reads as "usher does
+# nothing" rather than "that layout belongs to your other desk". So the
+# knowledge base is keyed by the CONNECTED SET.
+#
+# hwdp owns display identity on these boxes (`hwdp id` is EDID-derived), so it
+# is the preferred source and the two agree by construction. It is a SOFT
+# dependency, like mux: without it the id is derived from the outputs the last
+# snapshot saw, and failing that everything lands in one "default" profile,
+# which is exactly the old behaviour.
+PROFILE_TTL = 5.0             # seconds; a display change settles well inside it
+_PROFILE = {"id": None, "at": 0.0}
+
+
+def _hwdp_id():
+    exe = shutil.which("hwdp")
+    if not exe:
+        return None
+    try:
+        out = subprocess.run([exe, "id"], capture_output=True, text=True,
+                             timeout=3)
+    except Exception:
+        return None
+    return out.stdout.strip() or None
+
+
+def _derived_id(snap):
+    """A stable id for the monitor set the last snapshot saw. Hashed rather
+    than spelled out because it becomes a filename and an output list is
+    neither short nor guaranteed filename-safe. Geometry is included, so the
+    same cables at a different resolution are a different profile."""
+    outs = (snap or {}).get("outputs") or []
+    if not outs:
+        return None
+    parts = sorted(f"{o.get('name')}@{(o.get('geometry') or {}).get('width')}"
+                   f"x{(o.get('geometry') or {}).get('height')}" for o in outs)
+    return hashlib.sha256("+".join(parts).encode()).hexdigest()[:12]
+
+
+def _safe_profile(name):
+    return re.sub(r"[^A-Za-z0-9._-]", "_", name)[:64] or "default"
+
+
+def profile_id():
+    """The current display profile. Cached briefly: this is consulted on every
+    knowledge load, and the capture loop runs often. The window in which a
+    just-changed display can still resolve to the OLD profile is bounded by
+    PROFILE_TTL, and the cost of losing it is a handful of entries written to
+    the wrong profile, which the next capture in the right one supersedes."""
+    env = os.environ.get("SESSION_PROFILE")
+    if env:
+        return _safe_profile(env)
+    now = time.time()
+    if _PROFILE["id"] and now - _PROFILE["at"] < PROFILE_TTL:
+        return _PROFILE["id"]
+    pid = _hwdp_id() or _derived_id(_load_snapshot()) or "default"
+    _PROFILE["id"], _PROFILE["at"] = _safe_profile(pid), now
+    return _PROFILE["id"]
+
+
+def kb_path(profile=None):
+    return os.path.join(STATE, f"knowledge-{profile or profile_id()}.json")
+
+
+def schema_path(profile=None):
+    """Per PROFILE, not global: a schema bump has to be applied to each store
+    separately, and a single global stamp would mark them all migrated the
+    first time any one of them was."""
+    return os.path.join(STATE, f"knowledge-{profile or profile_id()}.schema")
+
+
+def adopt_legacy_store():
+    """Move a pre-profile knowledge.json into whatever profile is current, once.
+    The alternative -- leaving it and starting empty -- silently discards every
+    learned placement on upgrade, which is not a thing to do to a store that
+    took weeks to build. Idempotent: only fires when the legacy file exists and
+    the profile's own does not."""
+    legacy = os.path.join(STATE, "knowledge.json")
+    if not os.path.exists(legacy) or os.path.exists(kb_path()):
+        return
+    try:
+        os.replace(legacy, kb_path())
+        old = os.path.join(STATE, "knowledge.schema")
+        if os.path.exists(old):
+            os.replace(old, schema_path())
+        logline(f"adopted the pre-profile store into profile {profile_id()}")
+    except OSError as e:
+        logline(f"could not adopt the legacy store: {e}")
 
 # Colour-invert is a SEPARATE mechanism (toggle_invert_focused, Super+N): a
 # per-view filters shader whose live state lives in its own store, keyed by the
@@ -999,7 +1093,7 @@ def migrate_kb(kb):
     On a stale/absent schema, drop every Chrome + kitty title-keyed entry so
     relearn under the new identities, then stamp -- so a boot after the upgrade
     collapses the accumulated per-title pile instead of carrying it."""
-    sp = os.path.join(STATE, "knowledge.schema")
+    sp = schema_path()
     try:
         cur = open(sp).read().strip()
     except OSError:
@@ -1017,12 +1111,15 @@ def migrate_kb(kb):
 
 
 def load_knowledge():
+    """The knowledge base for the CURRENT display profile. A monitor set with
+    nothing learned yet starts empty (and seeds from the last snapshot), which
+    is right: the placements from another desk would not fit here anyway."""
+    adopt_legacy_store()
     try:
-        kb = json.load(open(os.path.join(STATE, "knowledge.json")))
+        kb = json.load(open(kb_path()))
     except (FileNotFoundError, ValueError):
-        try:                       # seed from the latest snapshot if present
-            snap = json.load(open(os.path.join(STATE, "current.json")))
-        except (FileNotFoundError, ValueError):
+        snap = _load_snapshot()    # seed from the latest snapshot if present
+        if snap is None:
             return {}
         kb = {}
         upsert(kb, snap["windows"], snap["time"])
@@ -1177,8 +1274,7 @@ def learn(kb, groups, windows, when):
 
 
 def save_knowledge(kb):
-    write_json(os.path.join(STATE, "knowledge.json"),
-               json.dumps(kb, indent=2))
+    write_json(kb_path(), json.dumps(kb, indent=2))
 
 
 def persist(snap, roll=True):
@@ -1563,8 +1659,17 @@ def _doctor_store(out):
     counts = Counter(k.split("\x00", 1)[0] for k in kb)
     out("== store ==")
     out(f"  state dir    {STATE}")
+    src = ("SESSION_PROFILE" if os.environ.get("SESSION_PROFILE")
+           else "hwdp" if _hwdp_id() else "derived from outputs")
+    out(f"  profile      {profile_id()}  ({src})")
+    others = sorted(os.path.basename(p)[len("knowledge-"):-len(".json")]
+                    for p in glob.glob(os.path.join(STATE, "knowledge-*.json"))
+                    if os.path.basename(p)[len("knowledge-"):-len(".json")]
+                    != profile_id())
+    if others:
+        out(f"  other sets   {', '.join(others)}  (remembered separately)")
     try:
-        schema = open(os.path.join(STATE, "knowledge.schema")).read().strip()
+        schema = open(schema_path()).read().strip()
     except OSError:
         schema = "(unstamped)"
     out(f"  knowledge    {len(kb)} entr{'y' if len(kb) == 1 else 'ies'}"
@@ -2530,6 +2635,30 @@ def selftest():
     learn(_kb, _groups, [LW(1, "usher:main⠀⠀⠀⠀[manifestor]")],
           1_800_000_002)
     ck("learn-keeps-kitty-cwd", "kitty\x00kitty:/tmp" in _kb)
+
+    # display profiles: the id is a filename, and a monitor set must map to the
+    # SAME id every time or a layout is lost on every replug.
+    _o = lambda n, w, h: {"name": n, "geometry": {"width": w, "height": h}}
+    _a = {"outputs": [_o("DP-1", 1920, 1080), _o("DP-2", 2560, 1440)]}
+    _b = {"outputs": [_o("DP-2", 2560, 1440), _o("DP-1", 1920, 1080)]}
+    ck("profile-stable", _derived_id(_a) == _derived_id(_b))   # order-blind
+    ck("profile-geometry-matters",
+       _derived_id(_a) != _derived_id({"outputs": [_o("DP-1", 1920, 1080),
+                                                   _o("DP-2", 3840, 2160)]}))
+    ck("profile-subset-differs",
+       _derived_id(_a) != _derived_id({"outputs": [_o("DP-1", 1920, 1080)]}))
+    ck("profile-none", _derived_id({"outputs": []}) is None)
+    ck("profile-safe", _safe_profile("../../etc/passwd") == ".._.._etc_passwd")
+    ck("profile-safe-empty", _safe_profile("") == "default")
+    _saved_env = os.environ.get("SESSION_PROFILE")
+    os.environ["SESSION_PROFILE"] = "testset"
+    ck("profile-env", profile_id() == "testset")
+    ck("profile-paths", kb_path().endswith("knowledge-testset.json")
+       and schema_path().endswith("knowledge-testset.schema"))
+    if _saved_env is None:
+        del os.environ["SESSION_PROFILE"]
+    else:
+        os.environ["SESSION_PROFILE"] = _saved_env
 
     # CONTRACT with mux: `mux resume --list` must stay BARE NAMES, one per line.
     # This is the guard the old `mux ls` scrape lacked -- a cosmetic change over

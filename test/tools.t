@@ -13,9 +13,17 @@ for _f in "$HERE/session_mgr.py" \
   python3 -m py_compile "$_f" 2>/dev/null \
     || { echo "  py: $_f" >&2; _bad=1; }
 done
-for _f in "$HERE/setup.sh" "$HERE/indicator/setup.sh" "$HERE/test/run"; do
+for _f in "$HERE/setup.sh" "$HERE/indicator/setup.sh" "$HERE/test/run" \
+          "$HERE/share/hooks"/*; do
+  [ -f "$_f" ] || continue
   { dash -n "$_f" 2>/dev/null || sh -n "$_f" 2>/dev/null; } \
     || { echo "  sh: $_f" >&2; _bad=1; }
+done
+# A hook that is not EXECUTABLE is silently ignored by the runner that invokes
+# it, which is the same shape as every other fault this suite now guards.
+for _f in "$HERE/share/hooks"/*; do
+  [ -f "$_f" ] && [ ! -x "$_f" ] && { echo "  not executable: $_f" >&2
+    _bad=1; }
 done
 [ "$_bad" = 0 ] || fail "a shipped script failed its syntax check"
 pass "engine + indicator + setup.sh parse"

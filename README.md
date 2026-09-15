@@ -15,6 +15,14 @@ actually are and puts them back where you left them. The one command
   windows never to place.
 - **Stable identity, never the title.** A window is matched to its saved slot by
   an app-specific identity, because window titles are too volatile to key on.
+- **One layout per monitor set.** A placement only means anything on the
+  monitors it was learned on, so the store is keyed by the connected display
+  set: docked and undocked remember separately instead of overwriting each
+  other. [hwdp](https://github.com/jello-d/hwdp) supplies the id when present
+  (a *soft* dependency; without it the set is derived from the outputs, and
+  failing that everything shares one `default` profile).
+- **It will tell you what it is doing.** `session-mgr doctor` reports the store,
+  the cross-tool contracts, and per window what would happen and why.
 
 ## Plugins
 
@@ -49,9 +57,13 @@ socket via `pywayfire`), so `setup.sh` builds a venv:
 ./setup.sh install      # core: build the venv, link session-mgr + man
 ./setup.sh indicator    # optional: the tray indicator (--user service)
 ./setup.sh all          # both
+./setup.sh hooks        # link the hwdp display-change hook
 ./setup.sh check        # audit the install
 ./setup.sh test         # run the in-repo suite
 ```
+
+`install` links the hwdp hook by itself when hwdp's hook directory already
+exists, so a box with hwdp needs no extra step and one without is untouched.
 
 Everything is userspace (no sudo), into `~/.local` (override with `PREFIX` /
 `XDG_*`). Under a provisioning layer (e.g. tackup) the same `setup.sh` is the

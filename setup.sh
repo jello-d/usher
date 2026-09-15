@@ -7,6 +7,8 @@
 #   ./setup.sh install       build the core venv + link session-mgr + man
 #   ./setup.sh indicator [V] drive the optional tray indicator (passthrough)
 #   ./setup.sh all           install + indicator install
+#   ./setup.sh hooks         link the hwdp display-change hook (install does
+#                            this too when hwdp's hook dir already exists)
 #   ./setup.sh uninstall     remove the core links (the venv is left in place)
 #   ./setup.sh check         core + deps present; [OK]/[FAIL] markers; drift rc
 #   ./setup.sh test          run the in-repo suite (test/run)
@@ -41,6 +43,24 @@ bad()  { printf '  %s[FAIL]%s %s\n' "$_R" "$_O" "$1"; RC=1; }
 warn() { printf '  %s[WARN]%s %s\n' "$_Y" "$_O" "$1"; }
 
 _rmln() { [ "$(readlink "$2" 2>/dev/null)" = "$1" ] && rm -f "$2" || :; }
+
+# hwdp integration: usher remembers a layout PER MONITOR SET, and hwdp is what
+# knows the set changed. Its hook dir is a documented contract, so dropping a
+# link in is the whole wiring. Opt-in by PRESENCE: `install` does it only if
+# hwdp's hook root already exists, so a box without hwdp is untouched and one
+# with it needs no extra step.
+_hook_src() { echo "$_root/share/hooks/hwdp-changed"; }
+_hook_dir() { echo "${XDG_CONFIG_HOME:-$HOME/.config}/hwdp/hooks/changed.d"; }
+# Numeric prefix because hwdp runs the dir as a sorted glob and placement must
+# come LAST: restoring windows before the outputs are configured and the
+# compositor runtime is applied would place them against the old geometry.
+_hook_dst() { echo "$(_hook_dir)/40-usher"; }
+
+do_hooks() {
+  mkdir -p "$(_hook_dir)"
+  ln -sfn "$(_hook_src)" "$(_hook_dst)"
+  echo "$PKG: display-change hook -> $(_hook_dst)"
+}
 _man_pages() { for _m in "$_root"/man/man*/*.[0-9]; do
   [ -e "$_m" ] && printf '%s\n' "$_m"; done; }
 
@@ -62,9 +82,11 @@ do_install() {
     _d=$_man/$(basename "$(dirname "$_m")")
     mkdir -p "$_d"; ln -sfn "$_m" "$_d/$(basename "$_m")"; done
   echo "$PKG: session-mgr -> $_bin/session-mgr (venv $VENV)"
+  [ -d "$(_hook_dir)" ] && do_hooks || :
 }
 
 do_uninstall() {
+  _rmln "$(_hook_src)" "$(_hook_dst)"
   _rmln "$VENV/bin/session-mgr" "$_bin/session-mgr"
   _man_pages | while IFS= read -r _m; do
     _rmln "$_m" "$_man/$(basename "$(dirname "$_m")")/$(basename "$_m")"; done
@@ -81,11 +103,20 @@ do_check() {
   else bad "$_bin/session-mgr missing"; fi
   if command -v mux >/dev/null 2>&1; then ok "mux present (terminal restore)"
   else warn "mux absent -- the mux plugin's terminal restore degrades"; fi
+  if ! command -v hwdp >/dev/null 2>&1; then
+    warn "hwdp absent -- one layout for all monitor sets (profile 'default')"
+  elif [ "$(readlink "$(_hook_dst)" 2>/dev/null)" = "$(_hook_src)" ]; then
+    ok "hwdp display-change hook linked"
+  else
+    warn "hwdp present but no display-change hook -- run: setup.sh hooks"
+  fi
 }
 
-_U="usage: setup.sh [install|indicator [V]|all|uninstall|check|test|version]"
+_U="usage: setup.sh [install|indicator [V]|all|hooks|uninstall|check|test\
+|version]"
 case "${1:-install}" in
   install)   do_install ;;
+  hooks)     do_hooks ;;
   indicator) shift; exec sh "$_root/indicator/setup.sh" "${@:-install}" ;;
   all)       do_install; sh "$_root/indicator/setup.sh" install ;;
   uninstall) do_uninstall ;;
