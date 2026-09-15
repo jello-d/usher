@@ -32,7 +32,8 @@ app_id windows (slack, --app Gmail) key by app_id alone, title-independent. App-
 SPECIFIC identity + respawn live in PLUGINS (see WindowPlugin): chrome, mux, and
 kitty ship built in, users add more in ~/.config/session/plugins/. The volatile
 title is never the key: chrome keys by the active-tab URL (SNSS session file),
-mux by the tmux SESSION (`mux:<session>`, respawned via `mux go`), kitty by the
+mux by the tmux SESSION **and the host it lives on** (`mux@<host>:<session>`,
+respawned via `mux go`, over ssh when the host is not this box), kitty by the
 shell's CWD from /proc (`kitty:<cwd>`, respawned as a shell there). See
 WindowPlugin, plugins(), identity(), and learn().
 """
@@ -66,6 +67,13 @@ SKIP_TITLE = re.compile(os.environ.get("SESSION_SKIP_TITLE", r"^\[WORK"))
 
 
 DEFAULT_TERM_TITLE = "terminal"
+
+# This box's short hostname, matching tmux's #{host_short} (and `hostname -s`).
+# It is what tells a LOCAL mux session from one reached over ssh: mux stamps the
+# tmux SERVER's host into the terminal title, so the tag naming another box is
+# the durable "this session lives on a different machine" signal. See
+# mux_host_of.
+LOCAL_HOST = os.uname().nodename.split(".")[0]
 
 
 def is_scratch_term(app, title):
@@ -336,6 +344,13 @@ def snapshot(sock):
             "id": v.get("id"),   # wayfire view id: the in-session window key
             "app_id": v.get("app-id") or v.get("app_id") or "",
             "title": v.get("title", ""),
+            # The RESOLVED identity, recorded HERE because this is the only
+            # moment it can be: a plugin derives it from live state (kitty reads
+            # the shell's cwd out of /proc, chrome the SNSS file), and by the
+            # time anything replays this snapshot the pid is gone. Without it
+            # the relaunch path had only the raw title to match an identity-
+            # shaped prefix against, so it matched nothing and never fired.
+            "key": identity(v),
             "pid": pid,
             "wid": window_id_for(v),
             "output": p["output"],
@@ -835,6 +850,47 @@ def mux_session_of(title):
     return t.split(":", 1)[0].strip() or None
 
 
+def mux_host_of(title):
+    """The HOST a mux session lives on, from the TRAILING `[host]` tag mux
+    stamps into the terminal title (its set-titles-string ends in the tmux
+    format `[#{host_short}]`). That tag names the tmux SERVER's host, so a
+    session reached over ssh reads as the REMOTE box and a local one as this
+    box.
+
+    mux added the tag for exactly this consumer -- its own comment says a local
+    session and an ssh'd one sharing a name "would otherwise snap the two
+    windows onto each other" -- so reading it is the whole local/remote story;
+    no /proc sniffing is needed, and unlike /proc it still works for a STORED
+    entry, whose pid is long dead.
+
+    None when there is no trailing tag (an older mux, or a title that merely
+    looks like a banner). Callers treat that as local, which is what it was
+    before mux stamped the host. Anchored at the END so the LEADING [LABEL]
+    context prefix (a work banner) is never mistaken for it."""
+    m = re.search(r"\[([^\[\]]+)\]\s*$", title.strip())
+    if not m:
+        return None
+    return m.group(1).strip() or None
+
+
+def mux_identity(title):
+    """The mux plugin's kb key: `mux@<host>:<session>`, or None if the title is
+    not a session banner. FULLY QUALIFIED, always -- a bare `mux:<session>` key
+    could not say which box it meant, and two boxes running a same-named session
+    (the norm here: a `tackup` session on both) would share one saved slot and
+    fight over it. An untagged title falls back to this host."""
+    s = mux_session_of(title)
+    if not s:
+        return None
+    return f"mux@{mux_host_of(title) or LOCAL_HOST}:{s}"
+
+
+# The parsed form of a stored mux key. Neither field can contain ':' (tmux
+# forbids it in a session name, and a hostname cannot hold one), so the split
+# is unambiguous.
+MUX_KEY_RE = re.compile(r"^mux@([^:]+):(.+)$")
+
+
 class ChromePlugin(WindowPlugin):
     """Chrome / Chromium: identity is the active-tab URL read from the SNSS
     session file (chrome_url_for). Transient states (a blank New Tab, the
@@ -850,20 +906,24 @@ class ChromePlugin(WindowPlugin):
 
 class MuxPlugin(WindowPlugin):
     """mux-attached kitty terminals -- a kitty window wearing a mux
-    `session:window` banner (is_mux_term). Identity is the mux SESSION alone
-    (`mux:<session>`), the durable unit `mux go`/`mux ls` name, parsed from the
-    title label-stripped up to the first ':'. NOT the full title, which churns
-    you switch windows within a session and carries a host label + padding.
-    Respawns a missing session via `mux go` -- the sole mux-BINARY touchpoint,
-    best-effort so it no-ops without mux (the soft dep)."""
+    `session:window` banner (is_mux_term). Identity is the mux SESSION plus the
+    HOST it lives on (`mux@<host>:<session>`), both parsed from the title: the
+    session is the durable unit `mux go` names, and the host is the trailing tag
+    mux stamps (see mux_host_of). NOT the full title, which churns as you switch
+    windows within a session and carries padding.
+
+    Claims a REMOTE session (one whose host is not this box) as readily as a
+    local one: it is the same kind of window doing the same job, wants the same
+    slot back, and differs only in how it respawns -- `mux go` here, the same
+    through `ssh` there. Respawn is the sole mux-BINARY touchpoint, best-effort
+    so it no-ops without mux (the soft dep)."""
     name = "mux"
 
     def owns(self, v):
         return is_mux_term(v["app"], v["title"])
 
     def identity(self, v):
-        s = mux_session_of(v["title"])
-        return f"mux:{s}" if s else None
+        return mux_identity(v["title"])
 
     def window_id(self, v):
         return term_wid(v["pid"])
@@ -926,9 +986,11 @@ def kkey(app_id, title):
 
 # Bump when the key scheme changes. Schema 2 moved Chrome off per-page-title
 # keys onto the normalized active-tab URL; schema 3 moved kitty off per-title
-# keys onto mux:<session> / kitty:<cwd>. The old keys can never match again, so
-# migrate_kb drops them once (the store is a rebuildable cache).
-KB_SCHEMA = "3"
+# keys onto mux:<session> / kitty:<cwd>; schema 4 QUALIFIED the mux key with the
+# host (mux@<host>:<session>), so a same-named session on two boxes stops
+# sharing one slot. The old keys can never match again, so migrate_kb drops them
+# once (the store is a rebuildable cache).
+KB_SCHEMA = "4"
 _MIGRATE_APPS = CHROME_APPS | {"kitty"}
 
 
@@ -1148,7 +1210,24 @@ def app_of(v):
 
 # --- init-launch: bring terminals back (Chrome self-restores on its own) ----
 
-def spawn_term(session):
+def mux_go_command(session, host=None):
+    """The shell command a terminal runs to land in `session`, LOCAL when host
+    is this box (or None) and over ssh otherwise.
+
+    Remote goes through `sh -lc` because a plain `ssh <host> mux ...` runs a
+    NON-login shell, which on these boxes does not put ~/.local/bin on PATH, so
+    the bare name does not resolve (verified on manifold: `command -v mux` fails
+    without -l, succeeds with it). `ssh -t` because mux attaches a tmux client,
+    which needs a tty."""
+    if not host or host == LOCAL_HOST:
+        mux = os.path.expanduser("~/.local/bin/mux")
+        return f"{shlex.quote(mux)} go {shlex.quote(session)}"
+    inner = f"mux go {shlex.quote(session)}"
+    return (f"ssh -t {shlex.quote(host)} "
+            f"{shlex.quote('sh -lc ' + shlex.quote(inner))}")
+
+
+def spawn_term(session, host=None):
     """Open a terminal attached to a mux session, launched through a shell so
     that DETACHING drops back to that shell instead of closing the window.
     kitty running `mux go` as its direct child would exit on detach (mux exits
@@ -1156,49 +1235,116 @@ def spawn_term(session):
     ksh -i'` leaves an interactive shell after detach: the window survives and,
     re-sourcing kshrc, becomes a plain 'terminal' -- untracked, exactly what a
     detached scratch terminal should be. TMUX is cleared so mux does a fresh
-    attach, not a switch-client that hijacks another window."""
+    attach, not a switch-client that hijacks another window.
+
+    A REMOTE session (host not this box) differs only in the command; the same
+    detach-survives-as-a-shell wrapper holds, so dropping an ssh'd session
+    leaves a local shell exactly as a local one does."""
     env = {k: v for k, v in os.environ.items() if k != "TMUX"}
     env["TERM_WINDOW_ID"] = os.urandom(6).hex()   # stable per-window id
-    mux = os.path.expanduser("~/.local/bin/mux")
-    cmd = f"{shlex.quote(mux)} go {shlex.quote(session)}; exec ksh -i"
+    cmd = f"{mux_go_command(session, host)}; exec ksh -i"
     subprocess.Popen(["kitty", "ksh", "-c", cmd],
                      env=env, start_new_session=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def mux_relaunch_missing(saved, live):
-    """The mux plugin's relaunch: reopen a mux SESSION that was open at the last
-    snapshot but is not currently on screen, reattached with `mux go`. Saved
-    entries key by session (title == 'mux:<session>'), so one relaunch per
-    session. Skips a session with no live tmux session (nothing to attach --
-    `mux ls`) or one a live window already shows. `mux ls` failing (mux absent)
-    -> persisted empty -> no relaunch, the soft-dep no-op."""
+def saved_key(w):
+    """The identity a saved snapshot window was recorded under. Prefers the
+    `key` snapshot() now stores; falls back to re-deriving it for a snapshot
+    written before that field existed (which works for a title-derived identity
+    like mux's, and honestly yields nothing for a /proc-derived one, whose pid
+    is gone)."""
+    k = w.get("key")
+    if k:
+        return k
+    return identity(w) or ""
+
+
+def mux_session_set():
+    """The session names mux would rebuild on this box: `mux resume --list`,
+    one bare NAME per line.
+
+    This is mux's durable session SET (recorded per socket under $MUX_CACHE,
+    additive as sessions are built or attached, subtractive on `mux kill`), NOT
+    the live tmux server -- which is the whole point, because the case that
+    matters is a COLD BOOT, where no session is live but `mux go` rebuilds from
+    exactly this set. Reading the live server instead meant there was never
+    anything to relaunch after a reboot.
+
+    Deliberately not scraped out of `mux ls`, which is a HUMAN listing: it leads
+    each line with an agent-state glyph, so the scrape that used to read it
+    matched nothing and left this entire path dead with no symptom. selftest
+    asserts the bare-name shape against the real binary, so a future change to
+    mux's output fails LOUD here instead of silently going inert again.
+
+    Empty when mux is absent or errors -- the soft-dep no-op."""
     try:
-        out = subprocess.run([os.path.expanduser("~/.local/bin/mux"), "ls"],
-                             capture_output=True, text=True, timeout=5).stdout
+        out = subprocess.run(
+            [os.path.expanduser("~/.local/bin/mux"), "resume", "--list"],
+            capture_output=True, text=True, timeout=5).stdout
     except Exception:
-        out = ""
-    persisted = {ln.split(":", 1)[0].strip() for ln in out.splitlines()
-                 if ":" in ln and not ln.strip().startswith("mux:")}
-    livesess = set()
+        return set()
+    return {ln.strip() for ln in out.splitlines() if ln.strip()}
+
+
+def live_keys(live):
+    """The resolved identities of the windows currently on screen -- the ONE
+    definition of "already showing" that every relaunch path tests against, so
+    the question is answered the same way for each. Comparing identities rather
+    than raw state is what keeps the plugins from tripping over each other: a
+    mux-attached window keys mux@... (its owner is the mux plugin), so it can
+    never be mistaken for a kitty:<cwd> window whose shell happens to sit in the
+    same place."""
+    out = set()
     for v in live:
-        vv = _pview(v)
-        if is_mux_term(vv["app"], vv["title"]):
-            s = mux_session_of(vv["title"])
-            if s:
-                livesess.add(s)
-    seen, n = set(), 0
+        k = identity(_pview(v))
+        if k:
+            out.add(k)
+    return out
+
+
+def mux_candidates(saved, livekeys, known, local_host=None):
+    """The (host, session) pairs to respawn: every mux window in the last
+    snapshot that is not already on screen (`livekeys`, from live_keys). Pure
+    and side-effect free so selftest can drive it with fixtures -- this logic
+    used to be reachable only through two subprocesses and a compositor, which
+    is exactly why it could rot unnoticed.
+
+    A LOCAL session must still be one mux knows (`known`): the set is
+    subtractive on `mux kill`, so a session you deliberately killed stays
+    killed rather than rising again at every login. A REMOTE one is taken on
+    trust from our own store, with no network call in the login path -- if it
+    has gone, `mux go` on the far box rebuilds it from that box's own set, which
+    is the same answer an ssh probe would have cost a round trip to get."""
+    local_host = local_host or LOCAL_HOST
+    out, seen = [], set()
     for w in saved:
-        t = w.get("title", "")
-        if w.get("app_id") != "kitty" or not t.startswith("mux:"):
+        if w.get("app_id") != "kitty":
             continue
-        s = t[len("mux:"):]
-        if not s or s in seen or s not in persisted or s in livesess:
+        m = MUX_KEY_RE.match(saved_key(w))
+        if not m:
             continue
-        seen.add(s)
-        spawn_term(s)
+        host, sess = m.group(1), m.group(2)
+        key = f"mux@{host}:{sess}"
+        if key in seen or key in livekeys:
+            continue
+        if host == local_host and sess not in known:
+            continue
+        seen.add(key)
+        out.append((host, sess))
+    return out
+
+
+def mux_relaunch_missing(saved, live):
+    """The mux plugin's relaunch: reopen each mux session that was on screen at
+    the last snapshot and is not now, reattached with `mux go` -- locally, or
+    over ssh for a session that lived on another box."""
+    n = 0
+    for host, sess in mux_candidates(saved, live_keys(live), mux_session_set()):
+        spawn_term(sess, host)
         n += 1
-        print(f"launch  mux go {s}", flush=True)
+        where = "" if host == LOCAL_HOST else f"  [on {host}]"
+        print(f"launch  mux go {sess}{where}", flush=True)
     return n
 
 
@@ -1213,26 +1359,31 @@ def _spawn_kitty(cwd):
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def kitty_candidates(saved, livekeys):
+    """The cwds to reopen a plain kitty shell in: every non-mux kitty window in
+    the last snapshot that is not already on screen (`livekeys`, from
+    live_keys). Pure, for the same reason mux_candidates is."""
+    seen, out = set(), []
+    for w in saved:
+        if w.get("app_id") != "kitty":
+            continue
+        k = saved_key(w)
+        if not k.startswith("kitty:"):
+            continue
+        cwd = k[len("kitty:"):]
+        if not cwd or cwd in seen or k in livekeys or not os.path.isdir(cwd):
+            continue
+        seen.add(cwd)
+        out.append(cwd)
+    return out
+
+
 def kitty_relaunch_missing(saved, live):
     """The kitty plugin's relaunch: reopen a non-mux kitty window (identity
     'kitty:<cwd>') that was open at the last snapshot but is not on screen, as a
     plain shell in that cwd. Deduped by cwd; skips one a live window shows."""
-    live_cwds = set()
-    for v in live:
-        vv = _pview(v)
-        if vv["app"] == "kitty":
-            c = _term_cwd(vv["pid"])
-            if c:
-                live_cwds.add(c)
-    seen, n = set(), 0
-    for w in saved:
-        t = w.get("title", "")
-        if w.get("app_id") != "kitty" or not t.startswith("kitty:"):
-            continue
-        cwd = t[len("kitty:"):]
-        if not cwd or cwd in seen or cwd in live_cwds or not os.path.isdir(cwd):
-            continue
-        seen.add(cwd)
+    n = 0
+    for cwd in kitty_candidates(saved, live_keys(live)):
         _spawn_kitty(cwd)
         n += 1
         print(f"launch  kitty {cwd}", flush=True)
@@ -2110,7 +2261,73 @@ def selftest():
     ck("mux-session", mux_session_of("wf:code⠀[manifold]") == "wf")
     ck("mux-session-label", mux_session_of("[WORK] proj:main") == "proj")
     ck("mux-session-none", mux_session_of("terminal") is None)
-    ck("mux-id", ps["mux"].identity(V("kitty", "wf:code")) == "mux:wf")
+
+    # host parse: the TRAILING tag only. The leading [LABEL] context prefix must
+    # never be read as a host, and an untagged title falls back to this box.
+    ck("mux-host", mux_host_of("wf:code⠀⠀⠀⠀[manifold]") == "manifold")
+    ck("mux-host-label", mux_host_of("[WORK] proj:main") is None)
+    ck("mux-host-both",
+       mux_host_of("[WORK] proj:main⠀⠀⠀⠀[manifold]") == "manifold")
+    ck("mux-id", ps["mux"].identity(V("kitty", "wf:code⠀⠀⠀⠀[manifold]"))
+       == "mux@manifold:wf")
+    ck("mux-id-untagged",
+       ps["mux"].identity(V("kitty", "wf:code")) == f"mux@{LOCAL_HOST}:wf")
+    # THE case this exists for: one session name, two boxes, two slots.
+    ck("mux-id-splits-hosts",
+       ps["mux"].identity(V("kitty", "tackup:main⠀⠀⠀⠀[manifestor]"))
+       != ps["mux"].identity(V("kitty", "tackup:main⠀⠀⠀⠀[manifold]")))
+
+    # live_keys resolves a real on-screen title through to its identity
+    ck("live-keys", live_keys([V("kitty", "live:1⠀⠀⠀⠀[manifestor]")])
+       == {"mux@manifestor:live"})
+
+    # relaunch candidate selection, driven with fixtures (no mux, no compositor)
+    def S(key, app="kitty"):
+        return {"app_id": app, "key": key, "title": ""}
+
+    snap = [S("mux@manifestor:usher"),      # local, still known -> relaunch
+            S("mux@manifestor:gone"),       # local, killed since -> skip
+            S("mux@manifold:tackup"),       # remote -> relaunch on trust
+            S("mux@manifestor:live"),       # already on screen -> skip
+            S("mux@manifestor:usher"),      # duplicate -> deduped
+            S("kitty:/tmp"),                # not a mux key -> not ours
+            S("mux@manifestor:x", "signal")]    # not a terminal -> ignored
+    got = mux_candidates(snap, {"mux@manifestor:live"},
+                         {"usher", "live"}, local_host="manifestor")
+    ck("mux-candidates", got == [("manifestor", "usher"),
+                                 ("manifold", "tackup")])
+    ck("mux-candidates-both-hosts",
+       mux_candidates([S("mux@manifestor:tackup"), S("mux@manifold:tackup")],
+                      set(), {"tackup"}, local_host="manifestor")
+       == [("manifestor", "tackup"), ("manifold", "tackup")])
+    # a remote session is never gated on the LOCAL set
+    ck("mux-candidates-remote-unknown",
+       mux_candidates([S("mux@manifold:elsewhere")], set(), set(),
+                      local_host="manifestor")
+       == [("manifold", "elsewhere")])
+
+    ck("kitty-candidates",
+       kitty_candidates([S("kitty:/tmp"), S("kitty:/tmp"),
+                         S("kitty:/nonexistent-" + "z" * 12),
+                         S("mux@manifestor:wf")], set()) == ["/tmp"])
+    ck("kitty-candidates-live",
+       kitty_candidates([S("kitty:/tmp")], {"kitty:/tmp"}) == [])
+
+    # the spawn command: local runs mux directly, remote goes through ssh -t
+    # and a LOGIN shell (a non-login ssh shell has no ~/.local/bin on PATH)
+    ck("go-local", "ssh" not in mux_go_command("wf")
+       and mux_go_command("wf").endswith("mux go wf"))
+    ck("go-local-selfhost", "ssh" not in mux_go_command("wf", LOCAL_HOST))
+    _r = mux_go_command("wf", "manifold")
+    ck("go-remote", _r.startswith("ssh -t manifold ") and "sh -lc" in _r
+       and "mux go" in _r)
+
+    # CONTRACT with mux: `mux resume --list` must stay BARE NAMES, one per line.
+    # This is the guard the old `mux ls` scrape lacked -- a cosmetic change over
+    # in mux (the agent-state glyph) silently killed relaunch with no symptom.
+    # Skipped when mux is absent (the soft dep); an empty set is legitimate.
+    ck("mux-list-contract",
+       all(re.fullmatch(r"[^\s:]+", s) for s in mux_session_set()))
 
     # identity() is a STRICT no-op for a non-plugin app
     ck("noop-slack", identity(V("slack", "Slack")) == "Slack")

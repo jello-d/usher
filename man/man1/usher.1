@@ -60,7 +60,11 @@ keys a Chrome/Chromium window by its active-tab URL (read from the browser's
 SNSS session file), normalized to host/path.
 .TP
 .B mux
-keys a mux terminal by its tmux SESSION name and respawns it with \fBmux go\fR
+keys a mux terminal by its tmux SESSION name and the HOST it runs on
+(\fBmux@<host>:<session>\fR), and respawns it with \fBmux go\fR \(en over
+\fBssh\fR when that host is not this box, so a remote session returns to its own
+machine and never collides with a same-named local one. Candidates come from
+mux's durable session set (\fBmux resume --list\fR), so they survive a reboot
 (a soft dependency: absent \fBmux\fR degrades to a no-op).
 .TP
 .B kitty

@@ -24,8 +24,13 @@ ship built in — none uses the volatile title:
 - **chrome** — keys a Chrome/Chromium window by its **active-tab URL** (read
   from the browser's own SNSS session file), normalized to host/path.
 - **mux** — keys a [mux](https://github.com/jello-d/mux) terminal by its tmux
-  **session** name and respawns it with `mux go`. `mux` is a *soft* dependency:
-  if it is absent the plugin degrades to a no-op.
+  **session** name *and the host it runs on* (`mux@<host>:<session>`), both read
+  from the title mux stamps, and respawns it with `mux go`. A session reached
+  over **ssh** is respawned with `ssh -t <host> …` instead, so a remote session
+  comes back on its own box and never collides with a same-named local one.
+  Candidates come from mux's durable session **set** (`mux resume --list`), not
+  the live server, so they survive a reboot. `mux` is a *soft* dependency: if it
+  is absent the plugin degrades to a no-op.
 - **kitty** — keys any other kitty terminal by its shell's **working directory**
   (from `/proc`) and respawns it as a shell there.
 
