@@ -281,17 +281,21 @@ def _safe_profile(name):
     return re.sub(r"[^A-Za-z0-9._-]", "_", name)[:64] or "default"
 
 
-def profile_id():
+def profile_id(fresh=False):
     """The current display profile. Cached briefly: this is consulted on every
     knowledge load, and the capture loop runs often. The window in which a
     just-changed display can still resolve to the OLD profile is bounded by
     PROFILE_TTL, and the cost of losing it is a handful of entries written to
-    the wrong profile, which the next capture in the right one supersedes."""
+    the wrong profile, which the next capture in the right one supersedes.
+
+    `fresh` bypasses the cache, for the one caller that must not be told the
+    old answer: the display-change handler, which runs within a second of the
+    change and decides whether anything happened at all."""
     env = os.environ.get("SESSION_PROFILE")
     if env:
         return _safe_profile(env)
     now = time.time()
-    if _PROFILE["id"] and now - _PROFILE["at"] < PROFILE_TTL:
+    if not fresh and _PROFILE["id"] and now - _PROFILE["at"] < PROFILE_TTL:
         return _PROFILE["id"]
     pid = _hwdp_id() or _derived_id(_load_snapshot()) or "default"
     _PROFILE["id"], _PROFILE["at"] = _safe_profile(pid), now
@@ -1138,6 +1142,16 @@ def load_knowledge():
     try:
         kb = json.load(open(kb_path()))
     except (FileNotFoundError, ValueError):
+        # A store that does not exist yet is CURRENT by construction, so stamp
+        # it NOW. Without this, the first monitor set to be seen writes an
+        # unstamped store, and the very next load judges it stale and drops
+        # exactly the chrome + kitty entries it has just learned -- every new
+        # desk silently losing its browser and terminal placements once.
+        try:
+            os.makedirs(STATE, exist_ok=True)
+            write_json(schema_path(), KB_SCHEMA)
+        except OSError:
+            pass
         snap = _load_snapshot()    # seed from the latest snapshot if present
         if snap is None:
             return {}
@@ -1891,6 +1905,54 @@ def _doctor_placement(out, kb, live, outs):
                 f" -> {where} NOT ATTACHED")
     for lv in unlive:
         out(f"  unmatched  {app_of(lv)[:14]:14} {lv.get('title','')[:34]}")
+
+
+PROFILE_MARK = "session-mgr.profile"   # last profile we acted on, per boot
+
+
+def do_display_changed():
+    """The display-change entry point, for hwdp's `changed` hook.
+
+    That edge fires on EVERY output burst -- a monitor blanking and waking, a
+    kanshi reapply, a re-detect -- not only when the set of monitors actually
+    differs. Re-arming aggressive placement on each of those was a mistake:
+    aggressive means every mapped window is put back where it is remembered, so
+    a window deliberately moved during the session would be yanked home every
+    time a screen blinked, which is exactly the teleporting the steady state
+    exists to prevent.
+
+    So act only on a REAL profile change. The marker lives in the runtime dir,
+    so it is per-boot: the first display event after login has nothing to
+    compare against and is treated as a change, which is what you want at
+    login anyway.
+    """
+    now = profile_id(fresh=True)
+    mark = os.path.join(runtime_dir(), PROFILE_MARK)
+    try:
+        with open(mark) as f:
+            was = f.read().strip()
+    except OSError:
+        was = ""
+    if was == now:
+        return 0                     # same monitors; nothing to do, silently
+    try:
+        with open(mark, "w") as f:
+            f.write(now + "\n")
+    except OSError as e:
+        logline(f"display-changed: cannot record the profile: {e}")
+    logline(f"display changed: profile {was or '(none)'} -> {now}; "
+            "re-arming placement")
+    try:
+        os.makedirs(os.path.dirname(ARM_FILE), exist_ok=True)
+        with open(ARM_FILE, "w") as f:
+            f.write(f"{time.time()}\n")
+    except OSError as e:
+        logline(f"display-changed: cannot re-arm: {e}")
+    try:
+        do_restore(dry=False)
+    except Exception as e:
+        logline(f"display-changed: restore failed: {e}")
+    return 0
 
 
 def do_doctor():
@@ -2821,6 +2883,28 @@ def selftest():
     ck("profile-env", profile_id() == "testset")
     ck("profile-paths", kb_path().endswith("knowledge-testset.json")
        and schema_path().endswith("knowledge-testset.schema"))
+
+    # A NEW profile must be stamped CURRENT the moment it is created. It was
+    # not, and the next load then judged the unstamped store stale and dropped
+    # every chrome + kitty entry it had just learned -- each new monitor set
+    # silently losing its browser and terminal placements exactly once.
+    import tempfile
+    _st, _prev = STATE, os.environ.get("XDG_STATE_HOME")
+    _tmp = tempfile.mkdtemp()
+    try:
+        globals()["STATE"] = _tmp
+        load_knowledge()                     # first touch of a fresh profile
+        ck("new-profile-stamped", os.path.exists(schema_path())
+           and open(schema_path()).read().strip() == KB_SCHEMA)
+        _kb = {kkey("google-chrome", "example.com"): {
+            "app_id": "google-chrome", "title": "example.com",
+            "appid_only": False, "last_seen": 1_800_000_000}}
+        save_knowledge(_kb)
+        ck("new-profile-survives-reload", len(load_knowledge()) == 1)
+    finally:
+        globals()["STATE"] = _st
+        shutil.rmtree(_tmp, ignore_errors=True)
+
     if _saved_env is None:
         del os.environ["SESSION_PROFILE"]
     else:
@@ -2948,6 +3032,8 @@ def main():
             print(f"{getattr(p, 'name', '?'):10} {', '.join(hooks)}")
         print(f"# {len(plugins())} plugin(s); user dir {PLUGIN_DIR}",
               file=sys.stderr)
+    elif verb == "display-changed":   # hwdp's changed hook; no-op if same set
+        sys.exit(do_display_changed())
     elif verb == "doctor":        # what is it doing, and what is it NOT doing
         sys.exit(do_doctor())
     elif verb == "selftest":      # offline unit checks (no compositor needed)
@@ -2986,7 +3072,7 @@ def main():
               "restore [--dry-run] [--only S] [--from SPEC] | "
               "watch [--no-launch] | resume | stop | launch | aggressive | "
               "settle | toggle | status | exclude | include | identity | "
-              "plugins | doctor | selftest",
+              "plugins | display-changed | doctor | selftest",
               file=sys.stderr)
         sys.exit(2)
 
