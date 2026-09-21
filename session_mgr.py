@@ -1126,9 +1126,8 @@ class ChromePlugin(WindowPlugin):
                 start_new_session=True,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             n += 1
-            print(f"launch  {os.path.basename(exe)}"
-                  f"{' --profile-directory=' + prof if prof else ''}",
-                  flush=True)
+            _announce(f"launch  {os.path.basename(exe)}"
+                      f"{' --profile-directory=' + prof if prof else ''}")
         return n
 
 
@@ -1487,6 +1486,15 @@ def mux_go_command(session, host=None):
             f"|| echo {shlex.quote(msg)} >&2")
 
 
+def _announce(msg):
+    """Say it on stdout AND in the daemon's log. Both matter: stdout is what a
+    person running `session-mgr launch` by hand reads, and the log is the only
+    copy that survives, since the compositor autostart discards the worker's
+    stdout entirely."""
+    print(msg, flush=True)
+    logline(msg)
+
+
 def saved_sizes(saved):
     """identity -> [w, h] from the last snapshot, so a respawned window can be
     ASKED FOR at the size it had instead of mapping at kitty's configured
@@ -1642,7 +1650,7 @@ def mux_relaunch_missing(saved, live):
         spawn_term(sess, host, sizes.get(f"mux@{host}:{sess}"))
         n += 1
         where = "" if host == LOCAL_HOST else f"  [on {host}]"
-        print(f"launch  mux go {sess}{where}", flush=True)
+        _announce(f"launch  mux go {sess}{where}")
     return n
 
 
@@ -1685,7 +1693,7 @@ def kitty_relaunch_missing(saved, live):
     for cwd in kitty_candidates(saved, live_keys(live)):
         _spawn_kitty(cwd, sizes.get(f"kitty:{cwd}"))
         n += 1
-        print(f"launch  kitty {cwd}", flush=True)
+        _announce(f"launch  kitty {cwd}")
     return n
 
 
@@ -2580,9 +2588,17 @@ def watch_worker(launch=True):
         placed.add(vid)
         if e.get("inverted"):
             apply_invert(place_sock, vid)
-        print(f"placed  {app[:18]:18} {e['output']} "
-              f"ws{tuple(e['workspace'])} | {title[:32]}"
-              f"{' [inv]' if e.get('inverted') else ''}", flush=True)
+        msg = (f"placed  {app[:18]:18} {e['output']} "
+               f"ws{tuple(e['workspace'])} | {title[:32]}"
+               f"{' [inv]' if e.get('inverted') else ''}")
+        print(msg, flush=True)
+        # ALSO to the log. The autostart discards the worker's stdout, so a
+        # per-window placement left no trace anywhere, and the only record of
+        # placement was the init-placed COUNT. Reconstructing why one window
+        # was not placed then depends entirely on the history ring, which
+        # samples on capture and cannot say whether usher acted or the human
+        # did. This is the line that answers that next time.
+        logline(msg)
         return True
 
     def capture_loop():
