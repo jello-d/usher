@@ -976,53 +976,6 @@ def _term_cwd(pid):
     return ""
 
 
-_SSH_TAKES_ARG = set("bcDeFIiJLlmOopQRSWw")
-
-
-def _ssh_target(argv):
-    """(host, session) from an `ssh ...` argv, either half None if unknown.
-
-    The HOST is the first non-option word, which means skipping both flags and
-    the VALUES of the flags that take one. The SESSION is read from a `mux go
-    NAME` in the remote command: for a window usher itself spawned, the command
-    line states the identity outright, which is worth having because the TITLE
-    does not say it yet (see mux_identity)."""
-    host = None
-    it = iter(argv[1:])
-    for a in it:
-        if a.startswith("-"):
-            if len(a) == 2 and a[1] in _SSH_TAKES_ARG:
-                next(it, None)          # this flag consumes the next word
-            continue
-        host = a.split("@")[-1]         # user@host -> host
-        break
-    m = re.search(r"\bmux\s+go\s+(?:--\S+\s+)*([^\s'\"]+)", " ".join(argv))
-    return host, (m.group(1) if m else None)
-
-
-def _term_ssh_target(pid):
-    """(host, session) if this terminal is ssh'd somewhere, else (None, None).
-    Looks at the window's shell and that shell's children, which is where
-    spawn_term's `ssh -t <host> ...` sits."""
-    if not pid or pid < 0:
-        return None, None
-    for kid in _proc_children(pid):
-        if _proc_argv0(kid) in ("kitten", "kitty"):
-            continue
-        for p in [kid] + _proc_children(kid):
-            if _proc_argv0(p) != "ssh":
-                continue
-            try:
-                with open(f"/proc/{p}/cmdline", "rb") as f:
-                    argv = [x.decode("utf-8", "replace")
-                            for x in f.read().split(b"\0") if x]
-            except OSError:
-                continue
-            if argv:
-                return _ssh_target(argv)
-    return None, None
-
-
 def mux_session_of(title):
     """The mux SESSION from a `session:window` banner -- the durable unit that
     `mux go`/`mux ls` name (#{session_name}). Strips a leading [LABEL] context
@@ -1056,29 +1009,24 @@ def mux_host_of(title):
     return m.group(1).strip() or None
 
 
-def mux_identity(title, pid=-1):
+def mux_identity(title):
     """The mux plugin's kb key: `mux@<host>:<session>`, or None if the title is
     not a session banner. FULLY QUALIFIED, always -- a bare `mux:<session>` key
     could not say which box it meant, and two boxes running a same-named session
     (the norm here: a `tackup` session on both) would share one saved slot and
     fight over it. An untagged title falls back to this host.
 
-    /proc OVERRIDES the title for a LIVE window that is ssh'd somewhere, because
-    the title LAGS. A freshly spawned remote terminal wears whatever the local
-    shell set for as long as it takes ssh to connect and the remote tmux to
-    paint its banner -- measured at 31 seconds on this box, during which the
-    window advertised a DIFFERENT machine's session, was matched to that
-    window's saved slot, and was placed on top of it. The process tree knows
-    the truth from the moment the window maps, and for a window usher itself
-    spawned it knows the session name too.
-
-    A stored entry (pid < 0) has no process to ask and uses the title, which is
-    correct: by then the identity has long since been resolved and recorded."""
-    p_host, p_sess = _term_ssh_target(pid)
-    s = p_sess or mux_session_of(title)
+    The TITLE is the authority here, deliberately. The host tag names the tmux
+    SERVER's host, which is the question identity asks; sniffing the ssh in
+    /proc would answer a different one (the ROUTE taken), and the two diverge
+    through a jump host. A window is also free to move between sessions while
+    that ssh stays put, so the process tree goes stale where the title does
+    not. Tried and reverted 2026-09-20.
+    """
+    s = mux_session_of(title)
     if not s:
         return None
-    return f"mux@{p_host or mux_host_of(title) or LOCAL_HOST}:{s}"
+    return f"mux@{mux_host_of(title) or LOCAL_HOST}:{s}"
 
 
 # The parsed form of a stored mux key. Neither field can contain ':' (tmux
@@ -1147,15 +1095,10 @@ class MuxPlugin(WindowPlugin):
     name = "mux"
 
     def owns(self, v):
-        # A window ssh'd into a box and running mux is ours even before its
-        # banner arrives; without this the kitty plugin would claim it during
-        # the title lag and key it by the local shell's cwd.
-        if v["app"] == "kitty" and _term_ssh_target(v.get("pid", -1))[1]:
-            return not SKIP_TITLE.search(v["title"])
         return is_mux_term(v["app"], v["title"])
 
     def identity(self, v):
-        return mux_identity(v["title"], v.get("pid", -1))
+        return mux_identity(v["title"])
 
     def window_id(self, v):
         return term_wid(v["pid"])
@@ -2993,24 +2936,6 @@ def selftest():
     learn(_kb, _groups, [LW(1, "usher:main⠀⠀⠀⠀[manifestor]")],
           1_800_000_002)
     ck("learn-keeps-kitty-cwd", "kitty\x00kitty:/tmp" in _kb)
-
-    # ssh argv parsing: the host is the first non-option word, which means
-    # skipping the VALUES of value-taking flags too; the session comes from the
-    # remote command for a window usher spawned itself.
-    ck("ssh-plain", _ssh_target(["ssh", "-t", "manifold",
-                                 "sh -lc 'mux go tackup'"])
-       == ("manifold", "tackup"))
-    ck("ssh-valued-flags",
-       _ssh_target(["ssh", "-o", "BatchMode=yes", "-p", "2222", "-t",
-                    "jello@box.example", "sh -lc 'mux go api'"])
-       == ("box.example", "api"))
-    ck("ssh-no-session", _ssh_target(["ssh", "manifold"]) == ("manifold", None))
-    # -o's VALUE must never be read as the host
-    ck("ssh-not-the-flag-value",
-       _ssh_target(["ssh", "-o", "User=root", "realhost"])[0] == "realhost")
-    # a stored entry has no process to ask and must fall back to the title
-    ck("mux-id-stored-uses-title",
-       mux_identity("wf:code⠀⠀⠀⠀[manifold]", -1) == "mux@manifold:wf")
 
     # respawn geometry: ask kitty for the size the window had, so it does not
     # map at kitty.conf's default and sit wrong until placement catches up
