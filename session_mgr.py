@@ -744,6 +744,44 @@ def chrome_url_for(title):
 HOME = os.path.expanduser("~")
 
 
+def chrome_profile_map():
+    """normalized-URL -> the Chrome PROFILE DIRECTORY that has it open.
+
+    Built from the same SNSS session files the chrome identity is read from, so
+    it needs no new state: the profile is simply where each file LIVES
+    (.../<Profile>/Sessions/Session_*). The files survive a restart, which is
+    how Chrome restores itself, so this is answerable at login before Chrome
+    has started."""
+    out = {}
+    for p in _session_files():
+        prof = os.path.basename(os.path.dirname(os.path.dirname(p)))
+        try:
+            found = parse_snss(p)
+        except Exception:
+            continue
+        for url in found.values():
+            k = normalize_url(url)
+            if k:
+                out.setdefault(k, prof)
+    return out
+
+
+def chrome_profiles_for(saved):
+    """The profile directories to start, one per profile that actually had a
+    window last session, in first-seen order. Falls back to a single unnamed
+    launch (Chrome's own choice, possibly the picker) when nothing can be
+    matched -- no worse than before, and only when there is nothing to go on."""
+    pm = chrome_profile_map()
+    out = []
+    for w in saved:
+        if w.get("app_id") not in CHROME_APPS:
+            continue
+        prof = pm.get(saved_key(w))
+        if prof and prof not in out:
+            out.append(prof)
+    return out or [None]
+
+
 def _pview(v):
     """Normalize a wayfire view, a snapshot window, or a kb entry to the fields
     plugins read: app, title, pid (-1 when absent, e.g. a stored entry)."""
@@ -938,6 +976,53 @@ def _term_cwd(pid):
     return ""
 
 
+_SSH_TAKES_ARG = set("bcDeFIiJLlmOopQRSWw")
+
+
+def _ssh_target(argv):
+    """(host, session) from an `ssh ...` argv, either half None if unknown.
+
+    The HOST is the first non-option word, which means skipping both flags and
+    the VALUES of the flags that take one. The SESSION is read from a `mux go
+    NAME` in the remote command: for a window usher itself spawned, the command
+    line states the identity outright, which is worth having because the TITLE
+    does not say it yet (see mux_identity)."""
+    host = None
+    it = iter(argv[1:])
+    for a in it:
+        if a.startswith("-"):
+            if len(a) == 2 and a[1] in _SSH_TAKES_ARG:
+                next(it, None)          # this flag consumes the next word
+            continue
+        host = a.split("@")[-1]         # user@host -> host
+        break
+    m = re.search(r"\bmux\s+go\s+(?:--\S+\s+)*([^\s'\"]+)", " ".join(argv))
+    return host, (m.group(1) if m else None)
+
+
+def _term_ssh_target(pid):
+    """(host, session) if this terminal is ssh'd somewhere, else (None, None).
+    Looks at the window's shell and that shell's children, which is where
+    spawn_term's `ssh -t <host> ...` sits."""
+    if not pid or pid < 0:
+        return None, None
+    for kid in _proc_children(pid):
+        if _proc_argv0(kid) in ("kitten", "kitty"):
+            continue
+        for p in [kid] + _proc_children(kid):
+            if _proc_argv0(p) != "ssh":
+                continue
+            try:
+                with open(f"/proc/{p}/cmdline", "rb") as f:
+                    argv = [x.decode("utf-8", "replace")
+                            for x in f.read().split(b"\0") if x]
+            except OSError:
+                continue
+            if argv:
+                return _ssh_target(argv)
+    return None, None
+
+
 def mux_session_of(title):
     """The mux SESSION from a `session:window` banner -- the durable unit that
     `mux go`/`mux ls` name (#{session_name}). Strips a leading [LABEL] context
@@ -971,16 +1056,29 @@ def mux_host_of(title):
     return m.group(1).strip() or None
 
 
-def mux_identity(title):
+def mux_identity(title, pid=-1):
     """The mux plugin's kb key: `mux@<host>:<session>`, or None if the title is
     not a session banner. FULLY QUALIFIED, always -- a bare `mux:<session>` key
     could not say which box it meant, and two boxes running a same-named session
     (the norm here: a `tackup` session on both) would share one saved slot and
-    fight over it. An untagged title falls back to this host."""
-    s = mux_session_of(title)
+    fight over it. An untagged title falls back to this host.
+
+    /proc OVERRIDES the title for a LIVE window that is ssh'd somewhere, because
+    the title LAGS. A freshly spawned remote terminal wears whatever the local
+    shell set for as long as it takes ssh to connect and the remote tmux to
+    paint its banner -- measured at 31 seconds on this box, during which the
+    window advertised a DIFFERENT machine's session, was matched to that
+    window's saved slot, and was placed on top of it. The process tree knows
+    the truth from the moment the window maps, and for a window usher itself
+    spawned it knows the session name too.
+
+    A stored entry (pid < 0) has no process to ask and uses the title, which is
+    correct: by then the identity has long since been resolved and recorded."""
+    p_host, p_sess = _term_ssh_target(pid)
+    s = p_sess or mux_session_of(title)
     if not s:
         return None
-    return f"mux@{mux_host_of(title) or LOCAL_HOST}:{s}"
+    return f"mux@{p_host or mux_host_of(title) or LOCAL_HOST}:{s}"
 
 
 # The parsed form of a stored mux key. Neither field can contain ':' (tmux
@@ -1005,8 +1103,13 @@ class ChromePlugin(WindowPlugin):
         """Start the browser if the last session had Chrome windows and none
         is running now. Chrome restores its OWN windows, but only once
         something starts it -- so on a login where nothing did, usher was
-        leaving the largest part of the desk shut. It launches the browser and
-        nothing more: which windows come back stays Chrome's business."""
+        leaving the largest part of the desk shut. It starts the browser and
+        nothing more: which windows come back stays Chrome's business.
+
+        Started PER PROFILE, naming each one. A bare `google-chrome` on a box
+        with several profiles and no `Default` opens the profile PICKER and
+        waits for a human, restoring nothing at all -- so the one thing usher
+        had to get right about starting it was which profile to start."""
         if not any(w.get("app_id") in CHROME_APPS for w in saved):
             return 0
         if any(_pview(v)["app"] in CHROME_APPS for v in live):
@@ -1016,10 +1119,17 @@ class ChromePlugin(WindowPlugin):
                      "chromium-browser") if shutil.which(c)), None)
         if not exe:
             return 0
-        subprocess.Popen([exe], start_new_session=True,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print(f"launch  {os.path.basename(exe)}", flush=True)
-        return 1
+        n = 0
+        for prof in chrome_profiles_for(saved):
+            subprocess.Popen(
+                [exe] + ([f"--profile-directory={prof}"] if prof else []),
+                start_new_session=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            n += 1
+            print(f"launch  {os.path.basename(exe)}"
+                  f"{' --profile-directory=' + prof if prof else ''}",
+                  flush=True)
+        return n
 
 
 class MuxPlugin(WindowPlugin):
@@ -1038,10 +1148,15 @@ class MuxPlugin(WindowPlugin):
     name = "mux"
 
     def owns(self, v):
+        # A window ssh'd into a box and running mux is ours even before its
+        # banner arrives; without this the kitty plugin would claim it during
+        # the title lag and key it by the local shell's cwd.
+        if v["app"] == "kitty" and _term_ssh_target(v.get("pid", -1))[1]:
+            return not SKIP_TITLE.search(v["title"])
         return is_mux_term(v["app"], v["title"])
 
     def identity(self, v):
-        return mux_identity(v["title"])
+        return mux_identity(v["title"], v.get("pid", -1))
 
     def window_id(self, v):
         return term_wid(v["pid"])
@@ -1372,7 +1487,33 @@ def mux_go_command(session, host=None):
             f"|| echo {shlex.quote(msg)} >&2")
 
 
-def spawn_term(session, host=None):
+def saved_sizes(saved):
+    """identity -> [w, h] from the last snapshot, so a respawned window can be
+    ASKED FOR at the size it had instead of mapping at kitty's configured
+    default and waiting to be corrected. Measured here: a relaunched terminal
+    mapped at 1085x672 (the 80c x 24c in kitty.conf) against a remembered
+    2132x1690, and sat that way until placement caught up."""
+    out = {}
+    for w in saved:
+        k, s = saved_key(w), w.get("size")
+        if k and s and len(s) == 2 and s[0] and s[1]:
+            out.setdefault(k, [int(s[0]), int(s[1])])
+    return out
+
+
+def _size_opts(size):
+    """kitty's initial-size flags. Plain numbers are PIXELS (kitty.conf here
+    uses the `c` suffix for cells). kitty rounds to whole cells and adds its
+    padding, so this lands CLOSE rather than exact -- 2176x1761 for a 2132x1690
+    request when measured -- and the normal placement pass makes it exact. The
+    point is that the window never appears at the wrong size."""
+    if not size:
+        return []
+    return ["-o", f"initial_window_width={int(size[0])}",
+            "-o", f"initial_window_height={int(size[1])}"]
+
+
+def spawn_term(session, host=None, size=None):
     """Open a terminal attached to a mux session, launched through a shell so
     that DETACHING drops back to that shell instead of closing the window.
     kitty running `mux go` as its direct child would exit on detach (mux exits
@@ -1388,7 +1529,7 @@ def spawn_term(session, host=None):
     env = {k: v for k, v in os.environ.items() if k != "TMUX"}
     env["TERM_WINDOW_ID"] = os.urandom(6).hex()   # stable per-window id
     cmd = f"{mux_go_command(session, host)}; exec ksh -i"
-    subprocess.Popen(["kitty", "ksh", "-c", cmd],
+    subprocess.Popen(["kitty"] + _size_opts(size) + ["ksh", "-c", cmd],
                      env=env, start_new_session=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -1496,21 +1637,22 @@ def mux_relaunch_missing(saved, live):
     the last snapshot and is not now, reattached with `mux go` -- locally, or
     over ssh for a session that lived on another box."""
     n = 0
+    sizes = saved_sizes(saved)
     for host, sess in mux_candidates(saved, live_keys(live), mux_session_set()):
-        spawn_term(sess, host)
+        spawn_term(sess, host, sizes.get(f"mux@{host}:{sess}"))
         n += 1
         where = "" if host == LOCAL_HOST else f"  [on {host}]"
         print(f"launch  mux go {sess}{where}", flush=True)
     return n
 
 
-def _spawn_kitty(cwd):
+def _spawn_kitty(cwd, size=None):
     """Open a plain kitty shell in cwd (a fresh per-window id). Deliberately NOT
     re-running the window's captured program -- restoring the place + directory,
     not the command."""
     env = {k: v for k, v in os.environ.items() if k != "TMUX"}
     env["TERM_WINDOW_ID"] = os.urandom(6).hex()
-    subprocess.Popen(["kitty", "--directory", cwd],
+    subprocess.Popen(["kitty"] + _size_opts(size) + ["--directory", cwd],
                      env=env, start_new_session=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -1539,8 +1681,9 @@ def kitty_relaunch_missing(saved, live):
     'kitty:<cwd>') that was open at the last snapshot but is not on screen, as a
     plain shell in that cwd. Deduped by cwd; skips one a live window shows."""
     n = 0
+    sizes = saved_sizes(saved)
     for cwd in kitty_candidates(saved, live_keys(live)):
-        _spawn_kitty(cwd)
+        _spawn_kitty(cwd, sizes.get(f"kitty:{cwd}"))
         n += 1
         print(f"launch  kitty {cwd}", flush=True)
     return n
@@ -2834,6 +2977,45 @@ def selftest():
     learn(_kb, _groups, [LW(1, "usher:main⠀⠀⠀⠀[manifestor]")],
           1_800_000_002)
     ck("learn-keeps-kitty-cwd", "kitty\x00kitty:/tmp" in _kb)
+
+    # ssh argv parsing: the host is the first non-option word, which means
+    # skipping the VALUES of value-taking flags too; the session comes from the
+    # remote command for a window usher spawned itself.
+    ck("ssh-plain", _ssh_target(["ssh", "-t", "manifold",
+                                 "sh -lc 'mux go tackup'"])
+       == ("manifold", "tackup"))
+    ck("ssh-valued-flags",
+       _ssh_target(["ssh", "-o", "BatchMode=yes", "-p", "2222", "-t",
+                    "jello@box.example", "sh -lc 'mux go api'"])
+       == ("box.example", "api"))
+    ck("ssh-no-session", _ssh_target(["ssh", "manifold"]) == ("manifold", None))
+    # -o's VALUE must never be read as the host
+    ck("ssh-not-the-flag-value",
+       _ssh_target(["ssh", "-o", "User=root", "realhost"])[0] == "realhost")
+    # a stored entry has no process to ask and must fall back to the title
+    ck("mux-id-stored-uses-title",
+       mux_identity("wf:code⠀⠀⠀⠀[manifold]", -1) == "mux@manifold:wf")
+
+    # respawn geometry: ask kitty for the size the window had, so it does not
+    # map at kitty.conf's default and sit wrong until placement catches up
+    ck("saved-sizes", saved_sizes([{"app_id": "kitty", "key": "kitty:/tmp",
+                                    "size": [2132.0, 1690.0]}])
+       == {"kitty:/tmp": [2132, 1690]})
+    ck("saved-sizes-skips-junk",
+       saved_sizes([{"app_id": "kitty", "key": "k", "size": [0, 0]},
+                    {"app_id": "kitty", "key": "j"}]) == {})
+    ck("size-opts", _size_opts([2132, 1690])
+       == ["-o", "initial_window_width=2132",
+           "-o", "initial_window_height=1690"])
+    ck("size-opts-none", _size_opts(None) == [])
+
+    # chrome: with nothing resolvable, fall back to one unnamed launch
+    ck("chrome-profiles-fallback",
+       chrome_profiles_for([{"app_id": "google-chrome",
+                             "key": "nowhere.example/x"}]) == [None])
+    ck("chrome-profiles-ignores-others",
+       chrome_profiles_for([{"app_id": "kitty", "key": "kitty:/tmp"}])
+       == [None])
 
     # --from spec resolution (pure half; the file lookup is driven by `list`)
     _t = date(2026, 3, 1)
