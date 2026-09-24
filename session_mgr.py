@@ -539,6 +539,17 @@ def write_json(path, blob):
 # churn. A window not yet in the session file falls back to its raw title, so
 # behavior never regresses below the old title scheme.
 CHROME_APPS = {"google-chrome", "chromium"}
+
+
+def is_chrome(app):
+    """Chrome/Chromium by app-id, case-INSENSITIVELY. A window that comes up
+    through XWayland reports `Google-chrome` where the native Wayland one
+    reports `google-chrome`, and BOTH turn up in a real store here. Matching
+    only the lower-case form left the capitalised windows unclaimed by the
+    plugin -- no URL identity, and invisible to the browser relaunch -- while
+    is_browser() (a substring test) still treated them as browsers, so they got
+    the settle delay and none of the benefit."""
+    return (app or "").lower() in CHROME_APPS
 # Seconds between starting one Chrome profile and the next. Long enough for the
 # first invocation to become the browser process and open its singleton socket,
 # which is what the second one needs to talk to.
@@ -804,6 +815,33 @@ def chrome_url_for(title):
 HOME = os.path.expanduser("~")
 
 
+_BROWSER_EXES = {"chrome", "chromium", "chromium-browser", "google-chrome",
+                 "google-chrome-stable"}
+
+
+def _browser_pids():
+    """The BROWSER processes, which is the one per running browser that has no
+    `--type=` in its argv. Everything else with the same name is a renderer,
+    a gpu process or a zygote (55 of them against 1 browser, measured), and
+    signalling those achieves nothing useful."""
+    out = []
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        try:
+            with open(f"/proc/{d}/cmdline", "rb") as f:
+                argv = f.read().split(b"\0")
+        except OSError:
+            continue
+        if not argv or not argv[0]:
+            continue
+        exe = os.path.basename(argv[0].decode("utf-8", "replace"))
+        if exe in _BROWSER_EXES and not any(a.startswith(b"--type=")
+                                            for a in argv):
+            out.append(int(d))
+    return out
+
+
 def chrome_profile_map():
     """normalized-URL -> the Chrome PROFILE DIRECTORY that has it open.
 
@@ -834,7 +872,7 @@ def chrome_profiles_for(saved):
     pm = chrome_profile_map()
     out = []
     for w in saved:
-        if w.get("app_id") not in CHROME_APPS:
+        if not is_chrome(w.get("app_id")):
             continue
         prof = pm.get(saved_key(w))
         if prof and prof not in out:
@@ -873,6 +911,18 @@ class WindowPlugin:
 
     def relaunch_missing(self, saved, live):
         return 0          # respawn this app's saved-but-absent windows; count
+
+    def wind_down(self, live):
+        """Ask this app's windows to exit CLEANLY, and return the pids asked.
+
+        The mirror of relaunch_missing: that one knows how to bring an app
+        back, this one knows how to let it go. An app that needs nothing (a
+        terminal, whose mux session outlives the window by design) leaves it
+        alone and returns [], which is most of them.
+
+        Return pids rather than waiting: the engine waits for all of them at
+        once, under ONE bounded deadline, so no plugin can hold up a reboot."""
+        return []
 
 
 PLUGIN_DIR = os.path.join(
@@ -1102,10 +1152,27 @@ class ChromePlugin(WindowPlugin):
     name = "chrome"
 
     def owns(self, v):
-        return v["app"] in CHROME_APPS
+        return is_chrome(v["app"])
 
     def identity(self, v):
         return chrome_url_for(v["title"])
+
+    def wind_down(self, live):
+        """SIGTERM the BROWSER process. Measured on Chrome 154: it exits in
+        about a second and records profile.exit_type = "SessionEnded".
+
+        That is the whole point. Killed mid-flight -- which is what a bare
+        `systemctl reboot` does, since it tears the session down with the
+        compositor still needed -- the profile keeps exit_type = "Crashed",
+        and every subsequent login opens with a "Chrome didn't shut down
+        correctly" prompt instead of the windows."""
+        pids = _browser_pids()
+        for p in pids:
+            try:
+                os.kill(p, signal.SIGTERM)
+            except OSError:
+                pass
+        return pids
 
     def relaunch_missing(self, saved, live):
         """Start the browser if the last session had Chrome windows and none
@@ -1118,9 +1185,9 @@ class ChromePlugin(WindowPlugin):
         with several profiles and no `Default` opens the profile PICKER and
         waits for a human, restoring nothing at all -- so the one thing usher
         had to get right about starting it was which profile to start."""
-        if not any(w.get("app_id") in CHROME_APPS for w in saved):
+        if not any(is_chrome(w.get("app_id")) for w in saved):
             return 0
-        if any(_pview(v)["app"] in CHROME_APPS for v in live):
+        if any(is_chrome(_pview(v)["app"]) for v in live):
             return 0
         exe = next((shutil.which(c) for c in
                     ("google-chrome", "google-chrome-stable", "chromium",
@@ -2022,13 +2089,13 @@ def _doctor_relaunch(out, snap, live):
     saved = snap.get("windows", [])
     lk = live_keys(live)
     known = mux_session_set()
-    chrome_up = any(_pview(v)["app"] in CHROME_APPS for v in live)
+    chrome_up = any(is_chrome(_pview(v)["app"]) for v in live)
     chrome_note = ("Chrome restores its own" if chrome_up
                    else "browser NOT running: usher starts it, Chrome"
                         " restores its own")
     for w in saved:
         app, key = w.get("app_id", ""), saved_key(w)
-        if app in CHROME_APPS:
+        if is_chrome(app):
             out(f"  {'self' if chrome_up else 'START':10} {app:14}"
                 f" {key[:36]:36}  ({chrome_note})")
             continue
@@ -2130,6 +2197,76 @@ def do_display_changed():
         do_restore(dry=False)
     except Exception as e:
         logline(f"display-changed: restore failed: {e}")
+    return 0
+
+
+# Seconds to wait for every app a plugin asked to quit. Bounded on purpose:
+# this runs between a human pressing Reboot and the machine rebooting, so it
+# must never be the reason that does not happen.
+WIND_DOWN_TIMEOUT = float(os.environ.get("SESSION_WIND_DOWN_TIMEOUT", 8))
+
+
+def do_wind_down():
+    """Bring the session to a clean stop: capture, stand down, let go.
+
+    The counterpart of the relaunch path, and the same shape -- each plugin
+    knows how to release its own app, exactly as it knows how to bring it back.
+
+    THE ORDER IS THE WHOLE THING:
+
+    1. CAPTURE while the session is still intact. This is the last moment the
+       layout is true, and the only snapshot guaranteed to describe a desk
+       somebody actually had.
+    2. STOP THE WATCHER. Without this it keeps capturing as the apps go away
+       and faithfully records a session with no browser in it, which is then
+       what the next login restores. The capture above would be overwritten by
+       the session dying.
+    3. Ask each plugin to release its app, then wait once, bounded.
+
+    Deliberately does NOT reboot, log out, or stop anything else. Power is the
+    caller's business; usher's is knowing what the session was and letting it
+    go tidily. Always exits 0 -- a failure here must never strand somebody at a
+    machine that will not shut down."""
+    try:
+        do_capture()
+    except Exception as e:
+        print(f"session-mgr: capture failed, winding down anyway: {e}",
+              file=sys.stderr)
+    try:
+        do_stop()
+    except Exception:
+        pass
+    try:
+        live = WayfireSocket().list_views(filter_mapped_toplevel=True)
+    except Exception:
+        live = []
+    pids = []
+    for p in plugins():
+        try:
+            pids += list(p.wind_down(live) or [])
+        except Exception as e:
+            print(f"session-mgr: wind-down ({getattr(p, 'name', '?')}): {e}",
+                  file=sys.stderr)
+    if not pids:
+        print("session-mgr: nothing asked to quit; session captured")
+        return 0
+    print(f"session-mgr: asked {len(pids)} process(es) to quit")
+    end = time.time() + WIND_DOWN_TIMEOUT
+    while time.time() < end:
+        alive = []
+        for p in pids:
+            try:
+                os.kill(p, 0)
+                alive.append(p)
+            except OSError:
+                pass
+        if not alive:
+            print("session-mgr: all exited cleanly")
+            return 0
+        pids = alive
+        time.sleep(0.2)
+    print(f"session-mgr: {len(pids)} still running after "
+          f"{WIND_DOWN_TIMEOUT:g}s; going ahead anyway")
     return 0
 
 
@@ -2907,6 +3044,12 @@ def selftest():
     ps = {getattr(p, "name", "?"): p for p in plugins()}
     ck("plugins-builtin", all(n in ps for n in ("chrome", "mux", "kitty")))
     ck("owns-chrome", ps["chrome"].owns(V("google-chrome")))
+    # XWayland reports `Google-chrome`; both forms exist in a real store, and
+    # only matching the lower-case one left those windows unclaimed
+    ck("owns-chrome-xwayland", ps["chrome"].owns(V("Google-chrome")))
+    ck("is_chrome-cases", is_chrome("Google-chrome") and is_chrome("chromium")
+       and not is_chrome("kitty") and not is_chrome(None))
+    ck("is_owned-xwayland", is_owned("Google-chrome"))
     ck("owns-mux", ps["mux"].owns(V("kitty", "wf:code")))
     ck("owns-kitty-notmux", not ps["mux"].owns(V("kitty", "✳ Claude Code"))
        and ps["kitty"].owns(V("kitty", "✳ Claude Code")))
@@ -2981,6 +3124,23 @@ def selftest():
     _r = mux_go_command("wf", "manifold")
     ck("go-remote", _r.endswith("latch manifold:wf"))
     ck("go-remote-delegates", "ssh" not in _r and " go " not in _r)
+
+    # wind-down: the plugin hook exists, defaults to a no-op, and the browser
+    # one finds only the BROWSER process (a renderer has --type= in its argv).
+    ck("wind-down-hook", hasattr(WindowPlugin, "wind_down")
+       and WindowPlugin().wind_down([]) == [])
+    ck("wind-down-terminals-noop",
+       ps["mux"].wind_down([]) == [] and ps["kitty"].wind_down([]) == [])
+    ck("browser-pids-is-a-list", isinstance(_browser_pids(), list))
+    # every pid it returns must be a browser, never a --type= child
+    for _p in _browser_pids():
+        try:
+            with open(f"/proc/{_p}/cmdline", "rb") as _f:
+                _av = _f.read().split(b"\0")
+        except OSError:
+            continue
+        ck("browser-pids-excludes-children",
+           not any(a.startswith(b"--type=") for a in _av))
 
     # chrome is started with the flags that make it RESTORE: naming the right
     # profile is not enough, since "On startup" is unset on these profiles and
@@ -3263,6 +3423,8 @@ def main():
             print(f"{getattr(p, 'name', '?'):10} {', '.join(hooks)}")
         print(f"# {len(plugins())} plugin(s); user dir {PLUGIN_DIR}",
               file=sys.stderr)
+    elif verb == "wind-down":     # last capture, then let the apps go cleanly
+        sys.exit(do_wind_down())
     elif verb == "display-changed":   # hwdp's changed hook; no-op if same set
         sys.exit(do_display_changed())
     elif verb == "doctor":        # what is it doing, and what is it NOT doing
@@ -3303,7 +3465,7 @@ def main():
               "restore [--dry-run] [--only S] [--from SPEC] | "
               "watch [--no-launch] | resume | stop | launch | aggressive | "
               "settle | toggle | status | exclude | include | identity | "
-              "plugins | display-changed | doctor | selftest",
+              "plugins | wind-down | display-changed | doctor | selftest",
               file=sys.stderr)
         sys.exit(2)
 
