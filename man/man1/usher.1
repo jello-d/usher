@@ -97,9 +97,11 @@ SNSS session file), normalized to host/path.
 .TP
 .B mux
 keys a mux terminal by its tmux SESSION name and the HOST it runs on
-(\fBmux@<host>:<session>\fR), and respawns it with \fBmux go\fR \(en over
-\fBssh\fR when that host is not this box, so a remote session returns to its own
-machine and never collides with a same-named local one. Candidates come from
+(\fBmux@<host>:<session>\fR), and respawns it with \fBmux go\fR \(en or with
+\fBmux latch <host>:<session>\fR when that host is not this box, so a remote
+session returns to its own machine, waits for a credential rather than failing
+once at login, and never collides with a same-named local one. Candidates come
+from
 mux's durable session set (\fBmux resume --list\fR), so they survive a reboot
 (a soft dependency: absent \fBmux\fR degrades to a no-op).
 .TP

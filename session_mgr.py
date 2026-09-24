@@ -539,6 +539,10 @@ def write_json(path, blob):
 # churn. A window not yet in the session file falls back to its raw title, so
 # behavior never regresses below the old title scheme.
 CHROME_APPS = {"google-chrome", "chromium"}
+# Seconds between starting one Chrome profile and the next. Long enough for the
+# first invocation to become the browser process and open its singleton socket,
+# which is what the second one needs to talk to.
+CHROME_STAGGER = float(os.environ.get("SESSION_CHROME_STAGGER", 4))
 # Wayland titles Chrome sets are "<page title> - Google Chrome"; strip that
 # browser suffix to recover the page title the session file stores.
 CHROME_SUFFIXES = (" - Google Chrome", " - Chromium")
@@ -1103,6 +1107,15 @@ class ChromePlugin(WindowPlugin):
             return 0
         n = 0
         for prof in chrome_profiles_for(saved):
+            if n:
+                # STAGGER. Chrome is a singleton per user-data-dir: the first
+                # invocation becomes the browser process and later ones hand
+                # their request to it over a socket that does not exist yet.
+                # Firing both in the same second is a race, and the loser does
+                # not restore its session. Observed on manifold, where two
+                # profiles were launched in the same second and only one came
+                # back with its windows.
+                time.sleep(CHROME_STAGGER)
             subprocess.Popen(
                 [exe] + ([f"--profile-directory={prof}"] if prof else []),
                 start_new_session=True,
@@ -1441,26 +1454,29 @@ def app_of(v):
 # --- init-launch: bring terminals back (Chrome self-restores on its own) ----
 
 def mux_go_command(session, host=None):
-    """The shell command a terminal runs to land in `session`, LOCAL when host
-    is this box (or None) and over ssh otherwise.
+    """The shell command a terminal runs to land in `session`: `mux go` when it
+    lives on this box, `mux latch HOST:SESSION` when it does not.
 
-    Remote goes through `sh -lc` because a plain `ssh <host> mux ...` runs a
-    NON-login shell, which on these boxes does not put ~/.local/bin on PATH, so
-    the bare name does not resolve (verified on manifold: `command -v mux` fails
-    without -l, succeeds with it). `ssh -t` because mux attaches a tmux client,
-    which needs a tty."""
+    The remote half used to be a hand-rolled `ssh -t <host> 'sh -lc "mux go
+    X"'`, and that was the wrong layer. It attempts ONCE, at login, and a
+    login is exactly when the credential is least likely to be live: the
+    daemon is started by the compositor autostart, whose environment has no
+    SSH_AUTH_SOCK at all (verified on manifold). The attempt failed, the `exec
+    ksh -i` fallback left a bare shell, and the session never came back.
+
+    `mux latch` is mux's own answer to this and treats it as a STATE MACHINE
+    rather than a single attempt. Its `blocked` state is written for precisely
+    this case -- no credential live YET -- and it polls the credential instead
+    of retrying the connection, so the attachment lands by itself the moment
+    an agent appears. It also distinguishes `denied` (terminal, say what to
+    fix) from `probing` (retry on a backoff), which a one-shot ssh cannot.
+
+    So remote attach semantics belong to mux, the same way the session SET
+    does. usher names the host and the session and stays out of it."""
+    mux = os.path.expanduser("~/.local/bin/mux")
     if not host or host == LOCAL_HOST:
-        mux = os.path.expanduser("~/.local/bin/mux")
         return f"{shlex.quote(mux)} go {shlex.quote(session)}"
-    inner = f"mux go {shlex.quote(session)}"
-    remote = shlex.quote("sh -lc " + shlex.quote(inner))
-    # If the far box is asleep or off-network the window would otherwise just
-    # sit at a bare shell, looking like usher opened a terminal for no reason.
-    # Say which host could not be reached; the window is kept either way, since
-    # it is a perfectly good terminal and closing it would hide the failure.
-    msg = f"usher: could not reach {host} -- 'mux go {session}' not started"
-    return (f"ssh -t {shlex.quote(host)} {remote} "
-            f"|| echo {shlex.quote(msg)} >&2")
+    return f"{shlex.quote(mux)} latch {shlex.quote(host + ':' + session)}"
 
 
 def _announce(msg):
@@ -2933,18 +2949,15 @@ def selftest():
     ck("kitty-candidates-live",
        kitty_candidates([S("kitty:/tmp")], {"kitty:/tmp"}) == [])
 
-    # the spawn command: local runs mux directly, remote goes through ssh -t
-    # and a LOGIN shell (a non-login ssh shell has no ~/.local/bin on PATH)
-    ck("go-local", "ssh" not in mux_go_command("wf")
-       and mux_go_command("wf").endswith("mux go wf"))
-    ck("go-local-selfhost", "ssh" not in mux_go_command("wf", LOCAL_HOST))
+    # the spawn command: `mux go` here, `mux latch HOST:SESSION` there. usher
+    # must NOT hand-roll ssh -- a one-shot attempt at login is exactly when no
+    # credential is live yet, and mux latch polls for one instead of failing.
+    ck("go-local", mux_go_command("wf").endswith("mux go wf"))
+    ck("go-local-selfhost",
+       mux_go_command("wf", LOCAL_HOST) == mux_go_command("wf"))
     _r = mux_go_command("wf", "manifold")
-    ck("go-remote", _r.startswith("ssh -t manifold ") and "sh -lc" in _r
-       and "mux go" in _r)
-    # an unreachable box must SAY so, not leave a bare shell looking like usher
-    # opened a terminal for no reason
-    ck("go-remote-reports-failure",
-       "|| echo" in _r and "could not reach manifold" in _r)
+    ck("go-remote", _r.endswith("latch manifold:wf"))
+    ck("go-remote-delegates", "ssh" not in _r and " go " not in _r)
 
     # chrome relaunch: only when the last session had Chrome and none is up
     _ch = ps["chrome"]
