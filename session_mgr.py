@@ -2481,33 +2481,59 @@ def runtime_dir():
     return os.environ.get("XDG_RUNTIME_DIR") or STATE
 
 
-ADOPT_FLAG = "session-adopt"   # marker: armed by resume, consumed at init
+ADOPT_FLAG = "session-adopt"   # armed by resume/reload, consumed at init.
+#                                Its CONTENT is the mode; empty reads as adopt,
+#                                which is what the flag used to mean.
+
+# How a worker generation starts. There are THREE answers, and for a long time
+# there were only two, which cost real data:
+#
+#   restore  place what is already open against the store   (`watch`)
+#   adopt    take the current layout as the new truth       (`resume`)
+#   quiet    touch nothing at all                           (`reload`)
+#
+# `quiet` exists because a CODE DEPLOY needs to restart the daemon without
+# expressing an opinion about the layout, and neither of the other two can do
+# that. `adopt` looks harmless -- it moves no windows -- but it CAPTURES, so it
+# overwrites every remembered slot with wherever that window currently sits,
+# and it deliberately grants no grace deadline, so those windows are never
+# placed afterwards either. Used as a deploy reload (five times on manifold on
+# 2026-09-24) it quietly rewrote a layout learned over days to match one that
+# had failed to restore, and then reported everything as correct, because by
+# then it WAS self-consistent.
+MODES = ("restore", "adopt", "quiet")
 
 
-def arm_adopt(on):
-    """Arm (session-mgr resume) or clear (session-mgr watch) the one-shot
-    adopt flag. watch clears it so a start/reload is unambiguously restore
-    mode."""
+def arm_mode(mode):
+    """Arm how the next worker generation starts. One-shot, consumed at init."""
     p = os.path.join(runtime_dir(), ADOPT_FLAG)
     try:
         os.makedirs(runtime_dir(), exist_ok=True)
-        if on:
-            open(p, "w").close()
-        elif os.path.exists(p):
-            os.remove(p)
+        if mode == "restore":
+            if os.path.exists(p):
+                os.remove(p)
+        else:
+            with open(p, "w") as f:
+                f.write(mode + "\n")
     except OSError:
         pass
 
 
-def take_adopt():
-    """One-shot: True (and clear) if a `session-mgr resume` armed the flag, else
-    False. Consumed by the worker at init, so only the first worker after a
-    resume adopts; respawns and plain watch restore."""
+def take_mode():
+    """The armed mode, cleared as it is read, so only the FIRST worker after
+    the arming acts on it and a later respawn restores. An empty flag file is
+    read as `adopt`: that is what its mere presence used to mean."""
+    p = os.path.join(runtime_dir(), ADOPT_FLAG)
     try:
-        os.remove(os.path.join(runtime_dir(), ADOPT_FLAG))
-        return True
+        with open(p) as f:
+            mode = f.read().strip()
     except OSError:
-        return False
+        return "restore"
+    try:
+        os.remove(p)
+    except OSError:
+        pass
+    return mode if mode in MODES else "adopt"
 
 
 def do_watch(launch=True):
@@ -2568,7 +2594,7 @@ def do_watch(launch=True):
         # argv: a re-exec must supervise WITHOUT re-arming/clearing the adopt
         # flag, so a `session-mgr resume` that triggered this reload is
         # honoured by the next worker instead of clobbered by a re-run of
-        # arm_adopt.
+        # arm_mode.
         keep = ["--no-launch"] if "--no-launch" in sys.argv[1:] else []
         os.execv(sys.executable, [sys.executable, script, "_super"] + keep)
 
@@ -2903,8 +2929,14 @@ def watch_worker(launch=True):
 
     # Consume the one-shot adopt flag (armed by `session-mgr resume`): the first
     # worker to reach here adopts; a respawn sees it gone and restores.
-    adopt = take_adopt()
-    if adopt:
+    mode = take_mode()
+    if mode == "quiet":
+        # A code reload: express NO opinion about the layout. No init-place, no
+        # capture, no grace deadlines. The windows keep their positions AND the
+        # store keeps its memory of where they belong, so a reload can never be
+        # the reason the two silently converge on the wrong answer.
+        logline("reload: neither restoring nor re-baselining")
+    elif mode == "adopt":
         # Capture-and-resume: adopt the CURRENT layout as the baseline and do
         # NOT restore. No init-place and no grace deadlines for open windows, so
         # they stay exactly where they are; the refreshed knowledge means new
@@ -3164,6 +3196,37 @@ def selftest():
     ck("go-remote", _r.endswith("latch manifold:wf"))
     ck("go-remote-delegates", "ssh" not in _r and " go " not in _r)
 
+    # start modes. `quiet` is the one a deploy needs: `adopt` moves no windows
+    # but CAPTURES, so using it as a reload rewrites every remembered slot to
+    # wherever the window currently sits.
+    import tempfile as _tf
+    _rt = _tf.mkdtemp()
+    _prev_rt = os.environ.get("XDG_RUNTIME_DIR")
+    os.environ["XDG_RUNTIME_DIR"] = _rt
+    try:
+        ck("mode-default-restore", take_mode() == "restore")
+        for _m in ("adopt", "quiet"):
+            arm_mode(_m)
+            ck(f"mode-{_m}", take_mode() == _m)
+        # one-shot: a second worker generation must not repeat it
+        arm_mode("adopt")
+        take_mode()
+        ck("mode-is-one-shot", take_mode() == "restore")
+        # restore is the ABSENCE of the flag, and must clear an armed one
+        arm_mode("quiet")
+        arm_mode("restore")
+        ck("mode-restore-clears", take_mode() == "restore")
+        # an EMPTY flag file is the pre-2026-09-24 spelling of adopt
+        with open(os.path.join(_rt, ADOPT_FLAG), "w"):
+            pass
+        ck("mode-legacy-empty-is-adopt", take_mode() == "adopt")
+    finally:
+        if _prev_rt is None:
+            del os.environ["XDG_RUNTIME_DIR"]
+        else:
+            os.environ["XDG_RUNTIME_DIR"] = _prev_rt
+        shutil.rmtree(_rt, ignore_errors=True)
+
     # wind-down: the plugin hook exists, defaults to a no-op, and the browser
     # one finds only the BROWSER process (a renderer has --type= in its argv).
     ck("wind-down-hook", hasattr(WindowPlugin, "wind_down")
@@ -3406,11 +3469,17 @@ def main():
                                       else "list")
         do_restore(dry="--dry-run" in args, only=only, source=source)
     elif verb == "watch":         # start, or reload if running -- RESTORE mode
-        arm_adopt(False)
+        arm_mode("restore")
         do_watch(launch="--no-launch" not in args)
     elif verb == "resume":        # start/reload in ADOPT (no restore)
-        arm_adopt(True)
+        arm_mode("adopt")
         do_watch(launch="--no-launch" not in args)
+    elif verb == "reload":        # pick up new code, touch NOTHING else
+        # What a deploy wants. `resume` looks right for this and is not: it
+        # captures, so it rewrites every remembered slot to wherever the window
+        # currently sits. Never relaunches either.
+        arm_mode("quiet")
+        do_watch(launch=False)
     elif verb == "_super":        # internal: re-exec'd supervisor (no re-arm)
         do_watch(launch="--no-launch" not in args)
     elif verb == "_worker":       # internal: the supervised worker
@@ -3504,7 +3573,8 @@ def main():
               "restore [--dry-run] [--only S] [--from SPEC] | "
               "watch [--no-launch] | resume | stop | launch | aggressive | "
               "settle | toggle | status | exclude | include | identity | "
-              "plugins | wind-down | display-changed | doctor | selftest",
+              "plugins | reload | wind-down | display-changed | doctor | "
+              "selftest",
               file=sys.stderr)
         sys.exit(2)
 
