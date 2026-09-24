@@ -543,6 +543,28 @@ CHROME_APPS = {"google-chrome", "chromium"}
 # first invocation to become the browser process and open its singleton socket,
 # which is what the second one needs to talk to.
 CHROME_STAGGER = float(os.environ.get("SESSION_CHROME_STAGGER", 4))
+
+# Flags usher adds when IT starts the browser. Starting the right profile is
+# not enough on its own: Chrome only reopens the previous windows when the
+# profile's "On startup" preference says to, and unset (the state of both
+# profiles here) means the New Tab page. So usher got the profile right and
+# Chrome opened a blank window.
+#
+#   --restore-last-session      reopen the last session regardless of that
+#                               preference. This is the whole intent of the
+#                               launch, and it applies ONLY to usher's own
+#                               invocation, never to one started by hand.
+#   --hide-crash-restore-bubble suppress "Chrome didn't shut down correctly.
+#                               Restore?". A session that ends with the machine
+#                               going down is recorded as exit_type=Crashed, so
+#                               that bubble appears at every login, and having
+#                               just ASKED for the restore we would be offering
+#                               it a second time.
+#
+# Override with SESSION_CHROME_FLAGS (space separated), empty to pass none.
+_CHROME_FLAGS_DEFAULT = "--restore-last-session --hide-crash-restore-bubble"
+CHROME_FLAGS = shlex.split(
+    os.environ.get("SESSION_CHROME_FLAGS", _CHROME_FLAGS_DEFAULT))
 # Wayland titles Chrome sets are "<page title> - Google Chrome"; strip that
 # browser suffix to recover the page title the session file stores.
 CHROME_SUFFIXES = (" - Google Chrome", " - Chromium")
@@ -1116,13 +1138,14 @@ class ChromePlugin(WindowPlugin):
                 # profiles were launched in the same second and only one came
                 # back with its windows.
                 time.sleep(CHROME_STAGGER)
-            subprocess.Popen(
-                [exe] + ([f"--profile-directory={prof}"] if prof else []),
-                start_new_session=True,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            argv = ([exe] + CHROME_FLAGS
+                    + ([f"--profile-directory={prof}"] if prof else []))
+            subprocess.Popen(argv, start_new_session=True,
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
             n += 1
-            _announce(f"launch  {os.path.basename(exe)}"
-                      f"{' --profile-directory=' + prof if prof else ''}")
+            _announce("launch  " + " ".join(
+                [os.path.basename(exe)] + argv[1:]))
         return n
 
 
@@ -2958,6 +2981,13 @@ def selftest():
     _r = mux_go_command("wf", "manifold")
     ck("go-remote", _r.endswith("latch manifold:wf"))
     ck("go-remote-delegates", "ssh" not in _r and " go " not in _r)
+
+    # chrome is started with the flags that make it RESTORE: naming the right
+    # profile is not enough, since "On startup" is unset on these profiles and
+    # unset means the New Tab page.
+    ck("chrome-restore-flag", "--restore-last-session" in CHROME_FLAGS)
+    ck("chrome-flags-overridable",
+       shlex.split("") == [] and isinstance(CHROME_FLAGS, list))
 
     # chrome relaunch: only when the last session had Chrome and none is up
     _ch = ps["chrome"]
