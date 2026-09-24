@@ -2069,6 +2069,18 @@ def _doctor_contracts(out):
             " no-op")
         return rc
     out(f"  [OK]   mux present ({mux})")
+    # Terminals inherit THIS process's environment, so a missing agent here is
+    # a missing agent in every session usher respawns -- and a remote one then
+    # cannot authenticate. mux latch copes (it polls for a credential rather
+    # than failing), but only if it can see an agent socket at all.
+    sock = os.environ.get("SSH_AUTH_SOCK")
+    if not sock:
+        out("  [WARN] no SSH_AUTH_SOCK: a respawned REMOTE session has no way"
+            " to authenticate")
+    elif not os.path.exists(sock):
+        out(f"  [WARN] SSH_AUTH_SOCK points at a missing socket ({sock})")
+    else:
+        out("  [OK]   ssh agent socket present")
     names = mux_session_set()
     bad = [s for s in names if not re.fullmatch(r"[^\s:]+", s)]
     if bad:
@@ -2636,6 +2648,9 @@ def watch_worker(launch=True):
     pending = {}           # vid -> {"v": latest view, "due": place-after time}:
     #                        the settle-debounce queue, drained by placer_loop
     deadline = {}          # vid -> time after which we no longer place it
+    identified = set()     # vids we have ever been able to RECOGNISE (see
+    #                        _place_view: the grace runs from that moment, not
+    #                        from the map, so a slow login sequence still lands)
     groups = {}            # vid -> {"app", "titles": set}: in-session tab-group
     place_sock = connect()
     logline("session-mgr watch: starting")
@@ -2713,17 +2728,40 @@ def watch_worker(launch=True):
                      # here; the parent field (-1 == none) is the reliable tell,
                      # where is_transient's title match is not (a portal file
                      # chooser has a null/foreign title).
-        if time.time() > deadline.get(vid, 0):
-            return   # past the grace window: the window is settled, hands off
         app = v.get("app-id") or v.get("app_id") or ""
         title = v.get("title", "")
         if SKIP_TITLE.search(title) or is_transient(v):
             return   # work / scratch / transient-chrome: leave where it opened
-        if not aggressive_now() and not is_anchored(app, title):
-            return   # steady state: only session/include anchors are (re)placed
         with lock:
             e = (kb.get(kkey(app, ""))
                  or kb.get(kkey(app, identity(v))))
+        # THE GRACE RUNS FROM RECOGNITION, NOT FROM THE MAP. A window can be
+        # unidentifiable for a long time after it appears: a terminal that has
+        # to wait for a keyring to be unlocked before its ssh connects and the
+        # remote tmux paints a banner is a bare shell until then, and its real
+        # title can arrive minutes later. Measuring the grace from the map meant
+        # that window was already past it, so it was never placed and the human
+        # had to do it by hand.
+        #
+        # So the FIRST time a window can be recognised, restart its grace and
+        # feed the settle clock, exactly as if it had just mapped -- because
+        # from usher's point of view it just has. This needs no model of the
+        # sequence, no knowledge of keyrings or agents, and no new persistent
+        # state: it simply stays willing to place a window until it has had one
+        # real chance. Still bounded, since the aggressive check below governs.
+        if e is not None and vid not in identified:
+            identified.add(vid)
+            late = time.time() > deadline.get(vid, 0)
+            deadline[vid] = time.time() + PLACE_GRACE
+            with lock:
+                st["last_map"] = time.time()
+            if late:
+                logline(f"recognised late, re-graced: {app[:16]} | "
+                        f"{title[:34]}")
+        if time.time() > deadline.get(vid, 0):
+            return   # past the grace window: the window is settled, hands off
+        if not aggressive_now() and not is_anchored(app, title):
+            return   # steady state: only session/include anchors are (re)placed
         if not e:
             return   # never seen this identity -> we don't know where it goes
         outs = {o["name"]: o for o in place_sock.list_outputs()}
@@ -2963,6 +3001,7 @@ def watch_worker(launch=True):
                         pending[vid] = {"v": v, "due": time.time() + wait}
             elif ev == "view-unmapped" and v.get("id") is not None:
                 placed.discard(v["id"])
+                identified.discard(v["id"])
                 deadline.pop(v["id"], None)
                 with lock:
                     pending.pop(v["id"], None)
