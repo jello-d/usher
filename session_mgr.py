@@ -314,20 +314,54 @@ def schema_path(profile=None):
 
 
 def adopt_legacy_store():
-    """Move a pre-profile knowledge.json into whatever profile is current, once.
-    The alternative -- leaving it and starting empty -- silently discards every
-    learned placement on upgrade, which is not a thing to do to a store that
-    took weeks to build. Idempotent: only fires when the legacy file exists and
-    the profile's own does not."""
+    """Fold a pre-profile knowledge.json into the CURRENT profile, once.
+
+    MERGES, and that is the whole point. The first version only adopted when
+    the profile store did not exist yet, so if anything created one first -- a
+    seed from a snapshot, a run before the displays came up -- adoption was
+    skipped FOREVER and the legacy store was orphaned in silence. Measured on
+    manifold: 1019 learned placements sat in a file nothing read while the live
+    store knew 24, so almost nothing was ever placed and it looked like usher
+    had stopped working.
+
+    Entries already in the profile WIN: they were learned on these monitors,
+    the legacy ones were learned across whatever was attached at the time. So
+    the legacy store only fills gaps. The file is RETIRED rather than deleted,
+    both so this runs once and so a bad merge is recoverable."""
     legacy = os.path.join(STATE, "knowledge.json")
-    if not os.path.exists(legacy) or os.path.exists(kb_path()):
+    if not os.path.exists(legacy):
         return
     try:
-        os.replace(legacy, kb_path())
-        old = os.path.join(STATE, "knowledge.schema")
-        if os.path.exists(old):
-            os.replace(old, schema_path())
-        logline(f"adopted the pre-profile store into profile {profile_id()}")
+        with open(legacy) as f:
+            old = json.load(f)
+    except (OSError, ValueError) as e:
+        logline(f"legacy store unreadable, leaving it alone: {e}")
+        return
+    try:
+        with open(kb_path()) as f:
+            cur = json.load(f)
+    except (OSError, ValueError):
+        cur = {}
+    added = 0
+    for k, v in old.items():
+        if k not in cur:
+            cur[k] = v
+            added += 1
+    try:
+        os.makedirs(STATE, exist_ok=True)
+        write_json(kb_path(), json.dumps(cur, indent=2))
+        # Stamp it: the merged result is in TODAY's key scheme as far as we can
+        # tell, and an unstamped store is one load away from having its chrome
+        # and kitty entries dropped as stale -- which would undo the merge.
+        # Legacy keys in an older scheme simply never match and age out by TTL.
+        write_json(schema_path(), KB_SCHEMA)
+        os.replace(legacy, legacy + ".pre-profile")
+        sch = os.path.join(STATE, "knowledge.schema")
+        if os.path.exists(sch):
+            os.replace(sch, sch + ".pre-profile")
+        logline(f"adopted the pre-profile store into profile {profile_id()}: "
+                f"{added} entr{'y' if added == 1 else 'ies'} merged, "
+                f"{len(cur)} total")
     except OSError as e:
         logline(f"could not adopt the legacy store: {e}")
 
@@ -1897,6 +1931,17 @@ def _doctor_store(out):
     if not counts.get("kitty"):
         out("  NOTE         no kitty entries: terminals are not being"
             " remembered, so they cannot be placed")
+    # An un-adopted pre-profile store is invisible otherwise: placement simply
+    # goes quiet while the knowledge sits in a file nothing opens.
+    legacy = os.path.join(STATE, "knowledge.json")
+    if os.path.exists(legacy):
+        try:
+            with open(legacy) as f:
+                n = len(json.load(f))
+        except (OSError, ValueError):
+            n = "?"
+        out(f"  ORPHANED     knowledge.json holds {n} entries and is NOT in"
+            " use -- it should have been merged into the profile above")
     snap = _load_snapshot()
     if snap is None:
         out("  snapshot     current.json MISSING -- nothing to relaunch from")
@@ -3024,6 +3069,26 @@ def selftest():
             "appid_only": False, "last_seen": 1_800_000_000}}
         save_knowledge(_kb)
         ck("new-profile-survives-reload", len(load_knowledge()) == 1)
+
+        # A legacy store must be MERGED even when a profile store already
+        # exists. Skipping it there orphaned 1019 placements on manifold and
+        # left placement silently doing almost nothing.
+        _e = lambda t: {"app_id": "google-chrome", "title": t,
+                        "appid_only": False, "last_seen": 1_800_000_000}
+        with open(os.path.join(STATE, "knowledge.json"), "w") as f:
+            json.dump({kkey("google-chrome", "old.example"): _e("old.example"),
+                       kkey("google-chrome", "example.com"): _e("CLOBBER")},
+                      f)
+        _merged = load_knowledge()
+        ck("legacy-merged-into-existing", len(_merged) == 2)
+        ck("legacy-does-not-clobber",
+           _merged[kkey("google-chrome", "example.com")]["title"]
+           == "example.com")
+        ck("legacy-retired",
+           not os.path.exists(os.path.join(STATE, "knowledge.json"))
+           and os.path.exists(os.path.join(STATE,
+                                           "knowledge.json.pre-profile")))
+        ck("legacy-merge-is-once", len(load_knowledge()) == 2)
     finally:
         globals()["STATE"] = _st
         shutil.rmtree(_tmp, ignore_errors=True)
