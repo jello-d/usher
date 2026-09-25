@@ -1201,7 +1201,27 @@ def mux_identity(title):
 # The parsed form of a stored mux key. Neither field can contain ':' (tmux
 # forbids it in a session name, and a hostname cannot hold one), so the split
 # is unambiguous.
-MUX_KEY_RE = re.compile(r"^mux@([^:]+):(.+)$")
+# A terminal's SLOT: what it owns a remembered place as. Keyed by the COMMAND
+# the window runs, not by the session it is showing.
+#
+# The session was the obvious key and the wrong one. A window can show many
+# sessions over its life -- that is what mux is for -- so keying on the current
+# one meant switching sessions made the window a stranger with no remembered
+# place, and purged the slot it used to own. Exactly the Chrome active-tab
+# problem, and the cause of "my terminals came back on the wrong desktop".
+#
+# The command does not change when you switch what the window displays, so the
+# slot survives. It is also the SAME fact that says how to bring the window
+# back, so identity and relaunch can no longer disagree with each other.
+#
+# Known consequence, accepted: two windows running the same command share one
+# slot. Within a partition that means two local mux windows, which is not a
+# thing anyone runs.
+TERM_KEY_RE = re.compile(r"^term:")
+
+
+def _mux_slot(latch_target):
+    return f"term:latch {latch_target}" if latch_target else "term:resume"
 
 
 class ChromePlugin(WindowPlugin):
@@ -1294,7 +1314,11 @@ class MuxPlugin(WindowPlugin):
         return is_mux_term(v["app"], v["title"])
 
     def identity(self, v):
-        return mux_identity(v["title"])
+        """The SLOT, from the command this window runs. See TERM_KEY_RE.
+
+        A STORED entry (pid < 0) cannot be asked, but does not need to be: the
+        slot was resolved at capture and recorded in the snapshot's `key`."""
+        return _mux_slot(_term_latch_target(v.get("pid", -1)))
 
     def window_id(self, v):
         return term_wid(v["pid"])
@@ -1366,9 +1390,11 @@ def kkey(app_id, title):
 # keys onto the normalized active-tab URL; schema 3 moved kitty off per-title
 # keys onto mux:<session> / kitty:<cwd>; schema 4 QUALIFIED the mux key with the
 # host (mux@<host>:<session>), so a same-named session on two boxes stops
-# sharing one slot. The old keys can never match again, so migrate_kb drops them
-# once (the store is a rebuildable cache).
-KB_SCHEMA = "4"
+# sharing one slot; schema 5 moved a terminal off the session entirely
+# onto its COMMAND (term:...), so switching sessions in a window no
+# longer forfeits its place. The old keys can never match again, so
+# migrate_kb drops them once (the store is a rebuildable cache).
+KB_SCHEMA = "5"
 _MIGRATE_APPS = CHROME_APPS | {"kitty"}
 
 
@@ -1561,7 +1587,7 @@ def learn(kb, groups, windows, when):
     live_terms = {identity(w) for w in windows
                   if is_mux_term(w["app_id"], w["title"])}
     for k in [k for k, v in kb.items()
-              if MUX_KEY_RE.match(v.get("title", ""))
+              if TERM_KEY_RE.match(v.get("title", ""))
               and v.get("title") not in live_terms]:
         del kb[k]
     prune_kb(kb, when)
@@ -1782,7 +1808,7 @@ def mux_candidates(saved, live):
     for w in saved:
         if w.get("app_id") != "kitty":
             continue
-        if not MUX_KEY_RE.match(saved_key(w)):
+        if not TERM_KEY_RE.match(saved_key(w)):
             continue
         c = mux_cmd_of_saved(w)
         want[c] += 1
@@ -2186,7 +2212,7 @@ def _doctor_relaunch(out, snap, live):
     for c, n in todo.items():
         out(f"  RELAUNCH   {n} terminal(s)  {c}")
     n_term = sum(1 for w in saved if w.get("app_id") == "kitty"
-                 and MUX_KEY_RE.match(saved_key(w)))
+                 and TERM_KEY_RE.match(saved_key(w)))
     if n_term and not todo:
         out(f"  live       all {n_term} terminal(s) already up")
     for w in saved:
@@ -2195,7 +2221,7 @@ def _doctor_relaunch(out, snap, live):
             out(f"  {'self' if chrome_up else 'START':10} {app:14}"
                 f" {key[:36]:36}  ({chrome_note})")
             continue
-        if MUX_KEY_RE.match(key):
+        if TERM_KEY_RE.match(key):
             continue        # covered by the per-command lines above
         if key.startswith("kitty:"):
             cwd = key[len("kitty:"):]
@@ -3224,18 +3250,22 @@ def selftest():
     ck("mux-host-label", mux_host_of("[WORK] proj:main") is None)
     ck("mux-host-both",
        mux_host_of("[WORK] proj:main⠀⠀⠀⠀[manifold]") == "manifold")
-    ck("mux-id", ps["mux"].identity(V("kitty", "wf:code⠀⠀⠀⠀[manifold]"))
-       == "mux@manifold:wf")
-    ck("mux-id-untagged",
-       ps["mux"].identity(V("kitty", "wf:code")) == f"mux@{LOCAL_HOST}:wf")
-    # THE case this exists for: one session name, two boxes, two slots.
-    ck("mux-id-splits-hosts",
-       ps["mux"].identity(V("kitty", "tackup:main⠀⠀⠀⠀[manifestor]"))
-       != ps["mux"].identity(V("kitty", "tackup:main⠀⠀⠀⠀[manifold]")))
+    # THE SLOT. A terminal owns its place by the COMMAND it runs, so the two
+    # windows below are the same slot despite showing different sessions --
+    # which is the entire point of the change, and what the session-shaped key
+    # could not do.
+    ck("slot-local", _mux_slot(None) == "term:resume")
+    ck("slot-latch",
+       _mux_slot("manifestor:tackup") == "term:latch manifestor:tackup")
+    ck("slot-survives-session-switch",
+       ps["mux"].identity(V("kitty", "vigilance:1\u2800\u2800[manifold]"))
+       == ps["mux"].identity(V("kitty", "tackup:1\u2800\u2800[manifold]")))
+    ck("slot-latch-differs-from-local",
+       _mux_slot("manifestor:tackup") != _mux_slot(None))
 
     # live_keys resolves a real on-screen title through to its identity
     ck("live-keys", live_keys([V("kitty", "live:1⠀⠀⠀⠀[manifestor]")])
-       == {"mux@manifestor:live"})
+       == {"term:resume"})
 
     # relaunch candidate selection, driven with fixtures (no mux, no
     # compositor). The per-session matching this replaced is covered by the
@@ -3263,7 +3293,7 @@ def selftest():
        " go " not in MUX_RESUME and MUX_RESUME.endswith(" resume"))
 
     # candidates are COUNTED per command, not matched per session
-    def MW(cmd=None, key="mux@manifold:a", size=None):
+    def MW(cmd=None, key="term:resume", size=None):
         w = {"app_id": "kitty", "key": key}
         if cmd:
             w["cmd"] = cmd
@@ -3332,16 +3362,19 @@ def selftest():
                 "pos": [0.0, 0.0], "size": [800.0, 600.0]}
 
     _kb, _groups = {}, {}
-    learn(_kb, _groups, [LW(1, "usher:main⠀⠀⠀⠀[manifestor]"),
-                         LW(2, "tackup:main⠀⠀⠀⠀[manifold]")], 1_800_000_000)
+    learn(_kb, _groups, [LW(1, "usher:main⠀⠀⠀⠀[manifestor]")], 1_800_000_000)
     ck("learn-keeps-live-mux",
-       sorted(v["title"] for v in _kb.values())
-       == ["mux@manifestor:usher", "mux@manifold:tackup"])
+       [v["title"] for v in _kb.values()] == ["term:resume"])
+    # THE REGRESSION THIS GUARDS: the same window, now showing a DIFFERENT
+    # session. Under the session-shaped key that made it a stranger and purged
+    # the slot it owned, which is how a terminal lost its remembered place.
+    learn(_kb, _groups, [LW(1, "tackup:main⠀⠀⠀⠀[manifold]")], 1_800_000_001)
+    ck("learn-survives-session-switch",
+       [v["title"] for v in _kb.values()] == ["term:resume"])
     # a terminal whose window is gone IS dropped (the point of the purge)
-    learn(_kb, _groups, [LW(1, "usher:main⠀⠀⠀⠀[manifestor]")],
-          1_800_000_001)
+    learn(_kb, _groups, [], 1_800_000_002)
     ck("learn-drops-absent-mux",
-       [v["title"] for v in _kb.values()] == ["mux@manifestor:usher"])
+       not any(v["title"].startswith("term:") for v in _kb.values()))
     # ...but a kitty:<cwd> entry is NOT swept by the mux purge (it merely has a
     # colon in it, which is all is_mux_term ever tested for)
     _kb["kitty\x00kitty:/tmp"] = {"app_id": "kitty", "title": "kitty:/tmp",
