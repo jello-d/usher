@@ -1618,6 +1618,15 @@ MUX_BIN = os.path.expanduser("~/.local/bin/mux")
 MUX_RESUME = f"{shlex.quote(MUX_BIN)} resume"
 
 
+def _announce(msg):
+    """Say it on stdout AND in the daemon's log. Both matter: stdout is what a
+    person running `session-mgr launch` by hand reads, and the log is the only
+    copy that survives, since the compositor autostart discards the worker's
+    stdout entirely."""
+    print(msg, flush=True)
+    logline(msg)
+
+
 def _load_snapshot():
     """The last snapshot, or None if there is not a readable one. The single
     reader of current.json, so relaunch and doctor always look at the same
@@ -3037,12 +3046,22 @@ def watch_worker(launch=True):
     # are caught and placed by the loop below. Chrome restores itself. Drop the
     # LAUNCHED marker only after launch_missing returns, so the supervisor keeps
     # launch on for a successor if this worker dies before reaching here.
-    if launch:
+    # `quiet` (session-mgr reload) suppresses the relaunch too, and MUST do it
+    # here rather than through the `launch` argument. A reload signals the
+    # running supervisor, which re-execs with its OWN original argv, so the
+    # launch flag the reload was invoked with never reaches the worker -- while
+    # a fresh supervisor generation deletes the LAUNCHED marker, re-arming the
+    # relaunch. A deploy therefore spawned a terminal every time. The mode
+    # travels in the flag file, which the worker does read, so that is the only
+    # place the suppression can actually take effect.
+    if launch and mode != "quiet":
         try:
             launch_missing()
             open(LAUNCHED, "w").close()
         except Exception as e:
             logline(f"launch_missing error: {e}")
+    elif mode == "quiet":
+        logline("reload: relaunch suppressed")
 
     # Settle-debounce placer. Moves a window only once its title has been QUIET
     # for PLACE_SETTLE: a restoring client churns its title as tabs load, and
@@ -3266,6 +3285,28 @@ def selftest():
        == [(MUX_RESUME, [2132, 1674])])
     ck("cand-ignores-non-mux",
        mux_candidates([{"app_id": "kitty", "key": "kitty:/tmp"}], []) == [])
+
+    # RUN the relaunch paths end to end with the spawn stubbed. Checking
+    # mux_candidates alone is not enough: a NameError in the announce after the
+    # spawn shipped undetected precisely because nothing executed these
+    # functions, only the pure helper inside them.
+    import io
+    import contextlib
+    _real = (spawn_term, _spawn_kitty)
+    _spawned = []
+    try:
+        globals()["spawn_term"] = lambda *a, **k: _spawned.append(("mux", a))
+        globals()["_spawn_kitty"] = lambda *a, **k: _spawned.append(("kitty",
+                                                                     a))
+        with contextlib.redirect_stdout(io.StringIO()):
+            n_mux = mux_relaunch_missing([MW(), MW(cmd="L latch box")], [])
+            n_kit = kitty_relaunch_missing(
+                [{"app_id": "kitty", "key": "kitty:/tmp", "title": ""}], [])
+        ck("relaunch-mux-runs", n_mux == 2)
+        ck("relaunch-kitty-runs", n_kit == 1)
+        ck("relaunch-spawned", len(_spawned) == 3)
+    finally:
+        globals()["spawn_term"], globals()["_spawn_kitty"] = _real
 
     # chrome is started with the flags that make it RESTORE: naming the right
     # profile is not enough, since "On startup" is unset on these profiles and
