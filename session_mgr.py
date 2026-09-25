@@ -1196,29 +1196,6 @@ def mux_host_of(title):
     return m.group(1).strip() or None
 
 
-def mux_identity(title):
-    """The mux plugin's kb key: `mux@<host>:<session>`, or None if the title is
-    not a session banner. FULLY QUALIFIED, always -- a bare `mux:<session>` key
-    could not say which box it meant, and two boxes running a same-named session
-    (the norm here: a `tackup` session on both) would share one saved slot and
-    fight over it. An untagged title falls back to this host.
-
-    The TITLE is the authority here, deliberately. The host tag names the tmux
-    SERVER's host, which is the question identity asks; sniffing the ssh in
-    /proc would answer a different one (the ROUTE taken), and the two diverge
-    through a jump host. A window is also free to move between sessions while
-    that ssh stays put, so the process tree goes stale where the title does
-    not. Tried and reverted 2026-09-20.
-    """
-    s = mux_session_of(title)
-    if not s:
-        return None
-    return f"mux@{mux_host_of(title) or LOCAL_HOST}:{s}"
-
-
-# The parsed form of a stored mux key. Neither field can contain ':' (tmux
-# forbids it in a session name, and a hostname cannot hold one), so the split
-# is unambiguous.
 # A terminal's SLOT: what it owns a remembered place as. Keyed by the COMMAND
 # the window runs, not by the session it is showing.
 #
@@ -2278,9 +2255,17 @@ def _doctor_placement(out, kb, live, outs):
     pairs, unlive, _ = match(live, list(kb.values()))
     for lv, e in pairs:
         where = f"{e['output']} ws{tuple(e['workspace'])}"
+        # A slot deliberately does not encode what the window is SHOWING, so
+        # say it here. Without this, `term:resume` on a screen full of mux
+        # terminals is unmatchable to the thing a human is looking at.
+        shows = ""
+        t = lv.get("title") or ""
+        if is_mux_term(app_of(lv), t):
+            sess, host = mux_session_of(t), mux_host_of(t)
+            shows = f"  [showing {sess}@{host or LOCAL_HOST}]" if sess else ""
         if e["output"] in outs:
             out(f"  placeable  {app_of(lv)[:14]:14} {e['title'][:34]:34}"
-                f" -> {where}")
+                f" -> {where}{shows}")
         else:
             out(f"  UNPLACEABLE {app_of(lv)[:13]:13} {e['title'][:34]:34}"
                 f" -> {where} NOT ATTACHED")
