@@ -483,6 +483,10 @@ def snapshot(sock):
             # the relaunch path had only the raw title to match an identity-
             # shaped prefix against, so it matched nothing and never fired.
             "key": identity(v),
+            # How to bring this window BACK, asked of the live
+            # window while it can still answer. See
+            # WindowPlugin.relaunch_command.
+            "cmd": relaunch_command_for(v),
             "pid": pid,
             "wid": window_id_for(v),
             "output": p["output"],
@@ -912,6 +916,16 @@ class WindowPlugin:
     def relaunch_missing(self, saved, live):
         return 0          # respawn this app's saved-but-absent windows; count
 
+    def relaunch_command(self, v):
+        """The command that brings THIS window back, read from the live window
+        while it can still be read, or None if the plugin has no opinion.
+
+        Recorded per window at capture. That is the difference between asking
+        "what was this window DOING" and inferring it from what the window is
+        currently SHOWING: a title names one thing, and a window that can show
+        many loses the rest."""
+        return None
+
     def wind_down(self, live):
         """Ask this app's windows to exit CLEANLY, and return the pids asked.
 
@@ -1040,6 +1054,20 @@ def is_owned(app):
     return _owner({"app": app, "title": "", "pid": -1}) is not None
 
 
+def relaunch_command_for(v):
+    """The OWNING plugin's command for bringing this window back, or None.
+    Computed at CAPTURE, because a live window can be asked what it is doing
+    and a stored one cannot."""
+    v = _pview(v)
+    p = _owner(v)
+    if p is not None:
+        try:
+            return p.relaunch_command(v)
+        except Exception:
+            pass
+    return None
+
+
 def window_id_for(v):
     """The OWNING plugin's stable per-window id for a view, else ''."""
     v = _pview(v)
@@ -1084,6 +1112,37 @@ def _term_cwd(pid):
         except OSError:
             return ""
     return ""
+
+
+def _proc_argv(pid):
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return [x.decode("utf-8", "replace")
+                    for x in f.read().split(b"\0") if x]
+    except OSError:
+        return []
+
+
+def _term_latch_target(pid):
+    """The HOST[:SESSION] a `mux latch` running in this window is holding, or
+    None.
+
+    latch is the ONE mux verb that can be seen after the fact. It is a
+    long-lived supervisor with a job (hold the attachment across drops), so it
+    stays in the process tree; `mux go` and `mux resume` exec into a tmux
+    client and are gone. That asymmetry is the whole basis of the rule below:
+    a command we can see, we replay; everything else was a local mux, and the
+    command a human would have typed for that is `mux resume`.
+
+    Matched on the argv rather than argv0, because latch runs as
+    `/bin/sh .../libexec/mux-latch <target>` and argv0 is the shell."""
+    for p in [pid] + _proc_children(pid):
+        for kid in [p] + _proc_children(p):
+            argv = _proc_argv(kid)
+            for i, a in enumerate(argv):
+                if os.path.basename(a) == "mux-latch" and i + 1 < len(argv):
+                    return argv[i + 1]
+    return None
 
 
 def mux_session_of(title):
@@ -1239,6 +1298,13 @@ class MuxPlugin(WindowPlugin):
 
     def window_id(self, v):
         return term_wid(v["pid"])
+
+    def relaunch_command(self, v):
+        """A latch if one is running here, otherwise nothing, which the
+        relaunch reads as `mux resume`. See MUX_RESUME for why that default is
+        right rather than merely convenient."""
+        t = _term_latch_target(v.get("pid", -1))
+        return f"{shlex.quote(MUX_BIN)} latch {shlex.quote(t)}" if t else None
 
     def relaunch_missing(self, saved, live):
         return mux_relaunch_missing(saved, live)
@@ -1543,47 +1609,32 @@ def app_of(v):
 
 # --- init-launch: bring terminals back (Chrome self-restores on its own) ----
 
-def mux_go_command(session, host=None):
-    """The shell command a terminal runs to land in `session`: `mux go` when it
-    lives on this box, `mux latch HOST:SESSION` when it does not.
-
-    The remote half used to be a hand-rolled `ssh -t <host> 'sh -lc "mux go
-    X"'`, and that was the wrong layer. It attempts ONCE, at login, and a
-    login is exactly when the credential is least likely to be live: the
-    daemon is started by the compositor autostart, whose environment has no
-    SSH_AUTH_SOCK at all (verified on manifold). The attempt failed, the `exec
-    ksh -i` fallback left a bare shell, and the session never came back.
-
-    `mux latch` is mux's own answer to this and treats it as a STATE MACHINE
-    rather than a single attempt. Its `blocked` state is written for precisely
-    this case -- no credential live YET -- and it polls the credential instead
-    of retrying the connection, so the attachment lands by itself the moment
-    an agent appears. It also distinguishes `denied` (terminal, say what to
-    fix) from `probing` (retry on a backoff), which a one-shot ssh cannot.
-
-    So remote attach semantics belong to mux, the same way the session SET
-    does. usher names the host and the session and stays out of it."""
-    mux = os.path.expanduser("~/.local/bin/mux")
-    if not host or host == LOCAL_HOST:
-        return f"{shlex.quote(mux)} go {shlex.quote(session)}"
-    return f"{shlex.quote(mux)} latch {shlex.quote(host + ':' + session)}"
+# mux's command names, in one place. `mux resume` is the LOCAL default for a
+# terminal whose command was not recorded: it rebuilds the whole recorded set
+# rather than the one session a titlebar happened to name, and it is what a
+# human types after a reboot. The remote counterpart is `mux latch <host>`,
+# which mux itself maps to a `mux resume` on the far side.
+MUX_BIN = os.path.expanduser("~/.local/bin/mux")
+MUX_RESUME = f"{shlex.quote(MUX_BIN)} resume"
 
 
-def _announce(msg):
-    """Say it on stdout AND in the daemon's log. Both matter: stdout is what a
-    person running `session-mgr launch` by hand reads, and the log is the only
-    copy that survives, since the compositor autostart discards the worker's
-    stdout entirely."""
-    print(msg, flush=True)
-    logline(msg)
+def _load_snapshot():
+    """The last snapshot, or None if there is not a readable one. The single
+    reader of current.json, so relaunch and doctor always look at the same
+    thing."""
+    try:
+        with open(os.path.join(STATE, "current.json")) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
 
 
 def saved_sizes(saved):
     """identity -> [w, h] from the last snapshot, so a respawned window can be
     ASKED FOR at the size it had instead of mapping at kitty's configured
-    default and waiting to be corrected. Measured here: a relaunched terminal
-    mapped at 1085x672 (the 80c x 24c in kitty.conf) against a remembered
-    2132x1690, and sat that way until placement caught up."""
+    default and waiting to be corrected. Measured: a relaunched terminal mapped
+    at 1085x672 (the 80c x 24c in kitty.conf) against a remembered 2132x1690,
+    and sat that way until placement caught up."""
     out = {}
     for w in saved:
         k, s = saved_key(w), w.get("size")
@@ -1604,36 +1655,26 @@ def _size_opts(size):
             "-o", f"initial_window_height={int(size[1])}"]
 
 
-def spawn_term(session, host=None, size=None):
-    """Open a terminal attached to a mux session, launched through a shell so
-    that DETACHING drops back to that shell instead of closing the window.
-    kitty running `mux go` as its direct child would exit on detach (mux exits
-    -> kitty exits -> window vanishes). Running it inside `ksh -c '... ; exec
-    ksh -i'` leaves an interactive shell after detach: the window survives and,
-    re-sourcing kshrc, becomes a plain 'terminal' -- untracked, exactly what a
-    detached scratch terminal should be. TMUX is cleared so mux does a fresh
-    attach, not a switch-client that hijacks another window.
+def spawn_term(cmd, size=None):
+    """Open a terminal running `cmd`, launched through a shell so that the
+    command ENDING drops back to that shell instead of closing the window.
+    kitty running mux as its direct child would exit on detach (mux exits ->
+    kitty exits -> window vanishes). Running it inside `ksh -c '... ; exec ksh
+    -i'` leaves an interactive shell after detach: the window survives and,
+    re-sourcing kshrc, becomes a plain untracked terminal, which is exactly
+    what a detached scratch terminal should be. TMUX is cleared so mux does a
+    fresh attach, not a switch-client that hijacks another window.
 
-    A REMOTE session (host not this box) differs only in the command; the same
-    detach-survives-as-a-shell wrapper holds, so dropping an ssh'd session
-    leaves a local shell exactly as a local one does."""
+    The command is passed in rather than derived here. Every mux verb needs a
+    TTY -- arranging one is what mux is FOR -- so a window is the right place
+    for all of them, local and remote alike, and usher's job is only to put a
+    window around the command it recorded."""
     env = {k: v for k, v in os.environ.items() if k != "TMUX"}
     env["TERM_WINDOW_ID"] = os.urandom(6).hex()   # stable per-window id
-    cmd = f"{mux_go_command(session, host)}; exec ksh -i"
-    subprocess.Popen(["kitty"] + _size_opts(size) + ["ksh", "-c", cmd],
+    subprocess.Popen(["kitty"] + _size_opts(size)
+                     + ["ksh", "-c", f"{cmd}; exec ksh -i"],
                      env=env, start_new_session=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-
-def _load_snapshot():
-    """The last snapshot, or None if there is not a readable one. The single
-    reader of current.json, so relaunch and doctor always look at the same
-    thing."""
-    try:
-        with open(os.path.join(STATE, "current.json")) as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return None
 
 
 def saved_key(w):
@@ -1691,49 +1732,74 @@ def live_keys(live):
     return out
 
 
-def mux_candidates(saved, livekeys, known, local_host=None):
-    """The (host, session) pairs to respawn: every mux window in the last
-    snapshot that is not already on screen (`livekeys`, from live_keys). Pure
-    and side-effect free so selftest can drive it with fixtures -- this logic
-    used to be reachable only through two subprocesses and a compositor, which
-    is exactly why it could rot unnoticed.
+def mux_cmd_of_saved(w):
+    """The command that brings a saved terminal window back: the one recorded
+    at capture, or `mux resume` when there is none.
 
-    A LOCAL session must still be one mux knows (`known`): the set is
-    subtractive on `mux kill`, so a session you deliberately killed stays
-    killed rather than rising again at every login. A REMOTE one is taken on
-    trust from our own store, with no network call in the login path -- if it
-    has gone, `mux go` on the far box rebuilds it from that box's own set, which
-    is the same answer an ssh probe would have cost a round trip to get."""
-    local_host = local_host or LOCAL_HOST
-    out, seen = [], set()
+    THE DEFAULT IS THE POINT. A window with no recorded command was running a
+    LOCAL mux, and `mux resume` is what a human types for that: it rebuilds the
+    whole recorded set rather than the single session the titlebar happened to
+    name. Deriving `mux go <session>` from the title instead is what restored
+    one session out of six, because a title can only ever name one.
+
+    Within a partition the sessions are the same set whichever window you look
+    from, so the only thing lost by not naming one is which session gets
+    initial focus, and running two windows on the same box in the same
+    partition is not a thing anyone does. KNOWN HOLE: telling local mux
+    windows apart ACROSS partitions. Narrower than it sounds, because the work
+    partition is excluded end to end by SKIP_TITLE and never captured at all."""
+    return w.get("cmd") or MUX_RESUME
+
+
+def mux_cmd_of_live(v):
+    """The same question asked of a window that is on screen right now."""
+    t = _term_latch_target(_pview(v).get("pid", -1))
+    return f"{shlex.quote(MUX_BIN)} latch {shlex.quote(t)}" if t else MUX_RESUME
+
+
+def mux_candidates(saved, live):
+    """The commands to run, one per terminal window that is missing.
+
+    COUNTED PER COMMAND, not matched per session. usher owns windows; which
+    session a window shows is mux's business and changes under it, so the
+    question is "how many windows was I running this command in, and how many
+    are up?" rather than "is session X on screen". That also means a window
+    keeps coming back after you switch what it displays, which the old
+    identity match could not do.
+
+    Returns a list of (cmd, size), size being the remembered geometry of the
+    first window recorded for that command, or None."""
+    want, sizes = Counter(), {}
     for w in saved:
         if w.get("app_id") != "kitty":
             continue
-        m = MUX_KEY_RE.match(saved_key(w))
-        if not m:
+        if not MUX_KEY_RE.match(saved_key(w)):
             continue
-        host, sess = m.group(1), m.group(2)
-        key = f"mux@{host}:{sess}"
-        if key in seen or key in livekeys:
-            continue
-        if host == local_host and sess not in known:
-            continue
-        seen.add(key)
-        out.append((host, sess))
+        c = mux_cmd_of_saved(w)
+        want[c] += 1
+        s = w.get("size")
+        if c not in sizes and s and len(s) == 2 and s[0] and s[1]:
+            sizes[c] = [int(s[0]), int(s[1])]
+    have = Counter()
+    for v in live:
+        vv = _pview(v)
+        if is_mux_term(vv["app"], vv["title"]):
+            have[mux_cmd_of_live(v)] += 1
+    out = []
+    for c, n in want.items():
+        for _ in range(max(0, n - have[c])):
+            out.append((c, sizes.get(c)))
     return out
 
 
 def mux_relaunch_missing(saved, live):
-    """The mux plugin's relaunch: reopen each mux session that was on screen at
-    the last snapshot and is not now, reattached with `mux go` -- locally, or
-    over ssh for a session that lived on another box."""
+    """Reopen each terminal window that was up at the last snapshot and is
+    not now, running the command it was running."""
     n = 0
-    sizes = saved_sizes(saved)
-    for host, sess in mux_candidates(saved, live_keys(live), mux_session_set()):
-        spawn_term(sess, host, sizes.get(f"mux@{host}:{sess}"))
+    for cmd, size in mux_candidates(saved, live):
+        spawn_term(cmd, size)
         n += 1
-        where = "" if host == LOCAL_HOST else f"  [on {host}]"
-        _announce(f"launch  mux go {sess}{where}")
+        _announce(f"launch  {cmd}")
     return n
 
 
@@ -2100,30 +2166,28 @@ def _doctor_relaunch(out, snap, live):
         return
     saved = snap.get("windows", [])
     lk = live_keys(live)
-    known = mux_session_set()
     chrome_up = any(is_chrome(_pview(v)["app"]) for v in live)
     chrome_note = ("Chrome restores its own" if chrome_up
                    else "browser NOT running: usher starts it, Chrome"
                         " restores its own")
+    # Terminals are reported per COMMAND, because that is how they are
+    # relaunched: counted, not matched per session. Reporting them per session
+    # would describe a mechanism usher no longer uses.
+    todo = Counter(c for c, _ in mux_candidates(saved, live))
+    for c, n in todo.items():
+        out(f"  RELAUNCH   {n} terminal(s)  {c}")
+    n_term = sum(1 for w in saved if w.get("app_id") == "kitty"
+                 and MUX_KEY_RE.match(saved_key(w)))
+    if n_term and not todo:
+        out(f"  live       all {n_term} terminal(s) already up")
     for w in saved:
         app, key = w.get("app_id", ""), saved_key(w)
         if is_chrome(app):
             out(f"  {'self' if chrome_up else 'START':10} {app:14}"
                 f" {key[:36]:36}  ({chrome_note})")
             continue
-        m = MUX_KEY_RE.match(key)
-        if m:
-            host, sess = m.group(1), m.group(2)
-            if key in lk:
-                out(f"  live       {key[:56]}")
-            elif host == LOCAL_HOST and sess not in known:
-                out(f"  skip       {key[:44]}  (mux no longer knows"
-                    f" '{sess}')")
-            else:
-                how = (f"mux go {sess}" if host == LOCAL_HOST
-                       else f"ssh {host} -> mux go {sess}")
-                out(f"  RELAUNCH   {key[:44]:44}  {how}")
-            continue
+        if MUX_KEY_RE.match(key):
+            continue        # covered by the per-command lines above
         if key.startswith("kitty:"):
             cwd = key[len("kitty:"):]
             if key in lk:
@@ -3154,30 +3218,11 @@ def selftest():
     ck("live-keys", live_keys([V("kitty", "live:1⠀⠀⠀⠀[manifestor]")])
        == {"mux@manifestor:live"})
 
-    # relaunch candidate selection, driven with fixtures (no mux, no compositor)
+    # relaunch candidate selection, driven with fixtures (no mux, no
+    # compositor). The per-session matching this replaced is covered by the
+    # command checks above; what matters here is the kitty half.
     def S(key, app="kitty"):
         return {"app_id": app, "key": key, "title": ""}
-
-    snap = [S("mux@manifestor:usher"),      # local, still known -> relaunch
-            S("mux@manifestor:gone"),       # local, killed since -> skip
-            S("mux@manifold:tackup"),       # remote -> relaunch on trust
-            S("mux@manifestor:live"),       # already on screen -> skip
-            S("mux@manifestor:usher"),      # duplicate -> deduped
-            S("kitty:/tmp"),                # not a mux key -> not ours
-            S("mux@manifestor:x", "signal")]    # not a terminal -> ignored
-    got = mux_candidates(snap, {"mux@manifestor:live"},
-                         {"usher", "live"}, local_host="manifestor")
-    ck("mux-candidates", got == [("manifestor", "usher"),
-                                 ("manifold", "tackup")])
-    ck("mux-candidates-both-hosts",
-       mux_candidates([S("mux@manifestor:tackup"), S("mux@manifold:tackup")],
-                      set(), {"tackup"}, local_host="manifestor")
-       == [("manifestor", "tackup"), ("manifold", "tackup")])
-    # a remote session is never gated on the LOCAL set
-    ck("mux-candidates-remote-unknown",
-       mux_candidates([S("mux@manifold:elsewhere")], set(), set(),
-                      local_host="manifestor")
-       == [("manifold", "elsewhere")])
 
     ck("kitty-candidates",
        kitty_candidates([S("kitty:/tmp"), S("kitty:/tmp"),
@@ -3186,63 +3231,41 @@ def selftest():
     ck("kitty-candidates-live",
        kitty_candidates([S("kitty:/tmp")], {"kitty:/tmp"}) == [])
 
-    # the spawn command: `mux go` here, `mux latch HOST:SESSION` there. usher
-    # must NOT hand-roll ssh -- a one-shot attempt at login is exactly when no
-    # credential is live yet, and mux latch polls for one instead of failing.
-    ck("go-local", mux_go_command("wf").endswith("mux go wf"))
-    ck("go-local-selfhost",
-       mux_go_command("wf", LOCAL_HOST) == mux_go_command("wf"))
-    _r = mux_go_command("wf", "manifold")
-    ck("go-remote", _r.endswith("latch manifold:wf"))
-    ck("go-remote-delegates", "ssh" not in _r and " go " not in _r)
+    # the relaunch command. A latch is REPLAYED (it is the one mux verb that
+    # survives in the process tree); anything else was a local mux, and the
+    # default is `mux resume`, which rebuilds the whole set rather than the one
+    # session a titlebar happened to name.
+    ck("cmd-default-is-resume",
+       mux_cmd_of_saved({"app_id": "kitty"}) == MUX_RESUME)
+    ck("cmd-recorded-wins",
+       mux_cmd_of_saved({"app_id": "kitty", "cmd": "X latch manifestor"})
+       == "X latch manifestor")
+    ck("resume-names-no-session",
+       " go " not in MUX_RESUME and MUX_RESUME.endswith(" resume"))
 
-    # start modes. `quiet` is the one a deploy needs: `adopt` moves no windows
-    # but CAPTURES, so using it as a reload rewrites every remembered slot to
-    # wherever the window currently sits.
-    import tempfile as _tf
-    _rt = _tf.mkdtemp()
-    _prev_rt = os.environ.get("XDG_RUNTIME_DIR")
-    os.environ["XDG_RUNTIME_DIR"] = _rt
-    try:
-        ck("mode-default-restore", take_mode() == "restore")
-        for _m in ("adopt", "quiet"):
-            arm_mode(_m)
-            ck(f"mode-{_m}", take_mode() == _m)
-        # one-shot: a second worker generation must not repeat it
-        arm_mode("adopt")
-        take_mode()
-        ck("mode-is-one-shot", take_mode() == "restore")
-        # restore is the ABSENCE of the flag, and must clear an armed one
-        arm_mode("quiet")
-        arm_mode("restore")
-        ck("mode-restore-clears", take_mode() == "restore")
-        # an EMPTY flag file is the pre-2026-09-24 spelling of adopt
-        with open(os.path.join(_rt, ADOPT_FLAG), "w"):
-            pass
-        ck("mode-legacy-empty-is-adopt", take_mode() == "adopt")
-    finally:
-        if _prev_rt is None:
-            del os.environ["XDG_RUNTIME_DIR"]
-        else:
-            os.environ["XDG_RUNTIME_DIR"] = _prev_rt
-        shutil.rmtree(_rt, ignore_errors=True)
+    # candidates are COUNTED per command, not matched per session
+    def MW(cmd=None, key="mux@manifold:a", size=None):
+        w = {"app_id": "kitty", "key": key}
+        if cmd:
+            w["cmd"] = cmd
+        if size:
+            w["size"] = size
+        return w
 
-    # wind-down: the plugin hook exists, defaults to a no-op, and the browser
-    # one finds only the BROWSER process (a renderer has --type= in its argv).
-    ck("wind-down-hook", hasattr(WindowPlugin, "wind_down")
-       and WindowPlugin().wind_down([]) == [])
-    ck("wind-down-terminals-noop",
-       ps["mux"].wind_down([]) == [] and ps["kitty"].wind_down([]) == [])
-    ck("browser-pids-is-a-list", isinstance(_browser_pids(), list))
-    # every pid it returns must be a browser, never a --type= child
-    for _p in _browser_pids():
-        try:
-            with open(f"/proc/{_p}/cmdline", "rb") as _f:
-                _av = _f.read().split(b"\0")
-        except OSError:
-            continue
-        ck("browser-pids-excludes-children",
-           not any(a.startswith(b"--type=") for a in _av))
+    ck("cand-one-per-missing-window",
+       mux_candidates([MW(), MW()], []) == [(MUX_RESUME, None)] * 2)
+    ck("cand-counts-live-down",
+       len(mux_candidates([MW(), MW()],
+                          [V("kitty", "a:1\u2800\u2800[manifold]")])) == 1)
+    ck("cand-distinct-commands",
+       sorted(c for c, _ in mux_candidates(
+           [MW(), MW(cmd="L latch manifestor")], []))
+       == sorted([MUX_RESUME, "L latch manifestor"]))
+    ck("cand-carries-size",
+       mux_candidates([MW(size=[2132.0, 1674.0])], [])
+       == [(MUX_RESUME, [2132, 1674])])
+    ck("cand-ignores-non-mux",
+       mux_candidates([{"app_id": "kitty", "key": "kitty:/tmp"}], []) == [])
 
     # chrome is started with the flags that make it RESTORE: naming the right
     # profile is not enough, since "On startup" is unset on these profiles and
