@@ -1395,7 +1395,12 @@ def kkey(app_id, title):
 # longer forfeits its place. The old keys can never match again, so
 # migrate_kb drops them once (the store is a rebuildable cache).
 KB_SCHEMA = "5"
-_MIGRATE_APPS = CHROME_APPS | {"kitty"}
+# WHICH apps a bump invalidates, which is not "all of them". Schema 5 changed
+# only the TERMINAL key (session -> command); chrome's active-tab URL key is
+# untouched, and dropping a thousand learned browser placements to relearn them
+# identically is gratuitous damage, not caution. Widen this again only for a
+# bump that actually changes chrome's shape.
+_MIGRATE_APPS = {"kitty"}
 
 
 def migrate_kb(kb):
