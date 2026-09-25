@@ -670,10 +670,17 @@ def _snss_str16(b, o):        # WriteString16: int32 nchars, 2*nchars, pad to 4
 
 
 def parse_snss(path):
-    """Parse one SNSS session file into {active_page_title: raw_url} for its
-    open windows -- each window's selected tab, at that tab's current
-    navigation. Never raises: a malformed record is skipped, a bad file yields
-    {}."""
+    """Parse one SNSS session file into {active_page_title: (window_id, url)}
+    for its open windows -- each window's selected tab, at that tab's current
+    navigation. Never raises: a malformed record is skipped, a bad file
+    yields {}.
+
+    THE WINDOW ID IS THE POINT, and it was parsed and discarded here for a
+    long time. Chrome's SessionID for a window is STABLE ACROSS A RESTART:
+    measured on manifestor, all six windows kept their ids through a
+    --restore-last-session cycle. So it is a durable per-window handle, which
+    the active-tab URL is not: a URL changes every time you switch tab, which
+    is how one browser accumulated 1053 store entries describing 73 places."""
     d = open(path, "rb").read()
     if d[:4] != b"SNSS":
         return {}
@@ -736,7 +743,7 @@ def parse_snss(path):
             continue
         url, title = entry
         if title and url:
-            out[title] = url
+            out[title] = (w, url)
     return out
 
 
@@ -760,8 +767,8 @@ def _session_files():
 
 
 def chrome_session_titles():
-    """Merged {page_title: raw_url} across profiles' current sessions, cached
-    and re-read only when a session file's mtime changes."""
+    """Merged {page_title: (window_id, raw_url)} across profiles' current
+    sessions, cached and re-read only when a session file's mtime changes."""
     files = _session_files()
     try:
         sig = tuple(sorted((f, os.path.getmtime(f)) for f in files))
@@ -794,17 +801,30 @@ def normalize_url(url):
     return base
 
 
-def chrome_url_for(title):
-    """The normalized active-tab URL for a live Chrome window titled `title`,
-    or None if it is not in the current session file (fall back to the title).
-    Joins on the page title after stripping the browser-name suffix."""
-    t = title
+def _chrome_page_title(title):
+    """The page title, with the browser-name suffix stripped."""
     for suf in CHROME_SUFFIXES:
-        if t.endswith(suf):
-            t = t[:-len(suf)]
-            break
-    url = chrome_session_titles().get(t)
-    return normalize_url(url) if url else None
+        if title.endswith(suf):
+            return title[:-len(suf)]
+    return title
+
+
+def chrome_window_for(title):
+    """The SLOT of a live Chrome window titled `title`: `chrome:win:<id>`,
+    joined through the session file on the ACTIVE TAB's page title.
+
+    Keyed by the WINDOW, not by what it is displaying. Switching tab no longer
+    makes a window a stranger, and revisiting a page seen weeks ago on another
+    desktop no longer drags the window there, which the URL key did."""
+    hit = chrome_session_titles().get(_chrome_page_title(title))
+    return f"chrome:win:{hit[0]}" if hit else None
+
+
+def chrome_url_for(title):
+    """The normalized active-tab URL. No longer the identity; still how a
+    saved window is traced back to its PROFILE."""
+    hit = chrome_session_titles().get(_chrome_page_title(title))
+    return normalize_url(hit[1]) if hit else None
 
 
 # --- plugin framework: app-specific window identity + restore --------------
@@ -861,10 +881,8 @@ def chrome_profile_map():
             found = parse_snss(p)
         except Exception:
             continue
-        for url in found.values():
-            k = normalize_url(url)
-            if k:
-                out.setdefault(k, prof)
+        for win, _url in found.values():
+            out.setdefault(f"chrome:win:{win}", prof)
     return out
 
 
@@ -1234,7 +1252,7 @@ class ChromePlugin(WindowPlugin):
         return is_chrome(v["app"])
 
     def identity(self, v):
-        return chrome_url_for(v["title"])
+        return chrome_window_for(v["title"])
 
     def wind_down(self, live):
         """SIGTERM the BROWSER process. Measured on Chrome 154: it exits in
@@ -1392,15 +1410,17 @@ def kkey(app_id, title):
 # host (mux@<host>:<session>), so a same-named session on two boxes stops
 # sharing one slot; schema 5 moved a terminal off the session entirely
 # onto its COMMAND (term:...), so switching sessions in a window no
-# longer forfeits its place. The old keys can never match again, so
-# migrate_kb drops them once (the store is a rebuildable cache).
-KB_SCHEMA = "5"
-# WHICH apps a bump invalidates, which is not "all of them". Schema 5 changed
-# only the TERMINAL key (session -> command); chrome's active-tab URL key is
-# untouched, and dropping a thousand learned browser placements to relearn them
-# identically is gratuitous damage, not caution. Widen this again only for a
-# bump that actually changes chrome's shape.
-_MIGRATE_APPS = {"kitty"}
+# longer forfeits its place; schema 6 did the same for CHROME, moving it
+# off the active-tab URL onto the window's stable SessionID. The old keys
+# can never match again, so migrate_kb drops them once (the store is a
+# rebuildable cache).
+KB_SCHEMA = "6"
+# WHICH apps a bump invalidates, which is not always "all of them" -- schema 5
+# changed only the terminal key and deliberately spared chrome's 1045 entries.
+# Schema 6 DOES change chrome's key shape, so both go. Here the drop is the
+# point rather than a cost: the entries being discarded are the per-URL spam
+# that keying on the active tab produced.
+_MIGRATE_APPS = CHROME_APPS | {"kitty"}
 
 
 def migrate_kb(kb):
@@ -3343,6 +3363,21 @@ def selftest():
     finally:
         globals()["spawn_term"], globals()["_spawn_kitty"] = _real
 
+    # chrome identity is the WINDOW, not the tab. These run against the real
+    # session files when present, which is the only place the join can be
+    # tested honestly.
+    _wins = {w for w, _u in chrome_session_titles().values()}
+    ck("chrome-slots-are-windows",
+       all(chrome_window_for(t + " - Google Chrome").startswith("chrome:win:")
+           for t in list(chrome_session_titles())[:5]))
+    ck("chrome-slot-count-matches-windows",
+       len({chrome_window_for(t + " - Google Chrome")
+            for t in chrome_session_titles()}) == len(_wins))
+    ck("chrome-unknown-title", chrome_window_for("nothing like this") is None)
+    # the profile map is keyed by slot now, so a saved window still resolves
+    ck("chrome-profile-map-by-slot",
+       all(k.startswith("chrome:win:") for k in chrome_profile_map()))
+
     # chrome is started with the flags that make it RESTORE: naming the right
     # profile is not enough, since "On startup" is unset on these profiles and
     # unset means the New Tab page.
@@ -3535,7 +3570,10 @@ def selftest():
         os.write(fd, _snss_build(11, 22, "https://example.com/x", "Example"))
         os.close(fd)
         m = parse_snss(path)
-        ck("snss-parse", m.get("Example") == "https://example.com/x")
+        # the WINDOW ID is what identity now rests on, so assert it, not just
+        # the url: dropping it is the bug this whole change undoes.
+        ck("snss-parse", m.get("Example") == (11, "https://example.com/x"))
+        ck("snss-window-id", m["Example"][0] == 11)
     finally:
         os.remove(path)
 
