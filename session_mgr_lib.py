@@ -37,6 +37,7 @@ respawned via `mux go`, over ssh when the host is not this box), kitty by the
 shell's CWD from /proc (`kitty:<cwd>`, respawned as a shell there). See
 WindowPlugin, plugins(), identity(), and learn().
 """
+import contextlib
 import glob
 import hashlib
 import json
@@ -3117,34 +3118,56 @@ def _snss_build(window, tab, url, title, ver=3):
           + cmd(_SNSS_UPDATE_TAB_NAV, wi(len(pk)) + pk))
 
 
-def selftest():
-  """Offline unit checks for the plugin framework + Chrome-identity machinery
-  -- no compositor, deterministic. Run with `session-mgr selftest`."""
-  fails = []
+@contextlib.contextmanager
+def _tprofile(name):
+  """Pin the display profile for a block and put the environment back, so an
+  area that changes it cannot leak into the next."""
+  prev = os.environ.get("SESSION_PROFILE")
+  os.environ["SESSION_PROFILE"] = name
+  try:
+    yield
+  finally:
+    if prev is None:
+      os.environ.pop("SESSION_PROFILE", None)
+    else:
+      os.environ["SESSION_PROFILE"] = prev
 
-  def ck(name, cond):
-    if not cond:
-      fails.append(name)
 
-  def V(app, title="", pid=-1):
-    return {"app": app, "title": title, "pid": pid}
+def _tmw(cmd=None, key="term:resume", size=None):
+  """A saved terminal window, as a snapshot records one."""
+  w = {"app_id": "kitty", "key": key}
+  if cmd:
+    w["cmd"] = cmd
+  if size:
+    w["size"] = size
+  return w
 
+
+def _tv(app, title="", pid=-1):
+  """A normalized view, shaped as a plugin hook receives one."""
+  return {"app": app, "title": title, "pid": pid}
+
+
+def _t_registry(ck):
+  """the plugin registry: who claims which window, and the
+  title parsers that feed it."""
+  ps = {getattr(p, "name", "?"): p for p in plugins()}
   # the registry loads the three built-ins; each claims the right windows
   ps = {getattr(p, "name", "?"): p for p in plugins()}
   ck("plugins-builtin", all(n in ps for n in ("chrome", "mux", "kitty")))
-  ck("owns-chrome", ps["chrome"].owns(V("google-chrome")))
+  ck("owns-chrome", ps["chrome"].owns(_tv("google-chrome")))
   # XWayland reports `Google-chrome`; both forms exist in a real store, and
   # only matching the lower-case one left those windows unclaimed
-  ck("owns-chrome-xwayland", ps["chrome"].owns(V("Google-chrome")))
+  ck("owns-chrome-xwayland", ps["chrome"].owns(_tv("Google-chrome")))
   ck("is_chrome-cases", is_chrome("Google-chrome") and is_chrome("chromium")
      and not is_chrome("kitty") and not is_chrome(None))
   ck("is_owned-xwayland", is_owned("Google-chrome"))
-  ck("owns-mux", ps["mux"].owns(V("kitty", "wf:code")))
-  ck("owns-kitty-notmux", not ps["mux"].owns(V("kitty", "✳ Claude Code"))
-     and ps["kitty"].owns(V("kitty", "✳ Claude Code")))
-  ck("owner-mux", _owner(V("kitty", "wf:code[manifold]")) is ps["mux"])
-  ck("owner-kitty", _owner(V("kitty", "✳ Claude Code")) is ps["kitty"])
-  ck("owns-nobody", _owner(V("slack", "Slack")) is None)
+  ck("owns-mux", ps["mux"].owns(_tv("kitty", "wf:code")))
+  ck("owns-kitty-notmux", not ps["mux"].owns(_tv("kitty", "✳ Claude Code"))
+     and ps["kitty"].owns(_tv("kitty", "✳ Claude Code")))
+  ck("owner-mux", _owner(_tv("kitty", "wf:code[manifold]")) is ps["mux"])
+  ck("owner-kitty", _owner(_tv("kitty", "✳ Claude Code")) is ps["kitty"])
+  ck("owns-nobody", _owner(_tv("slack", "Slack")) is None)
   ck("is_owned", is_owned("google-chrome") and is_owned("kitty")
      and not is_owned("slack"))
 
@@ -3176,6 +3199,10 @@ def selftest():
   ck("latch-argv-lookalike",
      _latch_target_in(["/opt/mux/libexec/mux-latcher", "box"]) is None)
 
+
+def _t_terminals(ck):
+  """a terminal's SLOT, and which windows need respawning."""
+  ps = {getattr(p, "name", "?"): p for p in plugins()}
   # THE SLOT. A terminal owns its place by the COMMAND it runs, so the two
   # windows below are the same slot despite showing different sessions --
   # which is the entire point of the change, and what the session-shaped key
@@ -3184,13 +3211,13 @@ def selftest():
   ck("slot-latch",
      _mux_slot("manifestor:tackup") == "term:latch manifestor:tackup")
   ck("slot-survives-session-switch",
-     ps["mux"].identity(V("kitty", "vigilance:1\u2800\u2800[manifold]"))
-     == ps["mux"].identity(V("kitty", "tackup:1\u2800\u2800[manifold]")))
+     ps["mux"].identity(_tv("kitty", "vigilance:1\u2800\u2800[manifold]"))
+     == ps["mux"].identity(_tv("kitty", "tackup:1\u2800\u2800[manifold]")))
   ck("slot-latch-differs-from-local",
      _mux_slot("manifestor:tackup") != _mux_slot(None))
 
   # live_keys resolves a real on-screen title through to its identity
-  ck("live-keys", live_keys([V("kitty", "live:1⠀⠀⠀⠀[manifestor]")])
+  ck("live-keys", live_keys([_tv("kitty", "live:1⠀⠀⠀⠀[manifestor]")])
      == {"term:resume"})
 
   # relaunch candidate selection, driven with fixtures (no mux, no
@@ -3219,29 +3246,24 @@ def selftest():
      " go " not in MUX_RESUME and MUX_RESUME.endswith(" resume"))
 
   # candidates are COUNTED per command, not matched per session
-  def MW(cmd=None, key="term:resume", size=None):
-    w = {"app_id": "kitty", "key": key}
-    if cmd:
-      w["cmd"] = cmd
-    if size:
-      w["size"] = size
-    return w
-
   ck("cand-one-per-missing-window",
-     mux_candidates([MW(), MW()], []) == [(MUX_RESUME, None)] * 2)
+     mux_candidates([_tmw(), _tmw()], []) == [(MUX_RESUME, None)] * 2)
   ck("cand-counts-live-down",
-     len(mux_candidates([MW(), MW()],
-                        [V("kitty", "a:1\u2800\u2800[manifold]")])) == 1)
+     len(mux_candidates([_tmw(), _tmw()],
+                        [_tv("kitty", "a:1\u2800\u2800[manifold]")])) == 1)
   ck("cand-distinct-commands",
      sorted(c for c, _ in mux_candidates(
-         [MW(), MW(cmd="L latch manifestor")], []))
+         [_tmw(), _tmw(cmd="L latch manifestor")], []))
      == sorted([MUX_RESUME, "L latch manifestor"]))
   ck("cand-carries-size",
-     mux_candidates([MW(size=[2132.0, 1674.0])], [])
+     mux_candidates([_tmw(size=[2132.0, 1674.0])], [])
      == [(MUX_RESUME, [2132, 1674])])
   ck("cand-ignores-non-mux",
      mux_candidates([{"app_id": "kitty", "key": "kitty:/tmp"}], []) == [])
 
+
+def _t_relaunch(ck):
+  """the relaunch paths, RUN with the spawn stubbed."""
   # RUN the relaunch paths end to end with the spawn stubbed. Checking
   # mux_candidates alone is not enough: a NameError in the announce after the
   # spawn shipped undetected precisely because nothing executed these
@@ -3255,7 +3277,7 @@ def selftest():
     globals()["_spawn_kitty"] = lambda *a, **k: _spawned.append(("kitty",
                                                                  a))
     with contextlib.redirect_stdout(io.StringIO()):
-      n_mux = mux_relaunch_missing([MW(), MW(cmd="L latch box")], [])
+      n_mux = mux_relaunch_missing([_tmw(), _tmw(cmd="L latch box")], [])
       n_kit = kitty_relaunch_missing(
           [{"app_id": "kitty", "key": "kitty:/tmp", "title": ""}], [])
     ck("relaunch-mux-runs", n_mux == 2)
@@ -3264,6 +3286,10 @@ def selftest():
   finally:
     globals()["spawn_term"], globals()["_spawn_kitty"] = _real
 
+
+def _t_chrome(ck):
+  """chrome identity, profiles, and the restore flags."""
+  ps = {getattr(p, "name", "?"): p for p in plugins()}
   # chrome identity is the WINDOW, not the tab. These run against the real
   # session files when present, which is the only place the join can be
   # tested honestly.
@@ -3291,8 +3317,11 @@ def selftest():
   ck("chrome-no-saved", _ch.relaunch_missing([], []) == 0)
   ck("chrome-already-live",
      _ch.relaunch_missing([{"app_id": "google-chrome"}],
-                          [V("google-chrome", "x")]) == 0)
+                          [_tv("google-chrome", "x")]) == 0)
 
+
+def _t_learn(ck):
+  """what a learn pass keeps, replaces and purges."""
   # learn() must KEEP the entry it just wrote for a live terminal. Its mux
   # purge once compared kb keys (identities) against raw window titles, so it
   # deleted every terminal entry on the same pass that created it, and
@@ -3325,6 +3354,9 @@ def selftest():
         1_800_000_002)
   ck("learn-keeps-kitty-cwd", "kitty\x00kitty:/tmp" in _kb)
 
+
+def _t_geometry(ck):
+  """respawn geometry and the chrome profile fallback."""
   # respawn geometry: ask kitty for the size the window had, so it does not
   # map at kitty.conf's default and sit wrong until placement catches up
   ck("saved-sizes", saved_sizes([{"app_id": "kitty", "key": "kitty:/tmp",
@@ -3346,6 +3378,9 @@ def selftest():
      chrome_profiles_for([{"app_id": "kitty", "key": "kitty:/tmp"}])
      == [None])
 
+
+def _t_snapshots(ck):
+  """restoring from a stored milestone."""
   # --from spec resolution (pure half; the file lookup is driven by `list`)
   _t = date(2026, 3, 1)
   ck("spec-today", _spec_to_date("today", _t) == "2026-03-01")
@@ -3375,6 +3410,9 @@ def selftest():
   ck("milestone-unique",
      [x["appid_only"] for x in _e if x["app_id"] == "signal"] == [True])
 
+
+def _t_profiles(ck):
+  """the display-profile id and its paths."""
   # display profiles: the id is a filename, and a monitor set must map to the
   # SAME id every time or a layout is lost on every replug.
   _o = lambda n, w, h: {"name": n, "geometry": {"width": w, "height": h}}
@@ -3389,12 +3427,19 @@ def selftest():
   ck("profile-none", _derived_id({"outputs": []}) is None)
   ck("profile-safe", _safe_profile("../../etc/passwd") == ".._.._etc_passwd")
   ck("profile-safe-empty", _safe_profile("") == "default")
-  _saved_env = os.environ.get("SESSION_PROFILE")
-  os.environ["SESSION_PROFILE"] = "testset"
-  ck("profile-env", profile_id() == "testset")
-  ck("profile-paths", kb_path().endswith("knowledge-testset.json")
-     and schema_path().endswith("knowledge-testset.schema"))
+  with _tprofile("testset"):
+    ck("profile-env", profile_id() == "testset")
+    ck("profile-paths", kb_path().endswith("knowledge-testset.json")
+       and schema_path().endswith("knowledge-testset.schema"))
 
+
+def _t_migration(ck):
+  """store migration: stamping, and the legacy merge."""
+  with _tprofile("testset"):
+    _t_migration_body(ck)
+
+
+def _t_migration_body(ck):
   # A NEW profile must be stamped CURRENT the moment it is created. It was
   # not, and the next load then judged the unstamped store stale and dropped
   # every chrome + kitty entry it had just learned -- each new monitor set
@@ -3436,11 +3481,10 @@ def selftest():
     globals()["STATE"] = _st
     shutil.rmtree(_tmp, ignore_errors=True)
 
-  if _saved_env is None:
-    del os.environ["SESSION_PROFILE"]
-  else:
-    os.environ["SESSION_PROFILE"] = _saved_env
 
+
+def _t_contracts(ck):
+  """the cross-tool contracts and the SNSS reader."""
   # CONTRACT with mux: `mux resume --list` must stay BARE NAMES, one per line.
   # This is the guard the old `mux ls` scrape lacked -- a cosmetic change over
   # in mux (the agent-state glyph) silently killed relaunch with no symptom.
@@ -3449,7 +3493,7 @@ def selftest():
      all(re.fullmatch(r"[^\s:]+", s) for s in mux_session_set()))
 
   # identity() is a STRICT no-op for a non-plugin app
-  ck("noop-slack", identity(V("slack", "Slack")) == "Slack")
+  ck("noop-slack", identity(_tv("slack", "Slack")) == "Slack")
 
   # parse_snss recovers the active-tab url from a synthetic session file
   import tempfile
@@ -3473,12 +3517,28 @@ def selftest():
   except Exception:
     ck("snss-live", False)
 
+
+def selftest():
+  """Offline unit checks for the plugin framework and the store -- no
+  compositor, deterministic. Run with `session-mgr selftest`.
+
+  Split by AREA rather than written as one list, so a failure names the area
+  it came from and a new check has an obvious home."""
+  fails = []
+
+  def ck(name, cond):
+    if not cond:
+      fails.append(name)
+
+  for area in (_t_registry, _t_terminals, _t_relaunch, _t_chrome, _t_learn,
+               _t_geometry, _t_snapshots, _t_profiles, _t_migration,
+               _t_contracts):
+    area(ck)
   if fails:
     print("selftest FAIL: " + ", ".join(fails), file=sys.stderr)
     return 1
   print("selftest OK")
   return 0
-
 
 def main():
   args = sys.argv[1:]
