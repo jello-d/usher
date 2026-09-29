@@ -22,7 +22,9 @@ actually are and puts them back where you left them. The one command
   (a *soft* dependency; without it the set is derived from the outputs, and
   failing that everything shares one `default` profile).
 - **It will tell you what it is doing.** `session-mgr doctor` reports the store,
-  the cross-tool contracts, and per window what would happen and why.
+  the cross-tool contracts, and per window what would happen and why. When it
+  *cannot* see the live session it says so loudly and exits non-zero, rather
+  than answering the window questions from nothing.
 - **Go back to a past layout.** A daily milestone and a rolling history are
   kept, so `session-mgr restore --from yesterday` (or `latest`, or a date) puts
   the desk back the way it was; `--from list` shows what is available.
@@ -34,12 +36,16 @@ ship built in, and none keys on what the window is currently *showing*,
 because a window that can display many things would otherwise lose its place
 every time you switched:
 
-- **chrome**: keys a Chrome/Chromium window by its **SessionID**, read from
-  the browser's own session file and stable across a restart. Keying on the
-  active tab instead meant a thousand entries describing six windows, and
-  revisiting an old page could drag the window to another desktop. Starts the
-  browser per profile, with `--restore-last-session`, when the last session had
-  Chrome windows and none is running.
+- **chrome**: keys a Chrome/Chromium window by its **SessionID**, read from the
+  browser's own session file. Keying on the active tab instead meant a thousand
+  entries describing six windows, and revisiting an old page could drag the
+  window to another desktop. The id is fresh every time Chrome restarts, so a
+  window is followed across that boundary by the **tabs** it came back with,
+  joining the previous session file to the new one. A window the session file
+  cannot identify is not remembered at all, rather than being keyed on the
+  title it happens to be wearing. Starts the browser per profile, with
+  `--restore-last-session`, when the last session had Chrome windows and none
+  is running.
 - **mux**: keys a [mux](https://github.com/jello-d/mux) terminal by the
   **command it runs** (`term:resume`, or `term:latch <host>:<session>`), so
   switching sessions inside a window does not forfeit its place. Relaunch

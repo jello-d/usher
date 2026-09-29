@@ -90,8 +90,14 @@ Show the never-place and anchor rules as loaded, with any parse errors.
 .B doctor
 Report what usher is and is not doing: the store (entries per app, the display
 profile, schema), the plugin registry, the cross-tool contracts, and per window
-what would be relaunched or placed and WHY not. Exits non-zero on a contract
-breach.
+what would be relaunched or placed and WHY not. Exit 1 on a contract breach;
+exit 2 when it could not see the live session at all (no
+.BR WAYFIRE_SOCKET ,
+no pywayfire, or no compositor answering), in which case the window sections
+are SKIPPED rather than answered from nothing and the report says so loudly.
+A non-interactive
+.BR ssh (1)
+carries none of the session environment, which is the usual way to meet it.
 .TP
 .B selftest
 Offline unit checks (no compositor).

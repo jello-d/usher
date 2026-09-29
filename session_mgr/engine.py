@@ -2270,6 +2270,19 @@ def _tprofile(name):
 
 
 @contextlib.contextmanager
+def _tblind():
+    """Force `doctor` to be unable to see the live session, however selftest
+    was invoked. Unsetting the socket covers both branches: with pywayfire
+    importable it is the WAYFIRE_SOCKET case, without it the import case."""
+    prev = os.environ.pop("WAYFIRE_SOCKET", None)
+    try:
+        yield
+    finally:
+        if prev is not None:
+            os.environ["WAYFIRE_SOCKET"] = prev
+
+
+@contextlib.contextmanager
 def _tsnss(tabs):
     """A real SNSS file on disk holding `tabs`, removed on the way out. The
     re-key has to read FILES, not dicts, so these checks build the same bytes
@@ -2826,6 +2839,28 @@ def _t_contracts(ck):
 
     # identity() is a STRICT no-op for a non-plugin app
     ck("noop-slack", identity(_tv("slack", "Slack")) == "Slack")
+
+    # DOCTOR MUST SCREAM WHEN IT CANNOT SEE THE SESSION. With no live windows
+    # the relaunch section calls every saved window missing and the browser
+    # not running -- every line false, none of it marked so, and it used to
+    # exit 0. Met twice in one afternoon over a non-interactive ssh, which
+    # carries none of the session environment. Imported here rather than at
+    # the top because doctor imports THIS module; at call time both are
+    # loaded, and keeping the module-level edge one-way is the point.
+    from .doctor import do_doctor
+    import contextlib
+    import io
+    _buf = io.StringIO()
+    with _tblind(), contextlib.redirect_stdout(_buf):
+        _rc = do_doctor()
+    _rep = _buf.getvalue()
+    ck("doctor-blind-exits-nonzero", _rc == 2)
+    ck("doctor-blind-shouts", "CANNOT SEE THE LIVE SESSION" in _rep)
+    ck("doctor-blind-skips-live-sections",
+       "saved windows -> relaunch" not in _rep
+       and "live windows -> placement" not in _rep)
+    ck("doctor-blind-keeps-the-store-report",
+       "== store ==" in _rep and "== contracts ==" in _rep)
 
     # parse_snss recovers the active-tab url from a synthetic session file
     import tempfile

@@ -199,9 +199,68 @@ def _doctor_placement(out, kb, live, outs):
         out(f"  unmatched  {app_of(lv)[:14]:14} {lv.get('title','')[:34]}")
 
 
+def _doctor_blind(out, what, *fix):
+    """The banner for "this report cannot see the live session".
+
+    IT HAS TO SHOUT, because the sections it disables are exactly the ones
+    that read as findings. With no live windows the relaunch section says
+    every saved window needs starting and the browser is not running -- every
+    line of it false, none of it marked as such, and the report exited 0. That
+    happened twice in one afternoon over a NON-INTERACTIVE ssh, which carries
+    none of the session environment, and both times it looked like a real
+    answer. A diagnostic that cannot see the thing it is diagnosing must say
+    so louder than it says anything else."""
+    out("")
+    out(f"  !!! CANNOT SEE THE LIVE SESSION: {what}")
+    for line in fix:
+        out(f"  !!! {line}")
+    out("  !!! The store and contract checks above STAND. Everything needing")
+    out("  !!! live windows is SKIPPED, not answered -- with none to look at,")
+    out("  !!! those sections would call every saved window missing.")
+    out("")
+
+
+def _doctor_compositor(out):
+    """Connect to the live session, or say LOUDLY why not. Returns
+    (live, outs, ok) -- and `ok` is NOT `bool(live)`, because a reachable
+    session with no windows open is a real answer and an unreachable one is
+    not."""
+    out("== compositor ==")
+    if WayfireSocket is None:
+        _doctor_blind(out, "pywayfire is NOT IMPORTABLE",
+                      "Run this from the venv (~/.venvs/usher/bin/python),"
+                      " not the system python3.")
+        return [], {}, False
+    if not os.environ.get("WAYFIRE_SOCKET"):
+        _doctor_blind(
+            out, "WAYFIRE_SOCKET IS NOT SET",
+            "pywayfire does not go looking for the socket, so there is",
+            "nothing here to connect to. A NON-INTERACTIVE ssh carries none",
+            "of the session environment, which is how this is usually met.",
+            "Pass it:  WAYFIRE_SOCKET=/run/user/$(id -u)/wayfire-<display>"
+            "-.socket")
+        return [], {}, False
+    try:
+        sock = WayfireSocket()
+        live = sock.list_views(filter_mapped_toplevel=True)
+        outs = {o["name"]: o for o in sock.list_outputs()}
+    except Exception as e:
+        _doctor_blind(out, f"the compositor did not answer ({e})",
+                      "WAYFIRE_SOCKET is set but stale, or no session is",
+                      "running on this seat.")
+        return [], {}, False
+    out(f"  outputs      {', '.join(sorted(outs))}")
+    if not live:
+        out("  (no windows open -- the sections below are answered, not"
+            " skipped)")
+    return live, outs, True
+
+
 def do_doctor():
-    """The whole report. Returns an exit code: non-zero only for a CONTRACT
-    breach, which is the class of fault that otherwise shows no symptom."""
+    """The whole report. Returns an exit code, non-zero for either of the two
+    things that must not pass silently: a CONTRACT breach (1), which is the
+    class of fault that otherwise shows no symptom, or a report that COULD NOT
+    LOOK (2) -- see _doctor_blind."""
     lines = []
 
     def out(s):
@@ -214,26 +273,9 @@ def do_doctor():
                  if h in getattr(type(p), "__dict__", {})]
         out(f"  {getattr(p, 'name', '?'):10} {', '.join(hooks)}")
     rc = _doctor_contracts(out)
-    live, outs = [], {}
-    out("== compositor ==")
-    if WayfireSocket is None:
-        # The import is guarded so this module runs anywhere; say which of the
-        # two "no compositor" cases this is, since the fixes differ entirely.
-        out("  pywayfire NOT IMPORTABLE -- run this from the venv"
-            " (~/.venvs/usher/bin/python), not the system python3")
-    else:
-        try:
-            sock = WayfireSocket()
-            live = sock.list_views(filter_mapped_toplevel=True)
-            outs = {o["name"]: o for o in sock.list_outputs()}
-            out(f"  outputs      {', '.join(sorted(outs))}")
-        except Exception as e:
-            out(f"  NOT REACHABLE ({e}) -- set WAYFIRE_SOCKET, or there is"
-                " no session")
-    if not live:
-        out("  (live checks below are skipped; store checks above stand)")
-    _doctor_relaunch(out, snap, live)
-    if live:
+    live, outs, ok = _doctor_compositor(out)
+    if ok:
+        _doctor_relaunch(out, snap, live)
         _doctor_placement(out, kb, live, outs)
     print("\n".join(lines))
-    return rc
+    return rc or (0 if ok else 2)
