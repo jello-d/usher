@@ -26,7 +26,7 @@ import time
 # So the one this module reads is reached through the MODULE instead
 # (engine.EXCLUDE_ERRORS). Everything imported by name below is a constant or a
 # function, which a rebind never touches.
-from . import engine
+from . import chrome, engine
 from .engine import (AGGR_CAP, ARM_FILE, EXCLUDE_FILE, IDLE_SETTLE,
                      INCLUDE_FILE, INVERT_STORE, LAUNCHED, SKIP_TITLE,
                      START_FLOOR, STATE, STATUS_FILE, _signal_watcher,
@@ -34,8 +34,8 @@ from .engine import (AGGR_CAP, ARM_FILE, EXCLUDE_FILE, IDLE_SETTLE,
                      do_capture, identity, is_anchored, is_desync_error,
                      is_transient, kkey, launch_missing, learn, load_knowledge,
                      logline, persist, place, reload_anchor, reload_exclude,
-                     save_knowledge, snapshot, store_mtime, take_mode,
-                     target_geometry)
+                     rekey_chrome, save_knowledge, snapshot, store_mtime,
+                     take_mode, target_geometry)
 
 
 # Layout-significant events: re-snapshot AND roll the history/milestone ring.
@@ -269,6 +269,11 @@ class Watcher:
         logline("session-mgr watch: starting")
         for _n, _text, _msg in engine.EXCLUDE_ERRORS:
             logline(f"exclude rule error (line {_n}): {_msg}: {_text!r}")
+        # BEFORE anything reads or writes the store. If Chrome restarted while
+        # no worker was up, every chrome slot in the store is already keyed to
+        # the dead ids and must be moved across before the first placement or
+        # the first capture.
+        self._rekey_chrome()
         threading.Thread(target=self._capture_loop, daemon=True).start()
         # Consume the one-shot adopt flag (armed by `session-mgr resume`): the
         # first worker to reach here adopts; a respawn sees it gone and
@@ -543,7 +548,8 @@ class Watcher:
         seen = {"inv": store_mtime(INVERT_STORE),
                 "exc": store_mtime(EXCLUDE_FILE),
                 "inc": store_mtime(INCLUDE_FILE),
-                "arm": store_mtime(ARM_FILE)}
+                "arm": store_mtime(ARM_FILE),
+                "chrome": chrome.session_sig()}
         errstreak = 0
         while True:
             time.sleep(1)
@@ -602,6 +608,32 @@ class Watcher:
             with self.lock:
                 self.st["dirty"] = True
                 self.st["last"] = time.time()
+        # A BROWSER RESTART IS VISIBLE RIGHT HERE and nowhere else. Chrome
+        # mints fresh SessionIDs for every restored window, so the store's
+        # chrome slots go dead the instant it rotates its session file -- and
+        # that rotation is exactly this signature changing. It is also the one
+        # moment the PREVIOUS file is still on disk to bind against, so this
+        # cannot be deferred to something slower.
+        c = chrome.session_sig()
+        if c != seen["chrome"]:
+            seen["chrome"] = c
+            self._rekey_chrome()
+
+    def _rekey_chrome(self):
+        """Move the chrome slots onto the current session's window ids, and
+        say so in the log. Silent and cheap when nothing is stale, which is
+        every call but the ones just after a browser restart."""
+        try:
+            with self.lock:
+                moved = rekey_chrome(self.kb)
+                if moved:
+                    save_knowledge(self.kb)
+        except Exception as e:
+            logline(f"chrome re-key error: {e}")
+            return
+        if moved:
+            logline(f"chrome: re-keyed {moved} window slot(s) onto the"
+                    f" restarted browser's session ids")
 
     def _capture_once(self, cap):
         """One snapshot: learn from it, save the knowledge, roll the history if

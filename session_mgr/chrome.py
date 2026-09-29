@@ -201,10 +201,18 @@ def parse_snss(path):
 _snss_cache = {"sig": None, "map": {}}
 
 
-def session_files():
-    """Newest Session_* file per Chrome profile (browser windows only -- PWAs
-    live in a separate Apps session and already carry stable app-ids)."""
-    newest = {}
+def session_history():
+    """{profile dir: [Session_* file, ...]}, NEWEST FIRST, per Chrome profile.
+
+    Browser windows only -- PWAs live in a separate Apps session and already
+    carry stable app-ids.
+
+    THE OLDER FILES ARE THE POINT. Chrome keeps the PREVIOUS session's file
+    beside the new one when it rotates, and that is the only reason a window
+    can be followed across a restart at all: the new file says what the
+    windows are now, the old one says what they were, and the tabs join them.
+    See chrome_bind_windows."""
+    byprof = {}
     for f in glob.glob(os.path.expanduser(
             "~/.config/google-chrome/*/Sessions/Session_*")):
         prof = os.path.dirname(os.path.dirname(f))
@@ -212,19 +220,34 @@ def session_files():
             mt = os.path.getmtime(f)
         except OSError:
             continue
-        if prof not in newest or mt > newest[prof][1]:
-            newest[prof] = (f, mt)
-    return [v[0] for v in newest.values()]
+        byprof.setdefault(prof, []).append((mt, f))
+    return {p: [f for _mt, f in sorted(v, reverse=True)]
+            for p, v in byprof.items()}
+
+
+def session_files():
+    """The CURRENT session file per Chrome profile: what the windows are now."""
+    return [v[0] for v in session_history().values()]
+
+
+def session_sig():
+    """A cheap signature of the current session files -- paths and mtimes, no
+    parsing. It changes exactly when Chrome writes one, and the PATHS change
+    when it rotates them, which is the moment a restart becomes visible to us.
+    One definition, used both to invalidate the title cache and to trigger the
+    re-key."""
+    try:
+        return tuple(sorted((f, os.path.getmtime(f))
+                            for f in session_files()))
+    except OSError:
+        return None
 
 
 def chrome_session_titles():
     """Merged {page_title: (window_id, raw_url)} across profiles' current
     sessions, cached and re-read only when a session file's mtime changes."""
     files = session_files()
-    try:
-        sig = tuple(sorted((f, os.path.getmtime(f)) for f in files))
-    except OSError:
-        sig = None
+    sig = session_sig()
     if sig != _snss_cache["sig"]:
         merged = {}
         for f in files:
@@ -254,6 +277,77 @@ def chrome_window_for(title):
     desktop no longer drags the window there, which the URL key did."""
     hit = chrome_session_titles().get(_chrome_page_title(title))
     return f"chrome:win:{hit[0]}" if hit else None
+
+
+def chrome_window_tabs(path):
+    """{window id: frozenset of the URL each of its open tabs is showing}, for
+    one session file. Never raises; a bad file yields {}.
+
+    parse_snss keeps only the ACTIVE tab, which is all an identity needs. This
+    keeps the WHOLE SET, because it answers a different question: which window
+    in the new session is the one that used to be that window in the old? One
+    URL per side is far too thin to decide that; the full tab set is a
+    fingerprint.
+
+    A tab's URL is the navigation it has SELECTED. If that record is missing
+    -- a half-written file, a tab mid-navigation -- fall back to its highest
+    recorded navigation rather than dropping the tab, since a fingerprint with
+    a hole in it still matches and a missing tab weakens it."""
+    tabs = _snss_scan(path)
+    if tabs is None:
+        return {}
+    tab_win, tab_idx, win_sel, tab_nav, nav, closed_tabs, closed_wins = tabs
+    newest = {}
+    for (t, idx), (url, _title) in nav.items():
+        if t not in newest or idx > newest[t][0]:
+            newest[t] = (idx, url)
+    out = {}
+    for t, w in tab_win.items():
+        if t in closed_tabs or w in closed_wins:
+            continue
+        entry = nav.get((t, tab_nav.get(t)))
+        url = entry[0] if entry else (newest.get(t) or (0, None))[1]
+        if url:
+            out.setdefault(w, set()).add(url)
+    return {w: frozenset(u) for w, u in out.items()}
+
+
+def chrome_bind_windows(cur, prev):
+    """Bind PREVIOUS window ids to the CURRENT ones that restored them, by the
+    tabs they have in common: {old id: new id}. Both arguments are
+    chrome_window_tabs output.
+
+    WHY THIS HAS TO EXIST. Chrome mints FRESH SessionIDs for every restored
+    window -- measured twice on 2026-09-29, on the clean-exit and the crash
+    path, six windows each time, zero overlap either way -- so a slot
+    remembered against the old id matches nothing after a restart, and every
+    Chrome window comes back a stranger. What survives a restore is the
+    CONTENT: the window comes back with its tabs. Chrome leaves the previous
+    session file on disk next to the new one, so both sides are readable and
+    the join needs no new stored state.
+
+    Greedy by overlap, largest first, each id used once, ties broken by id so
+    the answer is deterministic. A pair must ALSO carry MOST OF THE OLD
+    window's tabs -- more than half -- because that is the actual question: is
+    most of what that window was showing here again? Measuring the smaller of
+    the two instead lets a ten-tab window claim a two-tab one on a single
+    shared page, which two unrelated windows can easily have. Unmatched is the
+    safe outcome: the slot stays where it was and ages out on the TTL."""
+    pairs = []
+    for old, ourls in prev.items():
+        for new, nurls in cur.items():
+            n = len(ourls & nurls)
+            if n * 2 > len(ourls):
+                pairs.append((n, old, new))
+    pairs.sort(key=lambda p: (-p[0], p[1], p[2]))
+    used_old, used_new, out = set(), set(), {}
+    for _n, old, new in pairs:
+        if old in used_old or new in used_new:
+            continue
+        used_old.add(old)
+        used_new.add(new)
+        out[old] = new
+    return out
 
 
 _BROWSER_EXES = {"chrome", "chromium", "chromium-browser", "google-chrome",
@@ -324,9 +418,14 @@ def chrome_profile_map():
     return out
 
 
-def snss_build(window, tab, url, title, ver=3):
-    """Build a minimal one-window/one-tab SNSS blob, for selftest's parser
-    check -- the inverse of parse_snss (Pickle 4-byte alignment and all)."""
+def snss_build(tabs, ver=3):
+    """Build a minimal SNSS blob from [(window, tab, url, title), ...], for
+    selftest -- the inverse of the parser, Pickle 4-byte alignment and all.
+
+    Tabs are indexed within their window in the order given, and each window's
+    FIRST tab is the selected one, which is the tab parse_snss reads. Takes a
+    LIST because the interesting cases are plural: several windows, several
+    tabs each, which is what chrome_bind_windows has to tell apart."""
     def wi(x):
         return struct.pack("<i", x)
 
@@ -342,10 +441,16 @@ def snss_build(window, tab, url, title, ver=3):
         body = bytes([cid]) + payload
         return struct.pack("<H", len(body)) + body
 
-    pk = wi(tab) + wi(0) + ws(url) + ws16(title)
-    return (b"SNSS" + wi(ver)
-            + cmd(_SNSS_SET_TAB_WINDOW, wi(window) + wi(tab))
-            + cmd(_SNSS_SET_TAB_INDEX, wi(tab) + wi(0))
-            + cmd(_SNSS_SET_SEL_TAB_IN_WIN, wi(window) + wi(0))
-            + cmd(_SNSS_SET_SEL_NAV_INDEX, wi(tab) + wi(0))
-            + cmd(_SNSS_UPDATE_TAB_NAV, wi(len(pk)) + pk))
+    out = b"SNSS" + wi(ver)
+    nth = {}
+    for window, tab, url, title in tabs:
+        i = nth.get(window, 0)
+        nth[window] = i + 1
+        pk = wi(tab) + wi(0) + ws(url) + ws16(title)
+        out += (cmd(_SNSS_SET_TAB_WINDOW, wi(window) + wi(tab))
+                + cmd(_SNSS_SET_TAB_INDEX, wi(tab) + wi(i))
+                + cmd(_SNSS_SET_SEL_NAV_INDEX, wi(tab) + wi(0))
+                + cmd(_SNSS_UPDATE_TAB_NAV, wi(len(pk)) + pk))
+    for window in nth:
+        out += cmd(_SNSS_SET_SEL_TAB_IN_WIN, wi(window) + wi(0))
+    return out

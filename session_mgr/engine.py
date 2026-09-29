@@ -41,10 +41,11 @@ from datetime import date
 # global of its own (its one cache is mutated in place, never reassigned), so
 # there is nothing here that can go stale. The engine's users of it are
 # ChromePlugin, chrome_profiles_for, and the selftest fixtures.
-from .chrome import (CHROME_APPS, CHROME_FLAGS, CHROME_STAGGER, browser_pids,
-                     chrome_profile_map, chrome_session_titles,
-                     chrome_window_for, is_browser_cmdline, is_chrome,
-                     parse_snss, session_files, snss_build)
+from .chrome import (CHROME_APPS, CHROME_FLAGS, CHROME_STAGGER,
+                     browser_pids, chrome_bind_windows, chrome_profile_map,
+                     chrome_session_titles, chrome_window_for,
+                     chrome_window_tabs, is_browser_cmdline, is_chrome,
+                     parse_snss, session_files, session_history, snss_build)
 
 # pywayfire is needed only to talk to the live compositor -- guarded so the
 # module still imports (and `session-mgr selftest` runs) without it.
@@ -1026,6 +1027,67 @@ KB_SCHEMA = "6"
 # point rather than a cost: the entries being discarded are the per-URL spam
 # that keying on the active tab produced.
 _MIGRATE_APPS = CHROME_APPS | {"kitty"}
+
+CHROME_SLOT_RE = re.compile(r"^chrome:win:(\d+)$")
+
+
+def rekey_chrome(kb):
+    """Move the store's chrome slots onto the CURRENT session's window ids,
+    and return how many moved.
+
+    CHROME DOES NOT KEEP A WINDOW'S SessionID ACROSS A RESTART. It mints a
+    fresh block for the restored windows -- measured twice on 2026-09-29, on
+    the clean-exit and the crash path, zero overlap either way -- so after any
+    browser restart every `chrome:win:<id>` in the store is a dead key and
+    every Chrome window is a stranger with no remembered place. That is not a
+    small thing: it is the whole of why Chrome windows stopped being placed at
+    login.
+
+    The identity is still right; only the boundary was missing. Chrome leaves
+    the PREVIOUS session file beside the new one, so the two can be joined on
+    the tabs a window came back with (chrome_bind_windows), and the slot
+    follows the window. No new stored state: both sides are files usher
+    already parses.
+
+    CONSERVATIVE BY CONSTRUCTION, because this rewrites the store:
+      - only slots the current session does NOT know are candidates, so a
+        run with nothing stale is a no-op and running it twice is safe;
+      - a current window that ALREADY has a slot is left alone -- the store's
+        own answer for it is at least as good as this guess;
+      - nothing binds unless the tab sets agree, and not binding is the safe
+        outcome (the slot stays put and ages out on the TTL).
+    """
+    hist = session_history()
+    cur, prev = {}, {}
+    for files in hist.values():
+        cur.update(chrome_window_tabs(files[0]))
+        for f in files[1:]:
+            for w, urls in chrome_window_tabs(f).items():
+                prev.setdefault(w, urls)     # the newest previous file wins
+    if not cur or not prev:
+        return 0
+    stale = {}
+    for k in kb:
+        m = CHROME_SLOT_RE.match(k.split("\x00", 1)[-1])
+        if m and int(m.group(1)) not in cur:
+            stale[int(m.group(1))] = k
+    if not stale:
+        return 0
+    bound = chrome_bind_windows(
+        cur, {w: u for w, u in prev.items() if w in stale})
+    moved = 0
+    for old, new in bound.items():
+        app = stale[old].split("\x00", 1)[0]
+        newkey = kkey(app, f"chrome:win:{new}")
+        if newkey in kb:
+            continue
+        e = kb.pop(stale[old])
+        # "title" in a kb entry is the KEY-title, i.e. identity() -- the trap
+        # this file keeps falling into. It has to move with the key.
+        e["title"] = f"chrome:win:{new}"
+        kb[newkey] = e
+        moved += 1
+    return moved
 
 
 def migrate_kb(kb):
@@ -2088,6 +2150,38 @@ def _tprofile(name):
             os.environ["SESSION_PROFILE"] = prev
 
 
+@contextlib.contextmanager
+def _tsnss(tabs):
+    """A real SNSS file on disk holding `tabs`, removed on the way out. The
+    re-key has to read FILES, not dicts, so these checks build the same bytes
+    Chrome writes rather than a convenient stand-in."""
+    import tempfile
+    fd, path = tempfile.mkstemp(prefix="usher-snss-", dir="/var/tmp")
+    try:
+        os.write(fd, snss_build(tabs))
+        os.close(fd)
+        yield path
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+@contextlib.contextmanager
+def _tsession(cur, prev):
+    """Pose as a Chrome profile whose session file has just ROTATED: one
+    profile, the new file first and the previous one behind it, which is the
+    shape session_history() reports and the only shape the re-key can work
+    from."""
+    real = session_history
+    globals()["session_history"] = lambda: {"P": [cur, prev]}
+    try:
+        yield
+    finally:
+        globals()["session_history"] = real
+
+
 def _tmw(cmd=None, key="term:resume", size=None):
     """A saved terminal window, as a snapshot records one."""
     w = {"app_id": "kitty", "key": key}
@@ -2270,6 +2364,57 @@ def _t_chrome(ck):
     # the profile map is keyed by slot now, so a saved window still resolves
     ck("chrome-profile-map-by-slot",
        all(k.startswith("chrome:win:") for k in chrome_profile_map()))
+
+    # FOLLOWING A WINDOW ACROSS A RESTART. Chrome mints fresh SessionIDs for
+    # every restored window, so the bind is the only thing standing between a
+    # reboot and losing every Chrome placement. Built as two real SNSS blobs,
+    # an "old session" and the "new session" that restored it with different
+    # ids: window 7 (two tabs) and window 8 (one tab) come back as 91 and 92.
+    with _tsnss([(7, 70, "https://a.example/", "A"),
+                 (7, 71, "https://b.example/", "B"),
+                 (8, 80, "https://c.example/", "C")]) as _oldf, \
+         _tsnss([(91, 10, "https://a.example/", "A"),
+                 (91, 11, "https://b.example/", "B"),
+                 (92, 12, "https://c.example/", "C")]) as _newf:
+        _old, _new = chrome_window_tabs(_oldf), chrome_window_tabs(_newf)
+        ck("chrome-tabs-whole-set",
+           _old == {7: frozenset({"https://a.example/", "https://b.example/"}),
+                    8: frozenset({"https://c.example/"})})
+        ck("chrome-bind-across-restart",
+           chrome_bind_windows(_new, _old) == {7: 91, 8: 92})
+        # a window sharing ONE page with a big one is not that window
+        ck("chrome-bind-declines-a-coincidence",
+           chrome_bind_windows(
+               {93: frozenset({"https://a.example/"}
+                              | {f"https://x{i}/" for i in range(9)})},
+               {7: _old[7]}) == {})
+        ck("chrome-bind-declines-strangers",
+           chrome_bind_windows({93: frozenset({"https://zzz/"})}, _old) == {})
+        ck("chrome-bind-empty", chrome_bind_windows({}, _old) == {}
+           and chrome_bind_windows(_new, {}) == {})
+
+        # and the store move itself: a stale slot follows its window, one the
+        # CURRENT session still knows is untouched, a second run is a no-op.
+        _kb = {kkey("google-chrome", "chrome:win:7"):
+               {"title": "chrome:win:7", "pos": [1, 2]},
+               kkey("google-chrome", "chrome:win:8"):
+               {"title": "chrome:win:8", "pos": [3, 4]},
+               kkey("kitty", "kitty:/tmp"): {"title": "kitty:/tmp"}}
+        with _tsession(_newf, _oldf):
+            _n1 = rekey_chrome(_kb)
+            _n2 = rekey_chrome(_kb)
+        ck("chrome-rekey-moves-stale", _n1 == 2)
+        ck("chrome-rekey-is-idempotent", _n2 == 0)
+        ck("chrome-rekey-keeps-placement",
+           _kb.get(kkey("google-chrome", "chrome:win:91"),
+                   {}).get("pos") == [1, 2]
+           and _kb.get(kkey("google-chrome", "chrome:win:92"),
+                       {}).get("pos") == [3, 4])
+        ck("chrome-rekey-moves-the-key-title",
+           _kb[kkey("google-chrome", "chrome:win:91")]["title"]
+           == "chrome:win:91")
+        ck("chrome-rekey-leaves-others",
+           kkey("kitty", "kitty:/tmp") in _kb and len(_kb) == 3)
 
     # chrome is started with the flags that make it RESTORE: naming the right
     # profile is not enough, since "On startup" is unset on these profiles and
@@ -2490,7 +2635,8 @@ def _t_contracts(ck):
     import tempfile
     fd, path = tempfile.mkstemp()
     try:
-        os.write(fd, snss_build(11, 22, "https://example.com/x", "Example"))
+        os.write(fd, snss_build([(11, 22, "https://example.com/x",
+                                  "Example")]))
         os.close(fd)
         m = parse_snss(path)
         # the WINDOW ID is what identity now rests on, so assert it, not just
