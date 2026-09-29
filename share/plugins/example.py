@@ -26,9 +26,6 @@ class SpotifyPlugin:
   #   def transient(self, v):
   #     return False   # never capture or place this window
   #
-  #   def window_id(self, v):
-  #     return None    # a stable per-window id
-  #
   #   def relaunch_command(self, v):
   #     # How to bring THIS window back, read from the live window while it can
   #     # still be asked, and recorded in the snapshot. This is where to put

@@ -53,7 +53,7 @@ you switched:
 Add your own: drop a `*.py` file into `~/.config/session/plugins/` defining a
 top-level `PLUGIN` object. See [`share/plugins/example.py`](
 share/plugins/example.py). Each plugin claims an app's windows (`owns`) and may
-implement `identity` / `transient` / `window_id` / `relaunch_command` /
+implement `identity` / `transient` / `relaunch_command` /
 `relaunch_missing` / `wind_down`, each taking a normalized view (`v["app"]`,
 `v["title"]`, `v["pid"]`).
 

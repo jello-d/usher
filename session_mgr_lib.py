@@ -209,21 +209,6 @@ def is_mux_term(app, title):
           and not SKIP_TITLE.search(title))
 
 
-def term_wid(pid):
-  """The window's TERM_WINDOW_ID, read from its process env -- the stable
-  per-window id term/spawn_term mint, unchanged as the window cycles mux
-  sessions. It is what clusters a window's session-titles into one identity
-  (its 'tabs'). Empty string if unset or unreadable."""
-  try:
-    with open(f"/proc/{pid}/environ", "rb") as f:
-      for kv in f.read().split(b"\x00"):
-        if kv.startswith(b"TERM_WINDOW_ID="):
-          return kv[15:].decode("utf-8", "replace")
-  except OSError:
-    pass
-  return ""
-
-
 STATE = os.path.join(
     os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
     "session-layout")
@@ -487,7 +472,6 @@ def snapshot(sock):
         # WindowPlugin.relaunch_command.
         "cmd": relaunch_command_for(v),
         "pid": pid,
-        "wid": window_id_for(v),
         "output": p["output"],
         "workspace": p["workspace"],
         "pos": p["pos"],
@@ -855,9 +839,6 @@ class WindowPlugin:
   def transient(self, v):
     return False      # never capture/place (a New Tab, a scratch terminal)
 
-  def window_id(self, v):
-    return None       # a stable per-window id (mux/kitty's TERM_WINDOW_ID)
-
   def relaunch_missing(self, saved, live):
     return 0          # respawn this app's saved-but-absent windows; count
 
@@ -883,6 +864,12 @@ class WindowPlugin:
     once, under ONE bounded deadline, so no plugin can hold up a reboot."""
     return []
 
+
+# The hooks a plugin may implement, named ONCE: `plugins` and `doctor` both
+# report which of them a plugin defines, and listing them separately is how
+# relaunch_command and wind_down came to be missing from both.
+PLUGIN_HOOKS = ("owns", "identity", "transient", "relaunch_command",
+                "relaunch_missing", "wind_down")
 
 PLUGIN_DIR = os.path.join(
     os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
@@ -1011,18 +998,6 @@ def relaunch_command_for(v):
     except Exception:
       pass
   return None
-
-
-def window_id_for(v):
-  """The OWNING plugin's stable per-window id for a view, else ''."""
-  v = _pview(v)
-  p = _owner(v)
-  if p is not None:
-    try:
-      return p.window_id(v) or ""
-    except Exception:
-      pass
-  return ""
 
 
 # --- /proc window introspection (the kitty/mux plugins' stable-identity source)
@@ -1254,9 +1229,6 @@ class MuxPlugin(WindowPlugin):
     slot was resolved at capture and recorded in the snapshot's `key`."""
     return _mux_slot(_term_latch_target(v.get("pid", -1)))
 
-  def window_id(self, v):
-    return term_wid(v["pid"])
-
   def relaunch_command(self, v):
     """A latch if one is running here, otherwise nothing, which the
     relaunch reads as `mux resume`. See MUX_RESUME for why that default is
@@ -1293,9 +1265,6 @@ class KittyPlugin(WindowPlugin):
   def identity(self, v):
     cwd = _term_cwd(v["pid"])
     return f"kitty:{cwd}" if cwd and cwd != HOME else None
-
-  def window_id(self, v):
-    return term_wid(v["pid"])
 
   def relaunch_missing(self, saved, live):
     return kitty_relaunch_missing(saved, live)
@@ -1646,7 +1615,6 @@ def spawn_term(cmd, size=None):
   for all of them, local and remote alike, and usher's job is only to put a
   window around the command it recorded."""
   env = {k: v for k, v in os.environ.items() if k != "TMUX"}
-  env["TERM_WINDOW_ID"] = os.urandom(6).hex()   # stable per-window id
   subprocess.Popen(["kitty"] + _size_opts(size)
                    + ["ksh", "-c", f"{cmd}; exec ksh -i"],
                    env=env, start_new_session=True,
@@ -1784,7 +1752,6 @@ def _spawn_kitty(cwd, size=None):
   re-running the window's captured program -- restoring the place + directory,
   not the command."""
   env = {k: v for k, v in os.environ.items() if k != "TMUX"}
-  env["TERM_WINDOW_ID"] = os.urandom(6).hex()
   subprocess.Popen(["kitty"] + _size_opts(size) + ["--directory", cwd],
                    env=env, start_new_session=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -2341,8 +2308,7 @@ def do_doctor():
   kb, snap = _doctor_store(out)
   out("== plugins ==")
   for p in plugins():
-    hooks = [h for h in ("owns", "identity", "transient", "window_id",
-                         "relaunch_missing")
+    hooks = [h for h in PLUGIN_HOOKS
              if h in getattr(type(p), "__dict__", {})]
     out(f"  {getattr(p, 'name', '?'):10} {', '.join(hooks)}")
   rc = _doctor_contracts(out)
@@ -3569,8 +3535,7 @@ def main():
     sys.exit(1 if ANCHOR_ERRORS else 0)
   elif verb == "plugins":       # list loaded plugins (built-in + user)
     for p in plugins():
-      hooks = [h for h in ("owns", "identity", "transient", "window_id",
-                           "relaunch_missing")
+      hooks = [h for h in PLUGIN_HOOKS
                if h in getattr(type(p), "__dict__", {})]
       print(f"{getattr(p, 'name', '?'):10} {', '.join(hooks)}")
     print(f"# {len(plugins())} plugin(s); user dir {PLUGIN_DIR}",
