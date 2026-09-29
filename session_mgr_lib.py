@@ -603,21 +603,14 @@ def _snss_str16(b, o):        # WriteString16: int32 nchars, 2*nchars, pad to 4
   return s.decode("utf-16-le", "replace"), (o + 2 * n + 3) & ~3
 
 
-def parse_snss(path):
-  """Parse one SNSS session file into {active_page_title: (window_id, url)}
-  for its open windows -- each window's selected tab, at that tab's current
-  navigation. Never raises: a malformed record is skipped, a bad file
-  yields {}.
-
-  THE WINDOW ID IS THE POINT, and it was parsed and discarded here for a
-  long time. Chrome's SessionID for a window is STABLE ACROSS A RESTART:
-  measured on manifestor, all six windows kept their ids through a
-  --restore-last-session cycle. So it is a durable per-window handle, which
-  the active-tab URL is not: a URL changes every time you switch tab, which
-  is how one browser accumulated 1053 store entries describing 73 places."""
+def _snss_scan(path):
+  """Walk one session file's records into raw tables, or None if it is not a
+  session file. Split from parse_snss because the two halves fail differently:
+  this one must survive a malformed record mid-stream, while resolving the
+  tables afterwards is pure dict work that cannot."""
   d = open(path, "rb").read()
   if d[:4] != b"SNSS":
-    return {}
+    return None
   off = 8                                     # skip magic + int32 version
   tab_win, tab_idx, win_sel, tab_nav = {}, {}, {}, {}
   nav, closed_tabs, closed_wins = {}, set(), set()
@@ -661,15 +654,34 @@ def parse_snss(path):
         closed_wins.add(w)
     except Exception:
       pass
+  return tab_win, tab_idx, win_sel, tab_nav, nav, closed_tabs, closed_wins
+
+
+def parse_snss(path):
+  """Parse one SNSS session file into {active_page_title: (window_id, url)}
+  for its open windows -- each window's selected tab, at that tab's current
+  navigation. Never raises: a malformed record is skipped, a bad file
+  yields {}.
+
+  THE WINDOW ID IS THE POINT, and it was parsed and discarded here for a
+  long time. Chrome's SessionID for a window is STABLE ACROSS A RESTART:
+  measured on manifestor, all six windows kept their ids through a
+  --restore-last-session cycle. So it is a durable per-window handle, which
+  the active-tab URL is not: a URL changes every time you switch tab, which
+  is how one browser accumulated 1053 store entries describing 73 places."""
+  tabs = _snss_scan(path)
+  if tabs is None:
+    return {}
+  tab_win, tab_idx, win_sel, tab_nav, nav, closed_tabs, closed_wins = tabs
   wins = {}
   for t, w in tab_win.items():
     if t in closed_tabs or w in closed_wins:
       continue
     wins.setdefault(w, []).append(t)
   out = {}
-  for w, tabs in wins.items():
+  for w, tabs_in_win in wins.items():
     sel = win_sel.get(w)
-    active = next((t for t in tabs if tab_idx.get(t) == sel), None)
+    active = next((t for t in tabs_in_win if tab_idx.get(t) == sel), None)
     if active is None:
       continue
     entry = nav.get((active, tab_nav.get(active)))
@@ -1424,26 +1436,9 @@ def upsert(kb, windows, when):
   prune_kb(kb, when)
 
 
-def learn(kb, groups, windows, when):
-  """Watch-time knowledge update with view-id tab-grouping.
-
-  Each live view -- keyed by its wayfire id, stable for the window's whole
-  life -- owns the set of titles it has shown. Every title in the set is
-  stamped to the view's CURRENT placement, so a window drags its whole learned
-  tab-set with it when it moves (no stragglers pointing at the old screen),
-  and on restore it lands correctly whatever tab happens to be active.
-
-  A title shown by two live views at once is not a window discriminator, so it
-  is dropped from every group and from the store (the degroup rule). Groups
-  are in-session only (view ids do not survive a restart); they re-form under
-  fresh ids next session, self-healing. Unique-app_id windows (--app Gmail)
-  stay keyed by app_id alone; kitty is forced to per-title keys; Chrome keys
-  by its active-tab URL identity (see identity(), stamped below)."""
-  counts = Counter(w["app_id"] for w in windows)
-  tcount = Counter((w["app_id"], w["title"]) for w in windows if w["title"])
-  ambiguous = {k for k, c in tcount.items() if c >= 2}
-  live = {w["id"] for w in windows if w.get("id") is not None}
-
+def _learn_degroup(kb, groups, ambiguous, live):
+  """Drop titles two live views share, and retire groups whose window closed.
+  A title on two windows at once is not a discriminator."""
   # Degroup: purge now-ambiguous titles from every group and the store.
   for app, title in ambiguous:
     kb.pop(kkey(app, title), None)
@@ -1454,6 +1449,9 @@ def learn(kb, groups, windows, when):
   for vid in [v for v in groups if v not in live]:
     del groups[vid]
 
+
+def _learn_fold(groups, windows, ambiguous):
+  """Fold each live view's current title into its group."""
   # Fold each live view's current title into its group.
   for w in windows:
     vid = w.get("id")
@@ -1467,6 +1465,9 @@ def learn(kb, groups, windows, when):
       else:
         g["titles"].add(w["title"])
 
+
+def _learn_stamp(kb, groups, windows, counts, when):
+  """Write each live view's placement under the right key."""
   # Stamp: unique-app_id -> app_id key; a plugin single-identity (Chrome ->
   # its ONE active-tab URL, no title accumulation, restored whatever tab was
   # active) -> that key; other shared apps (mux terminals) -> every title in
@@ -1482,6 +1483,9 @@ def learn(kb, groups, windows, when):
       for t in groups[vid]["titles"]:
         kb[kkey(app, t)] = kb_entry(w, t, False, when)
 
+
+def _learn_purge_terminals(kb, windows):
+  """Drop terminal entries no live window shows."""
   # Mux terminals: keep only the session each window CURRENTLY shows. A window
   # that cycled sessions leaves the old titles in the store, where they would
   # relaunch as phantom windows or yank a different window that later shows
@@ -1501,6 +1505,31 @@ def learn(kb, groups, windows, when):
             if TERM_KEY_RE.match(v.get("title", ""))
             and v.get("title") not in live_terms]:
     del kb[k]
+
+
+def learn(kb, groups, windows, when):
+  """Watch-time knowledge update with view-id tab-grouping.
+
+  Each live view -- keyed by its wayfire id, stable for the window's whole
+  life -- owns the set of titles it has shown. Every title in the set is
+  stamped to the view's CURRENT placement, so a window drags its whole learned
+  tab-set with it when it moves (no stragglers pointing at the old screen),
+  and on restore it lands correctly whatever tab happens to be active.
+
+  A title shown by two live views at once is not a window discriminator, so it
+  is dropped from every group and from the store (the degroup rule). Groups
+  are in-session only (view ids do not survive a restart); they re-form under
+  fresh ids next session, self-healing. Unique-app_id windows (--app Gmail)
+  stay keyed by app_id alone; kitty is forced to per-title keys; Chrome keys
+  by its active-tab URL identity (see identity(), stamped below)."""
+  counts = Counter(w["app_id"] for w in windows)
+  tcount = Counter((w["app_id"], w["title"]) for w in windows if w["title"])
+  ambiguous = {k for k, c in tcount.items() if c >= 2}
+  live = {w["id"] for w in windows if w.get("id") is not None}
+  _learn_degroup(kb, groups, ambiguous, live)
+  _learn_fold(groups, windows, ambiguous)
+  _learn_stamp(kb, groups, windows, counts, when)
+  _learn_purge_terminals(kb, windows)
   prune_kb(kb, when)
 
 
