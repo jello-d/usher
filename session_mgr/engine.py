@@ -2225,12 +2225,20 @@ def _t_relaunch(ck):
     # functions, only the pure helper inside them.
     import io
     import contextlib
-    _real = (spawn_term, _spawn_kitty)
-    _spawned = []
+    _real = (spawn_term, _spawn_kitty, logline)
+    _spawned, _logged = [], []
     try:
         globals()["spawn_term"] = lambda *a, **k: _spawned.append(("mux", a))
         globals()["_spawn_kitty"] = lambda *a, **k: _spawned.append(("kitty",
                                                                      a))
+        # CAPTURE THE LOG instead of writing it. _announce appends to the REAL
+        # $STATE/watch.log, so every `./test/run` used to add three fixture
+        # rows to the one file that records what usher did to a LIVE session,
+        # indistinguishable from real relaunches to anyone reading it later.
+        # Capturing loses no coverage -- _announce is still CALLED, which is
+        # the whole point of running these paths -- and lets us assert what it
+        # said, which the old version did not.
+        globals()["logline"] = _logged.append
         with contextlib.redirect_stdout(io.StringIO()):
             n_mux = mux_relaunch_missing([_tmw(), _tmw(cmd="L latch box")], [])
             n_kit = kitty_relaunch_missing(
@@ -2238,8 +2246,11 @@ def _t_relaunch(ck):
         ck("relaunch-mux-runs", n_mux == 2)
         ck("relaunch-kitty-runs", n_kit == 1)
         ck("relaunch-spawned", len(_spawned) == 3)
+        ck("relaunch-announced",
+           len(_logged) == 3 and all(m.startswith("launch") for m in _logged))
     finally:
-        globals()["spawn_term"], globals()["_spawn_kitty"] = _real
+        (globals()["spawn_term"], globals()["_spawn_kitty"],
+         globals()["logline"]) = _real
 
 
 def _t_chrome(ck):
