@@ -2402,8 +2402,15 @@ def _tmw(cmd=None, key="term:resume", size=None):
 
 
 def _tv(app, title="", pid=-1):
-    """A normalized view, shaped as a plugin hook receives one."""
+    """A NORMALIZED view, shaped as a plugin hook receives one (see pview)."""
     return {"app": app, "title": title, "pid": pid}
+
+
+def _trv(app, title="", pid=-1, vid=None):
+    """A RAW view, shaped as the compositor reports one. Not interchangeable
+    with _tv: anything reached through pview takes either, but app_of and the
+    matcher read `app-id` and see nothing in a normalized view."""
+    return {"app-id": app, "title": title, "pid": pid, "id": vid}
 
 
 def _t_registry(ck):
@@ -2801,6 +2808,91 @@ def _t_learn(ck):
     ck("learn-keeps-kitty-cwd", "kitty\x00kitty:/tmp" in _kb)
 
 
+def _t_placement(ck):
+    """place_of and target_geometry: the two halves of WHERE a window goes.
+
+    They are inverses, and both were completely untested, which is a strange
+    place for this repo to have a hole -- a bug in either misplaces every
+    window, and the note in place_of already says "if a restored window ever
+    lands one workspace off, this offset is the thing to re-check first"."""
+    _o = {"DP-1": {"id": 1, "geometry": {"x": 0, "y": 0, "width": 1000,
+                                         "height": 800},
+                   "workspace": {"x": 1, "y": 1}}}
+
+    def _view(x, y, w=300, h=200, out="DP-1"):
+        return {"output-name": out,
+                "geometry": {"x": x, "y": y, "width": w, "height": h}}
+
+    # on the CURRENT workspace: the offset is zero, so absolute == current
+    ck("place-of-current-workspace",
+       place_of(_view(40, 50), _o)["workspace"] == [1, 1])
+    ck("place-of-keeps-the-position", place_of(_view(40, 50), _o)["pos"]
+       == [40, 50])
+    # one workspace right and one down
+    ck("place-of-offset-workspace",
+       place_of(_view(1040, 850), _o)["workspace"] == [2, 2])
+    ck("place-of-position-is-within-the-workspace",
+       place_of(_view(1040, 850), _o)["pos"] == [40, 50])
+    # FLOOR, NOT ROUND, which is the documented trap: a window in the lower
+    # half of a workspace is still ON it, and rounding would report the next
+    # one down and put pos out of range.
+    ck("place-of-floors-not-rounds",
+       place_of(_view(600, 600), _o)["workspace"] == [1, 1]
+       and place_of(_view(600, 600), _o)["pos"] == [600, 600])
+    # a NEGATIVE offset is a workspace up/left of the current one
+    ck("place-of-negative-offset",
+       place_of(_view(-960, -750), _o)["workspace"] == [0, 0])
+    # an output the compositor no longer reports must not throw
+    ck("place-of-unknown-output",
+       place_of(_view(5, 6, out="GONE-1"), _o)["workspace"] == [0, 0])
+
+    # target_geometry is the inverse: it lands a stored entry back, expressed
+    # relative to whatever workspace the output is showing NOW.
+    _e = {"workspace": [2, 2], "pos": [40, 50], "size": [300, 200]}
+    ck("target-offsets-from-the-current-workspace",
+       target_geometry(_e, _o["DP-1"])
+       == {"x": 1040, "y": 850, "width": 300, "height": 200})
+    ck("target-on-the-current-workspace-is-the-position",
+       target_geometry({"workspace": [1, 1], "pos": [40, 50],
+                        "size": [300, 200]}, _o["DP-1"])
+       == {"x": 40, "y": 50, "width": 300, "height": 200})
+    # ROUND TRIP, which is the property that actually matters: capture a view,
+    # restore it, and it must land exactly where it was.
+    for _x, _y in ((0, 0), (40, 50), (1040, 850), (-960, -750), (600, 600)):
+        _p = place_of(_view(_x, _y), _o)
+        _t = target_geometry({"workspace": _p["workspace"], "pos": _p["pos"],
+                              "size": _p["size"]}, _o["DP-1"])
+        ck(f"placement-round-trips-at-{_x}-{_y}",
+           (_t["x"], _t["y"]) == (_x, _y))
+
+    # MATCH: consume-once, so two live windows cannot claim the same slot.
+    # Deliberately an app NO plugin owns, so identity() is the raw title and
+    # the matcher is what is under test rather than the plugin registry. (A
+    # kitty titled "kitty:/a" would be claimed by MuxPlugin, which owns any
+    # kitty whose title has a colon -- which is why that fixture is wrong.)
+    _en = [{"app_id": "libreoffice", "title": "A.odt", "appid_only": False},
+           {"app_id": "libreoffice", "title": "B.odt", "appid_only": False},
+           {"app_id": "slack", "title": "anything", "appid_only": True}]
+    _lv = [_trv("slack", "Slack (3)"), _trv("libreoffice", "A.odt")]
+    _pairs, _unlive, _unent = match(_lv, _en)
+    ck("match-appid-only-ignores-the-title",
+       any(e["app_id"] == "slack" for _l, e in _pairs))
+    ck("match-exact-identity", any(e["title"] == "A.odt"
+                                   for _l, e in _pairs))
+    ck("match-reports-the-leftovers",
+       len(_unlive) == 0 and [e["title"] for e in _unent] == ["B.odt"])
+    # a live window with no entry is reported, not silently dropped
+    _pairs2, _unlive2, _ = match([_trv("libreoffice", "Z.odt")], _en)
+    ck("match-unmatched-live", not _pairs2 and len(_unlive2) == 1)
+    # CONSUME-ONCE: two live windows resolving to one identity get one slot
+    # between them, or they would both be moved onto the same spot.
+    _dup = [{"app_id": "libreoffice", "title": "A.odt", "appid_only": False}]
+    _pairs3, _unlive3, _ = match([_trv("libreoffice", "A.odt"),
+                                  _trv("libreoffice", "A.odt")], _dup)
+    ck("match-consumes-an-entry-once",
+       len(_pairs3) == 1 and len(_unlive3) == 1)
+
+
 def _t_geometry(ck):
     """respawn geometry and the chrome profile fallback."""
     # respawn geometry: ask kitty for the size the window had, so it does not
@@ -3026,6 +3118,118 @@ def _t_contracts(ck):
         ck("snss-live", False)
 
 
+def _t_watcher(ck):
+    """the DAEMON's state machine, which needs no compositor.
+
+    The notes said the only way to verify watch.py was to run the daemon. That
+    is half true: placement and capture need a live socket, but the STATE
+    MACHINE does not, and Watcher.__init__ opens nothing. Two of one day's bugs
+    lived exactly here -- the capture loop racing the placer over one window's
+    position, and a hold that never released -- and both were found by hand in
+    a session that should have been a test.
+
+    Imported here rather than at the top because watch imports THIS module; at
+    call time both are loaded, and keeping the module-level edge one-way is the
+    point."""
+    from .watch import Watcher
+    import time as _time
+    w = Watcher(launch=False)      # reads the store, opens no socket
+    now = _time.time()
+
+    # THE AGGRESSIVE/STEADY CLOCK. steady when the FLOOR has passed and it has
+    # been quiet for IDLE_SETTLE, but never past the CAP.
+    w.st["armed_at"] = now
+    w.st["last_map"] = now
+    ck("clock-aggressive-after-arming", w._aggressive_now())
+    w.st["armed_at"] = now - START_FLOOR - IDLE_SETTLE - 10
+    w.st["last_map"] = now - IDLE_SETTLE - 10
+    ck("clock-settles-when-quiet", not w._aggressive_now())
+    # a NEW window pushes last_map, which extends aggressive past the floor
+    w.st["last_map"] = now
+    ck("clock-extends-on-a-new-map", w._aggressive_now())
+    # ...but never past the CAP, which is what bounds a login storm
+    w.st["armed_at"] = now - AGGR_CAP - 1
+    ck("clock-capped", not w._aggressive_now())
+
+    # THE HOLD: while aggressive, a window the placer has not reached is
+    # sitting where its app dropped it, and learning that overwrites the slot
+    # the placer is about to aim at.
+    w.st["armed_at"], w.st["last_map"] = now, now
+    w.placed.clear()
+    w.deadline.clear()
+    w.deadline[7] = now + 60                       # still inside its grace
+    _wins = [{"id": 7, "app_id": "kitty", "title": "x"}]
+    ck("hold-holds-an-unplaced-window", w._held(_wins) == {7})
+    w.placed.add(7)
+    ck("hold-releases-once-placed", w._held(_wins) == frozenset())
+    w.placed.discard(7)
+    w.deadline[7] = now - 1                        # grace expired
+    ck("hold-releases-when-the-grace-runs-out",
+       w._held(_wins) == frozenset())
+    w.deadline[7] = now + 60
+    w.st["armed_at"] = now - AGGR_CAP - 1          # steady
+    ck("hold-holds-nothing-in-steady-state", w._held(_wins) == frozenset())
+
+    # EVENT ROUTING. A map grants the grace and feeds the settle clock; a
+    # place-event queues the view for the placer with the right settle; an
+    # unmap forgets everything about the window; a knowledge trigger dirties
+    # the store and only a LAYOUT one rolls history.
+    w.st["armed_at"], w.st["last_map"] = now, now - 999
+    w.placed.clear()
+    w.deadline.clear()
+    w.pending.clear()
+    w.identified.clear()
+    w.st["dirty"], w.st["layout"] = False, False
+    w._on_event({"event": "view-mapped",
+                 "view": {"id": 11, "app-id": "kitty", "title": "t"}})
+    ck("event-map-grants-a-grace", w.deadline.get(11, 0) > now)
+    ck("event-map-feeds-the-settle-clock", w.st["last_map"] > now - 5)
+    ck("event-map-queues-for-the-placer", 11 in w.pending)
+    ck("event-map-dirties-and-rolls", w.st["dirty"] and w.st["layout"])
+    # a BROWSER waits longer before being moved, because it churns its title
+    # through a session restore and moving it mid-restore can drop the window
+    w.pending.clear()
+    w._on_event({"event": "view-title-changed",
+                 "view": {"id": 12, "app-id": "google-chrome", "title": "t"}})
+    w._on_event({"event": "view-title-changed",
+                 "view": {"id": 13, "app-id": "kitty", "title": "t"}})
+    ck("event-browser-waits-longer",
+       w.pending[12]["due"] > w.pending[13]["due"])
+    # a title change is NOT a layout change: it must not roll the history ring,
+    # or a day of tab-flips floods it
+    w.st["layout"] = False
+    w.st["dirty"] = False
+    w._on_event({"event": "view-title-changed",
+                 "view": {"id": 13, "app-id": "kitty", "title": "u"}})
+    ck("event-title-dirties-without-rolling",
+       w.st["dirty"] and not w.st["layout"])
+    # an already-placed window is not re-queued
+    w.pending.clear()
+    w.placed.add(13)
+    w._on_event({"event": "view-title-changed",
+                 "view": {"id": 13, "app-id": "kitty", "title": "v"}})
+    ck("event-placed-window-not-requeued", 13 not in w.pending)
+    # an unmap forgets the window entirely, or the state leaks for the life of
+    # the daemon and a reused view id inherits it
+    w.identified.add(13)
+    w.deadline[13] = now + 60
+    w.pending[13] = {"v": {}, "due": now}
+    w._on_event({"event": "view-unmapped", "view": {"id": 13}})
+    ck("event-unmap-forgets-everything",
+       13 not in w.placed and 13 not in w.identified
+       and 13 not in w.deadline and 13 not in w.pending)
+
+    # RECOGNITION RESTARTS THE GRACE, which is what lets a window that could
+    # not be identified for minutes still be placed once it can.
+    w.deadline.clear()
+    w.identified.clear()
+    w.st["last_map"] = now - 999
+    w._recognise(21, "kitty", "late window")
+    ck("recognise-restarts-the-grace", w.deadline.get(21, 0) > now)
+    ck("recognise-feeds-the-settle-clock", w.st["last_map"] > now - 5)
+    ck("recognise-is-once-only", 21 in w.identified)
+
+
 def selftest():
     """Offline unit checks for the plugin framework and the store -- no
     compositor, deterministic. Run with `session-mgr selftest`.
@@ -3039,8 +3243,8 @@ def selftest():
             fails.append(name)
 
     for area in (_t_registry, _t_terminals, _t_relaunch, _t_chrome, _t_learn,
-                 _t_geometry, _t_snapshots, _t_profiles, _t_migration,
-                 _t_contracts):
+                 _t_geometry, _t_placement, _t_snapshots, _t_profiles,
+                 _t_migration, _t_watcher, _t_contracts):
         area(ck)
     if fails:
         print("selftest FAIL: " + ", ".join(fails), file=sys.stderr)
