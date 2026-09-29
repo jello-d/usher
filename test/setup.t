@@ -4,7 +4,7 @@
 # gone. A scratch PREFIX + a STUB venv (USHER_SKIP_BUILD), so no network and
 # nothing outside the sandbox is touched. `check` is not run here (it needs a
 # real venv with pywayfire); tools.t + selftest.t cover the code.
-. "$(dirname "$0")/lib.sh"
+. "$(dirname "$0")/harness_lib"
 harness_init setup
 
 BIN=$T/bin; SHR=$T/share; VENV=$T/venv; CFG=$T/config

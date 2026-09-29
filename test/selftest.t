@@ -3,7 +3,7 @@
 # the chrome/mux/kitty identity parsing, the SNSS reader). `session-mgr
 # selftest` imports no compositor (pywayfire is guarded), so it runs under
 # plain python3.
-. "$(dirname "$0")/lib.sh"
+. "$(dirname "$0")/harness_lib"
 harness_init selftest
 
 command -v python3 >/dev/null 2>&1 || { pass "skipped (no python3)"; exit 0; }

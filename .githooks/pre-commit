@@ -3,11 +3,11 @@
 # limit for code and prose). Binary blobs are skipped. To land a deliberate
 # exception, commit with --no-verify.
 offenders=$(
-  git diff --cached --name-only --diff-filter=ACM | while IFS= read -r f; do
-    [ "$(git diff --cached --numstat -- "$f" | cut -f1)" = "-" ] && continue
-    git show ":$f" 2>/dev/null |
-      awk -v F="$f" 'length>80{printf "%s:%d (%d cols)\n",F,FNR,length}'
-  done
+ git diff --cached --name-only --diff-filter=ACM | while IFS= read -r f; do
+  [ "$(git diff --cached --numstat -- "$f" | cut -f1)" = "-" ] && continue
+  git show ":$f" 2>/dev/null |
+   awk -v F="$f" 'length>80{printf "%s:%d (%d cols)\n",F,FNR,length}'
+ done
 )
 [ -z "$offenders" ] && exit 0
 echo "pre-commit: staged lines exceed the 80-column limit:" >&2

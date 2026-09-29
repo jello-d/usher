@@ -2,7 +2,7 @@
 # test/tools.t - every shipped script parses: the Python modules under
 # py_compile (the engine + the indicator), the shell scripts under sh -n.
 # Catches a syntax regression before it ships.
-. "$(dirname "$0")/lib.sh"
+. "$(dirname "$0")/harness_lib"
 harness_init tools
 
 _bad=0
@@ -14,6 +14,7 @@ for _f in "$HERE/session_mgr.py" \
     || { echo "  py: $_f" >&2; _bad=1; }
 done
 for _f in "$HERE/setup.sh" "$HERE/indicator/setup.sh" "$HERE/test/run" \
+          "$HERE/test/harness_lib" "$HERE/.githooks/pre-commit" \
           "$HERE/share/hooks"/*; do
   [ -f "$_f" ] || continue
   { dash -n "$_f" 2>/dev/null || sh -n "$_f" 2>/dev/null; } \
