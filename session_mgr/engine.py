@@ -1252,7 +1252,14 @@ def kb_entry(w, title, appid_only, when):
         "output": w["output"], "workspace": w["workspace"],
         "pos": w["pos"], "size": w["size"],
         "sticky": bool(w.get("sticky", False)),
-        "inverted": bool(w.get("inverted", False)), "last_seen": when,
+        "inverted": bool(w.get("inverted", False)),
+        # FULLSCREEN was captured into the snapshot and stopped here for a long
+        # time, so it never reached place() and a window left fullscreen came
+        # back windowed at the remembered geometry. Which is not pixel perfect,
+        # and is the fifth instance of this file's recurring shape: data
+        # captured and never read.
+        "fullscreen": bool(w.get("fullscreen", False)),
+        "last_seen": when,
     }
 
 
@@ -1849,6 +1856,25 @@ def place(sock, view_id, e, o):
     return geom
 
 
+def apply_fullscreen(sock, view_id):
+    """Put a just-restored window back into fullscreen.
+
+    ONLY EVER SET, NEVER CLEARED, exactly as apply_invert is. A remembered
+    entry saying "not fullscreen" is not evidence that a window which IS
+    fullscreen should be dragged out of it -- the human may have pressed F11
+    ten seconds ago -- and this runs once per map, so it cannot fight them.
+
+    AFTER place(), not instead of it. A fullscreen window's captured geometry
+    is the whole output, so the geometry alone makes it LOOK right while
+    leaving the window not actually fullscreen: no decoration change, and the
+    state lost on the next toggle. Best effort, like every other restore step:
+    an IPC hiccup must never abort the rest of a restore."""
+    try:
+        sock.set_view_fullscreen(int(view_id), True)
+    except Exception as e:
+        logline(f"fullscreen apply error (view {view_id}): {e}")
+
+
 def apply_invert(sock, view_id):
     """Re-apply the colour-invert shader to a just-restored window, then record
     the view's new id in toggle_invert_focused's store so the two mechanisms
@@ -2062,6 +2088,10 @@ def do_restore(dry, only=None, source=None):
             apply_invert(sock, lv["id"])
             if same:
                 print("  inverted " + label)
+        if e.get("fullscreen"):
+            apply_fullscreen(sock, lv["id"])
+            if same:
+                print("  fullscreen " + label)
 
     _restore_report(pairs, live, unlive, unlayout, unplaceable,
                     outs, dry, acted)

@@ -30,8 +30,9 @@ from . import chrome, engine
 from .engine import (AGGR_CAP, ARM_FILE, EXCLUDE_FILE, IDLE_SETTLE,
                      INCLUDE_FILE, INVERT_STORE, LAUNCHED, SKIP_TITLE,
                      START_FLOOR, STATE, STATUS_FILE, _signal_watcher,
-                     acquire_singleton, app_of, apply_invert, connect,
-                     do_capture, identity, is_anchored, is_desync_error,
+                     acquire_singleton, app_of, apply_fullscreen,
+                     apply_invert, connect, do_capture, identity, is_anchored,
+                     is_desync_error,
                      is_transient, kkey, launch_missing, learn,
                      load_knowledge, logline, persist, place, reload_anchor,
                      reload_exclude, rekey_chrome, save_knowledge, snapshot,
@@ -506,19 +507,19 @@ class Watcher:
                     g.get("height") == t["height"] and
                     v.get("output-name") == e["output"]):
                 self.placed.add(vid)
-                # Invert follows the window even when it needs no move. placed
-                # dedups, so this fires once per map and never fights a later
-                # Super+N un-invert.
-                if e.get("inverted"):
-                    apply_invert(self.place_sock, vid)
+                # Invert and fullscreen follow the WINDOW, not the move, so
+                # they are re-applied even when nothing needed moving. placed
+                # dedups, so each fires once per map and never fights a later
+                # Super+N or F11.
+                self._restate(vid, e)
                 return
         place(self.place_sock, vid, e, o)
         self.placed.add(vid)
-        if e.get("inverted"):
-            apply_invert(self.place_sock, vid)
+        self._restate(vid, e)
         msg = (f"placed  {app[:18]:18} {e['output']} "
                f"ws{tuple(e['workspace'])} | {title[:32]}"
-               f"{' [inv]' if e.get('inverted') else ''}")
+               f"{' [inv]' if e.get('inverted') else ''}"
+               f"{' [full]' if e.get('fullscreen') else ''}")
         print(msg, flush=True)
         # ALSO to the log. The autostart discards the worker's stdout, so a
         # per-window placement left no trace anywhere, and the only record of
@@ -528,6 +529,18 @@ class Watcher:
         # did. This is the line that answers that next time.
         logline(msg)
         return True
+
+    def _restate(self, vid, e):
+        """Re-apply the window STATE a geometry move does not carry: the
+        colour-invert shader, and fullscreen. Both are only ever set, never
+        cleared (see apply_fullscreen), and both belong here rather than inside
+        the move branch -- a window an app already restored at its target
+        position is matched-but-not-moved and must still get its state back,
+        which is exactly the bug that made invert "forget some"."""
+        if e.get("inverted"):
+            apply_invert(self.place_sock, vid)
+        if e.get("fullscreen"):
+            apply_fullscreen(self.place_sock, vid)
 
     def _placer_loop(self):
         """Settle-debounce placer. Moves a window only once its title has been
