@@ -2597,98 +2597,72 @@ def take_mode():
     return mode if mode in MODES else "adopt"
 
 
-def _supervise(script, launch, holder):
-    """Respawn the worker forever, with backoff. The worker is this script
-    RE-EXEC'd, so it reloads its code from disk on every respawn; killing the
-    worker is how an edit is picked up without touching the supervisor that
-    holds the singleton lock."""
-    base = [sys.executable, script, "_worker"]
-    backoff = 2
-    while True:
-        # Relaunch missing mux terminals on the first worker that actually
-        # REACHES launch_missing (which drops LAUNCHED), NOT merely the first
-        # spawned. The first worker often dies to the compositor-startup race
-        # before it can launch; welding launch to it lost the relaunch entirely.
-        # While the marker is absent, every spawn keeps launch on, so a crashed-
-        # early worker just hands the launch to its successor. launch_missing is
-        # idempotent (skips sessions a live window already shows), so at worst a
-        # rare double-pass is harmless.
-        argv = base if (launch and not os.path.exists(LAUNCHED)) \
-            else base + ["--no-launch"]
-        try:
-            proc = subprocess.Popen(argv)
-        except OSError as e:
-            logline(f"spawn failed: {e}; retry in {backoff}s")
-            time.sleep(backoff)
-            backoff = min(backoff * 2, 30)
-            continue
-        holder["proc"] = proc
-        started = time.time()
-        try:
-            rc = proc.wait()
-        except Exception as e:
-            logline(f"wait: {e}")
-            rc = -1
-        holder["proc"] = None
-        ran = int(time.time() - started)
-        if ran >= 60:
-            backoff = 2                # a healthy run resets the backoff
-        logline(f"worker exited (rc {rc}, ran {ran}s); respawn in {backoff}s")
-        time.sleep(backoff)
-        backoff = min(backoff * 2, 30)
+class Supervisor:
+    """Hold the single-instance lock, spawn a worker, and respawn it with
+    backoff if it dies. The worker is this same script RE-EXEC'd (the `_worker`
+    verb), not a fork -- so it reloads its code from disk on every respawn
+    (kill the worker to pick up an edit), and only the supervisor holds the
+    lock (the worker no longer inherits the fd, so an orphan can never block a
+    restart). If a watcher is ALREADY running, run() reloads it in place
+    (SIGHUP re-exec, picking up a code edit and the armed mode) instead of
+    exiting -- so re-running watch/resume IS the reload. Two paths in one
+    script, self-contained (contrast kanshi/kanshi-mgr); session teardown reaps
+    both via the cgroup kill, so the supervisor need not detect session end
+    itself."""
 
+    def __init__(self, launch=True):
+        self.launch = launch
+        self.script = os.path.abspath(sys.argv[0])
+        self.lock = None     # None until run(); an fd, or "unlocked"
+        self.proc = None     # the live worker, for the signal handlers
 
-def do_watch(launch=True):
-    """Supervisor: hold the single-instance lock, then spawn a worker and
-    respawn it with backoff if it dies. The worker is this same script
-    RE-EXEC'd (the _worker verb), not a fork -- so it reloads its code from
-    disk on every respawn (kill the worker to pick up an edit), and only the
-    supervisor holds the lock (the worker no longer inherits the fd, so an
-    orphan can never block a restart). If a watcher is ALREADY running, this
-    re-invocation reloads it in place (SIGHUP re-exec, picking up a code edit
-    and the armed mode) instead of exiting -- so re-running watch/resume IS the
-    reload, and there is no separate reload verb. Two paths in one script, self-
-    contained (contrast kanshi/kanshi-mgr); session teardown reaps both via the
-    cgroup kill, so the supervisor need not detect session end itself."""
-    script = os.path.abspath(sys.argv[0])
-    _lock = acquire_singleton()
-    if _lock is None:
-        # already running -> reload it (picks up code + the flag-armed mode).
-        _signal_watcher(signal.SIGHUP, "reload", "reloaded")
-        return
-    if _lock == "unlocked":
-        logline("singleton lock unavailable; supervising unlocked")
-    elif isinstance(_lock, int):
-        try:                    # record our pid so a re-run/stop can signal us
-            os.ftruncate(_lock, 0)
-            os.write(_lock, f"{os.getpid()}\n".encode())
+    def run(self):
+        self.lock = acquire_singleton()
+        if self.lock is None:
+            # already running -> reload it (picks up code + the armed mode).
+            _signal_watcher(signal.SIGHUP, "reload", "reloaded")
+            return
+        if self.lock == "unlocked":
+            logline("singleton lock unavailable; supervising unlocked")
+        elif isinstance(self.lock, int):
+            try:                # record our pid so a re-run/stop can signal us
+                os.ftruncate(self.lock, 0)
+                os.write(self.lock, f"{os.getpid()}\n".encode())
+            except OSError:
+                pass
+        signal.signal(signal.SIGTERM, self._stop)
+        signal.signal(signal.SIGINT, self._stop)
+        signal.signal(signal.SIGHUP, self._reload)
+        # A fresh supervisor (login or a re-run) starts un-launched: drop a
+        # stale marker so this generation relaunches. (A reload is safe -- the
+        # open terminals are live, so launch_missing skips them.)
+        try:
+            os.makedirs(STATE, exist_ok=True)
+            os.remove(LAUNCHED)
         except OSError:
             pass
+        self._respawn_forever()
 
-    holder = {"proc": None}
-
-    def stop(signum, _frame):
-        p = holder["proc"]
-        if p and p.poll() is None:
-            p.terminate()
+    def _stop(self, signum, _frame):
+        if self.proc and self.proc.poll() is None:
+            self.proc.terminate()
         logline(f"supervisor stopping (signal {signum})")
         os._exit(0)
 
-    def reload_self(signum, _frame):
+    def _reload(self, signum, _frame):
         # Signal-handler context: the main loop is blocked in proc.wait(), so
         # do NOT call Popen.wait() here -- it re-enters the same lock and
         # deadlocks. Just SIGTERM the worker (it holds no lock and dies on its
         # own; execv abandons the wait anyway) and release the lock fd so the
         # re-exec'd self can re-acquire it.
-        p = holder["proc"]
-        if p:
+        if self.proc:
             try:
-                os.kill(p.pid, signal.SIGTERM)
+                os.kill(self.proc.pid, signal.SIGTERM)
             except OSError:
                 pass
-        if isinstance(_lock, int):
+        if isinstance(self.lock, int):
             try:
-                os.close(_lock)
+                os.close(self.lock)
             except OSError:
                 pass
         logline("reload (SIGHUP): re-exec supervisor")
@@ -2698,22 +2672,51 @@ def do_watch(launch=True):
         # honoured by the next worker instead of clobbered by a re-run of
         # arm_mode.
         keep = ["--no-launch"] if "--no-launch" in sys.argv[1:] else []
-        os.execv(sys.executable, [sys.executable, script, "_super"] + keep)
+        os.execv(sys.executable,
+                 [sys.executable, self.script, "_super"] + keep)
 
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGINT, stop)
-    signal.signal(signal.SIGHUP, reload_self)
+    def _respawn_forever(self):
+        """Respawn the worker forever, with backoff."""
+        base = [sys.executable, self.script, "_worker"]
+        backoff = 2
+        while True:
+            # Relaunch missing mux terminals on the first worker that actually
+            # REACHES launch_missing (which drops LAUNCHED), NOT merely the
+            # first spawned. The first worker often dies to the compositor-
+            # startup race before it can launch; welding launch to it lost the
+            # relaunch entirely. While the marker is absent, every spawn keeps
+            # launch on, so a crashed-early worker just hands the launch to its
+            # successor. launch_missing is idempotent (it skips sessions a live
+            # window already shows), so at worst a rare double-pass is
+            # harmless.
+            argv = base if (self.launch and not os.path.exists(LAUNCHED)) \
+                else base + ["--no-launch"]
+            try:
+                self.proc = subprocess.Popen(argv)
+            except OSError as e:
+                logline(f"spawn failed: {e}; retry in {backoff}s")
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 30)
+                continue
+            started = time.time()
+            try:
+                rc = self.proc.wait()
+            except Exception as e:
+                logline(f"wait: {e}")
+                rc = -1
+            self.proc = None
+            ran = int(time.time() - started)
+            if ran >= 60:
+                backoff = 2            # a healthy run resets the backoff
+            logline(f"worker exited (rc {rc}, ran {ran}s); "
+                    f"respawn in {backoff}s")
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 30)
 
-    # A fresh supervisor (login or a re-run) starts un-launched: drop a
-    # stale marker so this generation relaunches. (A reload is safe -- the open
-    # terminals are live, so launch_missing skips them.)
-    try:
-        os.makedirs(STATE, exist_ok=True)
-        os.remove(LAUNCHED)
-    except OSError:
-        pass
 
-    _supervise(script, launch, holder)
+def do_watch(launch=True):
+    """Start supervising, or reload the supervisor already running."""
+    Supervisor(launch).run()
 
 
 class Watcher:
