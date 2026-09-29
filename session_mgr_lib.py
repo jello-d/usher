@@ -56,10 +56,10 @@ from datetime import date
 # pywayfire is needed only to talk to the live compositor -- guarded so the
 # module still imports (and `session-mgr selftest` runs) without it.
 try:
-  from wayfire import WayfireSocket
-  from wayfire.extra.wpe import WPE
+    from wayfire import WayfireSocket
+    from wayfire.extra.wpe import WPE
 except ImportError:
-  WayfireSocket = WPE = None
+    WayfireSocket = WPE = None
 
 # The work/personal boundary: this daemon runs as the personal account, so it
 # must not record or move work-enclave windows. mux stamps work terminals with
@@ -79,17 +79,17 @@ LOCAL_HOST = os.uname().nodename.split(".")[0]
 
 
 def is_scratch_term(app, title):
-  """A plain (unnamed) terminal: kitty wearing the constant default title that
+    """A plain (unnamed) terminal: kitty wearing the constant default title that
   kshrc stamps ("terminal") for a non-tmux shell. It has no cross-session
   identity, so never capture or place it -- it opens where you are and is
   never resized. Give a terminal a real name with ~/bin/settitle, or let mux
   stamp its session name, and it becomes a normal placed window. Also skips
   the legacy per-boot "ksh"/"ksh: N" titles from the old unique-title scheme,
   so stale store entries self-heal during the transition."""
-  if app != "kitty":
-    return False
-  return (title == DEFAULT_TERM_TITLE
-          or title == "ksh" or title.startswith("ksh:"))
+    if app != "kitty":
+        return False
+    return (title == DEFAULT_TERM_TITLE
+            or title == "ksh" or title.startswith("ksh:"))
 
 
 # --- never-place rules: transient windows session must ignore ---------------
@@ -105,7 +105,7 @@ EXCLUDE_FILE = os.environ.get(
 
 
 def load_exclude_rules(path=EXCLUDE_FILE):
-  """Parse session/exclude into compiled (app_re, title_re) pairs. Every rule
+    """Parse session/exclude into compiled (app_re, title_re) pairs. Every rule
   is one line, '<app-regex> :: <title-regex>' -- both fields required, use
   '.*' for "any". A line starting with # is a comment, blanks ignored.
   Patterns are Python regexes matched with re.search, so they are UNANCHORED
@@ -117,55 +117,55 @@ def load_exclude_rules(path=EXCLUDE_FILE):
   or unreadable file yields ([], []); the built-in work-boundary and
   scratch-terminal skips still apply. Read once per process, so an edit is
   picked up by the next worker respawn or a re-run of session-mgr watch."""
-  rules, errors = [], []
-  try:
-    with open(path) as f:
-      lines = f.readlines()
-  except OSError:
-    return rules, errors
-  for n, raw in enumerate(lines, 1):
-    line = raw.strip()
-    if not line or line.startswith("#"):
-      continue
-    if "::" not in line:
-      errors.append((n, line, "missing '::' (use '<app> :: <title>')"))
-      continue
-    app, title = (s.strip() for s in line.split("::", 1))
+    rules, errors = [], []
     try:
-      rules.append((re.compile(app or ".*"), re.compile(title or ".*")))
-    except re.error as e:
-      errors.append((n, line, f"bad regex: {e}"))
-  return rules, errors
+        with open(path) as f:
+            lines = f.readlines()
+    except OSError:
+        return rules, errors
+    for n, raw in enumerate(lines, 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "::" not in line:
+            errors.append((n, line, "missing '::' (use '<app> :: <title>')"))
+            continue
+        app, title = (s.strip() for s in line.split("::", 1))
+        try:
+            rules.append((re.compile(app or ".*"), re.compile(title or ".*")))
+        except re.error as e:
+            errors.append((n, line, f"bad regex: {e}"))
+    return rules, errors
 
 
 EXCLUDE_RULES, EXCLUDE_ERRORS = load_exclude_rules()
 
 
 def is_transient(v):
-  """True if the window must open wherever the user is -- never captured (a
+    """True if the window must open wherever the user is -- never captured (a
   stored "New Tab" would drag every future new tab to one spot), never placed.
   Takes a view/window/entry dict. Two sources: a session/exclude config rule
   (blank New Tab, profile picker, a pre-load "Google Chrome" title -- config-
   driven, grows without a code change) OR a plugin's transient() (a scratch
   terminal). plugin_transient is only reached if no exclude rule matched."""
-  v = _pview(v)
-  app, t = v["app"], v["title"].strip()
-  if any(ar.search(app) and tr.search(t) for ar, tr in EXCLUDE_RULES):
-    return True
-  return plugin_transient(v)
+    v = _pview(v)
+    app, t = v["app"], v["title"].strip()
+    if any(ar.search(app) and tr.search(t) for ar, tr in EXCLUDE_RULES):
+        return True
+    return plugin_transient(v)
 
 
 def reload_exclude():
-  """Re-read session/exclude into the module globals, live -- the watch loop
+    """Re-read session/exclude into the module globals, live -- the watch loop
   calls this when the file's mtime changes, so an edit applies on save with no
   reload. is_transient reads EXCLUDE_RULES on each call, so the swap is picked
   up immediately (the GIL makes the rebinding atomic across the threads)."""
-  global EXCLUDE_RULES, EXCLUDE_ERRORS
-  EXCLUDE_RULES, EXCLUDE_ERRORS = load_exclude_rules()
-  logline(f"exclude reloaded: {len(EXCLUDE_RULES)} rule(s),"
-          f" {len(EXCLUDE_ERRORS)} error(s)")
-  for _n, _text, _msg in EXCLUDE_ERRORS:
-    logline(f"exclude rule error (line {_n}): {_msg}: {_text!r}")
+    global EXCLUDE_RULES, EXCLUDE_ERRORS
+    EXCLUDE_RULES, EXCLUDE_ERRORS = load_exclude_rules()
+    logline(f"exclude reloaded: {len(EXCLUDE_RULES)} rule(s),"
+            f" {len(EXCLUDE_ERRORS)} error(s)")
+    for _n, _text, _msg in EXCLUDE_ERRORS:
+        logline(f"exclude rule error (line {_n}): {_msg}: {_text!r}")
 
 
 # --- anchor (include) rules: the OPT-IN set placed in STEADY state -----------
@@ -184,30 +184,30 @@ ANCHOR_RULES, ANCHOR_ERRORS = load_exclude_rules(INCLUDE_FILE)
 
 
 def is_anchored(app, title):
-  """True if the window matches a session/include rule -- the opt-in set that
+    """True if the window matches a session/include rule -- the opt-in set that
   is STILL placed in the conservative steady state."""
-  t = title.strip()
-  return any(ar.search(app) and tr.search(t) for ar, tr in ANCHOR_RULES)
+    t = title.strip()
+    return any(ar.search(app) and tr.search(t) for ar, tr in ANCHOR_RULES)
 
 
 def reload_anchor():
-  """Re-read session/include live, exactly as reload_exclude does its file."""
-  global ANCHOR_RULES, ANCHOR_ERRORS
-  ANCHOR_RULES, ANCHOR_ERRORS = load_exclude_rules(INCLUDE_FILE)
-  logline(f"anchor reloaded: {len(ANCHOR_RULES)} rule(s),"
-          f" {len(ANCHOR_ERRORS)} error(s)")
-  for _n, _text, _msg in ANCHOR_ERRORS:
-    logline(f"anchor rule error (line {_n}): {_msg}: {_text!r}")
+    """Re-read session/include live, exactly as reload_exclude does its file."""
+    global ANCHOR_RULES, ANCHOR_ERRORS
+    ANCHOR_RULES, ANCHOR_ERRORS = load_exclude_rules(INCLUDE_FILE)
+    logline(f"anchor reloaded: {len(ANCHOR_RULES)} rule(s),"
+            f" {len(ANCHOR_ERRORS)} error(s)")
+    for _n, _text, _msg in ANCHOR_ERRORS:
+        logline(f"anchor rule error (line {_n}): {_msg}: {_text!r}")
 
 
 def is_mux_term(app, title):
-  """A named mux terminal: kitty whose title is 'session:window' (a mux
+    """A named mux terminal: kitty whose title is 'session:window' (a mux
   session attached). NOT a plain 'terminal', a scratch 'ksh:', or a work
   window. These are the only terminals session tracks, places, and relaunches
   -- and the ones a single window cycles through as it switches sessions."""
-  return (app == "kitty" and ":" in title
-          and not is_scratch_term(app, title)
-          and not SKIP_TITLE.search(title))
+    return (app == "kitty" and ":" in title
+            and not is_scratch_term(app, title)
+            and not SKIP_TITLE.search(title))
 
 
 STATE = os.path.join(
@@ -238,36 +238,36 @@ _PROFILE = {"id": None, "at": 0.0}
 
 
 def _hwdp_id():
-  exe = shutil.which("hwdp")
-  if not exe:
-    return None
-  try:
-    out = subprocess.run([exe, "id"], capture_output=True, text=True,
-                         timeout=3)
-  except Exception:
-    return None
-  return out.stdout.strip() or None
+    exe = shutil.which("hwdp")
+    if not exe:
+        return None
+    try:
+        out = subprocess.run([exe, "id"], capture_output=True, text=True,
+                             timeout=3)
+    except Exception:
+        return None
+    return out.stdout.strip() or None
 
 
 def _derived_id(snap):
-  """A stable id for the monitor set the last snapshot saw. Hashed rather
+    """A stable id for the monitor set the last snapshot saw. Hashed rather
   than spelled out because it becomes a filename and an output list is
   neither short nor guaranteed filename-safe. Geometry is included, so the
   same cables at a different resolution are a different profile."""
-  outs = (snap or {}).get("outputs") or []
-  if not outs:
-    return None
-  parts = sorted(f"{o.get('name')}@{(o.get('geometry') or {}).get('width')}"
-                 f"x{(o.get('geometry') or {}).get('height')}" for o in outs)
-  return hashlib.sha256("+".join(parts).encode()).hexdigest()[:12]
+    outs = (snap or {}).get("outputs") or []
+    if not outs:
+        return None
+    parts = sorted(f"{o.get('name')}@{(o.get('geometry') or {}).get('width')}"
+                   f"x{(o.get('geometry') or {}).get('height')}" for o in outs)
+    return hashlib.sha256("+".join(parts).encode()).hexdigest()[:12]
 
 
 def _safe_profile(name):
-  return re.sub(r"[^A-Za-z0-9._-]", "_", name)[:64] or "default"
+    return re.sub(r"[^A-Za-z0-9._-]", "_", name)[:64] or "default"
 
 
 def profile_id(fresh=False):
-  """The current display profile. Cached briefly: this is consulted on every
+    """The current display profile. Cached briefly: this is consulted on every
   knowledge load, and the capture loop runs often. The window in which a
   just-changed display can still resolve to the OLD profile is bounded by
   PROFILE_TTL, and the cost of losing it is a handful of entries written to
@@ -276,30 +276,30 @@ def profile_id(fresh=False):
   `fresh` bypasses the cache, for the one caller that must not be told the
   old answer: the display-change handler, which runs within a second of the
   change and decides whether anything happened at all."""
-  env = os.environ.get("SESSION_PROFILE")
-  if env:
-    return _safe_profile(env)
-  now = time.time()
-  if not fresh and _PROFILE["id"] and now - _PROFILE["at"] < PROFILE_TTL:
+    env = os.environ.get("SESSION_PROFILE")
+    if env:
+        return _safe_profile(env)
+    now = time.time()
+    if not fresh and _PROFILE["id"] and now - _PROFILE["at"] < PROFILE_TTL:
+        return _PROFILE["id"]
+    pid = _hwdp_id() or _derived_id(_load_snapshot()) or "default"
+    _PROFILE["id"], _PROFILE["at"] = _safe_profile(pid), now
     return _PROFILE["id"]
-  pid = _hwdp_id() or _derived_id(_load_snapshot()) or "default"
-  _PROFILE["id"], _PROFILE["at"] = _safe_profile(pid), now
-  return _PROFILE["id"]
 
 
 def kb_path(profile=None):
-  return os.path.join(STATE, f"knowledge-{profile or profile_id()}.json")
+    return os.path.join(STATE, f"knowledge-{profile or profile_id()}.json")
 
 
 def schema_path(profile=None):
-  """Per PROFILE, not global: a schema bump has to be applied to each store
+    """Per PROFILE, not global: a schema bump has to be applied to each store
   separately, and a single global stamp would mark them all migrated the
   first time any one of them was."""
-  return os.path.join(STATE, f"knowledge-{profile or profile_id()}.schema")
+    return os.path.join(STATE, f"knowledge-{profile or profile_id()}.schema")
 
 
 def adopt_legacy_store():
-  """Fold a pre-profile knowledge.json into the CURRENT profile, once.
+    """Fold a pre-profile knowledge.json into the CURRENT profile, once.
 
   MERGES, and that is the whole point. The first version only adopted when
   the profile store did not exist yet, so if anything created one first -- a
@@ -313,42 +313,42 @@ def adopt_legacy_store():
   the legacy ones were learned across whatever was attached at the time. So
   the legacy store only fills gaps. The file is RETIRED rather than deleted,
   both so this runs once and so a bad merge is recoverable."""
-  legacy = os.path.join(STATE, "knowledge.json")
-  if not os.path.exists(legacy):
-    return
-  try:
-    with open(legacy) as f:
-      old = json.load(f)
-  except (OSError, ValueError) as e:
-    logline(f"legacy store unreadable, leaving it alone: {e}")
-    return
-  try:
-    with open(kb_path()) as f:
-      cur = json.load(f)
-  except (OSError, ValueError):
-    cur = {}
-  added = 0
-  for k, v in old.items():
-    if k not in cur:
-      cur[k] = v
-      added += 1
-  try:
-    os.makedirs(STATE, exist_ok=True)
-    write_json(kb_path(), json.dumps(cur, indent=2))
-    # Stamp it: the merged result is in TODAY's key scheme as far as we can
-    # tell, and an unstamped store is one load away from having its chrome
-    # and kitty entries dropped as stale -- which would undo the merge.
-    # Legacy keys in an older scheme simply never match and age out by TTL.
-    write_json(schema_path(), KB_SCHEMA)
-    os.replace(legacy, legacy + ".pre-profile")
-    sch = os.path.join(STATE, "knowledge.schema")
-    if os.path.exists(sch):
-      os.replace(sch, sch + ".pre-profile")
-    logline(f"adopted the pre-profile store into profile {profile_id()}: "
-            f"{added} entr{'y' if added == 1 else 'ies'} merged, "
-            f"{len(cur)} total")
-  except OSError as e:
-    logline(f"could not adopt the legacy store: {e}")
+    legacy = os.path.join(STATE, "knowledge.json")
+    if not os.path.exists(legacy):
+        return
+    try:
+        with open(legacy) as f:
+            old = json.load(f)
+    except (OSError, ValueError) as e:
+        logline(f"legacy store unreadable, leaving it alone: {e}")
+        return
+    try:
+        with open(kb_path()) as f:
+            cur = json.load(f)
+    except (OSError, ValueError):
+        cur = {}
+    added = 0
+    for k, v in old.items():
+        if k not in cur:
+            cur[k] = v
+            added += 1
+    try:
+        os.makedirs(STATE, exist_ok=True)
+        write_json(kb_path(), json.dumps(cur, indent=2))
+        # Stamp it: the merged result is in TODAY's key scheme as far as we can
+        # tell, and an unstamped store is one load away from having its chrome
+        # and kitty entries dropped as stale -- which would undo the merge.
+        # Legacy keys in an older scheme simply never match and age out by TTL.
+        write_json(schema_path(), KB_SCHEMA)
+        os.replace(legacy, legacy + ".pre-profile")
+        sch = os.path.join(STATE, "knowledge.schema")
+        if os.path.exists(sch):
+            os.replace(sch, sch + ".pre-profile")
+        logline(f"adopted the pre-profile store into profile {profile_id()}: "
+                f"{added} entr{'y' if added == 1 else 'ies'} merged, "
+                f"{len(cur)} total")
+    except OSError as e:
+        logline(f"could not adopt the legacy store: {e}")
 
 # Colour-invert is a SEPARATE mechanism (toggle_invert_focused, Super+N): a
 # per-view filters shader whose live state lives in its own store, keyed by the
@@ -365,31 +365,31 @@ INVERT_VALUE = "invert"
 
 
 def load_inverts():
-  """View-ids recorded colour-inverted, per toggle_invert_focused's store
+    """View-ids recorded colour-inverted, per toggle_invert_focused's store
   (keyed by view id as a string; presence == invert was toggled on). The store
   is invert-SPECIFIC but only session-live in spirit: view ids reset every
   wayfire session while this file persists, so it accumulates stale ids -- see
   is_inverted for why we gate it on the live shader. Best-effort: a missing or
   corrupt file means none are inverted."""
-  try:
-    with open(INVERT_STORE) as f:
-      return json.load(f)
-  except (OSError, ValueError):
-    return {}
+    try:
+        with open(INVERT_STORE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
 
 
 def store_mtime(path):
-  """mtime of a state file, 0 if absent. Used to notice the invert store
+    """mtime of a state file, 0 if absent. Used to notice the invert store
   changing: a Super+N toggle writes it but fires no view event, so the capture
   loop watches this to persist inversion on its own (see capture_loop)."""
-  try:
-    return os.stat(path).st_mtime
-  except OSError:
-    return 0
+    try:
+        return os.stat(path).st_mtime
+    except OSError:
+        return 0
 
 
 def is_inverted(sock, vid, inverts):
-  """True iff the view is colour-inverted RIGHT NOW: recorded in the invert
+    """True iff the view is colour-inverted RIGHT NOW: recorded in the invert
   store AND actually carrying a live filter shader. The store alone is not
   enough -- it is keyed by view id, and ids reset each session while the file
   persists, so a stale id reused by a fresh window would read as inverted (the
@@ -398,16 +398,16 @@ def is_inverted(sock, vid, inverts):
   excluded. (view-has-shader is not shader-specific -- one "filters"
   transformer name covers invert/monochrome/... -- but the store gate keeps
   the result invert-specific, and only Super+N writes the store.)"""
-  if vid is None or str(vid) not in inverts:
-    return False
-  try:
-    return bool(WPE(sock).view_has_shader(int(vid)).get("has-shader"))
-  except Exception:
-    return False
+    if vid is None or str(vid) not in inverts:
+        return False
+    try:
+        return bool(WPE(sock).view_has_shader(int(vid)).get("has-shader"))
+    except Exception:
+        return False
 
 
 def place_of(view, outputs):
-  """Frame-robust placement for one view: output name, ABSOLUTE workspace,
+    """Frame-robust placement for one view: output name, ABSOLUTE workspace,
   and position within that workspace.
 
   Wayfire reports view geometry relative to the output's current workspace
@@ -418,98 +418,98 @@ def place_of(view, outputs):
   NOTE: if a restored window ever lands one workspace off, this offset is
   the thing to re-check first (same caveat the old enforcer carried).
   """
-  name = view.get("output-name", "null")
-  geo = view.get("geometry", {}) or {}
-  gx, gy = geo.get("x", 0), geo.get("y", 0)
-  gw, gh = geo.get("width", 0), geo.get("height", 0)
+    name = view.get("output-name", "null")
+    geo = view.get("geometry", {}) or {}
+    gx, gy = geo.get("x", 0), geo.get("y", 0)
+    gw, gh = geo.get("width", 0), geo.get("height", 0)
 
-  o = outputs.get(name)
-  if not o:
-    return {"output": name, "workspace": [0, 0], "pos": [gx, gy],
-            "size": [gw, gh], "raw": [gx, gy]}
+    o = outputs.get(name)
+    if not o:
+        return {"output": name, "workspace": [0, 0], "pos": [gx, gy],
+                "size": [gw, gh], "raw": [gx, gy]}
 
-  ow = o["geometry"].get("width") or 1
-  oh = o["geometry"].get("height") or 1
-  cx = o["workspace"]["x"]
-  cy = o["workspace"]["y"]
-  # floor, not round: the workspace holding the window's ORIGIN. A window in
-  # the lower half of the current workspace (gy/oh ~ 0.5) is still on it, not
-  # the next one down; floor keeps pos within [0, output size) too.
-  rx = gx // ow
-  ry = gy // oh
-  return {
-      "output": name,
-      "workspace": [cx + rx, cy + ry],
-      "pos": [gx - rx * ow, gy - ry * oh],
-      "size": [gw, gh],
-      "raw": [gx, gy],   # raw geometry, kept for coordinate calibration
-  }
+    ow = o["geometry"].get("width") or 1
+    oh = o["geometry"].get("height") or 1
+    cx = o["workspace"]["x"]
+    cy = o["workspace"]["y"]
+    # floor, not round: the workspace holding the window's ORIGIN. A window in
+    # the lower half of the current workspace (gy/oh ~ 0.5) is still on it, not
+    # the next one down; floor keeps pos within [0, output size) too.
+    rx = gx // ow
+    ry = gy // oh
+    return {
+        "output": name,
+        "workspace": [cx + rx, cy + ry],
+        "pos": [gx - rx * ow, gy - ry * oh],
+        "size": [gw, gh],
+        "raw": [gx, gy],   # raw geometry, kept for coordinate calibration
+    }
 
 
 def snapshot(sock):
-  outputs = {o["name"]: o for o in sock.list_outputs()}
-  inverts = load_inverts()
-  windows = []
-  for v in sock.list_views(filter_mapped_toplevel=True):
-    title = v.get("title", "")
-    app = v.get("app-id") or v.get("app_id") or ""
-    if SKIP_TITLE.search(title) or is_transient(v):
-      continue   # work / scratch / transient-chrome: never record it
-    p = place_of(v, outputs)
-    pid = v.get("pid", -1)
-    windows.append({
-        "id": v.get("id"),   # wayfire view id: the in-session window key
-        "app_id": v.get("app-id") or v.get("app_id") or "",
-        "title": v.get("title", ""),
-        # The RESOLVED identity, recorded HERE because this is the only
-        # moment it can be: a plugin derives it from live state (kitty reads
-        # the shell's cwd out of /proc, chrome the SNSS file), and by the
-        # time anything replays this snapshot the pid is gone. Without it
-        # the relaunch path had only the raw title to match an identity-
-        # shaped prefix against, so it matched nothing and never fired.
-        "key": identity(v),
-        # How to bring this window BACK, asked of the live
-        # window while it can still answer. See
-        # WindowPlugin.relaunch_command.
-        "cmd": relaunch_command_for(v),
-        "pid": pid,
-        "output": p["output"],
-        "workspace": p["workspace"],
-        "pos": p["pos"],
-        "size": p["size"],
-        "tiled": v.get("tiled-edges", 0),
-        "fullscreen": bool(v.get("fullscreen", False)),
-        "sticky": bool(v.get("sticky", False)),
-        "inverted": is_inverted(sock, v.get("id"), inverts),
-        "raw_geometry": p["raw"],
-    })
-  return {
-      "version": 1,
-      "time": int(time.time()),
-      "host": os.uname().nodename,
-      "outputs": [{"name": o["name"], "geometry": o["geometry"],
-                   "workspace": o["workspace"]} for o in outputs.values()],
-      "windows": windows,
-  }
+    outputs = {o["name"]: o for o in sock.list_outputs()}
+    inverts = load_inverts()
+    windows = []
+    for v in sock.list_views(filter_mapped_toplevel=True):
+        title = v.get("title", "")
+        app = v.get("app-id") or v.get("app_id") or ""
+        if SKIP_TITLE.search(title) or is_transient(v):
+            continue   # work / scratch / transient-chrome: never record it
+        p = place_of(v, outputs)
+        pid = v.get("pid", -1)
+        windows.append({
+            "id": v.get("id"),   # wayfire view id: the in-session window key
+            "app_id": v.get("app-id") or v.get("app_id") or "",
+            "title": v.get("title", ""),
+            # The RESOLVED identity, recorded HERE because this is the only
+            # moment it can be: a plugin derives it from live state (kitty reads
+            # the shell's cwd out of /proc, chrome the SNSS file), and by the
+            # time anything replays this snapshot the pid is gone. Without it
+            # the relaunch path had only the raw title to match an identity-
+            # shaped prefix against, so it matched nothing and never fired.
+            "key": identity(v),
+            # How to bring this window BACK, asked of the live
+            # window while it can still answer. See
+            # WindowPlugin.relaunch_command.
+            "cmd": relaunch_command_for(v),
+            "pid": pid,
+            "output": p["output"],
+            "workspace": p["workspace"],
+            "pos": p["pos"],
+            "size": p["size"],
+            "tiled": v.get("tiled-edges", 0),
+            "fullscreen": bool(v.get("fullscreen", False)),
+            "sticky": bool(v.get("sticky", False)),
+            "inverted": is_inverted(sock, v.get("id"), inverts),
+            "raw_geometry": p["raw"],
+        })
+    return {
+        "version": 1,
+        "time": int(time.time()),
+        "host": os.uname().nodename,
+        "outputs": [{"name": o["name"], "geometry": o["geometry"],
+                     "workspace": o["workspace"]} for o in outputs.values()],
+        "windows": windows,
+    }
 
 
 def prune(dirpath, keep):
-  try:
-    files = sorted(os.listdir(dirpath))
-  except FileNotFoundError:
-    return
-  for f in files[:-keep]:
     try:
-      os.remove(os.path.join(dirpath, f))
-    except OSError:
-      pass
+        files = sorted(os.listdir(dirpath))
+    except FileNotFoundError:
+        return
+    for f in files[:-keep]:
+        try:
+            os.remove(os.path.join(dirpath, f))
+        except OSError:
+            pass
 
 
 def write_json(path, blob):
-  tmp = path + ".tmp"
-  with open(tmp, "w") as f:
-    f.write(blob)
-  os.replace(tmp, path)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(blob)
+    os.replace(tmp, path)
 
 
 # --- Chrome tab identity: the active-tab URL from the SNSS session file -----
@@ -530,14 +530,14 @@ CHROME_APPS = {"google-chrome", "chromium"}
 
 
 def is_chrome(app):
-  """Chrome/Chromium by app-id, case-INSENSITIVELY. A window that comes up
+    """Chrome/Chromium by app-id, case-INSENSITIVELY. A window that comes up
   through XWayland reports `Google-chrome` where the native Wayland one
   reports `google-chrome`, and BOTH turn up in a real store here. Matching
   only the lower-case form left the capitalised windows unclaimed by the
   plugin -- no URL identity, and invisible to the browser relaunch -- while
   is_browser() (a substring test) still treated them as browsers, so they got
   the settle delay and none of the benefit."""
-  return (app or "").lower() in CHROME_APPS
+    return (app or "").lower() in CHROME_APPS
 # Seconds between starting one Chrome profile and the next. Long enough for the
 # first invocation to become the browser process and open its singleton socket,
 # which is what the second one needs to talk to.
@@ -584,81 +584,81 @@ _SNSS_WINDOW_CLOSED = 17
 
 
 def _snss_i32(b, o):
-  return struct.unpack_from("<i", b, o)[0], o + 4
+    return struct.unpack_from("<i", b, o)[0], o + 4
 
 
 def _snss_str(b, o):          # Pickle WriteString: int32 len, bytes, pad to 4
-  n, o = _snss_i32(b, o)
-  if n < 0 or o + n > len(b):
-    raise ValueError("bad str")
-  s = b[o:o + n]
-  return s.decode("utf-8", "replace"), (o + n + 3) & ~3
+    n, o = _snss_i32(b, o)
+    if n < 0 or o + n > len(b):
+        raise ValueError("bad str")
+    s = b[o:o + n]
+    return s.decode("utf-8", "replace"), (o + n + 3) & ~3
 
 
 def _snss_str16(b, o):        # WriteString16: int32 nchars, 2*nchars, pad to 4
-  n, o = _snss_i32(b, o)
-  if n < 0 or o + 2 * n > len(b):
-    raise ValueError("bad str16")
-  s = b[o:o + 2 * n]
-  return s.decode("utf-16-le", "replace"), (o + 2 * n + 3) & ~3
+    n, o = _snss_i32(b, o)
+    if n < 0 or o + 2 * n > len(b):
+        raise ValueError("bad str16")
+    s = b[o:o + 2 * n]
+    return s.decode("utf-16-le", "replace"), (o + 2 * n + 3) & ~3
 
 
 def _snss_scan(path):
-  """Walk one session file's records into raw tables, or None if it is not a
+    """Walk one session file's records into raw tables, or None if it is not a
   session file. Split from parse_snss because the two halves fail differently:
   this one must survive a malformed record mid-stream, while resolving the
   tables afterwards is pure dict work that cannot."""
-  d = open(path, "rb").read()
-  if d[:4] != b"SNSS":
-    return None
-  off = 8                                     # skip magic + int32 version
-  tab_win, tab_idx, win_sel, tab_nav = {}, {}, {}, {}
-  nav, closed_tabs, closed_wins = {}, set(), set()
-  while off + 2 <= len(d):
-    (size,) = struct.unpack_from("<H", d, off)
-    off += 2
-    if size == 0 or off + size > len(d):
-      break
-    cid = d[off]
-    p = d[off + 1:off + size]
-    off += size
-    try:
-      if cid == _SNSS_SET_TAB_WINDOW:
-        w, o = _snss_i32(p, 0)
-        t, o = _snss_i32(p, o)
-        tab_win[t] = w
-      elif cid == _SNSS_SET_TAB_INDEX:
-        t, o = _snss_i32(p, 0)
-        i, o = _snss_i32(p, o)
-        tab_idx[t] = i
-      elif cid == _SNSS_SET_SEL_TAB_IN_WIN:
-        w, o = _snss_i32(p, 0)
-        i, o = _snss_i32(p, o)
-        win_sel[w] = i
-      elif cid == _SNSS_SET_SEL_NAV_INDEX:
-        t, o = _snss_i32(p, 0)
-        i, o = _snss_i32(p, o)
-        tab_nav[t] = i
-      elif cid == _SNSS_UPDATE_TAB_NAV:
-        _sz, o = _snss_i32(p, 0)         # pickle payload-size header
-        t, o = _snss_i32(p, o)
-        idx, o = _snss_i32(p, o)
-        url, o = _snss_str(p, o)
-        title, o = _snss_str16(p, o)
-        nav[(t, idx)] = (url, title)
-      elif cid == _SNSS_TAB_CLOSED:
-        t, o = _snss_i32(p, 0)
-        closed_tabs.add(t)
-      elif cid == _SNSS_WINDOW_CLOSED:
-        w, o = _snss_i32(p, 0)
-        closed_wins.add(w)
-    except Exception:
-      pass
-  return tab_win, tab_idx, win_sel, tab_nav, nav, closed_tabs, closed_wins
+    d = open(path, "rb").read()
+    if d[:4] != b"SNSS":
+        return None
+    off = 8                                     # skip magic + int32 version
+    tab_win, tab_idx, win_sel, tab_nav = {}, {}, {}, {}
+    nav, closed_tabs, closed_wins = {}, set(), set()
+    while off + 2 <= len(d):
+        (size,) = struct.unpack_from("<H", d, off)
+        off += 2
+        if size == 0 or off + size > len(d):
+            break
+        cid = d[off]
+        p = d[off + 1:off + size]
+        off += size
+        try:
+            if cid == _SNSS_SET_TAB_WINDOW:
+                w, o = _snss_i32(p, 0)
+                t, o = _snss_i32(p, o)
+                tab_win[t] = w
+            elif cid == _SNSS_SET_TAB_INDEX:
+                t, o = _snss_i32(p, 0)
+                i, o = _snss_i32(p, o)
+                tab_idx[t] = i
+            elif cid == _SNSS_SET_SEL_TAB_IN_WIN:
+                w, o = _snss_i32(p, 0)
+                i, o = _snss_i32(p, o)
+                win_sel[w] = i
+            elif cid == _SNSS_SET_SEL_NAV_INDEX:
+                t, o = _snss_i32(p, 0)
+                i, o = _snss_i32(p, o)
+                tab_nav[t] = i
+            elif cid == _SNSS_UPDATE_TAB_NAV:
+                _sz, o = _snss_i32(p, 0)         # pickle payload-size header
+                t, o = _snss_i32(p, o)
+                idx, o = _snss_i32(p, o)
+                url, o = _snss_str(p, o)
+                title, o = _snss_str16(p, o)
+                nav[(t, idx)] = (url, title)
+            elif cid == _SNSS_TAB_CLOSED:
+                t, o = _snss_i32(p, 0)
+                closed_tabs.add(t)
+            elif cid == _SNSS_WINDOW_CLOSED:
+                w, o = _snss_i32(p, 0)
+                closed_wins.add(w)
+        except Exception:
+            pass
+    return tab_win, tab_idx, win_sel, tab_nav, nav, closed_tabs, closed_wins
 
 
 def parse_snss(path):
-  """Parse one SNSS session file into {active_page_title: (window_id, url)}
+    """Parse one SNSS session file into {active_page_title: (window_id, url)}
   for its open windows -- each window's selected tab, at that tab's current
   navigation. Never raises: a malformed record is skipped, a bad file
   yields {}.
@@ -669,86 +669,86 @@ def parse_snss(path):
   --restore-last-session cycle. So it is a durable per-window handle, which
   the active-tab URL is not: a URL changes every time you switch tab, which
   is how one browser accumulated 1053 store entries describing 73 places."""
-  tabs = _snss_scan(path)
-  if tabs is None:
-    return {}
-  tab_win, tab_idx, win_sel, tab_nav, nav, closed_tabs, closed_wins = tabs
-  wins = {}
-  for t, w in tab_win.items():
-    if t in closed_tabs or w in closed_wins:
-      continue
-    wins.setdefault(w, []).append(t)
-  out = {}
-  for w, tabs_in_win in wins.items():
-    sel = win_sel.get(w)
-    active = next((t for t in tabs_in_win if tab_idx.get(t) == sel), None)
-    if active is None:
-      continue
-    entry = nav.get((active, tab_nav.get(active)))
-    if not entry:
-      continue
-    url, title = entry
-    if title and url:
-      out[title] = (w, url)
-  return out
+    tabs = _snss_scan(path)
+    if tabs is None:
+        return {}
+    tab_win, tab_idx, win_sel, tab_nav, nav, closed_tabs, closed_wins = tabs
+    wins = {}
+    for t, w in tab_win.items():
+        if t in closed_tabs or w in closed_wins:
+            continue
+        wins.setdefault(w, []).append(t)
+    out = {}
+    for w, tabs_in_win in wins.items():
+        sel = win_sel.get(w)
+        active = next((t for t in tabs_in_win if tab_idx.get(t) == sel), None)
+        if active is None:
+            continue
+        entry = nav.get((active, tab_nav.get(active)))
+        if not entry:
+            continue
+        url, title = entry
+        if title and url:
+            out[title] = (w, url)
+    return out
 
 
 _snss_cache = {"sig": None, "map": {}}
 
 
 def _session_files():
-  """Newest Session_* file per Chrome profile (browser windows only -- PWAs
+    """Newest Session_* file per Chrome profile (browser windows only -- PWAs
   live in a separate Apps session and already carry stable app-ids)."""
-  newest = {}
-  for f in glob.glob(os.path.expanduser(
-          "~/.config/google-chrome/*/Sessions/Session_*")):
-    prof = os.path.dirname(os.path.dirname(f))
-    try:
-      mt = os.path.getmtime(f)
-    except OSError:
-      continue
-    if prof not in newest or mt > newest[prof][1]:
-      newest[prof] = (f, mt)
-  return [v[0] for v in newest.values()]
+    newest = {}
+    for f in glob.glob(os.path.expanduser(
+            "~/.config/google-chrome/*/Sessions/Session_*")):
+        prof = os.path.dirname(os.path.dirname(f))
+        try:
+            mt = os.path.getmtime(f)
+        except OSError:
+            continue
+        if prof not in newest or mt > newest[prof][1]:
+            newest[prof] = (f, mt)
+    return [v[0] for v in newest.values()]
 
 
 def chrome_session_titles():
-  """Merged {page_title: (window_id, raw_url)} across profiles' current
+    """Merged {page_title: (window_id, raw_url)} across profiles' current
   sessions, cached and re-read only when a session file's mtime changes."""
-  files = _session_files()
-  try:
-    sig = tuple(sorted((f, os.path.getmtime(f)) for f in files))
-  except OSError:
-    sig = None
-  if sig != _snss_cache["sig"]:
-    merged = {}
-    for f in files:
-      try:
-        merged.update(parse_snss(f))
-      except Exception:
-        pass
-    _snss_cache["sig"] = sig
-    _snss_cache["map"] = merged
-  return _snss_cache["map"]
+    files = _session_files()
+    try:
+        sig = tuple(sorted((f, os.path.getmtime(f)) for f in files))
+    except OSError:
+        sig = None
+    if sig != _snss_cache["sig"]:
+        merged = {}
+        for f in files:
+            try:
+                merged.update(parse_snss(f))
+            except Exception:
+                pass
+        _snss_cache["sig"] = sig
+        _snss_cache["map"] = merged
+    return _snss_cache["map"]
 
 
 def _chrome_page_title(title):
-  """The page title, with the browser-name suffix stripped."""
-  for suf in CHROME_SUFFIXES:
-    if title.endswith(suf):
-      return title[:-len(suf)]
-  return title
+    """The page title, with the browser-name suffix stripped."""
+    for suf in CHROME_SUFFIXES:
+        if title.endswith(suf):
+            return title[:-len(suf)]
+    return title
 
 
 def chrome_window_for(title):
-  """The SLOT of a live Chrome window titled `title`: `chrome:win:<id>`,
+    """The SLOT of a live Chrome window titled `title`: `chrome:win:<id>`,
   joined through the session file on the ACTIVE TAB's page title.
 
   Keyed by the WINDOW, not by what it is displaying. Switching tab no longer
   makes a window a stranger, and revisiting a page seen weeks ago on another
   desktop no longer drags the window there, which the URL key did."""
-  hit = chrome_session_titles().get(_chrome_page_title(title))
-  return f"chrome:win:{hit[0]}" if hit else None
+    hit = chrome_session_titles().get(_chrome_page_title(title))
+    return f"chrome:win:{hit[0]}" if hit else None
 
 
 # --- plugin framework: app-specific window identity + restore --------------
@@ -768,105 +768,105 @@ _BROWSER_EXES = {"chrome", "chromium", "chromium-browser", "google-chrome",
 
 
 def _browser_pids():
-  """The BROWSER processes, which is the one per running browser that has no
+    """The BROWSER processes, which is the one per running browser that has no
   `--type=` in its argv. Everything else with the same name is a renderer,
   a gpu process or a zygote (55 of them against 1 browser, measured), and
   signalling those achieves nothing useful."""
-  out = []
-  for d in os.listdir("/proc"):
-    if not d.isdigit():
-      continue
-    try:
-      with open(f"/proc/{d}/cmdline", "rb") as f:
-        argv = f.read().split(b"\0")
-    except OSError:
-      continue
-    if not argv or not argv[0]:
-      continue
-    exe = os.path.basename(argv[0].decode("utf-8", "replace"))
-    if exe in _BROWSER_EXES and not any(a.startswith(b"--type=")
-                                        for a in argv):
-      out.append(int(d))
-  return out
+    out = []
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        try:
+            with open(f"/proc/{d}/cmdline", "rb") as f:
+                argv = f.read().split(b"\0")
+        except OSError:
+            continue
+        if not argv or not argv[0]:
+            continue
+        exe = os.path.basename(argv[0].decode("utf-8", "replace"))
+        if exe in _BROWSER_EXES and not any(a.startswith(b"--type=")
+                                            for a in argv):
+            out.append(int(d))
+    return out
 
 
 def chrome_profile_map():
-  """normalized-URL -> the Chrome PROFILE DIRECTORY that has it open.
+    """normalized-URL -> the Chrome PROFILE DIRECTORY that has it open.
 
   Built from the same SNSS session files the chrome identity is read from, so
   it needs no new state: the profile is simply where each file LIVES
   (.../<Profile>/Sessions/Session_*). The files survive a restart, which is
   how Chrome restores itself, so this is answerable at login before Chrome
   has started."""
-  out = {}
-  for p in _session_files():
-    prof = os.path.basename(os.path.dirname(os.path.dirname(p)))
-    try:
-      found = parse_snss(p)
-    except Exception:
-      continue
-    for win, _url in found.values():
-      out.setdefault(f"chrome:win:{win}", prof)
-  return out
+    out = {}
+    for p in _session_files():
+        prof = os.path.basename(os.path.dirname(os.path.dirname(p)))
+        try:
+            found = parse_snss(p)
+        except Exception:
+            continue
+        for win, _url in found.values():
+            out.setdefault(f"chrome:win:{win}", prof)
+    return out
 
 
 def chrome_profiles_for(saved):
-  """The profile directories to start, one per profile that actually had a
+    """The profile directories to start, one per profile that actually had a
   window last session, in first-seen order. Falls back to a single unnamed
   launch (Chrome's own choice, possibly the picker) when nothing can be
   matched -- no worse than before, and only when there is nothing to go on."""
-  pm = chrome_profile_map()
-  out = []
-  for w in saved:
-    if not is_chrome(w.get("app_id")):
-      continue
-    prof = pm.get(saved_key(w))
-    if prof and prof not in out:
-      out.append(prof)
-  return out or [None]
+    pm = chrome_profile_map()
+    out = []
+    for w in saved:
+        if not is_chrome(w.get("app_id")):
+            continue
+        prof = pm.get(saved_key(w))
+        if prof and prof not in out:
+            out.append(prof)
+    return out or [None]
 
 
 def _pview(v):
-  """Normalize a wayfire view, a snapshot window, or a kb entry to the fields
+    """Normalize a wayfire view, a snapshot window, or a kb entry to the fields
   plugins read: app, title, pid (-1 when absent, e.g. a stored entry)."""
-  if "app" in v and "app_id" not in v and "app-id" not in v:
-    return v                                # already normalized
-  return {"app": v.get("app-id") or v.get("app_id") or "",
-          "title": v.get("title", ""),
-          "pid": v.get("pid", -1)}
+    if "app" in v and "app_id" not in v and "app-id" not in v:
+        return v                                # already normalized
+    return {"app": v.get("app-id") or v.get("app_id") or "",
+            "title": v.get("title", ""),
+            "pid": v.get("pid", -1)}
 
 
 class WindowPlugin:
-  """Base + interface. A plugin CLAIMS an app's windows (owns) and can add
+    """Base + interface. A plugin CLAIMS an app's windows (owns) and can add
   stable identity, a transient test, a per-window id, and a way to respawn a
   missing window. Every window hook takes a normalized view (v["app"],
   v["title"], v["pid"]); the defaults make each opt-in."""
-  name = "base"
+    name = "base"
 
-  def owns(self, v):
-    return False
+    def owns(self, v):
+        return False
 
-  def identity(self, v):
-    return None       # a stable kb key, or None to defer to the raw title
+    def identity(self, v):
+        return None       # a stable kb key, or None to defer to the raw title
 
-  def transient(self, v):
-    return False      # never capture/place (a New Tab, a scratch terminal)
+    def transient(self, v):
+        return False      # never capture/place (a New Tab, a scratch terminal)
 
-  def relaunch_missing(self, saved, live):
-    return 0          # respawn this app's saved-but-absent windows; count
+    def relaunch_missing(self, saved, live):
+        return 0          # respawn this app's saved-but-absent windows; count
 
-  def relaunch_command(self, v):
-    """The command that brings THIS window back, read from the live window
+    def relaunch_command(self, v):
+        """The command that brings THIS window back, read from the live window
     while it can still be read, or None if the plugin has no opinion.
 
     Recorded per window at capture. That is the difference between asking
     "what was this window DOING" and inferring it from what the window is
     currently SHOWING: a title names one thing, and a window that can show
     many loses the rest."""
-    return None
+        return None
 
-  def wind_down(self, live):
-    """Ask this app's windows to exit CLEANLY, and return the pids asked.
+    def wind_down(self, live):
+        """Ask this app's windows to exit CLEANLY, and return the pids asked.
 
     The mirror of relaunch_missing: that one knows how to bring an app
     back, this one knows how to let it go. An app that needs nothing (a
@@ -875,7 +875,7 @@ class WindowPlugin:
 
     Return pids rather than waiting: the engine waits for all of them at
     once, under ONE bounded deadline, so no plugin can hold up a reboot."""
-    return []
+        return []
 
 
 # The hooks a plugin may implement, named ONCE: `plugins` and `doctor` both
@@ -892,183 +892,183 @@ _PLUGINS = None
 
 
 def plugins():
-  """The loaded plugin list -- built-ins first, then user plugins -- lazily
+    """The loaded plugin list -- built-ins first, then user plugins -- lazily
   built and cached. reload_plugins() drops the cache. mux is BEFORE kitty so a
   mux-attached kitty window is claimed by mux, the rest by kitty."""
-  global _PLUGINS
-  if _PLUGINS is None:
-    _PLUGINS = [ChromePlugin(), MuxPlugin(), KittyPlugin()] \
-        + _load_user_plugins()
-  return _PLUGINS
+    global _PLUGINS
+    if _PLUGINS is None:
+        _PLUGINS = [ChromePlugin(), MuxPlugin(), KittyPlugin()] \
+            + _load_user_plugins()
+    return _PLUGINS
 
 
 def reload_plugins():
-  global _PLUGINS
-  _PLUGINS = None
-  ps = plugins()
-  logline("plugins reloaded: "
-          + ", ".join(getattr(p, "name", "?") for p in ps))
+    global _PLUGINS
+    _PLUGINS = None
+    ps = plugins()
+    logline("plugins reloaded: "
+            + ", ".join(getattr(p, "name", "?") for p in ps))
 
 
 def _load_user_plugins():
-  """Import every ~/.config/session/plugins/*.py and collect its top-level
+    """Import every ~/.config/session/plugins/*.py and collect its top-level
   PLUGIN object. Best-effort: a bad plugin is logged and skipped, never
   crashing the headless daemon."""
-  import importlib.util
-  out = []
-  try:
-    files = sorted(glob.glob(os.path.join(PLUGIN_DIR, "*.py")))
-  except OSError:
-    files = []
-  for f in files:
+    import importlib.util
+    out = []
     try:
-      spec = importlib.util.spec_from_file_location(
-          "session_plugin_" + os.path.basename(f)[:-3], f)
-      mod = importlib.util.module_from_spec(spec)
-      spec.loader.exec_module(mod)
-      p = getattr(mod, "PLUGIN", None)
-      if p is not None:
-        out.append(p)
-    except Exception as e:
-      logline(f"plugin load error ({os.path.basename(f)}): {e}")
-  return out
+        files = sorted(glob.glob(os.path.join(PLUGIN_DIR, "*.py")))
+    except OSError:
+        files = []
+    for f in files:
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "session_plugin_" + os.path.basename(f)[:-3], f)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            p = getattr(mod, "PLUGIN", None)
+            if p is not None:
+                out.append(p)
+        except Exception as e:
+            logline(f"plugin load error ({os.path.basename(f)}): {e}")
+    return out
 
 
 def _owner(v):
-  """The first plugin that claims this window (normalized view), or None."""
-  v = _pview(v)
-  for p in plugins():
-    try:
-      if p.owns(v):
-        return p
-    except Exception:
-      pass
-  return None
+    """The first plugin that claims this window (normalized view), or None."""
+    v = _pview(v)
+    for p in plugins():
+        try:
+            if p.owns(v):
+                return p
+        except Exception:
+            pass
+    return None
 
 
 def identity(v):
-  """The kb KEY-title for a window -- the single chokepoint every keying site
+    """The kb KEY-title for a window -- the single chokepoint every keying site
   routes through (upsert, learn, match, place). An owning plugin's identity()
   wins (Chrome's URL, mux's session, kitty's cwd); otherwise the raw title."""
-  v = _pview(v)
-  p = _owner(v)
-  if p is not None:
-    try:
-      k = p.identity(v)
-      if k:
-        return k
-    except Exception:
-      pass
-  return v["title"]
+    v = _pview(v)
+    p = _owner(v)
+    if p is not None:
+        try:
+            k = p.identity(v)
+            if k:
+                return k
+        except Exception:
+            pass
+    return v["title"]
 
 
 def _single_id(v):
-  """An owning plugin's stable single-key identity for this window, or None to
+    """An owning plugin's stable single-key identity for this window, or None to
   fall through to the title-grouping path (non-owned apps). Drives the
   keying branch in upsert()/learn()."""
-  v = _pview(v)
-  p = _owner(v)
-  if p is not None:
-    try:
-      return p.identity(v)
-    except Exception:
-      pass
-  return None
+    v = _pview(v)
+    p = _owner(v)
+    if p is not None:
+        try:
+            return p.identity(v)
+        except Exception:
+            pass
+    return None
 
 
 def plugin_transient(v):
-  """True if this window's OWNING plugin marks it transient (a scratch
+    """True if this window's OWNING plugin marks it transient (a scratch
   terminal). Only the owner is consulted -- a plugin's hooks apply to the
   windows it claims, never another plugin's (e.g. kitty's cwd==$HOME scratch
   test must not fire on a mux window whose shell sits at $HOME)."""
-  v = _pview(v)
-  p = _owner(v)
-  if p is not None:
-    try:
-      return bool(p.transient(v))
-    except Exception:
-      pass
-  return False
+    v = _pview(v)
+    p = _owner(v)
+    if p is not None:
+        try:
+            return bool(p.transient(v))
+        except Exception:
+            pass
+    return False
 
 
 def is_owned(app):
-  """True if some plugin claims this app-id -- so its windows never drop to an
+    """True if some plugin claims this app-id -- so its windows never drop to an
   app_id-only key (the old FORCE_TITLE_APPS rule, now plugin-driven). By app
   alone (chrome/kitty own by app-id; mux is a title-keyed subset of the kitty
   app, already covered)."""
-  return _owner({"app": app, "title": "", "pid": -1}) is not None
+    return _owner({"app": app, "title": "", "pid": -1}) is not None
 
 
 def relaunch_command_for(v):
-  """The OWNING plugin's command for bringing this window back, or None.
+    """The OWNING plugin's command for bringing this window back, or None.
   Computed at CAPTURE, because a live window can be asked what it is doing
   and a stored one cannot."""
-  v = _pview(v)
-  p = _owner(v)
-  if p is not None:
-    try:
-      return p.relaunch_command(v)
-    except Exception:
-      pass
-  return None
+    v = _pview(v)
+    p = _owner(v)
+    if p is not None:
+        try:
+            return p.relaunch_command(v)
+        except Exception:
+            pass
+    return None
 
 
 # --- /proc window introspection (the kitty/mux plugins' stable-identity source)
 def _proc_children(pid):
-  try:
-    return [int(x) for x in
-            open(f"/proc/{pid}/task/{pid}/children").read().split()]
-  except OSError:
-    return []
+    try:
+        return [int(x) for x in
+                open(f"/proc/{pid}/task/{pid}/children").read().split()]
+    except OSError:
+        return []
 
 
 def _proc_argv0(pid):
-  try:
-    with open(f"/proc/{pid}/cmdline", "rb") as f:
-      a0 = f.read().split(b"\0", 1)[0]
-    return os.path.basename(a0.decode("utf-8", "replace"))
-  except OSError:
-    return ""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            a0 = f.read().split(b"\0", 1)[0]
+        return os.path.basename(a0.decode("utf-8", "replace"))
+    except OSError:
+        return ""
 
 
 def _term_cwd(pid):
-  """The working dir of a kitty window's SHELL -- its first non-helper child's
+    """The working dir of a kitty window's SHELL -- its first non-helper child's
   cwd. kitty itself stays at $HOME (--directory), but the shell's cwd tracks
   the user's cd, so it is where the window 'is'. '' if unreadable/none."""
-  if not pid or pid < 0:
+    if not pid or pid < 0:
+        return ""
+    for k in _proc_children(pid):
+        if _proc_argv0(k) in ("kitten", "kitty"):
+            continue                            # skip kitty's atexit helper
+        try:
+            return os.readlink(f"/proc/{k}/cwd")
+        except OSError:
+            return ""
     return ""
-  for k in _proc_children(pid):
-    if _proc_argv0(k) in ("kitten", "kitty"):
-      continue                            # skip kitty's atexit helper
-    try:
-      return os.readlink(f"/proc/{k}/cwd")
-    except OSError:
-      return ""
-  return ""
 
 
 def _proc_argv(pid):
-  try:
-    with open(f"/proc/{pid}/cmdline", "rb") as f:
-      return [x.decode("utf-8", "replace")
-              for x in f.read().split(b"\0") if x]
-  except OSError:
-    return []
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return [x.decode("utf-8", "replace")
+                    for x in f.read().split(b"\0") if x]
+    except OSError:
+        return []
 
 
 def _latch_target_in(argv):
-  """The HOST[:SESSION] in one process's argv, if it is a mux latch. Pure, so
+    """The HOST[:SESSION] in one process's argv, if it is a mux latch. Pure, so
   the matching is testable without a live process tree -- which matters
   because this is what decides whether a window is replayed as a latch or
   falls back to `mux resume`."""
-  for i, a in enumerate(argv):
-    if os.path.basename(a) == "mux-latch" and i + 1 < len(argv):
-      return argv[i + 1]
-  return None
+    for i, a in enumerate(argv):
+        if os.path.basename(a) == "mux-latch" and i + 1 < len(argv):
+            return argv[i + 1]
+    return None
 
 
 def _term_latch_target(pid):
-  """The HOST[:SESSION] a `mux latch` running in this window is holding, or
+    """The HOST[:SESSION] a `mux latch` running in this window is holding, or
   None.
 
   latch is the ONE mux verb that can be seen after the fact. It is a
@@ -1082,26 +1082,26 @@ def _term_latch_target(pid):
   `/bin/sh .../libexec/mux-latch <target>` and argv0 is the shell. The scan
   itself is _latch_target_in, kept separate so it can be tested without a
   process tree."""
-  for p in [pid] + _proc_children(pid):
-    for kid in [p] + _proc_children(p):
-      hit = _latch_target_in(_proc_argv(kid))
-      if hit:
-        return hit
-  return None
+    for p in [pid] + _proc_children(pid):
+        for kid in [p] + _proc_children(p):
+            hit = _latch_target_in(_proc_argv(kid))
+            if hit:
+                return hit
+    return None
 
 
 def mux_session_of(title):
-  """The mux SESSION from a `session:window` banner -- the durable unit that
+    """The mux SESSION from a `session:window` banner -- the durable unit that
   `mux go`/`mux ls` name (#{session_name}). Strips a leading [LABEL] context
   prefix, then takes up to the first ":". None if not a session banner."""
-  t = re.sub(r"^\[[^\]]*\]\s*", "", title.strip())
-  if ":" not in t:
-    return None
-  return t.split(":", 1)[0].strip() or None
+    t = re.sub(r"^\[[^\]]*\]\s*", "", title.strip())
+    if ":" not in t:
+        return None
+    return t.split(":", 1)[0].strip() or None
 
 
 def mux_host_of(title):
-  """The HOST a mux session lives on, from the TRAILING `[host]` tag mux
+    """The HOST a mux session lives on, from the TRAILING `[host]` tag mux
   stamps into the terminal title (its set-titles-string ends in the tmux
   format `[#{host_short}]`). That tag names the tmux SERVER's host, so a
   session reached over ssh reads as the REMOTE box and a local one as this
@@ -1117,10 +1117,10 @@ def mux_host_of(title):
   looks like a banner). Callers treat that as local, which is what it was
   before mux stamped the host. Anchored at the END so the LEADING [LABEL]
   context prefix (a work banner) is never mistaken for it."""
-  m = re.search(r"\[([^\[\]]+)\]\s*$", title.strip())
-  if not m:
-    return None
-  return m.group(1).strip() or None
+    m = re.search(r"\[([^\[\]]+)\]\s*$", title.strip())
+    if not m:
+        return None
+    return m.group(1).strip() or None
 
 
 # A terminal's SLOT: what it owns a remembered place as. Keyed by the COMMAND
@@ -1143,23 +1143,23 @@ TERM_KEY_RE = re.compile(r"^term:")
 
 
 def _mux_slot(latch_target):
-  return f"term:latch {latch_target}" if latch_target else "term:resume"
+    return f"term:latch {latch_target}" if latch_target else "term:resume"
 
 
 class ChromePlugin(WindowPlugin):
-  """Chrome / Chromium: identity is the active-tab URL read from the SNSS
+    """Chrome / Chromium: identity is the active-tab URL read from the SNSS
   session file, keyed by its stable window id. Transient states (a blank
   profile picker) are handled by the session/exclude config, not here."""
-  name = "chrome"
+    name = "chrome"
 
-  def owns(self, v):
-    return is_chrome(v["app"])
+    def owns(self, v):
+        return is_chrome(v["app"])
 
-  def identity(self, v):
-    return chrome_window_for(v["title"])
+    def identity(self, v):
+        return chrome_window_for(v["title"])
 
-  def wind_down(self, live):
-    """SIGTERM the BROWSER process. Measured on Chrome 154: it exits in
+    def wind_down(self, live):
+        """SIGTERM the BROWSER process. Measured on Chrome 154: it exits in
     about a second and records profile.exit_type = "SessionEnded".
 
     That is the whole point. Killed mid-flight -- which is what a bare
@@ -1167,16 +1167,16 @@ class ChromePlugin(WindowPlugin):
     compositor still needed -- the profile keeps exit_type = "Crashed",
     and every subsequent login opens with a "Chrome didn't shut down
     correctly" prompt instead of the windows."""
-    pids = _browser_pids()
-    for p in pids:
-      try:
-        os.kill(p, signal.SIGTERM)
-      except OSError:
-        pass
-    return pids
+        pids = _browser_pids()
+        for p in pids:
+            try:
+                os.kill(p, signal.SIGTERM)
+            except OSError:
+                pass
+        return pids
 
-  def relaunch_missing(self, saved, live):
-    """Start the browser if the last session had Chrome windows and none
+    def relaunch_missing(self, saved, live):
+        """Start the browser if the last session had Chrome windows and none
     is running now. Chrome restores its OWN windows, but only once
     something starts it -- so on a login where nothing did, usher was
     leaving the largest part of the desk shut. It starts the browser and
@@ -1186,39 +1186,39 @@ class ChromePlugin(WindowPlugin):
     with several profiles and no `Default` opens the profile PICKER and
     waits for a human, restoring nothing at all -- so the one thing usher
     had to get right about starting it was which profile to start."""
-    if not any(is_chrome(w.get("app_id")) for w in saved):
-      return 0
-    if any(is_chrome(_pview(v)["app"]) for v in live):
-      return 0
-    exe = next((shutil.which(c) for c in
-                ("google-chrome", "google-chrome-stable", "chromium",
-                 "chromium-browser") if shutil.which(c)), None)
-    if not exe:
-      return 0
-    n = 0
-    for prof in chrome_profiles_for(saved):
-      if n:
-        # STAGGER. Chrome is a singleton per user-data-dir: the first
-        # invocation becomes the browser process and later ones hand
-        # their request to it over a socket that does not exist yet.
-        # Firing both in the same second is a race, and the loser does
-        # not restore its session. Observed on manifold, where two
-        # profiles were launched in the same second and only one came
-        # back with its windows.
-        time.sleep(CHROME_STAGGER)
-      argv = ([exe] + CHROME_FLAGS
-              + ([f"--profile-directory={prof}"] if prof else []))
-      subprocess.Popen(argv, start_new_session=True,
-                       stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL)
-      n += 1
-      _announce("launch  " + " ".join(
-          [os.path.basename(exe)] + argv[1:]))
-    return n
+        if not any(is_chrome(w.get("app_id")) for w in saved):
+            return 0
+        if any(is_chrome(_pview(v)["app"]) for v in live):
+            return 0
+        exe = next((shutil.which(c) for c in
+                    ("google-chrome", "google-chrome-stable", "chromium",
+                     "chromium-browser") if shutil.which(c)), None)
+        if not exe:
+            return 0
+        n = 0
+        for prof in chrome_profiles_for(saved):
+            if n:
+                # STAGGER. Chrome is a singleton per user-data-dir: the first
+                # invocation becomes the browser process and later ones hand
+                # their request to it over a socket that does not exist yet.
+                # Firing both in the same second is a race, and the loser does
+                # not restore its session. Observed on manifold, where two
+                # profiles were launched in the same second and only one came
+                # back with its windows.
+                time.sleep(CHROME_STAGGER)
+            argv = ([exe] + CHROME_FLAGS
+                    + ([f"--profile-directory={prof}"] if prof else []))
+            subprocess.Popen(argv, start_new_session=True,
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+            n += 1
+            _announce("launch  " + " ".join(
+                [os.path.basename(exe)] + argv[1:]))
+        return n
 
 
 class MuxPlugin(WindowPlugin):
-  """mux-attached kitty terminals -- a kitty window wearing a mux
+    """mux-attached kitty terminals -- a kitty window wearing a mux
   `session:window` banner (is_mux_term). Identity is the mux SESSION plus the
   HOST it lives on (`mux@<host>:<session>`), both parsed from the title: the
   session is the durable unit `mux go` names, and the host is the trailing tag
@@ -1230,57 +1230,57 @@ class MuxPlugin(WindowPlugin):
   slot back, and differs only in how it respawns -- `mux go` here, the same
   through `ssh` there. Respawn is the sole mux-BINARY touchpoint, best-effort
   so it no-ops without mux (the soft dep)."""
-  name = "mux"
+    name = "mux"
 
-  def owns(self, v):
-    return is_mux_term(v["app"], v["title"])
+    def owns(self, v):
+        return is_mux_term(v["app"], v["title"])
 
-  def identity(self, v):
-    """The SLOT, from the command this window runs. See TERM_KEY_RE.
+    def identity(self, v):
+        """The SLOT, from the command this window runs. See TERM_KEY_RE.
 
     A STORED entry (pid < 0) cannot be asked, but does not need to be: the
     slot was resolved at capture and recorded in the snapshot's `key`."""
-    return _mux_slot(_term_latch_target(v.get("pid", -1)))
+        return _mux_slot(_term_latch_target(v.get("pid", -1)))
 
-  def relaunch_command(self, v):
-    """A latch if one is running here, otherwise nothing, which the
+    def relaunch_command(self, v):
+        """A latch if one is running here, otherwise nothing, which the
     relaunch reads as `mux resume`. See MUX_RESUME for why that default is
     right rather than merely convenient."""
-    t = _term_latch_target(v.get("pid", -1))
-    return f"{shlex.quote(MUX_BIN)} latch {shlex.quote(t)}" if t else None
+        t = _term_latch_target(v.get("pid", -1))
+        return f"{shlex.quote(MUX_BIN)} latch {shlex.quote(t)}" if t else None
 
-  def relaunch_missing(self, saved, live):
-    return mux_relaunch_missing(saved, live)
+    def relaunch_missing(self, saved, live):
+        return mux_relaunch_missing(saved, live)
 
 
 class KittyPlugin(WindowPlugin):
-  """Non-mux kitty terminals -- a shell or a program (e.g. Claude Code) in a
+    """Non-mux kitty terminals -- a shell or a program (e.g. Claude Code) in a
   working dir. Claims any kitty window mux did not (registry order). Identity
   is the shell's CWD from /proc (`kitty:<cwd>`), so the window keeps its place
   across restarts regardless of the volatile title. A bare shell sitting at
   $HOME is a scratch terminal (transient). Respawns a missing one as a plain
   shell in that cwd (`kitty --directory` -- deliberately NOT re-running the
   captured command)."""
-  name = "kitty"
+    name = "kitty"
 
-  def owns(self, v):
-    return v["app"] == "kitty"
+    def owns(self, v):
+        return v["app"] == "kitty"
 
-  def transient(self, v):
-    # a live window: a shell at $HOME (or an unreadable proc) is scratch. A
-    # stored entry (pid<0) is never re-judged transient -- it was kept at
-    # capture; fall back to the title scratch test so prune_kb stays safe.
-    if v["pid"] and v["pid"] > 0:
-      cwd = _term_cwd(v["pid"])
-      return (not cwd) or cwd == HOME
-    return is_scratch_term(v["app"], v["title"])
+    def transient(self, v):
+        # a live window: a shell at $HOME (or an unreadable proc) is scratch. A
+        # stored entry (pid<0) is never re-judged transient -- it was kept at
+        # capture; fall back to the title scratch test so prune_kb stays safe.
+        if v["pid"] and v["pid"] > 0:
+            cwd = _term_cwd(v["pid"])
+            return (not cwd) or cwd == HOME
+        return is_scratch_term(v["app"], v["title"])
 
-  def identity(self, v):
-    cwd = _term_cwd(v["pid"])
-    return f"kitty:{cwd}" if cwd and cwd != HOME else None
+    def identity(self, v):
+        cwd = _term_cwd(v["pid"])
+        return f"kitty:{cwd}" if cwd and cwd != HOME else None
 
-  def relaunch_missing(self, saved, live):
-    return kitty_relaunch_missing(saved, live)
+    def relaunch_missing(self, saved, live):
+        return kitty_relaunch_missing(saved, live)
 
 
 # --- knowledge base: identity -> latest placement -------------------------
@@ -1299,7 +1299,7 @@ KNOWLEDGE_TTL = 30 * 86400
 # Distinct --app Chrome ids (chrome-mail.google.com__-Default, ...) are NOT
 # owned: they are genuinely unique per app and stay title-independent.
 def kkey(app_id, title):
-  return f"{app_id}\x00{title}"
+    return f"{app_id}\x00{title}"
 
 
 # Bump when the key scheme changes. Schema 2 moved Chrome off per-page-title
@@ -1322,78 +1322,78 @@ _MIGRATE_APPS = CHROME_APPS | {"kitty"}
 
 
 def migrate_kb(kb):
-  """One-time store migration, idempotent via a schema stamp beside the kb.
+    """One-time store migration, idempotent via a schema stamp beside the kb.
   On a stale/absent schema, drop every Chrome + kitty title-keyed entry so
   relearn under the new identities, then stamp -- so a boot after the upgrade
   collapses the accumulated per-title pile instead of carrying it."""
-  sp = schema_path()
-  try:
-    cur = open(sp).read().strip()
-  except OSError:
-    cur = ""
-  if cur == KB_SCHEMA:
-    return
-  for k in [k for k in kb if k.split("\x00", 1)[0] in _MIGRATE_APPS]:
-    del kb[k]
-  try:
-    os.makedirs(STATE, exist_ok=True)
-    save_knowledge(kb)
-    write_json(sp, KB_SCHEMA)
-  except OSError:
-    pass
+    sp = schema_path()
+    try:
+        cur = open(sp).read().strip()
+    except OSError:
+        cur = ""
+    if cur == KB_SCHEMA:
+        return
+    for k in [k for k in kb if k.split("\x00", 1)[0] in _MIGRATE_APPS]:
+        del kb[k]
+    try:
+        os.makedirs(STATE, exist_ok=True)
+        save_knowledge(kb)
+        write_json(sp, KB_SCHEMA)
+    except OSError:
+        pass
 
 
 def load_knowledge():
-  """The knowledge base for the CURRENT display profile. A monitor set with
+    """The knowledge base for the CURRENT display profile. A monitor set with
   nothing learned yet starts empty (and seeds from the last snapshot), which
   is right: the placements from another desk would not fit here anyway."""
-  adopt_legacy_store()
-  try:
-    kb = json.load(open(kb_path()))
-  except (FileNotFoundError, ValueError):
-    # A store that does not exist yet is CURRENT by construction, so stamp
-    # it NOW. Without this, the first monitor set to be seen writes an
-    # unstamped store, and the very next load judges it stale and drops
-    # exactly the chrome + kitty entries it has just learned -- every new
-    # desk silently losing its browser and terminal placements once.
+    adopt_legacy_store()
     try:
-      os.makedirs(STATE, exist_ok=True)
-      write_json(schema_path(), KB_SCHEMA)
-    except OSError:
-      pass
-    snap = _load_snapshot()    # seed from the latest snapshot if present
-    if snap is None:
-      return {}
-    kb = {}
-    upsert(kb, snap["windows"], snap["time"])
+        kb = json.load(open(kb_path()))
+    except (FileNotFoundError, ValueError):
+        # A store that does not exist yet is CURRENT by construction, so stamp
+        # it NOW. Without this, the first monitor set to be seen writes an
+        # unstamped store, and the very next load judges it stale and drops
+        # exactly the chrome + kitty entries it has just learned -- every new
+        # desk silently losing its browser and terminal placements once.
+        try:
+            os.makedirs(STATE, exist_ok=True)
+            write_json(schema_path(), KB_SCHEMA)
+        except OSError:
+            pass
+        snap = _load_snapshot()    # seed from the latest snapshot if present
+        if snap is None:
+            return {}
+        kb = {}
+        upsert(kb, snap["windows"], snap["time"])
+        return kb
+    migrate_kb(kb)
     return kb
-  migrate_kb(kb)
-  return kb
 
 
 def is_unique(app, counts):
-  """True if this app_id identifies exactly one window (so it can key by
+    """True if this app_id identifies exactly one window (so it can key by
   app_id alone, title-independent). A plugin-owned app is never unique, even
   when momentarily alone -- its windows share an app_id (see is_owned)."""
-  return counts[app] == 1 and not is_owned(app)
+    return counts[app] == 1 and not is_owned(app)
 
 
 def kb_entry(w, title, appid_only, when):
-  """A knowledge record for one identity at window w's current placement.
+    """A knowledge record for one identity at window w's current placement.
   `title` is the KEY-title (identity() -- a URL for Chrome); `label` keeps the
   human window title for logs, since the key may no longer read as one."""
-  return {
-      "app_id": w["app_id"], "title": title, "appid_only": appid_only,
-      "label": w.get("title", ""),
-      "output": w["output"], "workspace": w["workspace"],
-      "pos": w["pos"], "size": w["size"],
-      "sticky": bool(w.get("sticky", False)),
-      "inverted": bool(w.get("inverted", False)), "last_seen": when,
-  }
+    return {
+        "app_id": w["app_id"], "title": title, "appid_only": appid_only,
+        "label": w.get("title", ""),
+        "output": w["output"], "workspace": w["workspace"],
+        "pos": w["pos"], "size": w["size"],
+        "sticky": bool(w.get("sticky", False)),
+        "inverted": bool(w.get("inverted", False)), "last_seen": when,
+    }
 
 
 def prune_kb(kb, when):
-  """Drop aged-out entries, work-tagged entries, and stale per-title entries
+    """Drop aged-out entries, work-tagged entries, and stale per-title entries
   for an app now keyed by app_id (an app_id-only key ends in NUL).
 
   A plugin-owned app must never carry an app_id-only key. If a stale one
@@ -1404,111 +1404,111 @@ def prune_kb(kb, when):
   this). So enforce the invariant rather than assume it: drop such keys
   outright, and keep owned apps out of appid_keyed so their per-title set
   survives."""
-  appid_keyed = {k[:-1] for k in kb
-                 if k.endswith("\x00") and not is_owned(k[:-1])}
-  cutoff = when - KNOWLEDGE_TTL
-  for k in [k for k, v in kb.items()
-            if v.get("last_seen", 0) < cutoff
-            or SKIP_TITLE.search(v.get("title", ""))
-            or is_transient(v)
-            or (k.endswith("\x00") and is_owned(k[:-1]))
-            or ("\x00" in k and not k.endswith("\x00")
-                and k.split("\x00", 1)[0] in appid_keyed)]:
-    del kb[k]
+    appid_keyed = {k[:-1] for k in kb
+                   if k.endswith("\x00") and not is_owned(k[:-1])}
+    cutoff = when - KNOWLEDGE_TTL
+    for k in [k for k, v in kb.items()
+              if v.get("last_seen", 0) < cutoff
+              or SKIP_TITLE.search(v.get("title", ""))
+              or is_transient(v)
+              or (k.endswith("\x00") and is_owned(k[:-1]))
+              or ("\x00" in k and not k.endswith("\x00")
+                  and k.split("\x00", 1)[0] in appid_keyed)]:
+        del kb[k]
 
 
 def upsert(kb, windows, when):
-  """One-shot knowledge update (no view-id grouping): record each window's
+    """One-shot knowledge update (no view-id grouping): record each window's
   CURRENT identity. Unique-app_id windows key by app_id alone; the rest by
   title. Used by `session-mgr capture` and the seed-from-snapshot path;
   the watch daemon uses learn() instead, which groups a window's tabs by
   view id."""
-  counts = Counter(w["app_id"] for w in windows)
-  for w in windows:
-    app = w["app_id"]
-    key = _single_id(w)   # plugin single identity (chrome/mux/kitty)
-    if is_unique(app, counts):
-      kb[kkey(app, "")] = kb_entry(w, w["title"], True, when)
-    elif key:
-      kb[kkey(app, key)] = kb_entry(w, key, False, when)
-    elif w["title"]:
-      kb[kkey(app, w["title"])] = kb_entry(w, w["title"], False, when)
-  prune_kb(kb, when)
+    counts = Counter(w["app_id"] for w in windows)
+    for w in windows:
+        app = w["app_id"]
+        key = _single_id(w)   # plugin single identity (chrome/mux/kitty)
+        if is_unique(app, counts):
+            kb[kkey(app, "")] = kb_entry(w, w["title"], True, when)
+        elif key:
+            kb[kkey(app, key)] = kb_entry(w, key, False, when)
+        elif w["title"]:
+            kb[kkey(app, w["title"])] = kb_entry(w, w["title"], False, when)
+    prune_kb(kb, when)
 
 
 def _learn_degroup(kb, groups, ambiguous, live):
-  """Drop titles two live views share, and retire groups whose window closed.
+    """Drop titles two live views share, and retire groups whose window closed.
   A title on two windows at once is not a discriminator."""
-  # Degroup: purge now-ambiguous titles from every group and the store.
-  for app, title in ambiguous:
-    kb.pop(kkey(app, title), None)
-  for g in groups.values():
-    g["titles"] -= {t for a, t in ambiguous if a == g["app"]}
+    # Degroup: purge now-ambiguous titles from every group and the store.
+    for app, title in ambiguous:
+        kb.pop(kkey(app, title), None)
+    for g in groups.values():
+        g["titles"] -= {t for a, t in ambiguous if a == g["app"]}
 
-  # Retire groups whose window closed (their kb entries linger under the TTL).
-  for vid in [v for v in groups if v not in live]:
-    del groups[vid]
+    # Retire groups whose window closed (their kb entries linger under the TTL).
+    for vid in [v for v in groups if v not in live]:
+        del groups[vid]
 
 
 def _learn_fold(groups, windows, ambiguous):
-  """Fold each live view's current title into its group."""
-  # Fold each live view's current title into its group.
-  for w in windows:
-    vid = w.get("id")
-    if vid is None:
-      continue
-    g = groups.setdefault(vid, {"app": w["app_id"], "titles": set()})
-    g["app"] = w["app_id"]
-    if w["title"] and (w["app_id"], w["title"]) not in ambiguous:
-      if is_mux_term(w["app_id"], w["title"]):
-        g["titles"] = {w["title"]}   # terminal: only current session
-      else:
-        g["titles"].add(w["title"])
+    """Fold each live view's current title into its group."""
+    # Fold each live view's current title into its group.
+    for w in windows:
+        vid = w.get("id")
+        if vid is None:
+            continue
+        g = groups.setdefault(vid, {"app": w["app_id"], "titles": set()})
+        g["app"] = w["app_id"]
+        if w["title"] and (w["app_id"], w["title"]) not in ambiguous:
+            if is_mux_term(w["app_id"], w["title"]):
+                g["titles"] = {w["title"]}   # terminal: only current session
+            else:
+                g["titles"].add(w["title"])
 
 
 def _learn_stamp(kb, groups, windows, counts, when):
-  """Write each live view's placement under the right key."""
-  # Stamp: unique-app_id -> app_id key; a plugin single-identity (Chrome ->
-  # its ONE active-tab URL, no title accumulation, restored whatever tab was
-  # active) -> that key; other shared apps (mux terminals) -> every title in
-  # the view's group, all at the view's current placement.
-  for w in windows:
-    app, vid = w["app_id"], w.get("id")
-    key = _single_id(w)
-    if is_unique(app, counts):
-      kb[kkey(app, "")] = kb_entry(w, w["title"], True, when)
-    elif key:
-      kb[kkey(app, key)] = kb_entry(w, key, False, when)
-    elif vid is not None and vid in groups:
-      for t in groups[vid]["titles"]:
-        kb[kkey(app, t)] = kb_entry(w, t, False, when)
+    """Write each live view's placement under the right key."""
+    # Stamp: unique-app_id -> app_id key; a plugin single-identity (Chrome ->
+    # its ONE active-tab URL, no title accumulation, restored whatever tab was
+    # active) -> that key; other shared apps (mux terminals) -> every title in
+    # the view's group, all at the view's current placement.
+    for w in windows:
+        app, vid = w["app_id"], w.get("id")
+        key = _single_id(w)
+        if is_unique(app, counts):
+            kb[kkey(app, "")] = kb_entry(w, w["title"], True, when)
+        elif key:
+            kb[kkey(app, key)] = kb_entry(w, key, False, when)
+        elif vid is not None and vid in groups:
+            for t in groups[vid]["titles"]:
+                kb[kkey(app, t)] = kb_entry(w, t, False, when)
 
 
 def _learn_purge_terminals(kb, windows):
-  """Drop terminal entries no live window shows."""
-  # Mux terminals: keep only the session each window CURRENTLY shows. A window
-  # that cycled sessions leaves the old titles in the store, where they would
-  # relaunch as phantom windows or yank a different window that later shows
-  # that session. Drop any mux-terminal entry no live window shows.
-  #
-  # BOTH sides must be IDENTITIES. A kb entry's "title" field is the KEY-title
-  # (kb_entry stamps identity(), not the window title), so comparing it to raw
-  # window titles never matched and this block deleted every terminal entry it
-  # had just written, on every pass -- terminals were therefore never placed
-  # at all. And the entry is selected by its KEY SHAPE, not by is_mux_term on
-  # that key: is_mux_term only asks "kitty, with a colon?", which a
-  # kitty:<cwd> key also satisfies, so the mux purge was sweeping plain kitty
-  # windows out too.
-  live_terms = {identity(w) for w in windows
-                if is_mux_term(w["app_id"], w["title"])}
-  for k in [k for k, v in kb.items()
-            if TERM_KEY_RE.match(v.get("title", ""))
-            and v.get("title") not in live_terms]:
-    del kb[k]
+    """Drop terminal entries no live window shows."""
+    # Mux terminals: keep only the session each window CURRENTLY shows. A window
+    # that cycled sessions leaves the old titles in the store, where they would
+    # relaunch as phantom windows or yank a different window that later shows
+    # that session. Drop any mux-terminal entry no live window shows.
+    #
+    # BOTH sides must be IDENTITIES. A kb entry's "title" field is the KEY-title
+    # (kb_entry stamps identity(), not the window title), so comparing it to raw
+    # window titles never matched and this block deleted every terminal entry it
+    # had just written, on every pass -- terminals were therefore never placed
+    # at all. And the entry is selected by its KEY SHAPE, not by is_mux_term on
+    # that key: is_mux_term only asks "kitty, with a colon?", which a
+    # kitty:<cwd> key also satisfies, so the mux purge was sweeping plain kitty
+    # windows out too.
+    live_terms = {identity(w) for w in windows
+                  if is_mux_term(w["app_id"], w["title"])}
+    for k in [k for k, v in kb.items()
+              if TERM_KEY_RE.match(v.get("title", ""))
+              and v.get("title") not in live_terms]:
+        del kb[k]
 
 
 def learn(kb, groups, windows, when):
-  """Watch-time knowledge update with view-id tab-grouping.
+    """Watch-time knowledge update with view-id tab-grouping.
 
   Each live view -- keyed by its wayfire id, stable for the window's whole
   life -- owns the set of titles it has shown. Every title in the set is
@@ -1522,55 +1522,55 @@ def learn(kb, groups, windows, when):
   fresh ids next session, self-healing. Unique-app_id windows (--app Gmail)
   stay keyed by app_id alone; kitty is forced to per-title keys; Chrome keys
   by its active-tab URL identity (see identity(), stamped below)."""
-  counts = Counter(w["app_id"] for w in windows)
-  tcount = Counter((w["app_id"], w["title"]) for w in windows if w["title"])
-  ambiguous = {k for k, c in tcount.items() if c >= 2}
-  live = {w["id"] for w in windows if w.get("id") is not None}
-  _learn_degroup(kb, groups, ambiguous, live)
-  _learn_fold(groups, windows, ambiguous)
-  _learn_stamp(kb, groups, windows, counts, when)
-  _learn_purge_terminals(kb, windows)
-  prune_kb(kb, when)
+    counts = Counter(w["app_id"] for w in windows)
+    tcount = Counter((w["app_id"], w["title"]) for w in windows if w["title"])
+    ambiguous = {k for k, c in tcount.items() if c >= 2}
+    live = {w["id"] for w in windows if w.get("id") is not None}
+    _learn_degroup(kb, groups, ambiguous, live)
+    _learn_fold(groups, windows, ambiguous)
+    _learn_stamp(kb, groups, windows, counts, when)
+    _learn_purge_terminals(kb, windows)
+    prune_kb(kb, when)
 
 
 def save_knowledge(kb):
-  write_json(kb_path(), json.dumps(kb, indent=2))
+    write_json(kb_path(), json.dumps(kb, indent=2))
 
 
 def persist(snap, roll=True):
-  """Write the snapshot to current.json always. Roll the history ring and the
+    """Write the snapshot to current.json always. Roll the history ring and the
   daily milestone only for layout-significant changes (roll=True); tab-switch
   captures pass roll=False so the 20-deep recent-layout ring is not flooded
   with title churn. Knowledge is updated separately."""
-  blob = json.dumps(snap, indent=2)
-  write_json(os.path.join(STATE, "current.json"), blob)
-  if not roll:
-    return
-  hist = os.path.join(STATE, "history")
-  mile = os.path.join(STATE, "milestones")
-  os.makedirs(hist, exist_ok=True)
-  os.makedirs(mile, exist_ok=True)
-  write_json(os.path.join(hist, f"{snap['time']}.json"), blob)
-  prune(hist, HISTORY_KEEP)
-  ms = os.path.join(mile, f"{date.today().isoformat()}.json")
-  if not os.path.exists(ms):
-    write_json(ms, blob)
-  prune(mile, MILESTONE_DAYS)
+    blob = json.dumps(snap, indent=2)
+    write_json(os.path.join(STATE, "current.json"), blob)
+    if not roll:
+        return
+    hist = os.path.join(STATE, "history")
+    mile = os.path.join(STATE, "milestones")
+    os.makedirs(hist, exist_ok=True)
+    os.makedirs(mile, exist_ok=True)
+    write_json(os.path.join(hist, f"{snap['time']}.json"), blob)
+    prune(hist, HISTORY_KEEP)
+    ms = os.path.join(mile, f"{date.today().isoformat()}.json")
+    if not os.path.exists(ms):
+        write_json(ms, blob)
+    prune(mile, MILESTONE_DAYS)
 
 
 def do_capture():
-  snap = snapshot(WayfireSocket())
-  os.makedirs(STATE, exist_ok=True)
-  persist(snap)
-  kb = load_knowledge()
-  upsert(kb, snap["windows"], snap["time"])
-  save_knowledge(kb)
-  print(f"session-mgr: captured {len(snap['windows'])} window(s); "
-        f"{len(kb)} known -> {STATE}")
+    snap = snapshot(WayfireSocket())
+    os.makedirs(STATE, exist_ok=True)
+    persist(snap)
+    kb = load_knowledge()
+    upsert(kb, snap["windows"], snap["time"])
+    save_knowledge(kb)
+    print(f"session-mgr: captured {len(snap['windows'])} window(s); "
+          f"{len(kb)} known -> {STATE}")
 
 
 def app_of(v):
-  return v.get("app-id") or v.get("app_id") or ""
+    return v.get("app-id") or v.get("app_id") or ""
 
 
 # --- init-launch: bring terminals back (Chrome self-restores on its own) ----
@@ -1585,53 +1585,53 @@ MUX_RESUME = f"{shlex.quote(MUX_BIN)} resume"
 
 
 def _announce(msg):
-  """Say it on stdout AND in the daemon's log. Both matter: stdout is what a
+    """Say it on stdout AND in the daemon's log. Both matter: stdout is what a
   person running `session-mgr launch` by hand reads, and the log is the only
   copy that survives, since the compositor autostart discards the worker's
   stdout entirely."""
-  print(msg, flush=True)
-  logline(msg)
+    print(msg, flush=True)
+    logline(msg)
 
 
 def _load_snapshot():
-  """The last snapshot, or None if there is not a readable one. The single
+    """The last snapshot, or None if there is not a readable one. The single
   reader of current.json, so relaunch and doctor always look at the same
   thing."""
-  try:
-    with open(os.path.join(STATE, "current.json")) as f:
-      return json.load(f)
-  except (OSError, ValueError):
-    return None
+    try:
+        with open(os.path.join(STATE, "current.json")) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
 
 
 def saved_sizes(saved):
-  """identity -> [w, h] from the last snapshot, so a respawned window can be
+    """identity -> [w, h] from the last snapshot, so a respawned window can be
   ASKED FOR at the size it had instead of mapping at kitty's configured
   default and waiting to be corrected. Measured: a relaunched terminal mapped
   at 1085x672 (the 80c x 24c in kitty.conf) against a remembered 2132x1690,
   and sat that way until placement caught up."""
-  out = {}
-  for w in saved:
-    k, s = saved_key(w), w.get("size")
-    if k and s and len(s) == 2 and s[0] and s[1]:
-      out.setdefault(k, [int(s[0]), int(s[1])])
-  return out
+    out = {}
+    for w in saved:
+        k, s = saved_key(w), w.get("size")
+        if k and s and len(s) == 2 and s[0] and s[1]:
+            out.setdefault(k, [int(s[0]), int(s[1])])
+    return out
 
 
 def _size_opts(size):
-  """kitty's initial-size flags. Plain numbers are PIXELS (kitty.conf here
+    """kitty's initial-size flags. Plain numbers are PIXELS (kitty.conf here
   uses the `c` suffix for cells). kitty rounds to whole cells and adds its
   padding, so this lands CLOSE rather than exact -- 2176x1761 for a 2132x1690
   request when measured -- and the normal placement pass makes it exact. The
   point is that the window never appears at the wrong size."""
-  if not size:
-    return []
-  return ["-o", f"initial_window_width={int(size[0])}",
-          "-o", f"initial_window_height={int(size[1])}"]
+    if not size:
+        return []
+    return ["-o", f"initial_window_width={int(size[0])}",
+            "-o", f"initial_window_height={int(size[1])}"]
 
 
 def spawn_term(cmd, size=None):
-  """Open a terminal running `cmd`, launched through a shell so that the
+    """Open a terminal running `cmd`, launched through a shell so that the
   command ENDING drops back to that shell instead of closing the window.
   kitty running mux as its direct child would exit on detach (mux exits ->
   kitty exits -> window vanishes). Running it inside `ksh -c '... ; exec ksh
@@ -1644,27 +1644,27 @@ def spawn_term(cmd, size=None):
   TTY -- arranging one is what mux is FOR -- so a window is the right place
   for all of them, local and remote alike, and usher's job is only to put a
   window around the command it recorded."""
-  env = {k: v for k, v in os.environ.items() if k != "TMUX"}
-  subprocess.Popen(["kitty"] + _size_opts(size)
-                   + ["ksh", "-c", f"{cmd}; exec ksh -i"],
-                   env=env, start_new_session=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    env = {k: v for k, v in os.environ.items() if k != "TMUX"}
+    subprocess.Popen(["kitty"] + _size_opts(size)
+                     + ["ksh", "-c", f"{cmd}; exec ksh -i"],
+                     env=env, start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def saved_key(w):
-  """The identity a saved snapshot window was recorded under. Prefers the
+    """The identity a saved snapshot window was recorded under. Prefers the
   `key` snapshot() now stores; falls back to re-deriving it for a snapshot
   written before that field existed (which works for a title-derived identity
   like mux's, and honestly yields nothing for a /proc-derived one, whose pid
   is gone)."""
-  k = w.get("key")
-  if k:
-    return k
-  return identity(w) or ""
+    k = w.get("key")
+    if k:
+        return k
+    return identity(w) or ""
 
 
 def mux_session_set():
-  """The session names mux would rebuild on this box: `mux resume --list`,
+    """The session names mux would rebuild on this box: `mux resume --list`,
   one bare NAME per line.
 
   This is mux's durable session SET (recorded per socket under $MUX_CACHE,
@@ -1681,33 +1681,33 @@ def mux_session_set():
   mux's output fails LOUD here instead of silently going inert again.
 
   Empty when mux is absent or errors -- the soft-dep no-op."""
-  try:
-    out = subprocess.run(
-        [os.path.expanduser("~/.local/bin/mux"), "resume", "--list"],
-        capture_output=True, text=True, timeout=5).stdout
-  except Exception:
-    return set()
-  return {ln.strip() for ln in out.splitlines() if ln.strip()}
+    try:
+        out = subprocess.run(
+            [os.path.expanduser("~/.local/bin/mux"), "resume", "--list"],
+            capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return set()
+    return {ln.strip() for ln in out.splitlines() if ln.strip()}
 
 
 def live_keys(live):
-  """The resolved identities of the windows currently on screen -- the ONE
+    """The resolved identities of the windows currently on screen -- the ONE
   definition of "already showing" that every relaunch path tests against, so
   the question is answered the same way for each. Comparing identities rather
   than raw state is what keeps the plugins from tripping over each other: a
   mux-attached window keys mux@... (its owner is the mux plugin), so it can
   never be mistaken for a kitty:<cwd> window whose shell happens to sit in the
   same place."""
-  out = set()
-  for v in live:
-    k = identity(_pview(v))
-    if k:
-      out.add(k)
-  return out
+    out = set()
+    for v in live:
+        k = identity(_pview(v))
+        if k:
+            out.add(k)
+    return out
 
 
 def mux_cmd_of_saved(w):
-  """The command that brings a saved terminal window back: the one recorded
+    """The command that brings a saved terminal window back: the one recorded
   at capture, or `mux resume` when there is none.
 
   THE DEFAULT IS THE POINT. A window with no recorded command was running a
@@ -1722,17 +1722,17 @@ def mux_cmd_of_saved(w):
   partition is not a thing anyone does. KNOWN HOLE: telling local mux
   windows apart ACROSS partitions. Narrower than it sounds, because the work
   partition is excluded end to end by SKIP_TITLE and never captured at all."""
-  return w.get("cmd") or MUX_RESUME
+    return w.get("cmd") or MUX_RESUME
 
 
 def mux_cmd_of_live(v):
-  """The same question asked of a window that is on screen right now."""
-  t = _term_latch_target(_pview(v).get("pid", -1))
-  return f"{shlex.quote(MUX_BIN)} latch {shlex.quote(t)}" if t else MUX_RESUME
+    """The same question asked of a window that is on screen right now."""
+    t = _term_latch_target(_pview(v).get("pid", -1))
+    return f"{shlex.quote(MUX_BIN)} latch {shlex.quote(t)}" if t else MUX_RESUME
 
 
 def mux_candidates(saved, live):
-  """The commands to run, one per terminal window that is missing.
+    """The commands to run, one per terminal window that is missing.
 
   COUNTED PER COMMAND, not matched per session. usher owns windows; which
   session a window shows is mux's business and changes under it, so the
@@ -1743,99 +1743,99 @@ def mux_candidates(saved, live):
 
   Returns a list of (cmd, size), size being the remembered geometry of the
   first window recorded for that command, or None."""
-  want, sizes = Counter(), {}
-  for w in saved:
-    if w.get("app_id") != "kitty":
-      continue
-    if not TERM_KEY_RE.match(saved_key(w)):
-      continue
-    c = mux_cmd_of_saved(w)
-    want[c] += 1
-    s = w.get("size")
-    if c not in sizes and s and len(s) == 2 and s[0] and s[1]:
-      sizes[c] = [int(s[0]), int(s[1])]
-  have = Counter()
-  for v in live:
-    vv = _pview(v)
-    if is_mux_term(vv["app"], vv["title"]):
-      have[mux_cmd_of_live(v)] += 1
-  out = []
-  for c, n in want.items():
-    for _ in range(max(0, n - have[c])):
-      out.append((c, sizes.get(c)))
-  return out
+    want, sizes = Counter(), {}
+    for w in saved:
+        if w.get("app_id") != "kitty":
+            continue
+        if not TERM_KEY_RE.match(saved_key(w)):
+            continue
+        c = mux_cmd_of_saved(w)
+        want[c] += 1
+        s = w.get("size")
+        if c not in sizes and s and len(s) == 2 and s[0] and s[1]:
+            sizes[c] = [int(s[0]), int(s[1])]
+    have = Counter()
+    for v in live:
+        vv = _pview(v)
+        if is_mux_term(vv["app"], vv["title"]):
+            have[mux_cmd_of_live(v)] += 1
+    out = []
+    for c, n in want.items():
+        for _ in range(max(0, n - have[c])):
+            out.append((c, sizes.get(c)))
+    return out
 
 
 def mux_relaunch_missing(saved, live):
-  """Reopen each terminal window that was up at the last snapshot and is
+    """Reopen each terminal window that was up at the last snapshot and is
   not now, running the command it was running."""
-  n = 0
-  for cmd, size in mux_candidates(saved, live):
-    spawn_term(cmd, size)
-    n += 1
-    _announce(f"launch  {cmd}")
-  return n
+    n = 0
+    for cmd, size in mux_candidates(saved, live):
+        spawn_term(cmd, size)
+        n += 1
+        _announce(f"launch  {cmd}")
+    return n
 
 
 def _spawn_kitty(cwd, size=None):
-  """Open a plain kitty shell in cwd (a fresh per-window id). Deliberately NOT
+    """Open a plain kitty shell in cwd (a fresh per-window id). Deliberately NOT
   re-running the window's captured program -- restoring the place + directory,
   not the command."""
-  env = {k: v for k, v in os.environ.items() if k != "TMUX"}
-  subprocess.Popen(["kitty"] + _size_opts(size) + ["--directory", cwd],
-                   env=env, start_new_session=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    env = {k: v for k, v in os.environ.items() if k != "TMUX"}
+    subprocess.Popen(["kitty"] + _size_opts(size) + ["--directory", cwd],
+                     env=env, start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def kitty_candidates(saved, livekeys):
-  """The cwds to reopen a plain kitty shell in: every non-mux kitty window in
+    """The cwds to reopen a plain kitty shell in: every non-mux kitty window in
   the last snapshot that is not already on screen (`livekeys`, from
   live_keys). Pure, for the same reason mux_candidates is."""
-  seen, out = set(), []
-  for w in saved:
-    if w.get("app_id") != "kitty":
-      continue
-    k = saved_key(w)
-    if not k.startswith("kitty:"):
-      continue
-    cwd = k[len("kitty:"):]
-    if not cwd or cwd in seen or k in livekeys or not os.path.isdir(cwd):
-      continue
-    seen.add(cwd)
-    out.append(cwd)
-  return out
+    seen, out = set(), []
+    for w in saved:
+        if w.get("app_id") != "kitty":
+            continue
+        k = saved_key(w)
+        if not k.startswith("kitty:"):
+            continue
+        cwd = k[len("kitty:"):]
+        if not cwd or cwd in seen or k in livekeys or not os.path.isdir(cwd):
+            continue
+        seen.add(cwd)
+        out.append(cwd)
+    return out
 
 
 def kitty_relaunch_missing(saved, live):
-  """The kitty plugin's relaunch: reopen a non-mux kitty window (identity
+    """The kitty plugin's relaunch: reopen a non-mux kitty window (identity
   'kitty:<cwd>') that was open at the last snapshot but is not on screen, as a
   plain shell in that cwd. Deduped by cwd; skips one a live window shows."""
-  n = 0
-  sizes = saved_sizes(saved)
-  for cwd in kitty_candidates(saved, live_keys(live)):
-    _spawn_kitty(cwd, sizes.get(f"kitty:{cwd}"))
-    n += 1
-    _announce(f"launch  kitty {cwd}")
-  return n
+    n = 0
+    sizes = saved_sizes(saved)
+    for cwd in kitty_candidates(saved, live_keys(live)):
+        _spawn_kitty(cwd, sizes.get(f"kitty:{cwd}"))
+        n += 1
+        _announce(f"launch  kitty {cwd}")
+    return n
 
 
 def launch_missing(*_):
-  """Ask every plugin to respawn any of its saved-but-absent windows. Loads
+    """Ask every plugin to respawn any of its saved-but-absent windows. Loads
   the last snapshot + the live views ONCE and hands both to each plugin's
   relaunch_missing; sums the counts. Chrome self-restores (its plugin returns
   0); mux reopens terminals. (The unused arg keeps the old call sites.)"""
-  saved = (_load_snapshot() or {}).get("windows", [])
-  try:
-    live = WayfireSocket().list_views(filter_mapped_toplevel=True)
-  except Exception:
-    live = []
-  n = 0
-  for p in plugins():
+    saved = (_load_snapshot() or {}).get("windows", [])
     try:
-      n += p.relaunch_missing(saved, live)
-    except Exception as e:
-      logline(f"relaunch ({getattr(p, 'name', '?')}) error: {e}")
-  return n
+        live = WayfireSocket().list_views(filter_mapped_toplevel=True)
+    except Exception:
+        live = []
+    n = 0
+    for p in plugins():
+        try:
+            n += p.relaunch_missing(saved, live)
+        except Exception as e:
+            logline(f"relaunch ({getattr(p, 'name', '?')}) error: {e}")
+    return n
 
 
 # --- restoring from a stored snapshot ---------------------------------------
@@ -1844,7 +1844,7 @@ def launch_missing(*_):
 # disk with no way to ask for it back. These are the read side.
 
 def entries_from_snapshot(snap):
-  """kb-shaped entries from a stored snapshot, so a milestone can drive the
+    """kb-shaped entries from a stored snapshot, so a milestone can drive the
   same placement path the knowledge base does.
 
   Keys come from saved_key (the recorded identity), NOT from re-deriving
@@ -1852,150 +1852,150 @@ def entries_from_snapshot(snap):
   cannot be recomputed. A snapshot written before the `key` field existed
   degrades to what its raw title yields, which for terminals will simply not
   match anything -- honest, and better than matching the wrong window."""
-  windows = snap.get("windows", [])
-  counts = Counter(w.get("app_id", "") for w in windows)
-  out = []
-  for w in windows:
-    app = w.get("app_id", "")
-    if is_unique(app, counts):
-      out.append(kb_entry(w, w.get("title", ""), True, snap["time"]))
-      continue
-    key = saved_key(w)
-    if key:
-      out.append(kb_entry(w, key, False, snap["time"]))
-  return out
+    windows = snap.get("windows", [])
+    counts = Counter(w.get("app_id", "") for w in windows)
+    out = []
+    for w in windows:
+        app = w.get("app_id", "")
+        if is_unique(app, counts):
+            out.append(kb_entry(w, w.get("title", ""), True, snap["time"]))
+            continue
+        key = saved_key(w)
+        if key:
+            out.append(kb_entry(w, key, False, snap["time"]))
+    return out
 
 
 def _spec_to_date(spec, today=None):
-  """The milestone DATE a --from spec names, or None if it names none."""
-  today = today or date.today()
-  if spec == "today":
-    return today.isoformat()
-  if spec == "yesterday":
-    return date.fromordinal(today.toordinal() - 1).isoformat()
-  if re.fullmatch(r"\d{4}-\d{2}-\d{2}", spec):
-    return spec
-  return None
+    """The milestone DATE a --from spec names, or None if it names none."""
+    today = today or date.today()
+    if spec == "today":
+        return today.isoformat()
+    if spec == "yesterday":
+        return date.fromordinal(today.toordinal() - 1).isoformat()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", spec):
+        return spec
+    return None
 
 
 def _available():
-  miles = sorted(os.path.basename(p)[:-5] for p in
-                 glob.glob(os.path.join(STATE, "milestones", "*.json")))
-  hist = sorted(glob.glob(os.path.join(STATE, "history", "*.json")))
-  return miles, hist
+    miles = sorted(os.path.basename(p)[:-5] for p in
+                   glob.glob(os.path.join(STATE, "milestones", "*.json")))
+    hist = sorted(glob.glob(os.path.join(STATE, "history", "*.json")))
+    return miles, hist
 
 
 def resolve_snapshot(spec):
-  """(label, snapshot) for a --from spec. `latest` is the newest rolled
+    """(label, snapshot) for a --from spec. `latest` is the newest rolled
   snapshot (undo a shuffle you just made); a date -- or today/yesterday --
   is that day's FIRST snapshot, the stable 'how it looked that morning'."""
-  miles, hist = _available()
-  if spec in ("list", ""):
-    print("milestones: " + (", ".join(miles) or "(none)"))
-    print(f"history:    {len(hist)} rolled snapshot(s); `--from latest`"
-          " is the newest")
-    sys.exit(0)
-  if spec == "latest":
-    if not hist:
-      sys.exit("session-mgr: no history snapshots yet")
-    path, label = hist[-1], "latest (history)"
-  else:
-    d = _spec_to_date(spec)
-    if d is None:
-      sys.exit(f"session-mgr: unknown --from '{spec}' (want: latest, "
-               f"today, yesterday, or YYYY-MM-DD). Have: "
-               f"{', '.join(miles) or 'no milestones yet'}")
-    path, label = os.path.join(STATE, "milestones", f"{d}.json"), d
-    if not os.path.exists(path):
-      sys.exit(f"session-mgr: no milestone for {d}. Have: "
-               f"{', '.join(miles) or 'none'}")
-  try:
-    with open(path) as f:
-      return label, json.load(f)
-  except (OSError, ValueError) as e:
-    sys.exit(f"session-mgr: cannot read {path}: {e}")
+    miles, hist = _available()
+    if spec in ("list", ""):
+        print("milestones: " + (", ".join(miles) or "(none)"))
+        print(f"history:    {len(hist)} rolled snapshot(s); `--from latest`"
+              " is the newest")
+        sys.exit(0)
+    if spec == "latest":
+        if not hist:
+            sys.exit("session-mgr: no history snapshots yet")
+        path, label = hist[-1], "latest (history)"
+    else:
+        d = _spec_to_date(spec)
+        if d is None:
+            sys.exit(f"session-mgr: unknown --from '{spec}' (want: latest, "
+                     f"today, yesterday, or YYYY-MM-DD). Have: "
+                     f"{', '.join(miles) or 'no milestones yet'}")
+        path, label = os.path.join(STATE, "milestones", f"{d}.json"), d
+        if not os.path.exists(path):
+            sys.exit(f"session-mgr: no milestone for {d}. Have: "
+                     f"{', '.join(miles) or 'none'}")
+    try:
+        with open(path) as f:
+            return label, json.load(f)
+    except (OSError, ValueError) as e:
+        sys.exit(f"session-mgr: cannot read {path}: {e}")
 
 
 def match(live, entries):
-  """Greedily match each live window to a knowledge entry, consume-once. An
+    """Greedily match each live window to a knowledge entry, consume-once. An
   app_id-keyed entry matches on app_id alone (unique-app_id apps whose title
   drifts); the rest need an exact identity too (raw title, or -- for Chrome --
   the active-tab URL via identity()). Returns (pairs, unmatched_live,
   unmatched_entries)."""
-  rem = list(entries)
-  pairs, unlive = [], []
-  for lv in live:
-    app = app_of(lv)
-    key = identity(lv)
-    idx = next((i for i, e in enumerate(rem)
-                if e["app_id"] == app
-                and (e.get("appid_only") or e["title"] == key)), None)
-    if idx is None:
-      unlive.append(lv)
-    else:
-      pairs.append((lv, rem.pop(idx)))
-  return pairs, unlive, rem
+    rem = list(entries)
+    pairs, unlive = [], []
+    for lv in live:
+        app = app_of(lv)
+        key = identity(lv)
+        idx = next((i for i, e in enumerate(rem)
+                    if e["app_id"] == app
+                    and (e.get("appid_only") or e["title"] == key)), None)
+        if idx is None:
+            unlive.append(lv)
+        else:
+            pairs.append((lv, rem.pop(idx)))
+    return pairs, unlive, rem
 
 
 def target_geometry(e, o):
-  """The geometry (current-workspace-relative, the frame set_geometry uses)
+    """The geometry (current-workspace-relative, the frame set_geometry uses)
   that lands entry e on its stored absolute workspace of output o."""
-  ow = o["geometry"]["width"] or 1
-  oh = o["geometry"]["height"] or 1
-  cur = o["workspace"]
-  i, j = e["workspace"]
-  px, py = e["pos"]
-  w, h = e["size"]
-  return {"x": (i - cur["x"]) * ow + px, "y": (j - cur["y"]) * oh + py,
-          "width": w, "height": h}
+    ow = o["geometry"]["width"] or 1
+    oh = o["geometry"]["height"] or 1
+    cur = o["workspace"]
+    i, j = e["workspace"]
+    px, py = e["pos"]
+    w, h = e["size"]
+    return {"x": (i - cur["x"]) * ow + px, "y": (j - cur["y"]) * oh + py,
+            "width": w, "height": h}
 
 
 def place(sock, view_id, e, o):
-  geom = target_geometry(e, o)
-  sock.send_json({
-      "method": "window-rules/configure-view",
-      "data": {"id": view_id, "output_id": o["id"], "geometry": geom,
-               "sticky": bool(e.get("sticky", False))},
-  })
-  return geom
+    geom = target_geometry(e, o)
+    sock.send_json({
+        "method": "window-rules/configure-view",
+        "data": {"id": view_id, "output_id": o["id"], "geometry": geom,
+                 "sticky": bool(e.get("sticky", False))},
+    })
+    return geom
 
 
 def apply_invert(sock, view_id):
-  """Re-apply the colour-invert shader to a just-restored window, then record
+    """Re-apply the colour-invert shader to a just-restored window, then record
   the view's new id in toggle_invert_focused's store so the two mechanisms
   share one registry (a later Super+N un-inverts on the first press). Both
   halves are best-effort: a filters/IPC hiccup must never abort a restore."""
-  try:
-    WPE(sock).set_view_shader(int(view_id), INVERT_SHADER)
-  except Exception as e:
-    logline(f"invert apply error (view {view_id}): {e}")
-    return
-  try:
-    st = load_inverts()
-    st[str(view_id)] = INVERT_VALUE
-    write_json(INVERT_STORE, json.dumps(st))
-  except OSError as e:
-    logline(f"invert store write error: {e}")
+    try:
+        WPE(sock).set_view_shader(int(view_id), INVERT_SHADER)
+    except Exception as e:
+        logline(f"invert apply error (view {view_id}): {e}")
+        return
+    try:
+        st = load_inverts()
+        st[str(view_id)] = INVERT_VALUE
+        write_json(INVERT_STORE, json.dumps(st))
+    except OSError as e:
+        logline(f"invert store write error: {e}")
 
 
 def _restore_report(pairs, live, unlive, unlayout, unplaceable, outs, dry,
                     acted):
-  """The summary a restore prints. Lifted out because a restore that places
+    """The summary a restore prints. Lifted out because a restore that places
   nothing and a restore that COULD place nothing look identical until this
   says which, and it is the part most likely to grow."""
-  print(f"matched {len(pairs)}/{len(live)}  unmatched-live {len(unlive)}  "
-        f"unmatched-layout {len(unlayout)}  "
-        f"unplaceable {len(unplaceable)}  "
-        f"{'acted ' + str(acted) if not dry else ''}")
-  for lv in unlive:
-    print(f"  UNMATCHED-LIVE   {app_of(lv)[:20]:20} | "
-          f"{lv.get('title','')[:42]}")
-  for e in unlayout:
-    print(f"  UNMATCHED-LAYOUT {e['app_id'][:20]:20} | {e['title'][:42]}")
-  have = ", ".join(sorted(outs)) or "none"
-  for lv, e in unplaceable:
-    print(f"  UNPLACEABLE      {app_of(lv)[:20]:20} | saved on "
-          f"{e['output']}, not attached (have: {have})")
+    print(f"matched {len(pairs)}/{len(live)}  unmatched-live {len(unlive)}  "
+          f"unmatched-layout {len(unlayout)}  "
+          f"unplaceable {len(unplaceable)}  "
+          f"{'acted ' + str(acted) if not dry else ''}")
+    for lv in unlive:
+        print(f"  UNMATCHED-LIVE   {app_of(lv)[:20]:20} | "
+              f"{lv.get('title','')[:42]}")
+    for e in unlayout:
+        print(f"  UNMATCHED-LAYOUT {e['app_id'][:20]:20} | {e['title'][:42]}")
+    have = ", ".join(sorted(outs)) or "none"
+    for lv, e in unplaceable:
+        print(f"  UNPLACEABLE      {app_of(lv)[:20]:20} | saved on "
+              f"{e['output']}, not attached (have: {have})")
 
 
 # --- doctor: say out loud what this thing is and is not doing ---------------
@@ -2006,168 +2006,168 @@ def _restore_report(pairs, live, unlive, unlayout, unplaceable, outs, dry,
 # what would happen and WHY. A zero-kitty knowledge base is obvious here.
 
 def _doctor_store(out):
-  kb = load_knowledge()
-  counts = Counter(k.split("\x00", 1)[0] for k in kb)
-  out("== store ==")
-  out(f"  state dir    {STATE}")
-  src = ("SESSION_PROFILE" if os.environ.get("SESSION_PROFILE")
-         else "hwdp" if _hwdp_id() else "derived from outputs")
-  out(f"  profile      {profile_id()}  ({src})")
-  others = sorted(os.path.basename(p)[len("knowledge-"):-len(".json")]
-                  for p in glob.glob(os.path.join(STATE, "knowledge-*.json"))
-                  if os.path.basename(p)[len("knowledge-"):-len(".json")]
-                  != profile_id())
-  if others:
-    out(f"  other sets   {', '.join(others)}  (remembered separately)")
-  try:
-    schema = open(schema_path()).read().strip()
-  except OSError:
-    schema = "(unstamped)"
-  out(f"  knowledge    {len(kb)} entr{'y' if len(kb) == 1 else 'ies'}"
-      f"  (schema {schema}, current {KB_SCHEMA})")
-  for app, n in counts.most_common():
-    out(f"                 {app or '(blank app-id)':32} {n}")
-  if not counts.get("kitty"):
-    out("  NOTE         no kitty entries: terminals are not being"
-        " remembered, so they cannot be placed")
-  # An un-adopted pre-profile store is invisible otherwise: placement simply
-  # goes quiet while the knowledge sits in a file nothing opens.
-  legacy = os.path.join(STATE, "knowledge.json")
-  if os.path.exists(legacy):
+    kb = load_knowledge()
+    counts = Counter(k.split("\x00", 1)[0] for k in kb)
+    out("== store ==")
+    out(f"  state dir    {STATE}")
+    src = ("SESSION_PROFILE" if os.environ.get("SESSION_PROFILE")
+           else "hwdp" if _hwdp_id() else "derived from outputs")
+    out(f"  profile      {profile_id()}  ({src})")
+    others = sorted(os.path.basename(p)[len("knowledge-"):-len(".json")]
+                    for p in glob.glob(os.path.join(STATE, "knowledge-*.json"))
+                    if os.path.basename(p)[len("knowledge-"):-len(".json")]
+                    != profile_id())
+    if others:
+        out(f"  other sets   {', '.join(others)}  (remembered separately)")
     try:
-      with open(legacy) as f:
-        n = len(json.load(f))
-    except (OSError, ValueError):
-      n = "?"
-    out(f"  ORPHANED     knowledge.json holds {n} entries and is NOT in"
-        " use -- it should have been merged into the profile above")
-  snap = _load_snapshot()
-  if snap is None:
-    out("  snapshot     current.json MISSING -- nothing to relaunch from")
-  else:
-    age = int(time.time()) - snap.get("time", 0)
-    out(f"  snapshot     {len(snap.get('windows', []))} window(s),"
-        f" {age}s old")
-  return kb, snap
+        schema = open(schema_path()).read().strip()
+    except OSError:
+        schema = "(unstamped)"
+    out(f"  knowledge    {len(kb)} entr{'y' if len(kb) == 1 else 'ies'}"
+        f"  (schema {schema}, current {KB_SCHEMA})")
+    for app, n in counts.most_common():
+        out(f"                 {app or '(blank app-id)':32} {n}")
+    if not counts.get("kitty"):
+        out("  NOTE         no kitty entries: terminals are not being"
+            " remembered, so they cannot be placed")
+    # An un-adopted pre-profile store is invisible otherwise: placement simply
+    # goes quiet while the knowledge sits in a file nothing opens.
+    legacy = os.path.join(STATE, "knowledge.json")
+    if os.path.exists(legacy):
+        try:
+            with open(legacy) as f:
+                n = len(json.load(f))
+        except (OSError, ValueError):
+            n = "?"
+        out(f"  ORPHANED     knowledge.json holds {n} entries and is NOT in"
+            " use -- it should have been merged into the profile above")
+    snap = _load_snapshot()
+    if snap is None:
+        out("  snapshot     current.json MISSING -- nothing to relaunch from")
+    else:
+        age = int(time.time()) - snap.get("time", 0)
+        out(f"  snapshot     {len(snap.get('windows', []))} window(s),"
+            f" {age}s old")
+    return kb, snap
 
 
 def _doctor_contracts(out):
-  """The cross-tool assumptions. These are the ones that break in SILENCE,
+    """The cross-tool assumptions. These are the ones that break in SILENCE,
   because they live in another repo's output format."""
-  rc = 0
-  out("== contracts ==")
-  mux = os.path.expanduser("~/.local/bin/mux")
-  if not os.path.exists(mux):
-    out(f"  [WARN] mux absent ({mux}); terminal relaunch degrades to a"
-        " no-op")
+    rc = 0
+    out("== contracts ==")
+    mux = os.path.expanduser("~/.local/bin/mux")
+    if not os.path.exists(mux):
+        out(f"  [WARN] mux absent ({mux}); terminal relaunch degrades to a"
+            " no-op")
+        return rc
+    out(f"  [OK]   mux present ({mux})")
+    # Terminals inherit THIS process's environment, so a missing agent here is
+    # a missing agent in every session usher respawns -- and a remote one then
+    # cannot authenticate. mux latch copes (it polls for a credential rather
+    # than failing), but only if it can see an agent socket at all.
+    sock = os.environ.get("SSH_AUTH_SOCK")
+    if not sock:
+        out("  [WARN] no SSH_AUTH_SOCK: a respawned REMOTE session has no way"
+            " to authenticate")
+    elif not os.path.exists(sock):
+        out(f"  [WARN] SSH_AUTH_SOCK points at a missing socket ({sock})")
+    else:
+        out("  [OK]   ssh agent socket present")
+    names = mux_session_set()
+    bad = [s for s in names if not re.fullmatch(r"[^\s:]+", s)]
+    if bad:
+        out(f"  [FAIL] `mux resume --list` is not bare names: {bad[:3]}")
+        out("         relaunch will match NOTHING (this exact break has"
+            " happened before)")
+        rc = 1
+    else:
+        out(f"  [OK]   `mux resume --list` -> {len(names)} bare name(s)")
     return rc
-  out(f"  [OK]   mux present ({mux})")
-  # Terminals inherit THIS process's environment, so a missing agent here is
-  # a missing agent in every session usher respawns -- and a remote one then
-  # cannot authenticate. mux latch copes (it polls for a credential rather
-  # than failing), but only if it can see an agent socket at all.
-  sock = os.environ.get("SSH_AUTH_SOCK")
-  if not sock:
-    out("  [WARN] no SSH_AUTH_SOCK: a respawned REMOTE session has no way"
-        " to authenticate")
-  elif not os.path.exists(sock):
-    out(f"  [WARN] SSH_AUTH_SOCK points at a missing socket ({sock})")
-  else:
-    out("  [OK]   ssh agent socket present")
-  names = mux_session_set()
-  bad = [s for s in names if not re.fullmatch(r"[^\s:]+", s)]
-  if bad:
-    out(f"  [FAIL] `mux resume --list` is not bare names: {bad[:3]}")
-    out("         relaunch will match NOTHING (this exact break has"
-        " happened before)")
-    rc = 1
-  else:
-    out(f"  [OK]   `mux resume --list` -> {len(names)} bare name(s)")
-  return rc
 
 
 def _doctor_relaunch(out, snap, live):
-  """Per saved window: would it come back, and if not, why not."""
-  out("== saved windows -> relaunch ==")
-  if snap is None:
-    return
-  saved = snap.get("windows", [])
-  lk = live_keys(live)
-  chrome_up = any(is_chrome(_pview(v)["app"]) for v in live)
-  chrome_note = ("Chrome restores its own" if chrome_up
-                 else "browser NOT running: usher starts it, Chrome"
-                      " restores its own")
-  # Terminals are reported per COMMAND, because that is how they are
-  # relaunched: counted, not matched per session. Reporting them per session
-  # would describe a mechanism usher no longer uses.
-  todo = Counter(c for c, _ in mux_candidates(saved, live))
-  for c, n in todo.items():
-    out(f"  RELAUNCH   {n} terminal(s)  {c}")
-  n_term = sum(1 for w in saved if w.get("app_id") == "kitty"
-               and TERM_KEY_RE.match(saved_key(w)))
-  if n_term and not todo:
-    out(f"  live       all {n_term} terminal(s) already up")
-  for w in saved:
-    app, key = w.get("app_id", ""), saved_key(w)
-    if is_chrome(app):
-      out(f"  {'self' if chrome_up else 'START':10} {app:14}"
-          f" {key[:36]:36}  ({chrome_note})")
-      continue
-    if TERM_KEY_RE.match(key):
-      continue        # covered by the per-command lines above
-    if key.startswith("kitty:"):
-      cwd = key[len("kitty:"):]
-      if key in lk:
-        out(f"  live       {key[:56]}")
-      elif not os.path.isdir(cwd):
-        out(f"  skip       {key[:44]}  (directory is gone)")
-      else:
-        out(f"  RELAUNCH   {key[:44]}  (kitty --directory {cwd})")
-      continue
-    out(f"  none       {app:14} {key[:44]}  (no plugin respawns this)")
-  # Two kitty windows in one directory share a key, so only ONE slot is
-  # remembered and the other silently loses its place. Keying on the running
-  # program instead would be worse -- the key would change every time a
-  # command started or exited -- so the limitation stands, but it should at
-  # least be VISIBLE, with the escape hatch named.
-  dupes = Counter(saved_key(w) for w in saved
-                  if w.get("app_id") == "kitty")
-  for key, n in dupes.items():
-    if n > 1 and key.startswith("kitty:"):
-      out(f"  COLLISION  {key[:44]}  {n} windows share this key; one"
-          " slot is remembered (name one: settitle)")
+    """Per saved window: would it come back, and if not, why not."""
+    out("== saved windows -> relaunch ==")
+    if snap is None:
+        return
+    saved = snap.get("windows", [])
+    lk = live_keys(live)
+    chrome_up = any(is_chrome(_pview(v)["app"]) for v in live)
+    chrome_note = ("Chrome restores its own" if chrome_up
+                   else "browser NOT running: usher starts it, Chrome"
+                        " restores its own")
+    # Terminals are reported per COMMAND, because that is how they are
+    # relaunched: counted, not matched per session. Reporting them per session
+    # would describe a mechanism usher no longer uses.
+    todo = Counter(c for c, _ in mux_candidates(saved, live))
+    for c, n in todo.items():
+        out(f"  RELAUNCH   {n} terminal(s)  {c}")
+    n_term = sum(1 for w in saved if w.get("app_id") == "kitty"
+                 and TERM_KEY_RE.match(saved_key(w)))
+    if n_term and not todo:
+        out(f"  live       all {n_term} terminal(s) already up")
+    for w in saved:
+        app, key = w.get("app_id", ""), saved_key(w)
+        if is_chrome(app):
+            out(f"  {'self' if chrome_up else 'START':10} {app:14}"
+                f" {key[:36]:36}  ({chrome_note})")
+            continue
+        if TERM_KEY_RE.match(key):
+            continue        # covered by the per-command lines above
+        if key.startswith("kitty:"):
+            cwd = key[len("kitty:"):]
+            if key in lk:
+                out(f"  live       {key[:56]}")
+            elif not os.path.isdir(cwd):
+                out(f"  skip       {key[:44]}  (directory is gone)")
+            else:
+                out(f"  RELAUNCH   {key[:44]}  (kitty --directory {cwd})")
+            continue
+        out(f"  none       {app:14} {key[:44]}  (no plugin respawns this)")
+    # Two kitty windows in one directory share a key, so only ONE slot is
+    # remembered and the other silently loses its place. Keying on the running
+    # program instead would be worse -- the key would change every time a
+    # command started or exited -- so the limitation stands, but it should at
+    # least be VISIBLE, with the escape hatch named.
+    dupes = Counter(saved_key(w) for w in saved
+                    if w.get("app_id") == "kitty")
+    for key, n in dupes.items():
+        if n > 1 and key.startswith("kitty:"):
+            out(f"  COLLISION  {key[:44]}  {n} windows share this key; one"
+                " slot is remembered (name one: settitle)")
 
 
 def _doctor_placement(out, kb, live, outs):
-  """Per live window: does it match a remembered slot, and is that slot's
+    """Per live window: does it match a remembered slot, and is that slot's
   output actually attached."""
-  out("== live windows -> placement ==")
-  pairs, unlive, _ = match(live, list(kb.values()))
-  for lv, e in pairs:
-    where = f"{e['output']} ws{tuple(e['workspace'])}"
-    # A slot deliberately does not encode what the window is SHOWING, so
-    # say it here. Without this, `term:resume` on a screen full of mux
-    # terminals is unmatchable to the thing a human is looking at.
-    shows = ""
-    t = lv.get("title") or ""
-    if is_mux_term(app_of(lv), t):
-      sess, host = mux_session_of(t), mux_host_of(t)
-      shows = f"  [showing {sess}@{host or LOCAL_HOST}]" if sess else ""
-    if e["output"] in outs:
-      out(f"  placeable  {app_of(lv)[:14]:14} {e['title'][:34]:34}"
-          f" -> {where}{shows}")
-    else:
-      out(f"  UNPLACEABLE {app_of(lv)[:13]:13} {e['title'][:34]:34}"
-          f" -> {where} NOT ATTACHED")
-  for lv in unlive:
-    out(f"  unmatched  {app_of(lv)[:14]:14} {lv.get('title','')[:34]}")
+    out("== live windows -> placement ==")
+    pairs, unlive, _ = match(live, list(kb.values()))
+    for lv, e in pairs:
+        where = f"{e['output']} ws{tuple(e['workspace'])}"
+        # A slot deliberately does not encode what the window is SHOWING, so
+        # say it here. Without this, `term:resume` on a screen full of mux
+        # terminals is unmatchable to the thing a human is looking at.
+        shows = ""
+        t = lv.get("title") or ""
+        if is_mux_term(app_of(lv), t):
+            sess, host = mux_session_of(t), mux_host_of(t)
+            shows = f"  [showing {sess}@{host or LOCAL_HOST}]" if sess else ""
+        if e["output"] in outs:
+            out(f"  placeable  {app_of(lv)[:14]:14} {e['title'][:34]:34}"
+                f" -> {where}{shows}")
+        else:
+            out(f"  UNPLACEABLE {app_of(lv)[:13]:13} {e['title'][:34]:34}"
+                f" -> {where} NOT ATTACHED")
+    for lv in unlive:
+        out(f"  unmatched  {app_of(lv)[:14]:14} {lv.get('title','')[:34]}")
 
 
 PROFILE_MARK = "session-mgr.profile"   # last profile we acted on, per boot
 
 
 def do_display_changed():
-  """The display-change entry point, for hwdp's `changed` hook.
+    """The display-change entry point, for hwdp's `changed` hook.
 
   That edge fires on EVERY output burst -- a monitor blanking and waking, a
   kanshi reapply, a re-detect -- not only when the set of monitors actually
@@ -2182,33 +2182,33 @@ def do_display_changed():
   compare against and is treated as a change, which is what you want at
   login anyway.
   """
-  now = profile_id(fresh=True)
-  mark = os.path.join(runtime_dir(), PROFILE_MARK)
-  try:
-    with open(mark) as f:
-      was = f.read().strip()
-  except OSError:
-    was = ""
-  if was == now:
-    return 0                     # same monitors; nothing to do, silently
-  try:
-    with open(mark, "w") as f:
-      f.write(now + "\n")
-  except OSError as e:
-    logline(f"display-changed: cannot record the profile: {e}")
-  logline(f"display changed: profile {was or '(none)'} -> {now}; "
-          "re-arming placement")
-  try:
-    os.makedirs(os.path.dirname(ARM_FILE), exist_ok=True)
-    with open(ARM_FILE, "w") as f:
-      f.write(f"{time.time()}\n")
-  except OSError as e:
-    logline(f"display-changed: cannot re-arm: {e}")
-  try:
-    do_restore(dry=False)
-  except Exception as e:
-    logline(f"display-changed: restore failed: {e}")
-  return 0
+    now = profile_id(fresh=True)
+    mark = os.path.join(runtime_dir(), PROFILE_MARK)
+    try:
+        with open(mark) as f:
+            was = f.read().strip()
+    except OSError:
+        was = ""
+    if was == now:
+        return 0                     # same monitors; nothing to do, silently
+    try:
+        with open(mark, "w") as f:
+            f.write(now + "\n")
+    except OSError as e:
+        logline(f"display-changed: cannot record the profile: {e}")
+    logline(f"display changed: profile {was or '(none)'} -> {now}; "
+            "re-arming placement")
+    try:
+        os.makedirs(os.path.dirname(ARM_FILE), exist_ok=True)
+        with open(ARM_FILE, "w") as f:
+            f.write(f"{time.time()}\n")
+    except OSError as e:
+        logline(f"display-changed: cannot re-arm: {e}")
+    try:
+        do_restore(dry=False)
+    except Exception as e:
+        logline(f"display-changed: restore failed: {e}")
+    return 0
 
 
 # Seconds to wait for every app a plugin asked to quit. Bounded on purpose:
@@ -2218,34 +2218,34 @@ WIND_DOWN_TIMEOUT = float(os.environ.get("SESSION_WIND_DOWN_TIMEOUT", 8))
 
 
 def _wind_down_wait(pids):
-  """Wait for everything a plugin asked to quit, under ONE bounded deadline.
+    """Wait for everything a plugin asked to quit, under ONE bounded deadline.
   Bounded because this runs between a human pressing Reboot and the machine
   rebooting, so it must never be the reason that does not happen."""
-  if not pids:
-    print("session-mgr: nothing asked to quit; session captured")
+    if not pids:
+        print("session-mgr: nothing asked to quit; session captured")
+        return 0
+    print(f"session-mgr: asked {len(pids)} process(es) to quit")
+    end = time.time() + WIND_DOWN_TIMEOUT
+    while time.time() < end:
+        alive = []
+        for p in pids:
+            try:
+                os.kill(p, 0)
+                alive.append(p)
+            except OSError:
+                pass
+        if not alive:
+            print("session-mgr: all exited cleanly")
+            return 0
+        pids = alive
+        time.sleep(0.2)
+    print(f"session-mgr: {len(pids)} still running after "
+          f"{WIND_DOWN_TIMEOUT:g}s; going ahead anyway")
     return 0
-  print(f"session-mgr: asked {len(pids)} process(es) to quit")
-  end = time.time() + WIND_DOWN_TIMEOUT
-  while time.time() < end:
-    alive = []
-    for p in pids:
-      try:
-        os.kill(p, 0)
-        alive.append(p)
-      except OSError:
-        pass
-    if not alive:
-      print("session-mgr: all exited cleanly")
-      return 0
-    pids = alive
-    time.sleep(0.2)
-  print(f"session-mgr: {len(pids)} still running after "
-        f"{WIND_DOWN_TIMEOUT:g}s; going ahead anyway")
-  return 0
 
 
 def do_wind_down():
-  """Bring the session to a clean stop: capture, stand down, let go.
+    """Bring the session to a clean stop: capture, stand down, let go.
 
   The counterpart of the relaunch path, and the same shape -- each plugin
   knows how to release its own app, exactly as it knows how to bring it back.
@@ -2265,122 +2265,122 @@ def do_wind_down():
   caller's business; usher's is knowing what the session was and letting it
   go tidily. Always exits 0 -- a failure here must never strand somebody at a
   machine that will not shut down."""
-  try:
-    do_capture()
-  except Exception as e:
-    print(f"session-mgr: capture failed, winding down anyway: {e}",
-          file=sys.stderr)
-  try:
-    do_stop()
-  except Exception:
-    pass
-  try:
-    live = WayfireSocket().list_views(filter_mapped_toplevel=True)
-  except Exception:
-    live = []
-  pids = []
-  for p in plugins():
     try:
-      pids += list(p.wind_down(live) or [])
+        do_capture()
     except Exception as e:
-      print(f"session-mgr: wind-down ({getattr(p, 'name', '?')}): {e}",
-            file=sys.stderr)
-  return _wind_down_wait(pids)
+        print(f"session-mgr: capture failed, winding down anyway: {e}",
+              file=sys.stderr)
+    try:
+        do_stop()
+    except Exception:
+        pass
+    try:
+        live = WayfireSocket().list_views(filter_mapped_toplevel=True)
+    except Exception:
+        live = []
+    pids = []
+    for p in plugins():
+        try:
+            pids += list(p.wind_down(live) or [])
+        except Exception as e:
+            print(f"session-mgr: wind-down ({getattr(p, 'name', '?')}): {e}",
+                  file=sys.stderr)
+    return _wind_down_wait(pids)
 
 
 def do_doctor():
-  """The whole report. Returns an exit code: non-zero only for a CONTRACT
+    """The whole report. Returns an exit code: non-zero only for a CONTRACT
   breach, which is the class of fault that otherwise shows no symptom."""
-  lines = []
+    lines = []
 
-  def out(s):
-    lines.append(s)
+    def out(s):
+        lines.append(s)
 
-  kb, snap = _doctor_store(out)
-  out("== plugins ==")
-  for p in plugins():
-    hooks = [h for h in PLUGIN_HOOKS
-             if h in getattr(type(p), "__dict__", {})]
-    out(f"  {getattr(p, 'name', '?'):10} {', '.join(hooks)}")
-  rc = _doctor_contracts(out)
-  live, outs = [], {}
-  out("== compositor ==")
-  if WayfireSocket is None:
-    # The import is guarded so this module runs anywhere; say which of the
-    # two "no compositor" cases this is, since the fixes differ entirely.
-    out("  pywayfire NOT IMPORTABLE -- run this from the venv"
-        " (~/.venvs/usher/bin/python), not the system python3")
-  else:
-    try:
-      sock = WayfireSocket()
-      live = sock.list_views(filter_mapped_toplevel=True)
-      outs = {o["name"]: o for o in sock.list_outputs()}
-      out(f"  outputs      {', '.join(sorted(outs))}")
-    except Exception as e:
-      out(f"  NOT REACHABLE ({e}) -- set WAYFIRE_SOCKET, or there is"
-          " no session")
-  if not live:
-    out("  (live checks below are skipped; store checks above stand)")
-  _doctor_relaunch(out, snap, live)
-  if live:
-    _doctor_placement(out, kb, live, outs)
-  print("\n".join(lines))
-  return rc
+    kb, snap = _doctor_store(out)
+    out("== plugins ==")
+    for p in plugins():
+        hooks = [h for h in PLUGIN_HOOKS
+                 if h in getattr(type(p), "__dict__", {})]
+        out(f"  {getattr(p, 'name', '?'):10} {', '.join(hooks)}")
+    rc = _doctor_contracts(out)
+    live, outs = [], {}
+    out("== compositor ==")
+    if WayfireSocket is None:
+        # The import is guarded so this module runs anywhere; say which of the
+        # two "no compositor" cases this is, since the fixes differ entirely.
+        out("  pywayfire NOT IMPORTABLE -- run this from the venv"
+            " (~/.venvs/usher/bin/python), not the system python3")
+    else:
+        try:
+            sock = WayfireSocket()
+            live = sock.list_views(filter_mapped_toplevel=True)
+            outs = {o["name"]: o for o in sock.list_outputs()}
+            out(f"  outputs      {', '.join(sorted(outs))}")
+        except Exception as e:
+            out(f"  NOT REACHABLE ({e}) -- set WAYFIRE_SOCKET, or there is"
+                " no session")
+    if not live:
+        out("  (live checks below are skipped; store checks above stand)")
+    _doctor_relaunch(out, snap, live)
+    if live:
+        _doctor_placement(out, kb, live, outs)
+    print("\n".join(lines))
+    return rc
 
 
 def do_restore(dry, only=None, source=None):
-  sock = WayfireSocket()
-  if source is None:
-    entries = list(load_knowledge().values())
-    print(f"from the knowledge base (profile {profile_id()})")
-  else:
-    label, snap = source
-    entries = entries_from_snapshot(snap)
-    print(f"from milestone {label} ({len(entries)} remembered window(s))")
-  live = sock.list_views(filter_mapped_toplevel=True)
-  outs = {o["name"]: o for o in sock.list_outputs()}
+    sock = WayfireSocket()
+    if source is None:
+        entries = list(load_knowledge().values())
+        print(f"from the knowledge base (profile {profile_id()})")
+    else:
+        label, snap = source
+        entries = entries_from_snapshot(snap)
+        print(f"from milestone {label} ({len(entries)} remembered window(s))")
+    live = sock.list_views(filter_mapped_toplevel=True)
+    outs = {o["name"]: o for o in sock.list_outputs()}
 
-  pairs, unlive, unlayout = match(live, entries)
-  acted = 0
-  unplaceable = []
-  for lv, e in pairs:
-    if only and (only not in (lv.get("title") or "")) \
-            and (only not in app_of(lv)):
-      continue
-    o = outs.get(e["output"])
-    if not o:
-      # The window matched a remembered slot on an output that is NOT
-      # attached right now (undocked, a monitor off, a different desk).
-      # Nothing sane to do with it, but SAY SO: skipping in silence is
-      # how a layout learned on another monitor set looks like usher
-      # simply not working. See `doctor` and the per-profile store.
-      unplaceable.append((lv, e))
-      continue
-    geom = target_geometry(e, o)
-    g = lv.get("geometry", {}) or {}
-    same = (g.get("x") == geom["x"] and g.get("y") == geom["y"] and
-            lv.get("output-name") == e["output"])
-    label = f"{app_of(lv)[:18]:18} -> {e['output']} " \
-        f"ws{tuple(e['workspace'])} pos{tuple(e['pos'])}" \
-        + (" [inv]" if e.get("inverted") else "")
-    if dry:
-      print(("  ok   " if same else "  MOVE ") + label)
-      continue
-    if not same:
-      place(sock, lv["id"], e, o)
-      acted += 1
-      print("  placed " + label)
-    # Invert follows the WINDOW, not the move. A window Chrome already
-    # restored at its target position is matched-but-not-moved, and must
-    # still get its inversion back -- the "forgets some" bug was applying
-    # invert only inside the move branch.
-    if e.get("inverted"):
-      apply_invert(sock, lv["id"])
-      if same:
-        print("  inverted " + label)
+    pairs, unlive, unlayout = match(live, entries)
+    acted = 0
+    unplaceable = []
+    for lv, e in pairs:
+        if only and (only not in (lv.get("title") or "")) \
+                and (only not in app_of(lv)):
+            continue
+        o = outs.get(e["output"])
+        if not o:
+            # The window matched a remembered slot on an output that is NOT
+            # attached right now (undocked, a monitor off, a different desk).
+            # Nothing sane to do with it, but SAY SO: skipping in silence is
+            # how a layout learned on another monitor set looks like usher
+            # simply not working. See `doctor` and the per-profile store.
+            unplaceable.append((lv, e))
+            continue
+        geom = target_geometry(e, o)
+        g = lv.get("geometry", {}) or {}
+        same = (g.get("x") == geom["x"] and g.get("y") == geom["y"] and
+                lv.get("output-name") == e["output"])
+        label = f"{app_of(lv)[:18]:18} -> {e['output']} " \
+            f"ws{tuple(e['workspace'])} pos{tuple(e['pos'])}" \
+            + (" [inv]" if e.get("inverted") else "")
+        if dry:
+            print(("  ok   " if same else "  MOVE ") + label)
+            continue
+        if not same:
+            place(sock, lv["id"], e, o)
+            acted += 1
+            print("  placed " + label)
+        # Invert follows the WINDOW, not the move. A window Chrome already
+        # restored at its target position is matched-but-not-moved, and must
+        # still get its inversion back -- the "forgets some" bug was applying
+        # invert only inside the move branch.
+        if e.get("inverted"):
+            apply_invert(sock, lv["id"])
+            if same:
+                print("  inverted " + label)
 
-  _restore_report(pairs, live, unlive, unlayout, unplaceable,
-                  outs, dry, acted)
+    _restore_report(pairs, live, unlive, unlayout, unplaceable,
+                    outs, dry, acted)
 
 
 # Layout-significant events: re-snapshot AND roll the history/milestone ring.
@@ -2439,11 +2439,11 @@ STATUS_FILE = os.path.join(RUNTIME_DIR, "session-mgr.status")
 
 
 def is_browser(app):
-  # Chrome/Chromium/Firefox: restore-heavy, title-churning clients that can
-  # drop a window if it is moved mid-restore. ONLY these wait PLACE_SETTLE;
-  # the (chrome-<ext>-Profile_N) app-mode ids match too, via the substring.
-  a = (app or "").lower()
-  return ("chrom" in a) or ("firefox" in a)
+    # Chrome/Chromium/Firefox: restore-heavy, title-churning clients that can
+    # drop a window if it is moved mid-restore. ONLY these wait PLACE_SETTLE;
+    # the (chrome-<ext>-Profile_N) app-mode ids match too, via the substring.
+    a = (app or "").lower()
+    return ("chrom" in a) or ("firefox" in a)
 
 
 # Consecutive failing captures before the worker exits for a clean supervisor
@@ -2458,45 +2458,45 @@ LOG_CAP = 256 * 1024   # rotate watch.log past this; bounds it to ~2x LOG_CAP
 
 
 def logline(msg):
-  """Append a timestamped line to the daemon's own log. Autostart discards a
+    """Append a timestamped line to the daemon's own log. Autostart discards a
   child's stdout/stderr, so without this a death (or a skipped event) is
   invisible -- which is exactly how a slow-login crash went unnoticed. Best
   effort: logging must never itself take the daemon down. Rotated at LOG_CAP
   (one generation kept) so a respawn loop cannot fill the disk -- the tree
   has a 14G-session-log scar behind that caution."""
-  try:
-    os.makedirs(STATE, exist_ok=True)
-    path = os.path.join(STATE, "watch.log")
     try:
-      if os.path.getsize(path) > LOG_CAP:
-        os.replace(path, path + ".1")
+        os.makedirs(STATE, exist_ok=True)
+        path = os.path.join(STATE, "watch.log")
+        try:
+            if os.path.getsize(path) > LOG_CAP:
+                os.replace(path, path + ".1")
+        except OSError:
+            pass
+        with open(path, "a") as f:
+            f.write(f"{time.strftime('%F %T')} {msg}\n")
     except OSError:
-      pass
-    with open(path, "a") as f:
-      f.write(f"{time.strftime('%F %T')} {msg}\n")
-  except OSError:
-    pass
+        pass
 
 
 def connect(retries=25, delay=0.2):
-  """Open an IPC socket, retrying while the compositor's socket comes up. At
+    """Open an IPC socket, retrying while the compositor's socket comes up. At
   autostart the ipc plugin may not have exported WAYFIRE_SOCKET yet, and
   WayfireSocket() raises at once with no retry of its own -- so a daemon that
   connects eagerly can die before it ever watches (kanshi-mgr retries the
   same way, ~5s). Only the initial connect retries; a mid-session drop is a
   real teardown and is handled by the caller."""
-  last = None
-  for _ in range(retries):
-    try:
-      return WayfireSocket()
-    except Exception as e:      # socket absent/unready: wait and retry
-      last = e
-      time.sleep(delay)
-  raise last
+    last = None
+    for _ in range(retries):
+        try:
+            return WayfireSocket()
+        except Exception as e:      # socket absent/unready: wait and retry
+            last = e
+            time.sleep(delay)
+    raise last
 
 
 def is_desync_error(e):
-  """True if e means the IPC socket is POISONED (off-by-one) and only a
+    """True if e means the IPC socket is POISONED (off-by-one) and only a
   reconnect can cure it -- as opposed to a benign server error-response (e.g.
   "view is not toplevel") that leaves the socket in sync. The desync CAUSE is
   a request timeout, whose response is left unread in the buffer; the SYMPTOM,
@@ -2504,41 +2504,41 @@ def is_desync_error(e):
   framing/decoding failure. A clean server error-response is none of these, so
   we must NOT reconnect on it (that would churn a fresh socket on every popup
   the compositor declines to place)."""
-  if isinstance(e, (KeyError, IndexError, TypeError, AttributeError)):
-    return True
-  msg = str(e).lower()
-  return "timeout" in msg or "json decod" in msg or "empty response" in msg
+    if isinstance(e, (KeyError, IndexError, TypeError, AttributeError)):
+        return True
+    msg = str(e).lower()
+    return "timeout" in msg or "json decod" in msg or "empty response" in msg
 
 
 def acquire_singleton():
-  """One watcher only. Two would double-place every window and race the
+    """One watcher only. Two would double-place every window and race the
   knowledge writes -- a hand-launched stopgap outliving the next autostart is
   the concrete case. flock auto-releases when the holder exits (even a
   crash), so the slot frees itself with no stale-pidfile cleanup. Returns the
   held fd (keep it for the process lifetime), None if another watcher holds
   it, or "unlocked" if the lock infra itself is unavailable (never let a lock
   failure disable restore -- degrade to unlocked and say so)."""
-  import fcntl
-  d = os.environ.get("XDG_RUNTIME_DIR") or STATE
-  try:
-    os.makedirs(d, exist_ok=True)
-    fd = os.open(os.path.join(d, "session-watch.lock"),
-                 os.O_CREAT | os.O_RDWR, 0o600)
-  except OSError as e:
-    logline(f"singleton: cannot open lock ({e}); continuing unlocked")
-    return "unlocked"
-  try:
-    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-  except OSError:
-    os.close(fd)
-    return None
-  return fd
+    import fcntl
+    d = os.environ.get("XDG_RUNTIME_DIR") or STATE
+    try:
+        os.makedirs(d, exist_ok=True)
+        fd = os.open(os.path.join(d, "session-watch.lock"),
+                     os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError as e:
+        logline(f"singleton: cannot open lock ({e}); continuing unlocked")
+        return "unlocked"
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
 
 
 def runtime_dir():
-  """XDG_RUNTIME_DIR (session-private tmpfs) or STATE as fallback -- the one
+    """XDG_RUNTIME_DIR (session-private tmpfs) or STATE as fallback -- the one
   place the lock file and the adopt flag live."""
-  return os.environ.get("XDG_RUNTIME_DIR") or STATE
+    return os.environ.get("XDG_RUNTIME_DIR") or STATE
 
 
 ADOPT_FLAG = "session-adopt"   # armed by resume/reload, consumed at init.
@@ -2565,80 +2565,80 @@ MODES = ("restore", "adopt", "quiet")
 
 
 def arm_mode(mode):
-  """Arm how the next worker generation starts. One-shot, consumed at init."""
-  p = os.path.join(runtime_dir(), ADOPT_FLAG)
-  try:
-    os.makedirs(runtime_dir(), exist_ok=True)
-    if mode == "restore":
-      if os.path.exists(p):
-        os.remove(p)
-    else:
-      with open(p, "w") as f:
-        f.write(mode + "\n")
-  except OSError:
-    pass
+    """Arm how the next worker generation starts. One-shot, consumed at init."""
+    p = os.path.join(runtime_dir(), ADOPT_FLAG)
+    try:
+        os.makedirs(runtime_dir(), exist_ok=True)
+        if mode == "restore":
+            if os.path.exists(p):
+                os.remove(p)
+        else:
+            with open(p, "w") as f:
+                f.write(mode + "\n")
+    except OSError:
+        pass
 
 
 def take_mode():
-  """The armed mode, cleared as it is read, so only the FIRST worker after
+    """The armed mode, cleared as it is read, so only the FIRST worker after
   the arming acts on it and a later respawn restores. An empty flag file is
   read as `adopt`: that is what its mere presence used to mean."""
-  p = os.path.join(runtime_dir(), ADOPT_FLAG)
-  try:
-    with open(p) as f:
-      mode = f.read().strip()
-  except OSError:
-    return "restore"
-  try:
-    os.remove(p)
-  except OSError:
-    pass
-  return mode if mode in MODES else "adopt"
+    p = os.path.join(runtime_dir(), ADOPT_FLAG)
+    try:
+        with open(p) as f:
+            mode = f.read().strip()
+    except OSError:
+        return "restore"
+    try:
+        os.remove(p)
+    except OSError:
+        pass
+    return mode if mode in MODES else "adopt"
 
 
 def _supervise(script, launch, holder):
-  """Respawn the worker forever, with backoff. The worker is this script
+    """Respawn the worker forever, with backoff. The worker is this script
   RE-EXEC'd, so it reloads its code from disk on every respawn; killing the
   worker is how an edit is picked up without touching the supervisor that
   holds the singleton lock."""
-  base = [sys.executable, script, "_worker"]
-  backoff = 2
-  while True:
-    # Relaunch missing mux terminals on the first worker that actually
-    # REACHES launch_missing (which drops LAUNCHED), NOT merely the first
-    # spawned. The first worker often dies to the compositor-startup race
-    # before it can launch; welding launch to it lost the relaunch entirely.
-    # While the marker is absent, every spawn keeps launch on, so a crashed-
-    # early worker just hands the launch to its successor. launch_missing is
-    # idempotent (skips sessions a live window already shows), so at worst a
-    # rare double-pass is harmless.
-    argv = base if (launch and not os.path.exists(LAUNCHED)) \
-        else base + ["--no-launch"]
-    try:
-      proc = subprocess.Popen(argv)
-    except OSError as e:
-      logline(f"spawn failed: {e}; retry in {backoff}s")
-      time.sleep(backoff)
-      backoff = min(backoff * 2, 30)
-      continue
-    holder["proc"] = proc
-    started = time.time()
-    try:
-      rc = proc.wait()
-    except Exception as e:
-      logline(f"wait: {e}")
-      rc = -1
-    holder["proc"] = None
-    ran = int(time.time() - started)
-    if ran >= 60:
-      backoff = 2                # a healthy run resets the backoff
-    logline(f"worker exited (rc {rc}, ran {ran}s); respawn in {backoff}s")
-    time.sleep(backoff)
-    backoff = min(backoff * 2, 30)
+    base = [sys.executable, script, "_worker"]
+    backoff = 2
+    while True:
+        # Relaunch missing mux terminals on the first worker that actually
+        # REACHES launch_missing (which drops LAUNCHED), NOT merely the first
+        # spawned. The first worker often dies to the compositor-startup race
+        # before it can launch; welding launch to it lost the relaunch entirely.
+        # While the marker is absent, every spawn keeps launch on, so a crashed-
+        # early worker just hands the launch to its successor. launch_missing is
+        # idempotent (skips sessions a live window already shows), so at worst a
+        # rare double-pass is harmless.
+        argv = base if (launch and not os.path.exists(LAUNCHED)) \
+            else base + ["--no-launch"]
+        try:
+            proc = subprocess.Popen(argv)
+        except OSError as e:
+            logline(f"spawn failed: {e}; retry in {backoff}s")
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 30)
+            continue
+        holder["proc"] = proc
+        started = time.time()
+        try:
+            rc = proc.wait()
+        except Exception as e:
+            logline(f"wait: {e}")
+            rc = -1
+        holder["proc"] = None
+        ran = int(time.time() - started)
+        if ran >= 60:
+            backoff = 2                # a healthy run resets the backoff
+        logline(f"worker exited (rc {rc}, ran {ran}s); respawn in {backoff}s")
+        time.sleep(backoff)
+        backoff = min(backoff * 2, 30)
 
 
 def do_watch(launch=True):
-  """Supervisor: hold the single-instance lock, then spawn a worker and
+    """Supervisor: hold the single-instance lock, then spawn a worker and
   respawn it with backoff if it dies. The worker is this same script
   RE-EXEC'd (the _worker verb), not a fork -- so it reloads its code from
   disk on every respawn (kill the worker to pick up an edit), and only the
@@ -2649,74 +2649,74 @@ def do_watch(launch=True):
   reload, and there is no separate reload verb. Two paths in one script, self-
   contained (contrast kanshi/kanshi-mgr); session teardown reaps both via the
   cgroup kill, so the supervisor need not detect session end itself."""
-  script = os.path.abspath(sys.argv[0])
-  _lock = acquire_singleton()
-  if _lock is None:
-    # already running -> reload it (picks up code + the flag-armed mode).
-    _signal_watcher(signal.SIGHUP, "reload", "reloaded")
-    return
-  if _lock == "unlocked":
-    logline("singleton lock unavailable; supervising unlocked")
-  elif isinstance(_lock, int):
-    try:                    # record our pid so a re-run/stop can signal us
-      os.ftruncate(_lock, 0)
-      os.write(_lock, f"{os.getpid()}\n".encode())
+    script = os.path.abspath(sys.argv[0])
+    _lock = acquire_singleton()
+    if _lock is None:
+        # already running -> reload it (picks up code + the flag-armed mode).
+        _signal_watcher(signal.SIGHUP, "reload", "reloaded")
+        return
+    if _lock == "unlocked":
+        logline("singleton lock unavailable; supervising unlocked")
+    elif isinstance(_lock, int):
+        try:                    # record our pid so a re-run/stop can signal us
+            os.ftruncate(_lock, 0)
+            os.write(_lock, f"{os.getpid()}\n".encode())
+        except OSError:
+            pass
+
+    holder = {"proc": None}
+
+    def stop(signum, _frame):
+        p = holder["proc"]
+        if p and p.poll() is None:
+            p.terminate()
+        logline(f"supervisor stopping (signal {signum})")
+        os._exit(0)
+
+    def reload_self(signum, _frame):
+        # Signal-handler context: the main loop is blocked in proc.wait(), so
+        # do NOT call Popen.wait() here -- it re-enters the same lock and
+        # deadlocks. Just SIGTERM the worker (it holds no lock and dies on its
+        # own; execv abandons the wait anyway) and release the lock fd so the
+        # re-exec'd self can re-acquire it.
+        p = holder["proc"]
+        if p:
+            try:
+                os.kill(p.pid, signal.SIGTERM)
+            except OSError:
+                pass
+        if isinstance(_lock, int):
+            try:
+                os.close(_lock)
+            except OSError:
+                pass
+        logline("reload (SIGHUP): re-exec supervisor")
+        # Re-exec via the internal _super verb, NOT the original watch/resume
+        # argv: a re-exec must supervise WITHOUT re-arming/clearing the adopt
+        # flag, so a `session-mgr resume` that triggered this reload is
+        # honoured by the next worker instead of clobbered by a re-run of
+        # arm_mode.
+        keep = ["--no-launch"] if "--no-launch" in sys.argv[1:] else []
+        os.execv(sys.executable, [sys.executable, script, "_super"] + keep)
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGHUP, reload_self)
+
+    # A fresh supervisor (login or a re-run) starts un-launched: drop a
+    # stale marker so this generation relaunches. (A reload is safe -- the open
+    # terminals are live, so launch_missing skips them.)
+    try:
+        os.makedirs(STATE, exist_ok=True)
+        os.remove(LAUNCHED)
     except OSError:
-      pass
-
-  holder = {"proc": None}
-
-  def stop(signum, _frame):
-    p = holder["proc"]
-    if p and p.poll() is None:
-      p.terminate()
-    logline(f"supervisor stopping (signal {signum})")
-    os._exit(0)
-
-  def reload_self(signum, _frame):
-    # Signal-handler context: the main loop is blocked in proc.wait(), so
-    # do NOT call Popen.wait() here -- it re-enters the same lock and
-    # deadlocks. Just SIGTERM the worker (it holds no lock and dies on its
-    # own; execv abandons the wait anyway) and release the lock fd so the
-    # re-exec'd self can re-acquire it.
-    p = holder["proc"]
-    if p:
-      try:
-        os.kill(p.pid, signal.SIGTERM)
-      except OSError:
         pass
-    if isinstance(_lock, int):
-      try:
-        os.close(_lock)
-      except OSError:
-        pass
-    logline("reload (SIGHUP): re-exec supervisor")
-    # Re-exec via the internal _super verb, NOT the original watch/resume
-    # argv: a re-exec must supervise WITHOUT re-arming/clearing the adopt
-    # flag, so a `session-mgr resume` that triggered this reload is
-    # honoured by the next worker instead of clobbered by a re-run of
-    # arm_mode.
-    keep = ["--no-launch"] if "--no-launch" in sys.argv[1:] else []
-    os.execv(sys.executable, [sys.executable, script, "_super"] + keep)
 
-  signal.signal(signal.SIGTERM, stop)
-  signal.signal(signal.SIGINT, stop)
-  signal.signal(signal.SIGHUP, reload_self)
-
-  # A fresh supervisor (login or a re-run) starts un-launched: drop a
-  # stale marker so this generation relaunches. (A reload is safe -- the open
-  # terminals are live, so launch_missing skips them.)
-  try:
-    os.makedirs(STATE, exist_ok=True)
-    os.remove(LAUNCHED)
-  except OSError:
-    pass
-
-  _supervise(script, launch, holder)
+    _supervise(script, launch, holder)
 
 
 def watch_worker(launch=True):
-  """The daemon proper: place windows to their known spot as they appear
+    """The daemon proper: place windows to their known spot as they appear
   (react), and continuously record the layout into the knowledge base
   (capture). Runs as a child of do_watch's supervisor; an uncaught crash
   here is caught there and the worker respawned. On startup, unless launch
@@ -2730,976 +2730,976 @@ def watch_worker(launch=True):
   instead of restoring the remembered one -- for use after killing session and
   fixing windows by hand, so it does not undo the good state. Then it watches
   normally; respawns (flag gone) restore as usual."""
-  import threading
-  os.makedirs(STATE, exist_ok=True)
-  kb = load_knowledge()
-  lock = threading.Lock()
-  # dirty: knowledge needs a capture. layout: roll history too (not tab-flip).
-  st = {"dirty": True, "layout": True, "last": time.time(),
-        "armed_at": time.time(),   # aggressive-mode clock (reset by the kick)
-        "last_map": time.time()}   # last new toplevel map (feeds IDLE_SETTLE)
-  placed = set()
-  pending = {}           # vid -> {"v": latest view, "due": place-after time}:
-  #                        the settle-debounce queue, drained by placer_loop
-  deadline = {}          # vid -> time after which we no longer place it
-  identified = set()     # vids we have ever been able to RECOGNISE (see
-  #                        _place_view: the grace runs from that moment, not
-  #                        from the map, so a slow login sequence still lands)
-  groups = {}            # vid -> {"app", "titles": set}: in-session tab-group
-  place_sock = connect()
-  logline("session-mgr watch: starting")
-  for _n, _text, _msg in EXCLUDE_ERRORS:
-    logline(f"exclude rule error (line {_n}): {_msg}: {_text!r}")
+    import threading
+    os.makedirs(STATE, exist_ok=True)
+    kb = load_knowledge()
+    lock = threading.Lock()
+    # dirty: knowledge needs a capture. layout: roll history too (not tab-flip).
+    st = {"dirty": True, "layout": True, "last": time.time(),
+          "armed_at": time.time(),   # aggressive-mode clock (reset by the kick)
+          "last_map": time.time()}   # last new toplevel map (feeds IDLE_SETTLE)
+    placed = set()
+    pending = {}           # vid -> {"v": latest view, "due": place-after time}:
+    #                        the settle-debounce queue, drained by placer_loop
+    deadline = {}          # vid -> time after which we no longer place it
+    identified = set()     # vids we have ever been able to RECOGNISE (see
+    #                        _place_view: the grace runs from that moment, not
+    #                        from the map, so a slow login sequence still lands)
+    groups = {}            # vid -> {"app", "titles": set}: in-session tab-group
+    place_sock = connect()
+    logline("session-mgr watch: starting")
+    for _n, _text, _msg in EXCLUDE_ERRORS:
+        logline(f"exclude rule error (line {_n}): {_msg}: {_text!r}")
 
-  def try_place(v):
-    # A desync-class IPC error (timeout/off-by-one) poisons place_sock the
-    # same way it poisons the capture socket, and would then silently fail
-    # EVERY placement for the rest of the session -- so rebuild it on one.
-    # A benign server error-response (e.g. "view is not toplevel" for a
-    # popup) leaves the socket in sync: log it and move on, never reconnect.
-    nonlocal place_sock
-    try:
-      return _place_view(v)
-    except Exception as e:
-      if is_desync_error(e):
-        logline(f"place desync: {e}; reconnecting place socket")
+    def try_place(v):
+        # A desync-class IPC error (timeout/off-by-one) poisons place_sock the
+        # same way it poisons the capture socket, and would then silently fail
+        # EVERY placement for the rest of the session -- so rebuild it on one.
+        # A benign server error-response (e.g. "view is not toplevel" for a
+        # popup) leaves the socket in sync: log it and move on, never reconnect.
+        nonlocal place_sock
         try:
-          place_sock.close()
-        except Exception:
-          pass
-        try:
-          place_sock = connect()
-        except Exception as e2:
-          logline(f"place reconnect failed: {e2}")
-      else:
-        logline(f"place error: {e}")
-      return None
+            return _place_view(v)
+        except Exception as e:
+            if is_desync_error(e):
+                logline(f"place desync: {e}; reconnecting place socket")
+                try:
+                    place_sock.close()
+                except Exception:
+                    pass
+                try:
+                    place_sock = connect()
+                except Exception as e2:
+                    logline(f"place reconnect failed: {e2}")
+            else:
+                logline(f"place error: {e}")
+            return None
 
-  def _steady_at():
-    # steady when (FLOOR passed AND quiet for SETTLE) OR past CAP; the kick
-    # resets armed_at and a new map pushes last_map -- both extend
-    # aggressive.
-    with lock:
-      armed = st["armed_at"]
-      last_map = st["last_map"]
-    return min(armed + AGGR_CAP,
-               max(armed + START_FLOOR, last_map + IDLE_SETTLE))
-
-  def aggressive_now():
-    return time.time() < _steady_at()
-
-  def write_status():
-    # Publish {mode, seconds_left} for `session-mgr status` + the tray. The
-    # steady-at estimate assumes no more windows arrive; a map or a kick
-    # moves it out. Atomic replace so a reader never sees a half file.
-    now = time.time()
-    steady_at = _steady_at()
-    # arc = fraction of the aggressive window still to run, for the tray's
-    # depleting ring; ~1.0 right after a kick, 0.0 once steady.
-    arc = max(0.0, min(1.0, (steady_at - now) / START_FLOOR))
-    try:
-      tmp = STATUS_FILE + ".tmp"
-      with open(tmp, "w") as f:
-        json.dump(
-            {"mode": "aggressive" if now < steady_at else "steady",
-             "seconds_left": max(0, round(steady_at - now)),
-             "arc": round(arc, 3)}, f)
-      os.replace(tmp, STATUS_FILE)
-    except OSError:
-      pass
-
-  def _place_view(v):
-    vid = v.get("id")
-    if vid is None or vid in placed:
-      return
-    if v.get("parent", -1) != -1:
-      return   # a dialog / child view (a file picker, a "Save As" sheet):
-      # it MUST stay on its parent's output. Issuing an output
-      # move for it aborts the whole compositor -- wayfire's
-      # move_view_to_output dassert("Cannot move a dialog to a
-      # different output than its parent"). The event path is not
-      # toplevel-filtered like the init path, so dialogs reach
-      # here; the parent field (-1 == none) is the reliable tell,
-      # where is_transient's title match is not (a portal file
-      # chooser has a null/foreign title).
-    app = v.get("app-id") or v.get("app_id") or ""
-    title = v.get("title", "")
-    if SKIP_TITLE.search(title) or is_transient(v):
-      return   # work / scratch / transient-chrome: leave where it opened
-    with lock:
-      e = (kb.get(kkey(app, ""))
-           or kb.get(kkey(app, identity(v))))
-    # THE GRACE RUNS FROM RECOGNITION, NOT FROM THE MAP. A window can be
-    # unidentifiable for a long time after it appears: a terminal that has
-    # to wait for a keyring to be unlocked before its ssh connects and the
-    # remote tmux paints a banner is a bare shell until then, and its real
-    # title can arrive minutes later. Measuring the grace from the map meant
-    # that window was already past it, so it was never placed and the human
-    # had to do it by hand.
-    #
-    # So the FIRST time a window can be recognised, restart its grace and
-    # feed the settle clock, exactly as if it had just mapped -- because
-    # from usher's point of view it just has. This needs no model of the
-    # sequence, no knowledge of keyrings or agents, and no new persistent
-    # state: it simply stays willing to place a window until it has had one
-    # real chance. Still bounded, since the aggressive check below governs.
-    if e is not None and vid not in identified:
-      identified.add(vid)
-      late = time.time() > deadline.get(vid, 0)
-      deadline[vid] = time.time() + PLACE_GRACE
-      with lock:
-        st["last_map"] = time.time()
-      if late:
-        logline(f"recognised late, re-graced: {app[:16]} | "
-                f"{title[:34]}")
-    if time.time() > deadline.get(vid, 0):
-      return   # past the grace window: the window is settled, hands off
-    if not aggressive_now() and not is_anchored(app, title):
-      return   # steady state: only session/include anchors are (re)placed
-    if not e:
-      return   # never seen this identity -> we don't know where it goes
-    outs = {o["name"]: o for o in place_sock.list_outputs()}
-    o = outs.get(e["output"])
-    if not o:
-      return
-    # Skip if already exactly there (init-place over an in-place session
-    # would otherwise re-issue every window). The event view carries
-    # geometry for init (list_views); a freshly-mapped view may not, and
-    # then we place unconditionally, which is what a new window wants.
-    g = v.get("geometry")
-    if g:
-      t = target_geometry(e, o)
-      if (g.get("x") == t["x"] and g.get("y") == t["y"] and
-              g.get("width") == t["width"] and
-              g.get("height") == t["height"] and
-              v.get("output-name") == e["output"]):
-        placed.add(vid)
-        # Invert follows the window even when it needs no move. placed
-        # dedups, so this fires once per map and never fights a later
-        # Super+N un-invert.
-        if e.get("inverted"):
-          apply_invert(place_sock, vid)
-        return
-    place(place_sock, vid, e, o)
-    placed.add(vid)
-    if e.get("inverted"):
-      apply_invert(place_sock, vid)
-    msg = (f"placed  {app[:18]:18} {e['output']} "
-           f"ws{tuple(e['workspace'])} | {title[:32]}"
-           f"{' [inv]' if e.get('inverted') else ''}")
-    print(msg, flush=True)
-    # ALSO to the log. The autostart discards the worker's stdout, so a
-    # per-window placement left no trace anywhere, and the only record of
-    # placement was the init-placed COUNT. Reconstructing why one window
-    # was not placed then depends entirely on the history ring, which
-    # samples on capture and cannot say whether usher acted or the human
-    # did. This is the line that answers that next time.
-    logline(msg)
-    return True
-
-  def capture_loop():
-    cap = connect()
-    inv_seen = store_mtime(INVERT_STORE)
-    exc_seen = store_mtime(EXCLUDE_FILE)
-    inc_seen = store_mtime(INCLUDE_FILE)
-    arm_seen = store_mtime(ARM_FILE)
-    errstreak = 0
-    while True:
-      time.sleep(1)
-      # Auto-incorporate session/exclude + session/include edits: reload
-      # when either file changes, so a new never-place or anchor rule
-      # applies on save.
-      e = store_mtime(EXCLUDE_FILE)
-      if e != exc_seen:
-        exc_seen = e
-        reload_exclude()
-      i = store_mtime(INCLUDE_FILE)
-      if i != inc_seen:
-        inc_seen = i
-        reload_anchor()
-      # aggressive/settle/toggle all write a timestamp to ARM_FILE; adopt
-      # it as the new armed_at (now = kick, a past ts = settle to steady).
-      # Then publish status each tick for `session-mgr status` + tray.
-      a = store_mtime(ARM_FILE)
-      if a != arm_seen:
-        arm_seen = a
-        try:
-          with lock:
-            st["armed_at"] = float(open(ARM_FILE).read().strip())
-          logline("aggressive re-armed (kick)"
-                  if aggressive_now() else "settled to steady")
-        except (OSError, ValueError):
-          pass
-      write_status()
-      # Inversion has no view event: a Super+N toggle only writes the
-      # invert store. Treat a change to that file as a capture trigger, so
-      # invert/un-invert persists on its own without waiting for a move.
-      # (apply_invert also writes it during restore -- harmless, just a
-      # redundant capture of state we set ourselves.)
-      m = store_mtime(INVERT_STORE)
-      if m != inv_seen:
-        inv_seen = m
+    def _steady_at():
+        # steady when (FLOOR passed AND quiet for SETTLE) OR past CAP; the kick
+        # resets armed_at and a new map pushes last_map -- both extend
+        # aggressive.
         with lock:
-          st["dirty"] = True
-          st["last"] = time.time()
-      with lock:
-        due = st["dirty"] and time.time() - st["last"] >= DEBOUNCE
-      if not due:
-        continue
-      # A transient IPC timeout (the compositor stalls under a slow
-      # login) must not kill this thread: leave st["dirty"] set and the
-      # next tick retries. Without the guard the capture thread died
-      # silently and snapshots simply stopped.
-      try:
-        snap = snapshot(cap)
-        with lock:
-          roll = st["layout"]
-          learn(kb, groups, snap["windows"], snap["time"])
-          st["dirty"] = False
-          st["layout"] = False
-          save_knowledge(kb)
-        persist(snap, roll=roll)
-        errstreak = 0
-      except Exception as e:
-        errstreak += 1
-        logline(f"capture error: {e} (streak {errstreak})")
-        # A request timeout leaves its response unread in cap's buffer,
-        # desyncing it off-by-one: every later call then reads the
-        # PREVIOUS call's response (the name/mapped KeyError storm).
-        # Reusing it never resyncs, so on a desync-class error drop the
-        # socket and reconnect; st["dirty"] stays set, so the next tick
-        # retries on the fresh socket. A benign error would not desync,
-        # so it is left alone -- the streak backstop below still covers
-        # a persistent one.
-        if is_desync_error(e):
-          try:
-            cap.close()
-          except Exception:
+            armed = st["armed_at"]
+            last_map = st["last_map"]
+        return min(armed + AGGR_CAP,
+                   max(armed + START_FLOOR, last_map + IDLE_SETTLE))
+
+    def aggressive_now():
+        return time.time() < _steady_at()
+
+    def write_status():
+        # Publish {mode, seconds_left} for `session-mgr status` + the tray. The
+        # steady-at estimate assumes no more windows arrive; a map or a kick
+        # moves it out. Atomic replace so a reader never sees a half file.
+        now = time.time()
+        steady_at = _steady_at()
+        # arc = fraction of the aggressive window still to run, for the tray's
+        # depleting ring; ~1.0 right after a kick, 0.0 once steady.
+        arc = max(0.0, min(1.0, (steady_at - now) / START_FLOOR))
+        try:
+            tmp = STATUS_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(
+                    {"mode": "aggressive" if now < steady_at else "steady",
+                     "seconds_left": max(0, round(steady_at - now)),
+                     "arc": round(arc, 3)}, f)
+            os.replace(tmp, STATUS_FILE)
+        except OSError:
             pass
-          try:
-            cap = connect()
-          except Exception as e2:
-            logline(f"cap reconnect failed: {e2}")
-        # Fail loud: a sustained streak means the error is not clearing
-        # (compositor wedged, or a class reconnect cannot fix). Exit so
-        # the supervisor does a clean full respawn instead of limping on
-        # a broken capture thread.
-        if errstreak >= CAPTURE_FAIL_LIMIT:
-          logline(f"capture failing {errstreak}x; exit for respawn")
-          os._exit(1)
 
-  threading.Thread(target=capture_loop, daemon=True).start()
-
-  # Consume the one-shot adopt flag (armed by `session-mgr resume`): the first
-  # worker to reach here adopts; a respawn sees it gone and restores.
-  mode = take_mode()
-  if mode == "quiet":
-    # A code reload: express NO opinion about the layout. No init-place, no
-    # capture, no grace deadlines. The windows keep their positions AND the
-    # store keeps its memory of where they belong, so a reload can never be
-    # the reason the two silently converge on the wrong answer.
-    logline("reload: neither restoring nor re-baselining")
-  elif mode == "adopt":
-    # Capture-and-resume: adopt the CURRENT layout as the baseline and do
-    # NOT restore. No init-place and no grace deadlines for open windows, so
-    # they stay exactly where they are; the refreshed knowledge means new
-    # windows FROM HERE are maintained against the good state, not the stale
-    # pre-kill one. capture_loop keeps it current after this.
-    try:
-      do_capture()
-      kb = load_knowledge()   # closure: try_place sees the refreshed KB
-      logline("adopt: captured current layout as baseline; not restoring")
-    except Exception as e:
-      logline(f"adopt capture error: {e}")
-  else:
-    # Place anything already open when we start (react handles the rest);
-    # they get a grace window from now, so init-place lands but later stray
-    # title changes on them do not.
-    now = time.time()
-    n_placed = 0
-    for v in place_sock.list_views(filter_mapped_toplevel=True):
-      if v.get("id") is not None:
-        deadline[v["id"]] = now + PLACE_GRACE
-      try:
-        if try_place(v):
-          n_placed += 1
-      except Exception as e:
-        logline(f"init place error: {e}")
-    logline(f"init-placed {n_placed} window(s)")
-
-  watch = connect()
-  watch.watch(list(KNOWLEDGE_TRIGGERS | PLACE_EVENTS))
-  print(f"session-mgr watch: {len(kb)} known windows; watching", flush=True)
-  logline(f"watching, {len(kb)} known windows")
-
-  # Relaunch missing terminals now that we are watching, so their map events
-  # are caught and placed by the loop below. Chrome restores itself. Drop the
-  # LAUNCHED marker only after launch_missing returns, so the supervisor keeps
-  # launch on for a successor if this worker dies before reaching here.
-  # `quiet` (session-mgr reload) suppresses the relaunch too, and MUST do it
-  # here rather than through the `launch` argument. A reload signals the
-  # running supervisor, which re-execs with its OWN original argv, so the
-  # launch flag the reload was invoked with never reaches the worker -- while
-  # a fresh supervisor generation deletes the LAUNCHED marker, re-arming the
-  # relaunch. A deploy therefore spawned a terminal every time. The mode
-  # travels in the flag file, which the worker does read, so that is the only
-  # place the suppression can actually take effect.
-  if launch and mode != "quiet":
-    try:
-      launch_missing()
-      open(LAUNCHED, "w").close()
-    except Exception as e:
-      logline(f"launch_missing error: {e}")
-  elif mode == "quiet":
-    logline("reload: relaunch suppressed")
-
-  # Settle-debounce placer. Moves a window only once its title has been QUIET
-  # for PLACE_SETTLE: a restoring client churns its title as tabs load, and
-  # reconfiguring it mid-restore can make it drop the window. The event loop
-  # only records the latest view + a due time in `pending`; this thread does
-  # the actual place when the churn stops, reusing place_sock (nothing else
-  # touches it once init is done, so the socket has one writer).
-  def placer_loop():
-    while True:
-      time.sleep(0.1)
-      now = time.time()
-      ready = []
-      with lock:
-        for vid in list(pending):
-          if vid in placed:
-            pending.pop(vid, None)
-          elif now >= pending[vid]["due"]:
-            ready.append(pending.pop(vid)["v"])
-      for v in ready:
-        try_place(v)
-
-  threading.Thread(target=placer_loop, daemon=True).start()
-
-  while True:
-    try:
-      msg = watch.read_next_event()
-    except Exception as e:
-      logline(f"watch loop exit: {e}")   # compositor gone: real teardown
-      break
-    # Guard the WHOLE event body: a stalled-compositor IPC timeout -- or any
-    # unforeseen error -- on one event must skip that event, never fall out
-    # of the loop and end the daemon. The login-storm crash that piled
-    # Chrome up came in through exactly this path (a placement call).
-    try:
-      ev = msg.get("event", "")
-      v = msg.get("view", {}) or {}
-      if ev == "view-mapped" and v.get("id") is not None:
-        deadline[v["id"]] = time.time() + PLACE_GRACE   # start grace
-        with lock:
-          st["last_map"] = time.time()   # feed the IDLE_SETTLE clock
-      if ev in PLACE_EVENTS:
+    def _place_view(v):
         vid = v.get("id")
-        if vid is not None and vid not in placed:
-          # Defer to placer_loop. Browsers wait PLACE_SETTLE (re-
-          # armed on every title change) so we never move one mid-
-          # restore; other apps are stable at map -> a tiny settle,
-          # placed on the next tick.
-          app = v.get("app-id") or v.get("app_id") or ""
-          wait = (PLACE_SETTLE if is_browser(app)
-                  else PLACE_SETTLE_FAST)
-          with lock:
-            pending[vid] = {"v": v, "due": time.time() + wait}
-      elif ev == "view-unmapped" and v.get("id") is not None:
-        placed.discard(v["id"])
-        identified.discard(v["id"])
-        deadline.pop(v["id"], None)
+        if vid is None or vid in placed:
+            return
+        if v.get("parent", -1) != -1:
+            return   # a dialog / child view (a file picker, a "Save As" sheet):
+            # it MUST stay on its parent's output. Issuing an output
+            # move for it aborts the whole compositor -- wayfire's
+            # move_view_to_output dassert("Cannot move a dialog to a
+            # different output than its parent"). The event path is not
+            # toplevel-filtered like the init path, so dialogs reach
+            # here; the parent field (-1 == none) is the reliable tell,
+            # where is_transient's title match is not (a portal file
+            # chooser has a null/foreign title).
+        app = v.get("app-id") or v.get("app_id") or ""
+        title = v.get("title", "")
+        if SKIP_TITLE.search(title) or is_transient(v):
+            return   # work / scratch / transient-chrome: leave where it opened
         with lock:
-          pending.pop(v["id"], None)
-      if ev in KNOWLEDGE_TRIGGERS:
-        with lock:
-          st["dirty"] = True
-          st["last"] = time.time()
-          if ev in LAYOUT_TRIGGERS:
-            st["layout"] = True
-    except Exception as e:
-      logline(f"event error ({msg.get('event', '?')}): {e}")
+            e = (kb.get(kkey(app, ""))
+                 or kb.get(kkey(app, identity(v))))
+        # THE GRACE RUNS FROM RECOGNITION, NOT FROM THE MAP. A window can be
+        # unidentifiable for a long time after it appears: a terminal that has
+        # to wait for a keyring to be unlocked before its ssh connects and the
+        # remote tmux paints a banner is a bare shell until then, and its real
+        # title can arrive minutes later. Measuring the grace from the map meant
+        # that window was already past it, so it was never placed and the human
+        # had to do it by hand.
+        #
+        # So the FIRST time a window can be recognised, restart its grace and
+        # feed the settle clock, exactly as if it had just mapped -- because
+        # from usher's point of view it just has. This needs no model of the
+        # sequence, no knowledge of keyrings or agents, and no new persistent
+        # state: it simply stays willing to place a window until it has had one
+        # real chance. Still bounded, since the aggressive check below governs.
+        if e is not None and vid not in identified:
+            identified.add(vid)
+            late = time.time() > deadline.get(vid, 0)
+            deadline[vid] = time.time() + PLACE_GRACE
+            with lock:
+                st["last_map"] = time.time()
+            if late:
+                logline(f"recognised late, re-graced: {app[:16]} | "
+                        f"{title[:34]}")
+        if time.time() > deadline.get(vid, 0):
+            return   # past the grace window: the window is settled, hands off
+        if not aggressive_now() and not is_anchored(app, title):
+            return   # steady state: only session/include anchors are (re)placed
+        if not e:
+            return   # never seen this identity -> we don't know where it goes
+        outs = {o["name"]: o for o in place_sock.list_outputs()}
+        o = outs.get(e["output"])
+        if not o:
+            return
+        # Skip if already exactly there (init-place over an in-place session
+        # would otherwise re-issue every window). The event view carries
+        # geometry for init (list_views); a freshly-mapped view may not, and
+        # then we place unconditionally, which is what a new window wants.
+        g = v.get("geometry")
+        if g:
+            t = target_geometry(e, o)
+            if (g.get("x") == t["x"] and g.get("y") == t["y"] and
+                    g.get("width") == t["width"] and
+                    g.get("height") == t["height"] and
+                    v.get("output-name") == e["output"]):
+                placed.add(vid)
+                # Invert follows the window even when it needs no move. placed
+                # dedups, so this fires once per map and never fights a later
+                # Super+N un-invert.
+                if e.get("inverted"):
+                    apply_invert(place_sock, vid)
+                return
+        place(place_sock, vid, e, o)
+        placed.add(vid)
+        if e.get("inverted"):
+            apply_invert(place_sock, vid)
+        msg = (f"placed  {app[:18]:18} {e['output']} "
+               f"ws{tuple(e['workspace'])} | {title[:32]}"
+               f"{' [inv]' if e.get('inverted') else ''}")
+        print(msg, flush=True)
+        # ALSO to the log. The autostart discards the worker's stdout, so a
+        # per-window placement left no trace anywhere, and the only record of
+        # placement was the init-placed COUNT. Reconstructing why one window
+        # was not placed then depends entirely on the history ring, which
+        # samples on capture and cannot say whether usher acted or the human
+        # did. This is the line that answers that next time.
+        logline(msg)
+        return True
+
+    def capture_loop():
+        cap = connect()
+        inv_seen = store_mtime(INVERT_STORE)
+        exc_seen = store_mtime(EXCLUDE_FILE)
+        inc_seen = store_mtime(INCLUDE_FILE)
+        arm_seen = store_mtime(ARM_FILE)
+        errstreak = 0
+        while True:
+            time.sleep(1)
+            # Auto-incorporate session/exclude + session/include edits: reload
+            # when either file changes, so a new never-place or anchor rule
+            # applies on save.
+            e = store_mtime(EXCLUDE_FILE)
+            if e != exc_seen:
+                exc_seen = e
+                reload_exclude()
+            i = store_mtime(INCLUDE_FILE)
+            if i != inc_seen:
+                inc_seen = i
+                reload_anchor()
+            # aggressive/settle/toggle all write a timestamp to ARM_FILE; adopt
+            # it as the new armed_at (now = kick, a past ts = settle to steady).
+            # Then publish status each tick for `session-mgr status` + tray.
+            a = store_mtime(ARM_FILE)
+            if a != arm_seen:
+                arm_seen = a
+                try:
+                    with lock:
+                        st["armed_at"] = float(open(ARM_FILE).read().strip())
+                    logline("aggressive re-armed (kick)"
+                            if aggressive_now() else "settled to steady")
+                except (OSError, ValueError):
+                    pass
+            write_status()
+            # Inversion has no view event: a Super+N toggle only writes the
+            # invert store. Treat a change to that file as a capture trigger, so
+            # invert/un-invert persists on its own without waiting for a move.
+            # (apply_invert also writes it during restore -- harmless, just a
+            # redundant capture of state we set ourselves.)
+            m = store_mtime(INVERT_STORE)
+            if m != inv_seen:
+                inv_seen = m
+                with lock:
+                    st["dirty"] = True
+                    st["last"] = time.time()
+            with lock:
+                due = st["dirty"] and time.time() - st["last"] >= DEBOUNCE
+            if not due:
+                continue
+            # A transient IPC timeout (the compositor stalls under a slow
+            # login) must not kill this thread: leave st["dirty"] set and the
+            # next tick retries. Without the guard the capture thread died
+            # silently and snapshots simply stopped.
+            try:
+                snap = snapshot(cap)
+                with lock:
+                    roll = st["layout"]
+                    learn(kb, groups, snap["windows"], snap["time"])
+                    st["dirty"] = False
+                    st["layout"] = False
+                    save_knowledge(kb)
+                persist(snap, roll=roll)
+                errstreak = 0
+            except Exception as e:
+                errstreak += 1
+                logline(f"capture error: {e} (streak {errstreak})")
+                # A request timeout leaves its response unread in cap's buffer,
+                # desyncing it off-by-one: every later call then reads the
+                # PREVIOUS call's response (the name/mapped KeyError storm).
+                # Reusing it never resyncs, so on a desync-class error drop the
+                # socket and reconnect; st["dirty"] stays set, so the next tick
+                # retries on the fresh socket. A benign error would not desync,
+                # so it is left alone -- the streak backstop below still covers
+                # a persistent one.
+                if is_desync_error(e):
+                    try:
+                        cap.close()
+                    except Exception:
+                        pass
+                    try:
+                        cap = connect()
+                    except Exception as e2:
+                        logline(f"cap reconnect failed: {e2}")
+                # Fail loud: a sustained streak means the error is not clearing
+                # (compositor wedged, or a class reconnect cannot fix). Exit so
+                # the supervisor does a clean full respawn instead of limping on
+                # a broken capture thread.
+                if errstreak >= CAPTURE_FAIL_LIMIT:
+                    logline(f"capture failing {errstreak}x; exit for respawn")
+                    os._exit(1)
+
+    threading.Thread(target=capture_loop, daemon=True).start()
+
+    # Consume the one-shot adopt flag (armed by `session-mgr resume`): the first
+    # worker to reach here adopts; a respawn sees it gone and restores.
+    mode = take_mode()
+    if mode == "quiet":
+        # A code reload: express NO opinion about the layout. No init-place, no
+        # capture, no grace deadlines. The windows keep their positions AND the
+        # store keeps its memory of where they belong, so a reload can never be
+        # the reason the two silently converge on the wrong answer.
+        logline("reload: neither restoring nor re-baselining")
+    elif mode == "adopt":
+        # Capture-and-resume: adopt the CURRENT layout as the baseline and do
+        # NOT restore. No init-place and no grace deadlines for open windows, so
+        # they stay exactly where they are; the refreshed knowledge means new
+        # windows FROM HERE are maintained against the good state, not the stale
+        # pre-kill one. capture_loop keeps it current after this.
+        try:
+            do_capture()
+            kb = load_knowledge()   # closure: try_place sees the refreshed KB
+            logline("adopt: captured current layout as baseline; not restoring")
+        except Exception as e:
+            logline(f"adopt capture error: {e}")
+    else:
+        # Place anything already open when we start (react handles the rest);
+        # they get a grace window from now, so init-place lands but later stray
+        # title changes on them do not.
+        now = time.time()
+        n_placed = 0
+        for v in place_sock.list_views(filter_mapped_toplevel=True):
+            if v.get("id") is not None:
+                deadline[v["id"]] = now + PLACE_GRACE
+            try:
+                if try_place(v):
+                    n_placed += 1
+            except Exception as e:
+                logline(f"init place error: {e}")
+        logline(f"init-placed {n_placed} window(s)")
+
+    watch = connect()
+    watch.watch(list(KNOWLEDGE_TRIGGERS | PLACE_EVENTS))
+    print(f"session-mgr watch: {len(kb)} known windows; watching", flush=True)
+    logline(f"watching, {len(kb)} known windows")
+
+    # Relaunch missing terminals now that we are watching, so their map events
+    # are caught and placed by the loop below. Chrome restores itself. Drop the
+    # LAUNCHED marker only after launch_missing returns, so the supervisor keeps
+    # launch on for a successor if this worker dies before reaching here.
+    # `quiet` (session-mgr reload) suppresses the relaunch too, and MUST do it
+    # here rather than through the `launch` argument. A reload signals the
+    # running supervisor, which re-execs with its OWN original argv, so the
+    # launch flag the reload was invoked with never reaches the worker -- while
+    # a fresh supervisor generation deletes the LAUNCHED marker, re-arming the
+    # relaunch. A deploy therefore spawned a terminal every time. The mode
+    # travels in the flag file, which the worker does read, so that is the only
+    # place the suppression can actually take effect.
+    if launch and mode != "quiet":
+        try:
+            launch_missing()
+            open(LAUNCHED, "w").close()
+        except Exception as e:
+            logline(f"launch_missing error: {e}")
+    elif mode == "quiet":
+        logline("reload: relaunch suppressed")
+
+    # Settle-debounce placer. Moves a window only once its title has been QUIET
+    # for PLACE_SETTLE: a restoring client churns its title as tabs load, and
+    # reconfiguring it mid-restore can make it drop the window. The event loop
+    # only records the latest view + a due time in `pending`; this thread does
+    # the actual place when the churn stops, reusing place_sock (nothing else
+    # touches it once init is done, so the socket has one writer).
+    def placer_loop():
+        while True:
+            time.sleep(0.1)
+            now = time.time()
+            ready = []
+            with lock:
+                for vid in list(pending):
+                    if vid in placed:
+                        pending.pop(vid, None)
+                    elif now >= pending[vid]["due"]:
+                        ready.append(pending.pop(vid)["v"])
+            for v in ready:
+                try_place(v)
+
+    threading.Thread(target=placer_loop, daemon=True).start()
+
+    while True:
+        try:
+            msg = watch.read_next_event()
+        except Exception as e:
+            logline(f"watch loop exit: {e}")   # compositor gone: real teardown
+            break
+        # Guard the WHOLE event body: a stalled-compositor IPC timeout -- or any
+        # unforeseen error -- on one event must skip that event, never fall out
+        # of the loop and end the daemon. The login-storm crash that piled
+        # Chrome up came in through exactly this path (a placement call).
+        try:
+            ev = msg.get("event", "")
+            v = msg.get("view", {}) or {}
+            if ev == "view-mapped" and v.get("id") is not None:
+                deadline[v["id"]] = time.time() + PLACE_GRACE   # start grace
+                with lock:
+                    st["last_map"] = time.time()   # feed the IDLE_SETTLE clock
+            if ev in PLACE_EVENTS:
+                vid = v.get("id")
+                if vid is not None and vid not in placed:
+                    # Defer to placer_loop. Browsers wait PLACE_SETTLE (re-
+                    # armed on every title change) so we never move one mid-
+                    # restore; other apps are stable at map -> a tiny settle,
+                    # placed on the next tick.
+                    app = v.get("app-id") or v.get("app_id") or ""
+                    wait = (PLACE_SETTLE if is_browser(app)
+                            else PLACE_SETTLE_FAST)
+                    with lock:
+                        pending[vid] = {"v": v, "due": time.time() + wait}
+            elif ev == "view-unmapped" and v.get("id") is not None:
+                placed.discard(v["id"])
+                identified.discard(v["id"])
+                deadline.pop(v["id"], None)
+                with lock:
+                    pending.pop(v["id"], None)
+            if ev in KNOWLEDGE_TRIGGERS:
+                with lock:
+                    st["dirty"] = True
+                    st["last"] = time.time()
+                    if ev in LAYOUT_TRIGGERS:
+                        st["layout"] = True
+        except Exception as e:
+            logline(f"event error ({msg.get('event', '?')}): {e}")
 
 
 def _signal_watcher(sig, action, done):
-  """Signal the running supervisor, whose pid is in the lock file (the single
+    """Signal the running supervisor, whose pid is in the lock file (the single
   place that path lives). Exit if none is running or the signal fails."""
-  d = os.environ.get("XDG_RUNTIME_DIR") or STATE
-  path = os.path.join(d, "session-watch.lock")
-  try:
-    pid = int(open(path).read().strip())
-  except (OSError, ValueError):
-    sys.exit(f"session-mgr: no running watcher to {action}")
-  try:
-    os.kill(pid, sig)
-  except OSError as e:
-    sys.exit(f"session-mgr: cannot signal watcher pid {pid}: {e}")
-  print(f"session-mgr: {done} watcher (pid {pid})")
+    d = os.environ.get("XDG_RUNTIME_DIR") or STATE
+    path = os.path.join(d, "session-watch.lock")
+    try:
+        pid = int(open(path).read().strip())
+    except (OSError, ValueError):
+        sys.exit(f"session-mgr: no running watcher to {action}")
+    try:
+        os.kill(pid, sig)
+    except OSError as e:
+        sys.exit(f"session-mgr: cannot signal watcher pid {pid}: {e}")
+    print(f"session-mgr: {done} watcher (pid {pid})")
 
 
 def do_stop():
-  """Stop the watcher cleanly: SIGTERM the supervisor, whose stop handler
+    """Stop the watcher cleanly: SIGTERM the supervisor, whose stop handler
   terminates the worker and exits (releasing the lock). Replaces the
   `pkill -f 'session-mgr watch'` dance, which races the respawn and can
   match the wrong process -- including the shell running the pkill."""
-  _signal_watcher(signal.SIGTERM, "stop", "stopped")
+    _signal_watcher(signal.SIGTERM, "stop", "stopped")
 
 
 def _snss_build(window, tab, url, title, ver=3):
-  """Build a minimal one-window/one-tab SNSS blob, for selftest's parser
+    """Build a minimal one-window/one-tab SNSS blob, for selftest's parser
   check -- the inverse of parse_snss (Pickle 4-byte alignment and all)."""
-  def wi(x):
-    return struct.pack("<i", x)
+    def wi(x):
+        return struct.pack("<i", x)
 
-  def ws(s):
-    b = s.encode("utf-8")
-    return wi(len(b)) + b + b"\x00" * ((-len(b)) % 4)
+    def ws(s):
+        b = s.encode("utf-8")
+        return wi(len(b)) + b + b"\x00" * ((-len(b)) % 4)
 
-  def ws16(s):
-    b = s.encode("utf-16-le")
-    return wi(len(s)) + b + b"\x00" * ((-len(b)) % 4)
+    def ws16(s):
+        b = s.encode("utf-16-le")
+        return wi(len(s)) + b + b"\x00" * ((-len(b)) % 4)
 
-  def cmd(cid, payload):
-    body = bytes([cid]) + payload
-    return struct.pack("<H", len(body)) + body
+    def cmd(cid, payload):
+        body = bytes([cid]) + payload
+        return struct.pack("<H", len(body)) + body
 
-  pk = wi(tab) + wi(0) + ws(url) + ws16(title)
-  return (b"SNSS" + wi(ver)
-          + cmd(_SNSS_SET_TAB_WINDOW, wi(window) + wi(tab))
-          + cmd(_SNSS_SET_TAB_INDEX, wi(tab) + wi(0))
-          + cmd(_SNSS_SET_SEL_TAB_IN_WIN, wi(window) + wi(0))
-          + cmd(_SNSS_SET_SEL_NAV_INDEX, wi(tab) + wi(0))
-          + cmd(_SNSS_UPDATE_TAB_NAV, wi(len(pk)) + pk))
+    pk = wi(tab) + wi(0) + ws(url) + ws16(title)
+    return (b"SNSS" + wi(ver)
+            + cmd(_SNSS_SET_TAB_WINDOW, wi(window) + wi(tab))
+            + cmd(_SNSS_SET_TAB_INDEX, wi(tab) + wi(0))
+            + cmd(_SNSS_SET_SEL_TAB_IN_WIN, wi(window) + wi(0))
+            + cmd(_SNSS_SET_SEL_NAV_INDEX, wi(tab) + wi(0))
+            + cmd(_SNSS_UPDATE_TAB_NAV, wi(len(pk)) + pk))
 
 
 @contextlib.contextmanager
 def _tprofile(name):
-  """Pin the display profile for a block and put the environment back, so an
+    """Pin the display profile for a block and put the environment back, so an
   area that changes it cannot leak into the next."""
-  prev = os.environ.get("SESSION_PROFILE")
-  os.environ["SESSION_PROFILE"] = name
-  try:
-    yield
-  finally:
-    if prev is None:
-      os.environ.pop("SESSION_PROFILE", None)
-    else:
-      os.environ["SESSION_PROFILE"] = prev
+    prev = os.environ.get("SESSION_PROFILE")
+    os.environ["SESSION_PROFILE"] = name
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop("SESSION_PROFILE", None)
+        else:
+            os.environ["SESSION_PROFILE"] = prev
 
 
 def _tmw(cmd=None, key="term:resume", size=None):
-  """A saved terminal window, as a snapshot records one."""
-  w = {"app_id": "kitty", "key": key}
-  if cmd:
-    w["cmd"] = cmd
-  if size:
-    w["size"] = size
-  return w
+    """A saved terminal window, as a snapshot records one."""
+    w = {"app_id": "kitty", "key": key}
+    if cmd:
+        w["cmd"] = cmd
+    if size:
+        w["size"] = size
+    return w
 
 
 def _tv(app, title="", pid=-1):
-  """A normalized view, shaped as a plugin hook receives one."""
-  return {"app": app, "title": title, "pid": pid}
+    """A normalized view, shaped as a plugin hook receives one."""
+    return {"app": app, "title": title, "pid": pid}
 
 
 def _t_registry(ck):
-  """the plugin registry: who claims which window, and the
+    """the plugin registry: who claims which window, and the
   title parsers that feed it."""
-  ps = {getattr(p, "name", "?"): p for p in plugins()}
-  # the registry loads the three built-ins; each claims the right windows
-  ps = {getattr(p, "name", "?"): p for p in plugins()}
-  ck("plugins-builtin", all(n in ps for n in ("chrome", "mux", "kitty")))
-  ck("owns-chrome", ps["chrome"].owns(_tv("google-chrome")))
-  # XWayland reports `Google-chrome`; both forms exist in a real store, and
-  # only matching the lower-case one left those windows unclaimed
-  ck("owns-chrome-xwayland", ps["chrome"].owns(_tv("Google-chrome")))
-  ck("is_chrome-cases", is_chrome("Google-chrome") and is_chrome("chromium")
-     and not is_chrome("kitty") and not is_chrome(None))
-  ck("is_owned-xwayland", is_owned("Google-chrome"))
-  ck("owns-mux", ps["mux"].owns(_tv("kitty", "wf:code")))
-  ck("owns-kitty-notmux", not ps["mux"].owns(_tv("kitty", "✳ Claude Code"))
-     and ps["kitty"].owns(_tv("kitty", "✳ Claude Code")))
-  ck("owner-mux", _owner(_tv("kitty", "wf:code[manifold]")) is ps["mux"])
-  ck("owner-kitty", _owner(_tv("kitty", "✳ Claude Code")) is ps["kitty"])
-  ck("owns-nobody", _owner(_tv("slack", "Slack")) is None)
-  ck("is_owned", is_owned("google-chrome") and is_owned("kitty")
-     and not is_owned("slack"))
+    ps = {getattr(p, "name", "?"): p for p in plugins()}
+    # the registry loads the three built-ins; each claims the right windows
+    ps = {getattr(p, "name", "?"): p for p in plugins()}
+    ck("plugins-builtin", all(n in ps for n in ("chrome", "mux", "kitty")))
+    ck("owns-chrome", ps["chrome"].owns(_tv("google-chrome")))
+    # XWayland reports `Google-chrome`; both forms exist in a real store, and
+    # only matching the lower-case one left those windows unclaimed
+    ck("owns-chrome-xwayland", ps["chrome"].owns(_tv("Google-chrome")))
+    ck("is_chrome-cases", is_chrome("Google-chrome") and is_chrome("chromium")
+       and not is_chrome("kitty") and not is_chrome(None))
+    ck("is_owned-xwayland", is_owned("Google-chrome"))
+    ck("owns-mux", ps["mux"].owns(_tv("kitty", "wf:code")))
+    ck("owns-kitty-notmux", not ps["mux"].owns(_tv("kitty", "✳ Claude Code"))
+       and ps["kitty"].owns(_tv("kitty", "✳ Claude Code")))
+    ck("owner-mux", _owner(_tv("kitty", "wf:code[manifold]")) is ps["mux"])
+    ck("owner-kitty", _owner(_tv("kitty", "✳ Claude Code")) is ps["kitty"])
+    ck("owns-nobody", _owner(_tv("slack", "Slack")) is None)
+    ck("is_owned", is_owned("google-chrome") and is_owned("kitty")
+       and not is_owned("slack"))
 
-  # mux session parse: label-stripped, up to the first ':'; namespaced key
-  ck("mux-session", mux_session_of("wf:code⠀[manifold]") == "wf")
-  ck("mux-session-label", mux_session_of("[WORK] proj:main") == "proj")
-  ck("mux-session-none", mux_session_of("terminal") is None)
+    # mux session parse: label-stripped, up to the first ':'; namespaced key
+    ck("mux-session", mux_session_of("wf:code⠀[manifold]") == "wf")
+    ck("mux-session-label", mux_session_of("[WORK] proj:main") == "proj")
+    ck("mux-session-none", mux_session_of("terminal") is None)
 
-  # host parse: the TRAILING tag only. The leading [LABEL] context prefix must
-  # never be read as a host, and an untagged title falls back to this box.
-  ck("mux-host", mux_host_of("wf:code⠀⠀⠀⠀[manifold]") == "manifold")
-  ck("mux-host-label", mux_host_of("[WORK] proj:main") is None)
-  ck("mux-host-both",
-     mux_host_of("[WORK] proj:main⠀⠀⠀⠀[manifold]") == "manifold")
-  # latch detection, the thing that decides replay-exactly vs fall back to
-  # `mux resume`. Verified live once; this pins the matching itself.
-  ck("latch-argv", _latch_target_in(
-     ["/bin/sh", "/home/x/.cache/pkgs/mux/bin/../libexec/mux-latch",
-      "manifestor:tackup"]) == "manifestor:tackup")
-  ck("latch-argv-host-only",
-     _latch_target_in(["/bin/sh", "/opt/mux/libexec/mux-latch",
-                       "manifold"]) == "manifold")
-  ck("latch-argv-none", _latch_target_in(
-     ["tmux", "-L", "global", "attach-session", "-t", "=wf"]) is None)
-  # a latch with NO target names no host, so there is nothing to replay
-  ck("latch-argv-bare",
-     _latch_target_in(["/bin/sh", "/opt/mux/libexec/mux-latch"]) is None)
-  # must not match a lookalike basename
-  ck("latch-argv-lookalike",
-     _latch_target_in(["/opt/mux/libexec/mux-latcher", "box"]) is None)
+    # host parse: the TRAILING tag only. The leading [LABEL] context prefix must
+    # never be read as a host, and an untagged title falls back to this box.
+    ck("mux-host", mux_host_of("wf:code⠀⠀⠀⠀[manifold]") == "manifold")
+    ck("mux-host-label", mux_host_of("[WORK] proj:main") is None)
+    ck("mux-host-both",
+       mux_host_of("[WORK] proj:main⠀⠀⠀⠀[manifold]") == "manifold")
+    # latch detection, the thing that decides replay-exactly vs fall back to
+    # `mux resume`. Verified live once; this pins the matching itself.
+    ck("latch-argv", _latch_target_in(
+       ["/bin/sh", "/home/x/.cache/pkgs/mux/bin/../libexec/mux-latch",
+        "manifestor:tackup"]) == "manifestor:tackup")
+    ck("latch-argv-host-only",
+       _latch_target_in(["/bin/sh", "/opt/mux/libexec/mux-latch",
+                         "manifold"]) == "manifold")
+    ck("latch-argv-none", _latch_target_in(
+       ["tmux", "-L", "global", "attach-session", "-t", "=wf"]) is None)
+    # a latch with NO target names no host, so there is nothing to replay
+    ck("latch-argv-bare",
+       _latch_target_in(["/bin/sh", "/opt/mux/libexec/mux-latch"]) is None)
+    # must not match a lookalike basename
+    ck("latch-argv-lookalike",
+       _latch_target_in(["/opt/mux/libexec/mux-latcher", "box"]) is None)
 
 
 def _t_terminals(ck):
-  """a terminal's SLOT, and which windows need respawning."""
-  ps = {getattr(p, "name", "?"): p for p in plugins()}
-  # THE SLOT. A terminal owns its place by the COMMAND it runs, so the two
-  # windows below are the same slot despite showing different sessions --
-  # which is the entire point of the change, and what the session-shaped key
-  # could not do.
-  ck("slot-local", _mux_slot(None) == "term:resume")
-  ck("slot-latch",
-     _mux_slot("manifestor:tackup") == "term:latch manifestor:tackup")
-  ck("slot-survives-session-switch",
-     ps["mux"].identity(_tv("kitty", "vigilance:1\u2800\u2800[manifold]"))
-     == ps["mux"].identity(_tv("kitty", "tackup:1\u2800\u2800[manifold]")))
-  ck("slot-latch-differs-from-local",
-     _mux_slot("manifestor:tackup") != _mux_slot(None))
+    """a terminal's SLOT, and which windows need respawning."""
+    ps = {getattr(p, "name", "?"): p for p in plugins()}
+    # THE SLOT. A terminal owns its place by the COMMAND it runs, so the two
+    # windows below are the same slot despite showing different sessions --
+    # which is the entire point of the change, and what the session-shaped key
+    # could not do.
+    ck("slot-local", _mux_slot(None) == "term:resume")
+    ck("slot-latch",
+       _mux_slot("manifestor:tackup") == "term:latch manifestor:tackup")
+    ck("slot-survives-session-switch",
+       ps["mux"].identity(_tv("kitty", "vigilance:1\u2800\u2800[manifold]"))
+       == ps["mux"].identity(_tv("kitty", "tackup:1\u2800\u2800[manifold]")))
+    ck("slot-latch-differs-from-local",
+       _mux_slot("manifestor:tackup") != _mux_slot(None))
 
-  # live_keys resolves a real on-screen title through to its identity
-  ck("live-keys", live_keys([_tv("kitty", "live:1⠀⠀⠀⠀[manifestor]")])
-     == {"term:resume"})
+    # live_keys resolves a real on-screen title through to its identity
+    ck("live-keys", live_keys([_tv("kitty", "live:1⠀⠀⠀⠀[manifestor]")])
+       == {"term:resume"})
 
-  # relaunch candidate selection, driven with fixtures (no mux, no
-  # compositor). The per-session matching this replaced is covered by the
-  # command checks above; what matters here is the kitty half.
-  def S(key, app="kitty"):
-    return {"app_id": app, "key": key, "title": ""}
+    # relaunch candidate selection, driven with fixtures (no mux, no
+    # compositor). The per-session matching this replaced is covered by the
+    # command checks above; what matters here is the kitty half.
+    def S(key, app="kitty"):
+        return {"app_id": app, "key": key, "title": ""}
 
-  ck("kitty-candidates",
-     kitty_candidates([S("kitty:/tmp"), S("kitty:/tmp"),
-                       S("kitty:/nonexistent-" + "z" * 12),
-                       S("mux@manifestor:wf")], set()) == ["/tmp"])
-  ck("kitty-candidates-live",
-     kitty_candidates([S("kitty:/tmp")], {"kitty:/tmp"}) == [])
+    ck("kitty-candidates",
+       kitty_candidates([S("kitty:/tmp"), S("kitty:/tmp"),
+                         S("kitty:/nonexistent-" + "z" * 12),
+                         S("mux@manifestor:wf")], set()) == ["/tmp"])
+    ck("kitty-candidates-live",
+       kitty_candidates([S("kitty:/tmp")], {"kitty:/tmp"}) == [])
 
-  # the relaunch command. A latch is REPLAYED (it is the one mux verb that
-  # survives in the process tree); anything else was a local mux, and the
-  # default is `mux resume`, which rebuilds the whole set rather than the one
-  # session a titlebar happened to name.
-  ck("cmd-default-is-resume",
-     mux_cmd_of_saved({"app_id": "kitty"}) == MUX_RESUME)
-  ck("cmd-recorded-wins",
-     mux_cmd_of_saved({"app_id": "kitty", "cmd": "X latch manifestor"})
-     == "X latch manifestor")
-  ck("resume-names-no-session",
-     " go " not in MUX_RESUME and MUX_RESUME.endswith(" resume"))
+    # the relaunch command. A latch is REPLAYED (it is the one mux verb that
+    # survives in the process tree); anything else was a local mux, and the
+    # default is `mux resume`, which rebuilds the whole set rather than the one
+    # session a titlebar happened to name.
+    ck("cmd-default-is-resume",
+       mux_cmd_of_saved({"app_id": "kitty"}) == MUX_RESUME)
+    ck("cmd-recorded-wins",
+       mux_cmd_of_saved({"app_id": "kitty", "cmd": "X latch manifestor"})
+       == "X latch manifestor")
+    ck("resume-names-no-session",
+       " go " not in MUX_RESUME and MUX_RESUME.endswith(" resume"))
 
-  # candidates are COUNTED per command, not matched per session
-  ck("cand-one-per-missing-window",
-     mux_candidates([_tmw(), _tmw()], []) == [(MUX_RESUME, None)] * 2)
-  ck("cand-counts-live-down",
-     len(mux_candidates([_tmw(), _tmw()],
-                        [_tv("kitty", "a:1\u2800\u2800[manifold]")])) == 1)
-  ck("cand-distinct-commands",
-     sorted(c for c, _ in mux_candidates(
-         [_tmw(), _tmw(cmd="L latch manifestor")], []))
-     == sorted([MUX_RESUME, "L latch manifestor"]))
-  ck("cand-carries-size",
-     mux_candidates([_tmw(size=[2132.0, 1674.0])], [])
-     == [(MUX_RESUME, [2132, 1674])])
-  ck("cand-ignores-non-mux",
-     mux_candidates([{"app_id": "kitty", "key": "kitty:/tmp"}], []) == [])
+    # candidates are COUNTED per command, not matched per session
+    ck("cand-one-per-missing-window",
+       mux_candidates([_tmw(), _tmw()], []) == [(MUX_RESUME, None)] * 2)
+    ck("cand-counts-live-down",
+       len(mux_candidates([_tmw(), _tmw()],
+                          [_tv("kitty", "a:1\u2800\u2800[manifold]")])) == 1)
+    ck("cand-distinct-commands",
+       sorted(c for c, _ in mux_candidates(
+           [_tmw(), _tmw(cmd="L latch manifestor")], []))
+       == sorted([MUX_RESUME, "L latch manifestor"]))
+    ck("cand-carries-size",
+       mux_candidates([_tmw(size=[2132.0, 1674.0])], [])
+       == [(MUX_RESUME, [2132, 1674])])
+    ck("cand-ignores-non-mux",
+       mux_candidates([{"app_id": "kitty", "key": "kitty:/tmp"}], []) == [])
 
 
 def _t_relaunch(ck):
-  """the relaunch paths, RUN with the spawn stubbed."""
-  # RUN the relaunch paths end to end with the spawn stubbed. Checking
-  # mux_candidates alone is not enough: a NameError in the announce after the
-  # spawn shipped undetected precisely because nothing executed these
-  # functions, only the pure helper inside them.
-  import io
-  import contextlib
-  _real = (spawn_term, _spawn_kitty)
-  _spawned = []
-  try:
-    globals()["spawn_term"] = lambda *a, **k: _spawned.append(("mux", a))
-    globals()["_spawn_kitty"] = lambda *a, **k: _spawned.append(("kitty",
-                                                                 a))
-    with contextlib.redirect_stdout(io.StringIO()):
-      n_mux = mux_relaunch_missing([_tmw(), _tmw(cmd="L latch box")], [])
-      n_kit = kitty_relaunch_missing(
-          [{"app_id": "kitty", "key": "kitty:/tmp", "title": ""}], [])
-    ck("relaunch-mux-runs", n_mux == 2)
-    ck("relaunch-kitty-runs", n_kit == 1)
-    ck("relaunch-spawned", len(_spawned) == 3)
-  finally:
-    globals()["spawn_term"], globals()["_spawn_kitty"] = _real
+    """the relaunch paths, RUN with the spawn stubbed."""
+    # RUN the relaunch paths end to end with the spawn stubbed. Checking
+    # mux_candidates alone is not enough: a NameError in the announce after the
+    # spawn shipped undetected precisely because nothing executed these
+    # functions, only the pure helper inside them.
+    import io
+    import contextlib
+    _real = (spawn_term, _spawn_kitty)
+    _spawned = []
+    try:
+        globals()["spawn_term"] = lambda *a, **k: _spawned.append(("mux", a))
+        globals()["_spawn_kitty"] = lambda *a, **k: _spawned.append(("kitty",
+                                                                     a))
+        with contextlib.redirect_stdout(io.StringIO()):
+            n_mux = mux_relaunch_missing([_tmw(), _tmw(cmd="L latch box")], [])
+            n_kit = kitty_relaunch_missing(
+                [{"app_id": "kitty", "key": "kitty:/tmp", "title": ""}], [])
+        ck("relaunch-mux-runs", n_mux == 2)
+        ck("relaunch-kitty-runs", n_kit == 1)
+        ck("relaunch-spawned", len(_spawned) == 3)
+    finally:
+        globals()["spawn_term"], globals()["_spawn_kitty"] = _real
 
 
 def _t_chrome(ck):
-  """chrome identity, profiles, and the restore flags."""
-  ps = {getattr(p, "name", "?"): p for p in plugins()}
-  # chrome identity is the WINDOW, not the tab. These run against the real
-  # session files when present, which is the only place the join can be
-  # tested honestly.
-  _wins = {w for w, _u in chrome_session_titles().values()}
-  ck("chrome-slots-are-windows",
-     all(chrome_window_for(t + " - Google Chrome").startswith("chrome:win:")
-         for t in list(chrome_session_titles())[:5]))
-  ck("chrome-slot-count-matches-windows",
-     len({chrome_window_for(t + " - Google Chrome")
-          for t in chrome_session_titles()}) == len(_wins))
-  ck("chrome-unknown-title", chrome_window_for("nothing like this") is None)
-  # the profile map is keyed by slot now, so a saved window still resolves
-  ck("chrome-profile-map-by-slot",
-     all(k.startswith("chrome:win:") for k in chrome_profile_map()))
+    """chrome identity, profiles, and the restore flags."""
+    ps = {getattr(p, "name", "?"): p for p in plugins()}
+    # chrome identity is the WINDOW, not the tab. These run against the real
+    # session files when present, which is the only place the join can be
+    # tested honestly.
+    _wins = {w for w, _u in chrome_session_titles().values()}
+    ck("chrome-slots-are-windows",
+       all(chrome_window_for(t + " - Google Chrome").startswith("chrome:win:")
+           for t in list(chrome_session_titles())[:5]))
+    ck("chrome-slot-count-matches-windows",
+       len({chrome_window_for(t + " - Google Chrome")
+            for t in chrome_session_titles()}) == len(_wins))
+    ck("chrome-unknown-title", chrome_window_for("nothing like this") is None)
+    # the profile map is keyed by slot now, so a saved window still resolves
+    ck("chrome-profile-map-by-slot",
+       all(k.startswith("chrome:win:") for k in chrome_profile_map()))
 
-  # chrome is started with the flags that make it RESTORE: naming the right
-  # profile is not enough, since "On startup" is unset on these profiles and
-  # unset means the New Tab page.
-  ck("chrome-restore-flag", "--restore-last-session" in CHROME_FLAGS)
-  ck("chrome-flags-overridable",
-     shlex.split("") == [] and isinstance(CHROME_FLAGS, list))
+    # chrome is started with the flags that make it RESTORE: naming the right
+    # profile is not enough, since "On startup" is unset on these profiles and
+    # unset means the New Tab page.
+    ck("chrome-restore-flag", "--restore-last-session" in CHROME_FLAGS)
+    ck("chrome-flags-overridable",
+       shlex.split("") == [] and isinstance(CHROME_FLAGS, list))
 
-  # chrome relaunch: only when the last session had Chrome and none is up
-  _ch = ps["chrome"]
-  ck("chrome-no-saved", _ch.relaunch_missing([], []) == 0)
-  ck("chrome-already-live",
-     _ch.relaunch_missing([{"app_id": "google-chrome"}],
-                          [_tv("google-chrome", "x")]) == 0)
+    # chrome relaunch: only when the last session had Chrome and none is up
+    _ch = ps["chrome"]
+    ck("chrome-no-saved", _ch.relaunch_missing([], []) == 0)
+    ck("chrome-already-live",
+       _ch.relaunch_missing([{"app_id": "google-chrome"}],
+                            [_tv("google-chrome", "x")]) == 0)
 
 
 def _t_learn(ck):
-  """what a learn pass keeps, replaces and purges."""
-  # learn() must KEEP the entry it just wrote for a live terminal. Its mux
-  # purge once compared kb keys (identities) against raw window titles, so it
-  # deleted every terminal entry on the same pass that created it, and
-  # terminals were never placed at all. Nothing else here would catch that.
-  def LW(vid, title, app="kitty"):
-    return {"id": vid, "app_id": app, "title": title, "pid": -1,
-            "output": "DP-1", "workspace": [1.0, 1.0],
-            "pos": [0.0, 0.0], "size": [800.0, 600.0]}
+    """what a learn pass keeps, replaces and purges."""
+    # learn() must KEEP the entry it just wrote for a live terminal. Its mux
+    # purge once compared kb keys (identities) against raw window titles, so it
+    # deleted every terminal entry on the same pass that created it, and
+    # terminals were never placed at all. Nothing else here would catch that.
+    def LW(vid, title, app="kitty"):
+        return {"id": vid, "app_id": app, "title": title, "pid": -1,
+                "output": "DP-1", "workspace": [1.0, 1.0],
+                "pos": [0.0, 0.0], "size": [800.0, 600.0]}
 
-  _kb, _groups = {}, {}
-  learn(_kb, _groups, [LW(1, "usher:main⠀⠀⠀⠀[manifestor]")], 1_800_000_000)
-  ck("learn-keeps-live-mux",
-     [v["title"] for v in _kb.values()] == ["term:resume"])
-  # THE REGRESSION THIS GUARDS: the same window, now showing a DIFFERENT
-  # session. Under the session-shaped key that made it a stranger and purged
-  # the slot it owned, which is how a terminal lost its remembered place.
-  learn(_kb, _groups, [LW(1, "tackup:main⠀⠀⠀⠀[manifold]")], 1_800_000_001)
-  ck("learn-survives-session-switch",
-     [v["title"] for v in _kb.values()] == ["term:resume"])
-  # a terminal whose window is gone IS dropped (the point of the purge)
-  learn(_kb, _groups, [], 1_800_000_002)
-  ck("learn-drops-absent-mux",
-     not any(v["title"].startswith("term:") for v in _kb.values()))
-  # ...but a kitty:<cwd> entry is NOT swept by the mux purge (it merely has a
-  # colon in it, which is all is_mux_term ever tested for)
-  _kb["kitty\x00kitty:/tmp"] = {"app_id": "kitty", "title": "kitty:/tmp",
-                                "last_seen": 1_800_000_001,
-                                "appid_only": False}
-  learn(_kb, _groups, [LW(1, "usher:main⠀⠀⠀⠀[manifestor]")],
-        1_800_000_002)
-  ck("learn-keeps-kitty-cwd", "kitty\x00kitty:/tmp" in _kb)
+    _kb, _groups = {}, {}
+    learn(_kb, _groups, [LW(1, "usher:main⠀⠀⠀⠀[manifestor]")], 1_800_000_000)
+    ck("learn-keeps-live-mux",
+       [v["title"] for v in _kb.values()] == ["term:resume"])
+    # THE REGRESSION THIS GUARDS: the same window, now showing a DIFFERENT
+    # session. Under the session-shaped key that made it a stranger and purged
+    # the slot it owned, which is how a terminal lost its remembered place.
+    learn(_kb, _groups, [LW(1, "tackup:main⠀⠀⠀⠀[manifold]")], 1_800_000_001)
+    ck("learn-survives-session-switch",
+       [v["title"] for v in _kb.values()] == ["term:resume"])
+    # a terminal whose window is gone IS dropped (the point of the purge)
+    learn(_kb, _groups, [], 1_800_000_002)
+    ck("learn-drops-absent-mux",
+       not any(v["title"].startswith("term:") for v in _kb.values()))
+    # ...but a kitty:<cwd> entry is NOT swept by the mux purge (it merely has a
+    # colon in it, which is all is_mux_term ever tested for)
+    _kb["kitty\x00kitty:/tmp"] = {"app_id": "kitty", "title": "kitty:/tmp",
+                                  "last_seen": 1_800_000_001,
+                                  "appid_only": False}
+    learn(_kb, _groups, [LW(1, "usher:main⠀⠀⠀⠀[manifestor]")],
+          1_800_000_002)
+    ck("learn-keeps-kitty-cwd", "kitty\x00kitty:/tmp" in _kb)
 
 
 def _t_geometry(ck):
-  """respawn geometry and the chrome profile fallback."""
-  # respawn geometry: ask kitty for the size the window had, so it does not
-  # map at kitty.conf's default and sit wrong until placement catches up
-  ck("saved-sizes", saved_sizes([{"app_id": "kitty", "key": "kitty:/tmp",
-                                  "size": [2132.0, 1690.0]}])
-     == {"kitty:/tmp": [2132, 1690]})
-  ck("saved-sizes-skips-junk",
-     saved_sizes([{"app_id": "kitty", "key": "k", "size": [0, 0]},
-                  {"app_id": "kitty", "key": "j"}]) == {})
-  ck("size-opts", _size_opts([2132, 1690])
-     == ["-o", "initial_window_width=2132",
-         "-o", "initial_window_height=1690"])
-  ck("size-opts-none", _size_opts(None) == [])
+    """respawn geometry and the chrome profile fallback."""
+    # respawn geometry: ask kitty for the size the window had, so it does not
+    # map at kitty.conf's default and sit wrong until placement catches up
+    ck("saved-sizes", saved_sizes([{"app_id": "kitty", "key": "kitty:/tmp",
+                                    "size": [2132.0, 1690.0]}])
+       == {"kitty:/tmp": [2132, 1690]})
+    ck("saved-sizes-skips-junk",
+       saved_sizes([{"app_id": "kitty", "key": "k", "size": [0, 0]},
+                    {"app_id": "kitty", "key": "j"}]) == {})
+    ck("size-opts", _size_opts([2132, 1690])
+       == ["-o", "initial_window_width=2132",
+           "-o", "initial_window_height=1690"])
+    ck("size-opts-none", _size_opts(None) == [])
 
-  # chrome: with nothing resolvable, fall back to one unnamed launch
-  ck("chrome-profiles-fallback",
-     chrome_profiles_for([{"app_id": "google-chrome",
-                           "key": "nowhere.example/x"}]) == [None])
-  ck("chrome-profiles-ignores-others",
-     chrome_profiles_for([{"app_id": "kitty", "key": "kitty:/tmp"}])
-     == [None])
+    # chrome: with nothing resolvable, fall back to one unnamed launch
+    ck("chrome-profiles-fallback",
+       chrome_profiles_for([{"app_id": "google-chrome",
+                             "key": "nowhere.example/x"}]) == [None])
+    ck("chrome-profiles-ignores-others",
+       chrome_profiles_for([{"app_id": "kitty", "key": "kitty:/tmp"}])
+       == [None])
 
 
 def _t_snapshots(ck):
-  """restoring from a stored milestone."""
-  # --from spec resolution (pure half; the file lookup is driven by `list`)
-  _t = date(2026, 3, 1)
-  ck("spec-today", _spec_to_date("today", _t) == "2026-03-01")
-  ck("spec-yesterday",     # crosses a month boundary, which is the point
-     _spec_to_date("yesterday", _t) == "2026-02-28")
-  ck("spec-date", _spec_to_date("2025-12-31", _t) == "2025-12-31")
-  ck("spec-junk", _spec_to_date("lastweek", _t) is None)
-  ck("spec-not-a-date", _spec_to_date("2026-3-1", _t) is None)
+    """restoring from a stored milestone."""
+    # --from spec resolution (pure half; the file lookup is driven by `list`)
+    _t = date(2026, 3, 1)
+    ck("spec-today", _spec_to_date("today", _t) == "2026-03-01")
+    ck("spec-yesterday",     # crosses a month boundary, which is the point
+       _spec_to_date("yesterday", _t) == "2026-02-28")
+    ck("spec-date", _spec_to_date("2025-12-31", _t) == "2025-12-31")
+    ck("spec-junk", _spec_to_date("lastweek", _t) is None)
+    ck("spec-not-a-date", _spec_to_date("2026-3-1", _t) is None)
 
-  # a milestone becomes placement entries keyed by the RECORDED identity
-  _snap = {"time": 1_800_000_000, "windows": [
-      {"app_id": "kitty", "title": "usher:1⠀⠀⠀⠀[manifestor]",
-       "key": "mux@manifestor:usher", "output": "DP-1",
-       "workspace": [1.0, 1.0], "pos": [0.0, 0.0], "size": [800.0, 600.0]},
-      {"app_id": "kitty", "title": "x:1⠀⠀⠀⠀[manifold]",
-       "key": "mux@manifold:x", "output": "DP-1",
-       "workspace": [1.0, 1.0], "pos": [0.0, 0.0], "size": [800.0, 600.0]},
-      {"app_id": "signal", "title": "Signal", "key": "Signal",
-       "output": "DP-1", "workspace": [1.0, 1.0], "pos": [0.0, 0.0],
-       "size": [800.0, 600.0]}]}
-  _e = entries_from_snapshot(_snap)
-  ck("milestone-entries", len(_e) == 3)
-  ck("milestone-keys",
-     sorted(x["title"] for x in _e if x["app_id"] == "kitty")
-     == ["mux@manifestor:usher", "mux@manifold:x"])
-  # signal is the only window of its app here, so it keys by app_id alone
-  ck("milestone-unique",
-     [x["appid_only"] for x in _e if x["app_id"] == "signal"] == [True])
+    # a milestone becomes placement entries keyed by the RECORDED identity
+    _snap = {"time": 1_800_000_000, "windows": [
+        {"app_id": "kitty", "title": "usher:1⠀⠀⠀⠀[manifestor]",
+         "key": "mux@manifestor:usher", "output": "DP-1",
+         "workspace": [1.0, 1.0], "pos": [0.0, 0.0], "size": [800.0, 600.0]},
+        {"app_id": "kitty", "title": "x:1⠀⠀⠀⠀[manifold]",
+         "key": "mux@manifold:x", "output": "DP-1",
+         "workspace": [1.0, 1.0], "pos": [0.0, 0.0], "size": [800.0, 600.0]},
+        {"app_id": "signal", "title": "Signal", "key": "Signal",
+         "output": "DP-1", "workspace": [1.0, 1.0], "pos": [0.0, 0.0],
+         "size": [800.0, 600.0]}]}
+    _e = entries_from_snapshot(_snap)
+    ck("milestone-entries", len(_e) == 3)
+    ck("milestone-keys",
+       sorted(x["title"] for x in _e if x["app_id"] == "kitty")
+       == ["mux@manifestor:usher", "mux@manifold:x"])
+    # signal is the only window of its app here, so it keys by app_id alone
+    ck("milestone-unique",
+       [x["appid_only"] for x in _e if x["app_id"] == "signal"] == [True])
 
 
 def _t_profiles(ck):
-  """the display-profile id and its paths."""
-  # display profiles: the id is a filename, and a monitor set must map to the
-  # SAME id every time or a layout is lost on every replug.
-  _o = lambda n, w, h: {"name": n, "geometry": {"width": w, "height": h}}
-  _a = {"outputs": [_o("DP-1", 1920, 1080), _o("DP-2", 2560, 1440)]}
-  _b = {"outputs": [_o("DP-2", 2560, 1440), _o("DP-1", 1920, 1080)]}
-  ck("profile-stable", _derived_id(_a) == _derived_id(_b))   # order-blind
-  ck("profile-geometry-matters",
-     _derived_id(_a) != _derived_id({"outputs": [_o("DP-1", 1920, 1080),
-                                                 _o("DP-2", 3840, 2160)]}))
-  ck("profile-subset-differs",
-     _derived_id(_a) != _derived_id({"outputs": [_o("DP-1", 1920, 1080)]}))
-  ck("profile-none", _derived_id({"outputs": []}) is None)
-  ck("profile-safe", _safe_profile("../../etc/passwd") == ".._.._etc_passwd")
-  ck("profile-safe-empty", _safe_profile("") == "default")
-  with _tprofile("testset"):
-    ck("profile-env", profile_id() == "testset")
-    ck("profile-paths", kb_path().endswith("knowledge-testset.json")
-       and schema_path().endswith("knowledge-testset.schema"))
+    """the display-profile id and its paths."""
+    # display profiles: the id is a filename, and a monitor set must map to the
+    # SAME id every time or a layout is lost on every replug.
+    _o = lambda n, w, h: {"name": n, "geometry": {"width": w, "height": h}}
+    _a = {"outputs": [_o("DP-1", 1920, 1080), _o("DP-2", 2560, 1440)]}
+    _b = {"outputs": [_o("DP-2", 2560, 1440), _o("DP-1", 1920, 1080)]}
+    ck("profile-stable", _derived_id(_a) == _derived_id(_b))   # order-blind
+    ck("profile-geometry-matters",
+       _derived_id(_a) != _derived_id({"outputs": [_o("DP-1", 1920, 1080),
+                                                   _o("DP-2", 3840, 2160)]}))
+    ck("profile-subset-differs",
+       _derived_id(_a) != _derived_id({"outputs": [_o("DP-1", 1920, 1080)]}))
+    ck("profile-none", _derived_id({"outputs": []}) is None)
+    ck("profile-safe", _safe_profile("../../etc/passwd") == ".._.._etc_passwd")
+    ck("profile-safe-empty", _safe_profile("") == "default")
+    with _tprofile("testset"):
+        ck("profile-env", profile_id() == "testset")
+        ck("profile-paths", kb_path().endswith("knowledge-testset.json")
+           and schema_path().endswith("knowledge-testset.schema"))
 
 
 def _t_migration(ck):
-  """store migration: stamping, and the legacy merge."""
-  with _tprofile("testset"):
-    _t_migration_body(ck)
+    """store migration: stamping, and the legacy merge."""
+    with _tprofile("testset"):
+        _t_migration_body(ck)
 
 
 def _t_migration_body(ck):
-  # A NEW profile must be stamped CURRENT the moment it is created. It was
-  # not, and the next load then judged the unstamped store stale and dropped
-  # every chrome + kitty entry it had just learned -- each new monitor set
-  # silently losing its browser and terminal placements exactly once.
-  import tempfile
-  _st, _prev = STATE, os.environ.get("XDG_STATE_HOME")
-  _tmp = tempfile.mkdtemp()
-  try:
-    globals()["STATE"] = _tmp
-    load_knowledge()                     # first touch of a fresh profile
-    ck("new-profile-stamped", os.path.exists(schema_path())
-       and open(schema_path()).read().strip() == KB_SCHEMA)
-    _kb = {kkey("google-chrome", "example.com"): {
-        "app_id": "google-chrome", "title": "example.com",
-        "appid_only": False, "last_seen": 1_800_000_000}}
-    save_knowledge(_kb)
-    ck("new-profile-survives-reload", len(load_knowledge()) == 1)
+    # A NEW profile must be stamped CURRENT the moment it is created. It was
+    # not, and the next load then judged the unstamped store stale and dropped
+    # every chrome + kitty entry it had just learned -- each new monitor set
+    # silently losing its browser and terminal placements exactly once.
+    import tempfile
+    _st, _prev = STATE, os.environ.get("XDG_STATE_HOME")
+    _tmp = tempfile.mkdtemp()
+    try:
+        globals()["STATE"] = _tmp
+        load_knowledge()                     # first touch of a fresh profile
+        ck("new-profile-stamped", os.path.exists(schema_path())
+           and open(schema_path()).read().strip() == KB_SCHEMA)
+        _kb = {kkey("google-chrome", "example.com"): {
+            "app_id": "google-chrome", "title": "example.com",
+            "appid_only": False, "last_seen": 1_800_000_000}}
+        save_knowledge(_kb)
+        ck("new-profile-survives-reload", len(load_knowledge()) == 1)
 
-    # A legacy store must be MERGED even when a profile store already
-    # exists. Skipping it there orphaned 1019 placements on manifold and
-    # left placement silently doing almost nothing.
-    _e = lambda t: {"app_id": "google-chrome", "title": t,
-                    "appid_only": False, "last_seen": 1_800_000_000}
-    with open(os.path.join(STATE, "knowledge.json"), "w") as f:
-      json.dump({kkey("google-chrome", "old.example"): _e("old.example"),
-                 kkey("google-chrome", "example.com"): _e("CLOBBER")},
-                f)
-    _merged = load_knowledge()
-    ck("legacy-merged-into-existing", len(_merged) == 2)
-    ck("legacy-does-not-clobber",
-       _merged[kkey("google-chrome", "example.com")]["title"]
-       == "example.com")
-    ck("legacy-retired",
-       not os.path.exists(os.path.join(STATE, "knowledge.json"))
-       and os.path.exists(os.path.join(STATE,
-                                       "knowledge.json.pre-profile")))
-    ck("legacy-merge-is-once", len(load_knowledge()) == 2)
-  finally:
-    globals()["STATE"] = _st
-    shutil.rmtree(_tmp, ignore_errors=True)
+        # A legacy store must be MERGED even when a profile store already
+        # exists. Skipping it there orphaned 1019 placements on manifold and
+        # left placement silently doing almost nothing.
+        _e = lambda t: {"app_id": "google-chrome", "title": t,
+                        "appid_only": False, "last_seen": 1_800_000_000}
+        with open(os.path.join(STATE, "knowledge.json"), "w") as f:
+            json.dump({kkey("google-chrome", "old.example"): _e("old.example"),
+                       kkey("google-chrome", "example.com"): _e("CLOBBER")},
+                      f)
+        _merged = load_knowledge()
+        ck("legacy-merged-into-existing", len(_merged) == 2)
+        ck("legacy-does-not-clobber",
+           _merged[kkey("google-chrome", "example.com")]["title"]
+           == "example.com")
+        ck("legacy-retired",
+           not os.path.exists(os.path.join(STATE, "knowledge.json"))
+           and os.path.exists(os.path.join(STATE,
+                                           "knowledge.json.pre-profile")))
+        ck("legacy-merge-is-once", len(load_knowledge()) == 2)
+    finally:
+        globals()["STATE"] = _st
+        shutil.rmtree(_tmp, ignore_errors=True)
 
 
 
 def _t_contracts(ck):
-  """the cross-tool contracts and the SNSS reader."""
-  # CONTRACT with mux: `mux resume --list` must stay BARE NAMES, one per line.
-  # This is the guard the old `mux ls` scrape lacked -- a cosmetic change over
-  # in mux (the agent-state glyph) silently killed relaunch with no symptom.
-  # Skipped when mux is absent (the soft dep); an empty set is legitimate.
-  ck("mux-list-contract",
-     all(re.fullmatch(r"[^\s:]+", s) for s in mux_session_set()))
+    """the cross-tool contracts and the SNSS reader."""
+    # CONTRACT with mux: `mux resume --list` must stay BARE NAMES, one per line.
+    # This is the guard the old `mux ls` scrape lacked -- a cosmetic change over
+    # in mux (the agent-state glyph) silently killed relaunch with no symptom.
+    # Skipped when mux is absent (the soft dep); an empty set is legitimate.
+    ck("mux-list-contract",
+       all(re.fullmatch(r"[^\s:]+", s) for s in mux_session_set()))
 
-  # identity() is a STRICT no-op for a non-plugin app
-  ck("noop-slack", identity(_tv("slack", "Slack")) == "Slack")
+    # identity() is a STRICT no-op for a non-plugin app
+    ck("noop-slack", identity(_tv("slack", "Slack")) == "Slack")
 
-  # parse_snss recovers the active-tab url from a synthetic session file
-  import tempfile
-  fd, path = tempfile.mkstemp()
-  try:
-    os.write(fd, _snss_build(11, 22, "https://example.com/x", "Example"))
-    os.close(fd)
-    m = parse_snss(path)
-    # the WINDOW ID is what identity now rests on, so assert it, not just
-    # the url: dropping it is the bug this whole change undoes.
-    ck("snss-parse", m.get("Example") == (11, "https://example.com/x"))
-    ck("snss-window-id", m["Example"][0] == 11)
-  finally:
-    os.remove(path)
+    # parse_snss recovers the active-tab url from a synthetic session file
+    import tempfile
+    fd, path = tempfile.mkstemp()
+    try:
+        os.write(fd, _snss_build(11, 22, "https://example.com/x", "Example"))
+        os.close(fd)
+        m = parse_snss(path)
+        # the WINDOW ID is what identity now rests on, so assert it, not just
+        # the url: dropping it is the bug this whole change undoes.
+        ck("snss-parse", m.get("Example") == (11, "https://example.com/x"))
+        ck("snss-window-id", m["Example"][0] == 11)
+    finally:
+        os.remove(path)
 
-  # any real session file present must parse without raising
-  try:
-    for p in _session_files():
-      parse_snss(p)
-    ck("snss-live", True)
-  except Exception:
-    ck("snss-live", False)
+    # any real session file present must parse without raising
+    try:
+        for p in _session_files():
+            parse_snss(p)
+        ck("snss-live", True)
+    except Exception:
+        ck("snss-live", False)
 
 
 def selftest():
-  """Offline unit checks for the plugin framework and the store -- no
+    """Offline unit checks for the plugin framework and the store -- no
   compositor, deterministic. Run with `session-mgr selftest`.
 
   Split by AREA rather than written as one list, so a failure names the area
   it came from and a new check has an obvious home."""
-  fails = []
+    fails = []
 
-  def ck(name, cond):
-    if not cond:
-      fails.append(name)
+    def ck(name, cond):
+        if not cond:
+            fails.append(name)
 
-  for area in (_t_registry, _t_terminals, _t_relaunch, _t_chrome, _t_learn,
-               _t_geometry, _t_snapshots, _t_profiles, _t_migration,
-               _t_contracts):
-    area(ck)
-  if fails:
-    print("selftest FAIL: " + ", ".join(fails), file=sys.stderr)
-    return 1
-  print("selftest OK")
-  return 0
+    for area in (_t_registry, _t_terminals, _t_relaunch, _t_chrome, _t_learn,
+                 _t_geometry, _t_snapshots, _t_profiles, _t_migration,
+                 _t_contracts):
+        area(ck)
+    if fails:
+        print("selftest FAIL: " + ", ".join(fails), file=sys.stderr)
+        return 1
+    print("selftest OK")
+    return 0
 
 def main():
-  args = sys.argv[1:]
-  verb = args[0] if args else ""
-  if verb == "capture":
-    do_capture()
-  elif verb == "restore":
-    only = None
-    if "--only" in args:
-      k = args.index("--only")
-      only = args[k + 1] if k + 1 < len(args) else None
-    source = None
-    if "--from" in args:      # a stored milestone instead of the live kb
-      k = args.index("--from")
-      source = resolve_snapshot(args[k + 1] if k + 1 < len(args)
-                                else "list")
-    do_restore(dry="--dry-run" in args, only=only, source=source)
-  elif verb == "watch":         # start, or reload if running -- RESTORE mode
-    arm_mode("restore")
-    do_watch(launch="--no-launch" not in args)
-  elif verb == "resume":        # start/reload in ADOPT (no restore)
-    arm_mode("adopt")
-    do_watch(launch="--no-launch" not in args)
-  elif verb == "reload":        # pick up new code, touch NOTHING else
-    # What a deploy wants. `resume` looks right for this and is not: it
-    # captures, so it rewrites every remembered slot to wherever the window
-    # currently sits. Never relaunches either.
-    arm_mode("quiet")
-    do_watch(launch=False)
-  elif verb == "_super":        # internal: re-exec'd supervisor (no re-arm)
-    do_watch(launch="--no-launch" not in args)
-  elif verb == "_worker":       # internal: the supervised worker
-    watch_worker(launch="--no-launch" not in args)
-  elif verb == "stop":          # SIGTERM the supervisor cleanly (no pkill)
-    do_stop()
-  elif verb == "launch":
-    n = launch_missing()
-    print(f"session-mgr: launched {n} terminal(s)")
-  elif verb == "exclude":       # show the never-place rules as loaded
-    for ar, tr in EXCLUDE_RULES:
-      print(f"{ar.pattern} :: {tr.pattern}")
-    for n, text, msg in EXCLUDE_ERRORS:
-      print(f"error: line {n}: {msg}: {text!r}", file=sys.stderr)
-    print(f"# {len(EXCLUDE_RULES)} rule(s), {len(EXCLUDE_ERRORS)} error(s)"
-          f" from {EXCLUDE_FILE}", file=sys.stderr)
-    sys.exit(1 if EXCLUDE_ERRORS else 0)
-  elif verb == "include":       # show the anchor (steady-state) rules loaded
-    for ar, tr in ANCHOR_RULES:
-      print(f"{ar.pattern} :: {tr.pattern}")
-    for n, text, msg in ANCHOR_ERRORS:
-      print(f"error: line {n}: {msg}: {text!r}", file=sys.stderr)
-    print(f"# {len(ANCHOR_RULES)} rule(s), {len(ANCHOR_ERRORS)} error(s)"
-          f" from {INCLUDE_FILE}", file=sys.stderr)
-    sys.exit(1 if ANCHOR_ERRORS else 0)
-  elif verb == "plugins":       # list loaded plugins (built-in + user)
-    for p in plugins():
-      hooks = [h for h in PLUGIN_HOOKS
-               if h in getattr(type(p), "__dict__", {})]
-      print(f"{getattr(p, 'name', '?'):10} {', '.join(hooks)}")
-    print(f"# {len(plugins())} plugin(s); user dir {PLUGIN_DIR}",
-          file=sys.stderr)
-  elif verb == "wind-down":     # last capture, then let the apps go cleanly
-    sys.exit(do_wind_down())
-  elif verb == "display-changed":   # hwdp's changed hook; no-op if same set
-    sys.exit(do_display_changed())
-  elif verb == "doctor":        # what is it doing, and what is it NOT doing
-    sys.exit(do_doctor())
-  elif verb == "selftest":      # offline unit checks (no compositor needed)
-    sys.exit(selftest())
-  elif verb in ("aggressive", "settle", "toggle"):
-    # Placement-mode controls (tray + CLI). All three drive the ONE armed_at
-    # seam the watcher adopts from ARM_FILE: aggressive arms NOW (aggressive
-    # for START_FLOOR); settle arms in the PAST (steady at once, past the
-    # CAP); toggle flips from live STATUS_FILE mode (the tray left-click).
-    act = verb
-    if act == "toggle":
-      try:
-        act = ("settle" if json.load(open(STATUS_FILE)).get("mode")
-               == "aggressive" else "aggressive")
-      except (OSError, ValueError):
-        act = "aggressive"
-    ts = time.time() if act == "aggressive" else time.time() - AGGR_CAP - 1
-    msg = ("re-armed aggressive placement" if act == "aggressive"
-           else "settled to steady")
-    try:
-      os.makedirs(os.path.dirname(ARM_FILE), exist_ok=True)
-      with open(ARM_FILE, "w") as f:
-        f.write(f"{ts}\n")
-      print(f"session-mgr: {msg}")
-    except OSError as e:
-      sys.exit(f"session-mgr: cannot {act}: {e}")
-  elif verb == "status":        # current placement mode + seconds to steady
-    try:
-      s = json.load(open(STATUS_FILE))
-      print(f"mode: {s.get('mode', '?')}  "
-            f"seconds_left: {s.get('seconds_left', '?')}")
-    except (OSError, ValueError):
-      sys.exit("session-mgr: no status (watcher not running?)")
-  else:
-    print("usage: session-mgr capture | "
-          "restore [--dry-run] [--only S] [--from SPEC] | "
-          "watch [--no-launch] | resume | stop | launch | aggressive | "
-          "settle | toggle | status | exclude | include | "
-          "plugins | reload | wind-down | display-changed | doctor | "
-          "selftest",
-          file=sys.stderr)
-    sys.exit(2)
+    args = sys.argv[1:]
+    verb = args[0] if args else ""
+    if verb == "capture":
+        do_capture()
+    elif verb == "restore":
+        only = None
+        if "--only" in args:
+            k = args.index("--only")
+            only = args[k + 1] if k + 1 < len(args) else None
+        source = None
+        if "--from" in args:      # a stored milestone instead of the live kb
+            k = args.index("--from")
+            source = resolve_snapshot(args[k + 1] if k + 1 < len(args)
+                                      else "list")
+        do_restore(dry="--dry-run" in args, only=only, source=source)
+    elif verb == "watch":         # start, or reload if running -- RESTORE mode
+        arm_mode("restore")
+        do_watch(launch="--no-launch" not in args)
+    elif verb == "resume":        # start/reload in ADOPT (no restore)
+        arm_mode("adopt")
+        do_watch(launch="--no-launch" not in args)
+    elif verb == "reload":        # pick up new code, touch NOTHING else
+        # What a deploy wants. `resume` looks right for this and is not: it
+        # captures, so it rewrites every remembered slot to wherever the window
+        # currently sits. Never relaunches either.
+        arm_mode("quiet")
+        do_watch(launch=False)
+    elif verb == "_super":        # internal: re-exec'd supervisor (no re-arm)
+        do_watch(launch="--no-launch" not in args)
+    elif verb == "_worker":       # internal: the supervised worker
+        watch_worker(launch="--no-launch" not in args)
+    elif verb == "stop":          # SIGTERM the supervisor cleanly (no pkill)
+        do_stop()
+    elif verb == "launch":
+        n = launch_missing()
+        print(f"session-mgr: launched {n} terminal(s)")
+    elif verb == "exclude":       # show the never-place rules as loaded
+        for ar, tr in EXCLUDE_RULES:
+            print(f"{ar.pattern} :: {tr.pattern}")
+        for n, text, msg in EXCLUDE_ERRORS:
+            print(f"error: line {n}: {msg}: {text!r}", file=sys.stderr)
+        print(f"# {len(EXCLUDE_RULES)} rule(s), {len(EXCLUDE_ERRORS)} error(s)"
+              f" from {EXCLUDE_FILE}", file=sys.stderr)
+        sys.exit(1 if EXCLUDE_ERRORS else 0)
+    elif verb == "include":       # show the anchor (steady-state) rules loaded
+        for ar, tr in ANCHOR_RULES:
+            print(f"{ar.pattern} :: {tr.pattern}")
+        for n, text, msg in ANCHOR_ERRORS:
+            print(f"error: line {n}: {msg}: {text!r}", file=sys.stderr)
+        print(f"# {len(ANCHOR_RULES)} rule(s), {len(ANCHOR_ERRORS)} error(s)"
+              f" from {INCLUDE_FILE}", file=sys.stderr)
+        sys.exit(1 if ANCHOR_ERRORS else 0)
+    elif verb == "plugins":       # list loaded plugins (built-in + user)
+        for p in plugins():
+            hooks = [h for h in PLUGIN_HOOKS
+                     if h in getattr(type(p), "__dict__", {})]
+            print(f"{getattr(p, 'name', '?'):10} {', '.join(hooks)}")
+        print(f"# {len(plugins())} plugin(s); user dir {PLUGIN_DIR}",
+              file=sys.stderr)
+    elif verb == "wind-down":     # last capture, then let the apps go cleanly
+        sys.exit(do_wind_down())
+    elif verb == "display-changed":   # hwdp's changed hook; no-op if same set
+        sys.exit(do_display_changed())
+    elif verb == "doctor":        # what is it doing, and what is it NOT doing
+        sys.exit(do_doctor())
+    elif verb == "selftest":      # offline unit checks (no compositor needed)
+        sys.exit(selftest())
+    elif verb in ("aggressive", "settle", "toggle"):
+        # Placement-mode controls (tray + CLI). All three drive the ONE armed_at
+        # seam the watcher adopts from ARM_FILE: aggressive arms NOW (aggressive
+        # for START_FLOOR); settle arms in the PAST (steady at once, past the
+        # CAP); toggle flips from live STATUS_FILE mode (the tray left-click).
+        act = verb
+        if act == "toggle":
+            try:
+                act = ("settle" if json.load(open(STATUS_FILE)).get("mode")
+                       == "aggressive" else "aggressive")
+            except (OSError, ValueError):
+                act = "aggressive"
+        ts = time.time() if act == "aggressive" else time.time() - AGGR_CAP - 1
+        msg = ("re-armed aggressive placement" if act == "aggressive"
+               else "settled to steady")
+        try:
+            os.makedirs(os.path.dirname(ARM_FILE), exist_ok=True)
+            with open(ARM_FILE, "w") as f:
+                f.write(f"{ts}\n")
+            print(f"session-mgr: {msg}")
+        except OSError as e:
+            sys.exit(f"session-mgr: cannot {act}: {e}")
+    elif verb == "status":        # current placement mode + seconds to steady
+        try:
+            s = json.load(open(STATUS_FILE))
+            print(f"mode: {s.get('mode', '?')}  "
+                  f"seconds_left: {s.get('seconds_left', '?')}")
+        except (OSError, ValueError):
+            sys.exit("session-mgr: no status (watcher not running?)")
+    else:
+        print("usage: session-mgr capture | "
+              "restore [--dry-run] [--only S] [--from SPEC] | "
+              "watch [--no-launch] | resume | stop | launch | aggressive | "
+              "settle | toggle | status | exclude | include | "
+              "plugins | reload | wind-down | display-changed | doctor | "
+              "selftest",
+              file=sys.stderr)
+        sys.exit(2)
 
 
 if __name__ == "__main__":
-  main()
+    main()
