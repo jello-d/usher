@@ -19,9 +19,9 @@ import time
 # THE ENGINE NAMES THIS MODULE USES, listed rather than star-imported, so the
 # daemon's whole dependency on the engine is one readable block.
 #
-# Three engine globals are REBOUND at runtime -- EXCLUDE_RULES/EXCLUDE_ERRORS by
+# Three engine globals are REBOUND at runtime: EXCLUDE_RULES/EXCLUDE_ERRORS by
 # reload_exclude, ANCHOR_RULES/ANCHOR_ERRORS by reload_anchor, _PLUGINS by
-# reload_plugins -- and importing one of those BY VALUE here would freeze
+# reload_plugins, and importing one of those BY VALUE here would freeze
 # whatever it held at import time and then go silently stale on the next reload.
 # So the one this module reads is reached through the MODULE instead
 # (engine.EXCLUDE_ERRORS). Everything imported by name below is a constant or a
@@ -45,8 +45,8 @@ LAYOUT_TRIGGERS = {
     "view-fullscreen", "view-sticky", "output-added", "output-removed",
     "wset-workspace-changed",
 }
-# A title/app-id change (a tab switch) also feeds the knowledge base -- it adds
-# a title to the window's group -- but must NOT roll history, or the ring
+# A title/app-id change (a tab switch) also feeds the knowledge base (it adds
+# a title to the window's group) but must NOT roll history, or the ring
 # floods with tab-flips. So the knowledge trigger set is broader than layout.
 KNOWLEDGE_TRIGGERS = LAYOUT_TRIGGERS | {
     "view-title-changed", "view-app-id-changed"}
@@ -57,19 +57,19 @@ PLACE_GRACE = 120.0   # place a window only within this long of it appearing,
 #                       then it is "settled" and left alone (a window you moved
 #                       is never yanked back). Generous because on login Chrome
 #                       opens every window and only sets each title once its
-#                       content loads -- under CPU/network spikes that whole
+#                       content loads, and under CPU/network spikes that whole
 #                       storm can take a minute or two.
 PLACE_SETTLE = 1.5    # BROWSER windows: seconds the title must be QUIET before
 #                       we place. A browser churns its title through a session-
 #                       restore as tabs load, and reconfiguring it mid-restore
-#                       can make it DROP the window -- a heavy tab-group window
+# can make it DROP the window, since a heavy tab-group window
 #                       was lost exactly this way. A PLACE_EVENT only re-arms
 #                       the timer; the move waits for the churn to stop. Well
 #                       under PLACE_GRACE.
 PLACE_SETTLE_FAST = 0.15  # everything else: the title is already stable at map
 #                           and nothing restores tabs, so place almost at once
 #                           (one placer tick). No reason to make normal apps sit
-#                           out the browser settle -- this is the common case.
+#                           out the browser settle, which is the common case.
 
 
 def is_browser(app):
@@ -125,7 +125,8 @@ class Supervisor:
         signal.signal(signal.SIGINT, self._stop)
         signal.signal(signal.SIGHUP, self._reload)
         # A fresh supervisor (login or a re-run) starts un-launched: drop a
-        # stale marker so this generation relaunches. (A reload is safe -- the
+        # stale marker so this generation relaunches. (A reload is safe, because
+        # the
         # open terminals are live, so launch_missing skips them.)
         try:
             os.makedirs(STATE, exist_ok=True)
@@ -142,7 +143,7 @@ class Supervisor:
 
     def _reload(self, signum, _frame):
         # Signal-handler context: the main loop is blocked in proc.wait(), so
-        # do NOT call Popen.wait() here -- it re-enters the same lock and
+        # do NOT call Popen.wait() here, because it re-enters the same lock and
         # deadlocks. Just SIGTERM the worker (it holds no lock and dies on its
         # own; execv abandons the wait anyway) and release the lock fd so the
         # re-exec'd self can re-acquire it.
@@ -362,7 +363,7 @@ class Watcher:
 
     def _steady_at(self):
         # steady when (FLOOR passed AND quiet for SETTLE) OR past CAP; the kick
-        # resets armed_at and a new map pushes last_map -- both extend
+        # resets armed_at and a new map pushes last_map, and both extend
         # aggressive.
         with self.lock:
             armed = self.st["armed_at"]
@@ -428,7 +429,7 @@ class Watcher:
         if v.get("parent", -1) != -1:
             return   # a dialog / child view (a file picker, a "Save As" sheet):
             # it MUST stay on its parent's output. Issuing an output
-            # move for it aborts the whole compositor -- wayfire's
+            # move for it aborts the whole compositor, because wayfire's
             # move_view_to_output dassert("Cannot move a dialog to a
             # different output than its parent"). The event path is not
             # toplevel-filtered like the init path, so dialogs reach
@@ -648,7 +649,7 @@ class Watcher:
                 pass
         # Treat a change to the invert store as a capture trigger, so
         # invert/un-invert persists on its own without waiting for a move.
-        # (apply_invert also writes it during restore -- harmless, just a
+        # (apply_invert also writes it during restore, which is harmless, just a
         # redundant capture of state we set ourselves.)
         m = store_mtime(INVERT_STORE)
         if m != seen["inv"]:
@@ -658,7 +659,7 @@ class Watcher:
                 self.st["last"] = time.time()
         # A BROWSER RESTART IS VISIBLE RIGHT HERE and nowhere else. Chrome
         # mints fresh SessionIDs for every restored window, so the store's
-        # chrome slots go dead the instant it rotates its session file -- and
+        # chrome slots go dead the instant it rotates its session file, and
         # that rotation is exactly this signature changing. It is also the one
         # moment the PREVIOUS file is still on disk to bind against, so this
         # cannot be deferred to something slower.

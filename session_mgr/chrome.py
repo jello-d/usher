@@ -42,7 +42,7 @@ import shlex
 import struct
 
 # THE SLOT KEY, built and recognised in ONE place. Two sites used to spell it
-# out -- the identity that writes it and the migration that validates it -- and
+# out (the identity that writes it and the migration that validates it): and
 # a store whose writer and checker disagree about a key shape is how this
 # codebase has lost placements before. Change the shape here and both follow.
 _CHROME_SLOT = "chrome:win:"

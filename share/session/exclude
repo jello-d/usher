@@ -1,4 +1,4 @@
-# session/exclude -- windows usher never captures and never places.
+# session/exclude: windows usher never captures and never places.
 #
 # MOSTLY EMPTY ON PURPOSE, and it did not start that way. The goal is pixel
 # perfect placement of every window you left open, so an exception here is a
@@ -43,7 +43,8 @@
 # prints the rules as loaded and flags any bad line. Edits apply AUTOMATICALLY:
 # the running watcher re-reads this file within a second of saving.
 #
-# NOTE: the work/personal boundary (titles starting "[WORK") is NOT here -- it
+# NOTE: the work/personal boundary (titles starting "[WORK") is NOT here,
+# because it
 # is a hardcoded safety wall inside usher, not a tunable. Never rely on this
 # file for it.
 

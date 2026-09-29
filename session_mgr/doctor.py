@@ -23,7 +23,7 @@ import time
 from collections import Counter
 
 # The engine's names, listed rather than star-imported, so this module's whole
-# dependency is one readable block -- the same rule watch.py follows. None of
+# dependency is one readable block, the same rule watch.py follows. None of
 # these is one of the three globals the engine REBINDS at runtime
 # (EXCLUDE_RULES/ERRORS, ANCHOR_RULES/ERRORS, _PLUGINS), so importing by value
 # cannot go stale here; the registry is reached through plugins(), which is a
@@ -38,7 +38,7 @@ from .engine import (KB_SCHEMA, LOCAL_HOST, PLUGIN_HOOKS, STATE, TERM_KEY_RE,
 # Every failure this tool has had was SILENT: the store looked healthy, Chrome
 # kept restoring itself, and the parts that had stopped working stopped saying
 # anything at all. `doctor` is the standing answer to "is it actually doing the
-# thing?" -- it reports the store, the cross-tool contracts, and, per window,
+# thing?": it reports the store, the cross-tool contracts, and, per window,
 # what would happen and WHY. A zero-kitty knowledge base is obvious here.
 
 def _doctor_store(out):
@@ -99,7 +99,7 @@ def _doctor_contracts(out):
         return rc
     out(f"  [OK]   mux present ({mux})")
     # Terminals inherit THIS process's environment, so a missing agent here is
-    # a missing agent in every session usher respawns -- and a remote one then
+    # a missing agent in every session usher respawns, and a remote one then
     # cannot authenticate. mux latch copes (it polls for a credential rather
     # than failing), but only if it can see an agent socket at all.
     sock = os.environ.get("SSH_AUTH_SOCK")
@@ -163,8 +163,8 @@ def _doctor_relaunch(out, snap, live):
         out(f"  none       {app:14} {key[:44]}  (no plugin respawns this)")
     # Two kitty windows in one directory share a key, so only ONE slot is
     # remembered and the other silently loses its place. Keying on the running
-    # program instead would be worse -- the key would change every time a
-    # command started or exited -- so the limitation stands, but it should at
+    # program instead would be worse (the key would change every time a
+    # command started or exited), so the limitation stands, but it should at
     # least be VISIBLE, with the escape hatch named.
     dupes = Counter(saved_key(w) for w in saved
                     if w.get("app_id") == "kitty")

@@ -36,7 +36,7 @@ from collections import Counter
 from datetime import date
 
 # Chrome's own knowledge lives in session_mgr.chrome, which imports NOTHING
-# from here -- it is a leaf -- so this can be a plain module-level import with
+# from here (it is a leaf), so this can be a plain module-level import with
 # no cycle. Imported by name rather than qualified because chrome rebinds no
 # global of its own (its one cache is mutated in place, never reassigned), so
 # there is nothing here that can go stale. The engine's users of it are
@@ -48,7 +48,7 @@ from .chrome import (CHROME_FLAGS, CHROME_STAGGER, browser_pids,
                      is_chrome_slot, parse_snss, session_files,
                      session_history, snss_build)
 
-# pywayfire is needed only to talk to the live compositor -- guarded so the
+# pywayfire is needed only to talk to the live compositor, and is guarded so the
 # module still imports (and `session-mgr selftest` runs) without it.
 try:
     from wayfire import WayfireSocket
@@ -167,7 +167,7 @@ def reload_exclude():
 # session/include mirrors session/exclude's '<app-regex> :: <title-regex>'
 # format. It is the steady-state whitelist: once the aggressive start window
 # ages out, ONLY windows matching an anchor rule are (re)placed; everything else
-# opens where you are and stays (default follow-me -- an empty/absent file
+# opens where you are and stays (default follow-me: an empty/absent file
 # anchors nothing). Exclude still wins: a window matching both is never placed.
 INCLUDE_FILE = os.environ.get(
     "SESSION_INCLUDE_FILE",
@@ -219,7 +219,7 @@ MILESTONE_DAYS = 14    # daily milestones retained under milestones/
 # --- display PROFILE: one remembered layout per monitor set -----------------
 # A placement only means anything on the monitors it was learned on. With ONE
 # flat store, docking and undocking overwrite each other's layout, and a window
-# whose output is absent is simply unplaceable -- which reads as "usher does
+# whose output is absent is simply unplaceable, which reads as "usher does
 # nothing" rather than "that layout belongs to your other desk". So the
 # knowledge base is keyed by the CONNECTED SET.
 #
@@ -332,7 +332,7 @@ def adopt_legacy_store():
         write_json(kb_path(), json.dumps(cur, indent=2))
         # Stamp it: the merged result is in TODAY's key scheme as far as we can
         # tell, and an unstamped store is one load away from having its chrome
-        # and kitty entries dropped as stale -- which would undo the merge.
+        # and kitty entries dropped as stale, which would undo the merge.
         # Legacy keys in an older scheme simply never match and age out by TTL.
         write_json(schema_path(), KB_SCHEMA)
         os.replace(legacy, legacy + ".pre-profile")
@@ -349,7 +349,7 @@ def adopt_legacy_store():
 # per-view filters shader whose live state lives in its own store, keyed by the
 # ephemeral wayfire view id. session bridges it across a restart: it reads that
 # store at capture and records an `inverted` flag against each window's DURABLE
-# identity, then re-applies the shader when it restores the window -- and writes
+# identity, then re-applies the shader when it restores the window, and writes
 # the view's new id back to the store, so the two mechanisms share one registry
 # and a later Super+N un-inverts on the first press. The path is hardcoded to
 # match the toggle script (which does not honour XDG_STATE_HOME).
@@ -511,7 +511,7 @@ def write_json(path, blob):
 # The engine is app-AGNOSTIC; how to IDENTIFY and RESPAWN a given app's windows
 # lives in a plugin. chrome, mux, and kitty ship built in; a user drops more
 # into ~/.config/session/plugins/*.py (each a module defining a top-level PLUGIN
-# with the WindowPlugin surface -- duck-typed, no import of this script needed).
+# with the WindowPlugin surface: duck-typed, no import of this script needed).
 # The engine consults the registry (order matters: FIRST owner wins) at each
 # app-specific site: identity, transient, per-window id, force-title keying, and
 # relaunch. Every window hook takes a normalized VIEW (see pview: app/title,
@@ -857,7 +857,7 @@ def mux_host_of(title):
 # the window runs, not by the session it is showing.
 #
 # The session was the obvious key and the wrong one. A window can show many
-# sessions over its life -- that is what mux is for -- so keying on the current
+# sessions over its life (that is what mux is for), so keying on the current
 # one meant switching sessions made the window a stranger with no remembered
 # place, and purged the slot it used to own. Exactly the Chrome active-tab
 # problem, and the cause of "my terminals came back on the wrong desktop".
@@ -998,7 +998,8 @@ class KittyPlugin(WindowPlugin):
 
     def transient(self, v):
         # a live window: a shell at $HOME (or an unreadable proc) is scratch. A
-        # stored entry (pid<0) is never re-judged transient -- it was kept at
+        # stored entry (pid<0) is never re-judged transient, because it was kept
+        # at
         # capture; fall back to the title scratch test so prune_kb stays safe.
         if v["pid"] and v["pid"] > 0:
             cwd = _term_cwd(v["pid"])
@@ -1021,7 +1022,7 @@ class KittyPlugin(WindowPlugin):
 # LRU is needed, the TTL bounds the store (see learn() for the grouping).
 KNOWLEDGE_TTL = 30 * 86400
 
-# Apps a plugin claims (is_owned) legitimately SHARE one app_id -- a momentary
+# Apps a plugin claims (is_owned) legitimately SHARE one app_id, and a momentary
 # drop to a single window must NOT collapse them to an app_id-only key (which
 # would prune the whole title-keyed set), so they always key by identity. This
 # was the hardcoded FORCE_TITLE_APPS set (google-chrome/chromium/kitty); it is
@@ -1045,7 +1046,7 @@ def kkey(app_id, title):
 #
 # Schema 7 is the first bump that changes NO key shape. It stopped usher
 # LEARNING a window its plugin could not identify, which invalidated exactly
-# the chrome entries the old title fallback had written -- 265 of 326 stored
+# the chrome entries the old title fallback had written: 265 of 326 stored
 # placements on manifestor, 287 of 334 on manifold, none of them matchable by
 # anything. See _migrate_store: this one is keyed on the SHAPE of the stored
 # key, not on the app, because dropping the app wholesale would take the
@@ -1125,7 +1126,8 @@ def rekey_chrome(kb):
         if newkey in kb:
             continue
         e = kb.pop(stale[old])
-        # "title" in a kb entry is the KEY-title, i.e. identity() -- the trap
+        # "title" in a kb entry is the KEY-title, i.e. identity(), which is the
+        # trap
         # this file keeps falling into. It has to move with the key.
         e["title"] = chrome_slot(new)
         kb[newkey] = e
@@ -1218,7 +1220,7 @@ def load_knowledge():
         # A store that does not exist yet is CURRENT by construction, so stamp
         # it NOW. Without this, the first monitor set to be seen writes an
         # unstamped store, and the very next load judges it stale and drops
-        # exactly the chrome + kitty entries it has just learned -- every new
+        # exactly the chrome + kitty entries it has just learned, and every new
         # desk silently losing its browser and terminal placements once.
         try:
             os.makedirs(STATE, exist_ok=True)
@@ -1354,7 +1356,7 @@ def _learn_stamp(kb, groups, windows, counts, when, hold=()):
             # Chrome hits this whenever its session file has not caught up with
             # a window, which is often, and every title change then minted
             # another entry: measured on manifold 2026-09-29, 286 of a
-            # 333-entry store were chrome keyed by raw TITLE -- 86% of
+            # 333-entry store were chrome keyed by raw TITLE: 86% of
             # everything usher knew, none of it matchable, and exactly the
             # tab-in-titlebar spam three schema bumps have now tried to kill.
             #
@@ -1379,7 +1381,7 @@ def _learn_purge_terminals(kb, windows):
     # BOTH sides must be IDENTITIES. A kb entry's "title" field is the KEY-title
     # (kb_entry stamps identity(), not the window title), so comparing it to raw
     # window titles never matched and this block deleted every terminal entry it
-    # had just written, on every pass -- terminals were therefore never placed
+    # had just written, on every pass, so terminals were never placed
     # at all. And the entry is selected by its KEY SHAPE, not by is_mux_term on
     # that key: is_mux_term only asks "kitty, with a colon?", which a
     # kitty:<cwd> key also satisfies, so the mux purge was sweeping plain kitty
@@ -2055,7 +2057,7 @@ def do_restore(dry, only=None, source=None):
             print("  placed " + label)
         # Invert follows the WINDOW, not the move. A window Chrome already
         # restored at its target position is matched-but-not-moved, and must
-        # still get its inversion back -- the "forgets some" bug was applying
+        # still get its inversion back: the "forgets some" bug was applying
         # invert only inside the move branch.
         if e.get("inverted"):
             apply_invert(sock, lv["id"])
@@ -2188,7 +2190,7 @@ ADOPT_FLAG = "session-adopt"   # armed by resume/reload, consumed at init.
 #
 # `quiet` exists because a CODE DEPLOY needs to restart the daemon without
 # expressing an opinion about the layout, and neither of the other two can do
-# that. `adopt` looks harmless -- it moves no windows -- but it CAPTURES, so it
+# that. `adopt` looks harmless (it moves no windows) but it CAPTURES, so it
 # overwrites every remembered slot with wherever that window currently sits,
 # and it deliberately grants no grace deadline, so those windows are never
 # placed afterwards either. Used as a deploy reload (five times on manifold on
@@ -2461,8 +2463,8 @@ def _t_relaunch(ck):
         # $STATE/watch.log, so every `./test/run` used to add three fixture
         # rows to the one file that records what usher did to a LIVE session,
         # indistinguishable from real relaunches to anyone reading it later.
-        # Capturing loses no coverage -- _announce is still CALLED, which is
-        # the whole point of running these paths -- and lets us assert what it
+        # Capturing loses no coverage (_announce is still CALLED, which is
+        # the whole point of running these paths) and lets us assert what it
         # said, which the old version did not.
         globals()["logline"] = _logged.append
         with contextlib.redirect_stdout(io.StringIO()):
@@ -2749,7 +2751,7 @@ def _t_migration(ck):
 def _t_migration_body(ck):
     # A NEW profile must be stamped CURRENT the moment it is created. It was
     # not, and the next load then judged the unstamped store stale and dropped
-    # every chrome + kitty entry it had just learned -- each new monitor set
+    # every chrome + kitty entry it had just learned, and each new monitor set
     # silently losing its browser and terminal placements exactly once.
     import tempfile
     _st, _prev = STATE, os.environ.get("XDG_STATE_HOME")
@@ -2805,7 +2807,7 @@ def _t_migration_body(ck):
            == ["Slack", "chrome:win:42", "chrome:win:43", "term:resume"])
         ck("migrate7-is-idempotent", _migrate_store(_from6, "7") == 0)
         # from a PRE-6 store the key shapes themselves are stale, so chrome and
-        # kitty go wholesale -- the older rule, still applied from older stamps
+        # kitty go wholesale, the older rule, still applied from older stamps
         _from4 = dict(_s7)
         _migrate_store(_from4, "4")
         ck("migrate-pre6-drops-chrome-and-kitty",
@@ -2831,7 +2833,8 @@ def _t_migration_body(ck):
 def _t_contracts(ck):
     """the cross-tool contracts and the SNSS reader."""
     # CONTRACT with mux: `mux resume --list` must stay BARE NAMES, one per line.
-    # This is the guard the old `mux ls` scrape lacked -- a cosmetic change over
+    # This is the guard the old `mux ls` scrape lacked, because a cosmetic
+    # change over
     # in mux (the agent-state glyph) silently killed relaunch with no symptom.
     # Skipped when mux is absent (the soft dep); an empty set is legitimate.
     ck("mux-list-contract",
@@ -2842,7 +2845,7 @@ def _t_contracts(ck):
 
     # DOCTOR MUST SCREAM WHEN IT CANNOT SEE THE SESSION. With no live windows
     # the relaunch section calls every saved window missing and the browser
-    # not running -- every line false, none of it marked so, and it used to
+    # not running: every line false, none of it marked so, and it used to
     # exit 0. Met twice in one afternoon over a non-interactive ssh, which
     # carries none of the session environment. Imported here rather than at
     # the top because doctor imports THIS module; at call time both are

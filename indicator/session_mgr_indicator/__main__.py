@@ -29,9 +29,10 @@ from PIL import Image, ImageDraw
 
 _BASE = (0x14, 0x15, 0x19)      # near-black screen
 _TINT = 0.14                    # state hue bleed into the screen
-# Border colour per state. Aggressive is a loud RED -- it wants the eye AND it
-# must read distinct from the ORANGE gadgets beside it (mux, comms/dnd), so a
-# clearly red (not amber/orange) hue; steady is a MUTED grey-green -- quiet, so
+# Border colour per state. Aggressive is a loud RED, because it wants the eye
+# AND must read distinct from the ORANGE gadgets beside it (mux, comms/dnd),
+# so a
+# clearly red (not amber/orange) hue; steady is a MUTED grey-green, quiet so
 # the louder gadgets win the glance; down is neutral grey. _DULL is what the
 # aggressive border leaves behind as it recedes: the "not working" grey.
 FRAME = {

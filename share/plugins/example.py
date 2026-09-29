@@ -1,15 +1,15 @@
-# example.py -- a user window plugin for usher.
+# example.py: a user window plugin for usher.
 #
 # Drop a copy into ~/.config/session/plugins/ and edit. usher imports every *.py
-# there and takes its top-level PLUGIN object (duck-typed -- no import of usher
+# there and takes its top-level PLUGIN object (duck-typed: no import of usher
 # needed). A plugin CLAIMS an app's windows (owns) and may give them a stable
 # identity, a transient test, a per-window id, and a way to respawn a missing
 # one. Every window hook takes a normalized view dict: v["app"] (the app-id),
 # v["title"], v["pid"]. Registry order is chrome, mux, kitty, then user plugins;
 # the FIRST plugin whose owns() is true handles the window.
 #
-# This example gives Spotify a stable identity -- its title drifts per track, so
-# without this it would never match its saved slot.
+# This example gives Spotify a stable identity, because its title drifts per
+# track and without this it would never match its saved slot.
 
 
 class SpotifyPlugin:

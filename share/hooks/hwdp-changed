@@ -11,7 +11,7 @@
 # display change. So this is the one line that connects the two.
 #
 # The DECISION is deliberately not made here. That edge fires on every output
-# burst -- a monitor blanking and waking, a kanshi reapply, a re-detect -- not
+# burst (a monitor blanking and waking, a kanshi reapply, a re-detect), not
 # only when the set of monitors actually differs, so a hook that re-armed
 # placement on each one would yank a deliberately-moved window home every time
 # a screen blinked. `session-mgr display-changed` compares the profile against
