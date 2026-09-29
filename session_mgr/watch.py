@@ -796,6 +796,10 @@ class Watcher:
             self.placed.discard(v["id"])
             self.identified.discard(v["id"])
             self.deadline.pop(v["id"], None)
+            # and the identity chrome resolved for it once and remembered. A
+            # cache that only ever grows is a leak in a process that runs for
+            # weeks, and this is the one moment we know the view is gone.
+            chrome.forget_window(v["id"])
             with self.lock:
                 self.pending.pop(v["id"], None)
         if ev in KNOWLEDGE_TRIGGERS:

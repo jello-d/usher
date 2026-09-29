@@ -33,7 +33,7 @@ from .engine import (KB_SCHEMA, LOCAL_HOST, PLUGIN_HOOKS, STATE, TERM_KEY_RE,
                      WayfireSocket, app_of, hwdp_id, is_mux_term, live_keys,
                      load_knowledge, load_snapshot, match, mux_candidates,
                      mux_host_of, mux_session_of, mux_session_set, plugins,
-                     profile_id, pview, saved_key, schema_path)
+                     profile_id, pview, saved_key, schema_path, unidentified)
 
 # Every failure this tool has had was SILENT: the store looked healthy, Chrome
 # kept restoring itself, and the parts that had stopped working stopped saying
@@ -196,7 +196,31 @@ def _doctor_placement(out, kb, live, outs):
             out(f"  UNPLACEABLE {app_of(lv)[:13]:13} {e['title'][:34]:34}"
                 f" -> {where} NOT ATTACHED")
     for lv in unlive:
-        out(f"  unmatched  {app_of(lv)[:14]:14} {lv.get('title','')[:34]}")
+        why = _unmatched_why(lv)
+        out(f"  {'unjoinable' if why else 'unmatched':10} {app_of(lv)[:14]:14}"
+            f" {lv.get('title','')[:34]:34}{why}")
+
+
+def _unmatched_why(lv):
+    """Why a live window has no slot, when usher can actually say.
+
+    Only one case is answerable today and it is worth answering, because the
+    window is not coming back and no amount of waiting will change that.
+    CHROME NEVER SESSION-SAVES AN INCOGNITO OR GUEST WINDOW: measured on
+    manifold, a Gmail window that appears in none of the twelve session files
+    spanning five days, while the other nine windows join instantly and the
+    current file was written 89 seconds ago. Chrome writes three kinds and
+    saves two -- normal windows to Sessions/Session_*, app and PWA windows to
+    Sessions/Apps_* (which usher skips, since those carry stable app-ids
+    already), and off-the-record windows nowhere at all, by design.
+
+    Saying so turns a silent absence into a stated one. Without it the window
+    just quietly is not in the report, which reads as a fault in usher and is
+    not one: there is no data to join against, and there never will be."""
+    if not is_chrome(app_of(lv)) or not unidentified(lv):
+        return ""      # Chrome DID record it; it simply has no slot yet
+    return ("  (Chrome has not recorded it: incognito and guest windows"
+            " never are)")
 
 
 def _doctor_blind(out, what, *fix):

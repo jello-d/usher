@@ -125,8 +125,12 @@ window is currently SHOWING \(en a window that can display many things would
 otherwise lose its place whenever you switched:
 .TP
 .B chrome
-keys a window by its SessionID, read from the browser's own session file and
-stable across a restart. Starts the browser per profile, with
+keys a window by its SessionID, read from the browser's own session file. That
+id is fresh every time Chrome restarts, so a window is followed across the
+boundary by the TABS it came back with, joining the previous session file to
+the new one. A window Chrome has not recorded (an incognito or guest window
+never is) has no identity here and is not remembered at all. Starts the
+browser per profile, with
 .BR --restore-last-session ,
 when the last session had Chrome windows and none is running.
 .TP
@@ -159,7 +163,12 @@ and may implement
 .BR identity ", " transient ", " relaunch_command ", "
 .BR relaunch_missing ", and " wind_down ,
 each taking a normalized view
-.RB ( v["app"] ", " v["title"] ", " v["pid"] ).
+.RB ( v["app"] ", " v["title"] ", " v["pid"] ", " v["id"] ).
+.I v["id"]
+is the compositor's view id, stable for exactly one window's lifetime and
+.I None
+for a window replayed from the store, so it is what to cache a hard-won
+identity against.
 .SH FILES
 .TP
 .I ~/.config/session/{exclude,include}

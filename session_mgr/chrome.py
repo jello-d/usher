@@ -216,7 +216,7 @@ def parse_snss(path):
         if t in closed_tabs or w in closed_wins:
             continue
         wins.setdefault(w, []).append(t)
-    out = {}
+    out, ambiguous = {}, set()
     for w, tabs_in_win in wins.items():
         sel = win_sel.get(w)
         active = next((t for t in tabs_in_win if tab_idx.get(t) == sel), None)
@@ -226,8 +226,19 @@ def parse_snss(path):
         if not entry:
             continue
         url, title = entry
-        if title and url:
-            out[title] = (w, url)
+        if not (title and url):
+            continue
+        # A TITLE TWO WINDOWS SHARE IS NOT A DISCRIMINATOR, and silently
+        # letting the last one win would hand both live windows the same slot.
+        # Two "New Tab" windows is all it takes. The same rule learn() applies
+        # to its title groups, for the same reason; refusing to answer is the
+        # only safe answer, and it matters more now that window_slot REMEMBERS
+        # what it resolved.
+        if title in out and out[title][0] != w:
+            ambiguous.add(title)
+        out[title] = (w, url)
+    for title in ambiguous:
+        del out[title]
     return out
 
 
@@ -310,6 +321,50 @@ def chrome_window_for(title):
     desktop no longer drags the window there, which the URL key did."""
     hit = chrome_session_titles().get(_chrome_page_title(title))
     return chrome_slot(hit[0]) if hit else None
+
+
+# wayfire view id -> the slot we resolved for it, for the LIFE of that view.
+_slot_cache = {}
+
+
+def window_slot(vid, title):
+    """The slot for a LIVE window: resolved ONCE from the title, then
+    remembered for as long as the window exists.
+
+    THE TITLE IS A BOOTSTRAP, NOT AN IDENTITY. Of everything wayfire reports
+    about a view, the only field that distinguishes two Chrome windows AND
+    that Chrome also knows about is the title (app-id and pid are shared,
+    geometry is ours to change). So the first join has to go through it. But
+    re-deriving on every lookup made identity as volatile as the string: a
+    Gmail window is `Inbox (1)` in the session file and `Inbox (2)` on screen
+    the moment mail arrives, so it became an unidentified stranger until
+    Chrome next wrote, then a known window again, flickering for its whole
+    life. Measured on manifold: one window unresolvable for twenty minutes,
+    then resolving instantly on the next probe.
+
+    A Chrome window's SessionID is fixed for as long as the browser runs, and
+    a wayfire view is one Chrome window for its whole life, so the answer
+    cannot go stale while the view exists. Cached only on SUCCESS, so a window
+    Chrome has not recorded yet is retried until it is.
+
+    Pass vid=None (a stored entry, which has no live view) to get the plain
+    lookup with no caching."""
+    if vid is None:
+        return chrome_window_for(title)
+    hit = _slot_cache.get(vid)
+    if hit:
+        return hit
+    hit = chrome_window_for(title)
+    if hit:
+        _slot_cache[vid] = hit
+    return hit
+
+
+def forget_window(vid):
+    """Drop a closed view's cached slot. Wayfire ids are not reused quickly,
+    but a cache that only ever grows is a leak in a process that runs for
+    weeks."""
+    _slot_cache.pop(vid, None)
 
 
 def chrome_window_tabs(path):
@@ -432,22 +487,23 @@ def browser_pids():
 
 
 def chrome_profile_map():
-    """normalized-URL -> the Chrome PROFILE DIRECTORY that has it open.
+    """slot -> the Chrome PROFILE DIRECTORY that has that window open.
 
     Built from the same SNSS session files the chrome identity is read from, so
     it needs no new state: the profile is simply where each file LIVES
     (.../<Profile>/Sessions/Session_*). The files survive a restart, which is
     how Chrome restores itself, so this is answerable at login before Chrome
-    has started."""
+    has started.
+
+    Reads the WINDOW table directly rather than going through parse_snss, which
+    answers a different question and drops a window whose active-tab title is
+    ambiguous or missing. Losing a window here would lose the PROFILE it names,
+    and usher would then not start that profile at all."""
     out = {}
-    for p in session_files():
-        prof = os.path.basename(os.path.dirname(os.path.dirname(p)))
-        try:
-            found = parse_snss(p)
-        except Exception:
-            continue
-        for win, _url in found.values():
-            out.setdefault(chrome_slot(win), prof)
+    for prof, files in session_history().items():
+        name = os.path.basename(prof)
+        for win in chrome_window_tabs(files[0]):
+            out.setdefault(chrome_slot(win), name)
     return out
 
 

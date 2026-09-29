@@ -44,9 +44,9 @@ from datetime import date
 from .chrome import (CHROME_FLAGS, CHROME_STAGGER, browser_pids,
                      chrome_bind_windows, chrome_profile_map, chrome_slot,
                      chrome_session_titles, chrome_window_for,
-                     chrome_window_tabs, is_browser_cmdline, is_chrome,
-                     is_chrome_slot, parse_snss, session_files,
-                     session_history, snss_build)
+                     chrome_window_tabs, forget_window, is_browser_cmdline,
+                     is_chrome, is_chrome_slot, parse_snss, session_files,
+                     session_history, snss_build, window_slot)
 
 # pywayfire is needed only to talk to the live compositor, and is guarded so the
 # module still imports (and `session-mgr selftest` runs) without it.
@@ -537,12 +537,21 @@ def chrome_profiles_for(saved):
 
 def pview(v):
     """Normalize a wayfire view, a snapshot window, or a kb entry to the fields
-    plugins read: app, title, pid (-1 when absent, e.g. a stored entry)."""
+    plugins read: app, title, pid (-1 when absent, e.g. a stored entry), and
+    id.
+
+    `id` is the WAYFIRE VIEW id, or None for anything that is not a live view.
+    It is the only handle that is stable for exactly one window's lifetime, so
+    it is what a plugin caches a hard-won identity against: chrome resolves a
+    window from its title once and then remembers it, because the title is a
+    bootstrap and not an identity. Anything replayed from the store has no
+    live view and gets None, which means no caching, which is correct."""
     if "app" in v and "app_id" not in v and "app-id" not in v:
         return v                                # already normalized
     return {"app": v.get("app-id") or v.get("app_id") or "",
             "title": v.get("title", ""),
-            "pid": v.get("pid", -1)}
+            "pid": v.get("pid", -1),
+            "id": v.get("id")}
 
 
 class WindowPlugin:
@@ -886,7 +895,7 @@ class ChromePlugin(WindowPlugin):
         return is_chrome(v["app"])
 
     def identity(self, v):
-        return chrome_window_for(v["title"])
+        return window_slot(v.get("id"), v["title"])
 
     def wind_down(self, live):
         """SIGTERM the BROWSER process. Measured on Chrome 154: it exits in
@@ -2495,6 +2504,41 @@ def _t_chrome(ck):
        len({chrome_window_for(t + " - Google Chrome")
             for t in chrome_session_titles()}) == len(_wins))
     ck("chrome-unknown-title", chrome_window_for("nothing like this") is None)
+
+    # THE TITLE IS A BOOTSTRAP, NOT AN IDENTITY: resolve once, then remember
+    # for the life of the view. A Gmail window is `Inbox (1)` in the session
+    # file and `Inbox (2)` on screen the moment mail arrives, so re-deriving
+    # every time made it flicker between known and stranger for its whole life.
+    _t0 = next(iter(chrome_session_titles()), None)
+    if _t0:
+        _want = chrome_window_for(_t0 + " - Google Chrome")
+        ck("slot-resolves-for-a-view",
+           window_slot(90001, _t0 + " - Google Chrome") == _want)
+        # ...and now survives the title changing under it, which is the bug
+        ck("slot-survives-a-title-change",
+           window_slot(90001, "Inbox (99) - nothing like this") == _want)
+        # a DIFFERENT view is not given the first one's answer
+        ck("slot-is-per-view",
+           window_slot(90002, "Inbox (99) - nothing like this") is None)
+        # a stored entry (no live view) never caches and never reads the cache
+        ck("slot-uncached-without-a-view",
+           window_slot(None, "Inbox (99) - nothing like this") is None)
+        forget_window(90001)
+        ck("slot-forgotten-on-unmap",
+           window_slot(90001, "Inbox (99) - nothing like this") is None)
+        forget_window(90002)
+
+    # A TITLE TWO WINDOWS SHARE IS NOT A DISCRIMINATOR, and it matters more
+    # now that the answer STICKS: two "New Tab" windows would otherwise both
+    # be handed the same slot, permanently. Same rule learn() applies to its
+    # title groups.
+    with _tsnss([(31, 1, "https://a/", "Same Title"),
+                 (32, 2, "https://b/", "Same Title"),
+                 (33, 3, "https://c/", "Unique Title")]) as _dupf:
+        _d = parse_snss(_dupf)
+        ck("chrome-drops-ambiguous-titles", "Same Title" not in _d)
+        ck("chrome-keeps-unambiguous-titles",
+           _d.get("Unique Title", (None,))[0] == 33)
     # the profile map is keyed by slot now, so a saved window still resolves
     ck("chrome-profile-map-by-slot",
        all(k.startswith("chrome:win:") for k in chrome_profile_map()))

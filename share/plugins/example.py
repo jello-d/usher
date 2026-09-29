@@ -3,10 +3,22 @@
 # Drop a copy into ~/.config/session/plugins/ and edit. usher imports every *.py
 # there and takes its top-level PLUGIN object (duck-typed: no import of usher
 # needed). A plugin CLAIMS an app's windows (owns) and may give them a stable
-# identity, a transient test, a per-window id, and a way to respawn a missing
-# one. Every window hook takes a normalized view dict: v["app"] (the app-id),
-# v["title"], v["pid"]. Registry order is chrome, mux, kitty, then user plugins;
-# the FIRST plugin whose owns() is true handles the window.
+# identity, a transient test, and a way to respawn a missing one. Every window
+# hook takes a normalized view dict:
+#
+#   v["app"]     the app-id
+#   v["title"]   the current window title, which is usually too volatile to key
+#   v["pid"]     the process, or -1 for a window replayed from the store
+#   v["id"]      the compositor's view id, or None when there is no live window
+#
+# v["id"] is the only handle stable for exactly one window's lifetime, so it is
+# what to cache a hard-won identity against. The chrome plugin does: it joins a
+# window to Chrome's session file by the page title ONCE, then remembers, since
+# a title that has to be right at the instant you look is a bootstrap and not
+# an identity.
+#
+# Registry order is chrome, mux, kitty, then user plugins; the FIRST plugin
+# whose owns() is true handles the window.
 #
 # This example gives Spotify a stable identity, because its title drifts per
 # track and without this it would never match its saved slot.
