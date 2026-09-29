@@ -58,9 +58,6 @@ The daemon's mode + seconds until it settles.
 .B plugins
 List the loaded window plugins (built-in + user).
 .TP
-.B identity
-Show the URL-normalization rules and how live windows resolve.
-.TP
 .B launch
 Respawn saved-but-absent windows now, without starting the daemon.
 .TP
@@ -159,8 +156,8 @@ each taking a normalized view
 .RB ( v["app"] ", " v["title"] ", " v["pid"] ).
 .SH FILES
 .TP
-.I ~/.config/session/{exclude,include,identity}
-never-place rules, steady-state anchors, and URL-normalization rules.
+.I ~/.config/session/{exclude,include}
+never-place rules and steady-state anchors.
 .TP
 .I ~/.config/session/plugins/*.py
 user window plugins.

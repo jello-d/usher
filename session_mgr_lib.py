@@ -49,7 +49,6 @@ import struct
 import subprocess
 import sys
 import time
-import urllib.parse
 from collections import Counter
 from datetime import date
 
@@ -584,56 +583,6 @@ CHROME_FLAGS = shlex.split(
 # browser suffix to recover the page title the session file stores.
 CHROME_SUFFIXES = (" - Google Chrome", " - Chromium")
 
-# ~/.config/session/identity: optional URL-normalization rules for domains
-# whose PATH is also volatile (e.g. mail.google.com carries message ids). Same
-# '<regex> :: <value>' line shape as session/exclude, but the left side matches
-# the normalized "host/path" and the right side is the LITERAL canonical id to
-# collapse it to (not a regex). Live-reloaded by the capture loop.
-IDENTITY_FILE = os.environ.get(
-    "SESSION_IDENTITY_FILE",
-    os.path.join(
-        os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
-        "session", "identity"))
-
-
-def load_identity_rules(path=IDENTITY_FILE):
-  """Parse session/identity into (url_regex, canonical) pairs. A line missing
-  '::' or with a bad regex is collected into errors and skipped, never
-  crashing the headless daemon; a missing file yields ([], [])."""
-  rules, errors = [], []
-  try:
-    with open(path) as f:
-      lines = f.readlines()
-  except OSError:
-    return rules, errors
-  for n, raw in enumerate(lines, 1):
-    line = raw.strip()
-    if not line or line.startswith("#"):
-      continue
-    if "::" not in line:
-      errors.append((n, line, "missing '::' (use '<url> :: <id>')"))
-      continue
-    pat, canon = (s.strip() for s in line.split("::", 1))
-    try:
-      rules.append((re.compile(pat or ".*"), canon))
-    except re.error as e:
-      errors.append((n, line, f"bad regex: {e}"))
-  return rules, errors
-
-
-IDENTITY_RULES, IDENTITY_ERRORS = load_identity_rules()
-
-
-def reload_identity():
-  """Re-read session/identity live, as reload_exclude does for its file."""
-  global IDENTITY_RULES, IDENTITY_ERRORS
-  IDENTITY_RULES, IDENTITY_ERRORS = load_identity_rules()
-  logline(f"identity reloaded: {len(IDENTITY_RULES)} rule(s),"
-          f" {len(IDENTITY_ERRORS)} error(s)")
-  for _n, _text, _msg in IDENTITY_ERRORS:
-    logline(f"identity rule error (line {_n}): {_msg}: {_text!r}")
-
-
 # SNSS command ids (Chromium components/sessions/core/session_service_commands
 # .cc). Framing is fixed: int16 size, then a 1-byte id + payload of size-1; we
 # always advance by size, so a payload we cannot decode never desyncs the
@@ -786,21 +735,6 @@ def chrome_session_titles():
   return _snss_cache["map"]
 
 
-def normalize_url(url):
-  """A URL's stable identity: host + path (query and fragment dropped -- they
-  carry the volatile per-visit state), then any session/identity rule that
-  matches collapses it to that rule's canonical id."""
-  try:
-    pr = urllib.parse.urlsplit(url)
-  except ValueError:
-    return url
-  base = (pr.netloc + pr.path).rstrip("/") or pr.netloc or url
-  for rx, canon in IDENTITY_RULES:
-    if rx.search(base):
-      return canon
-  return base
-
-
 def _chrome_page_title(title):
   """The page title, with the browser-name suffix stripped."""
   for suf in CHROME_SUFFIXES:
@@ -818,13 +752,6 @@ def chrome_window_for(title):
   desktop no longer drags the window there, which the URL key did."""
   hit = chrome_session_titles().get(_chrome_page_title(title))
   return f"chrome:win:{hit[0]}" if hit else None
-
-
-def chrome_url_for(title):
-  """The normalized active-tab URL. No longer the identity; still how a
-  saved window is traced back to its PROFILE."""
-  hit = chrome_session_titles().get(_chrome_page_title(title))
-  return normalize_url(hit[1]) if hit else None
 
 
 # --- plugin framework: app-specific window identity + restore --------------
@@ -1233,7 +1160,7 @@ def _mux_slot(latch_target):
 
 class ChromePlugin(WindowPlugin):
   """Chrome / Chromium: identity is the active-tab URL read from the SNSS
-  session file (chrome_url_for). Transient states (a blank New Tab, the
+  session file, keyed by its stable window id. Transient states (a blank
   profile picker) are handled by the session/exclude config, not here."""
   name = "chrome"
 
@@ -2955,7 +2882,6 @@ def watch_worker(launch=True):
     inv_seen = store_mtime(INVERT_STORE)
     exc_seen = store_mtime(EXCLUDE_FILE)
     inc_seen = store_mtime(INCLUDE_FILE)
-    idn_seen = store_mtime(IDENTITY_FILE)
     arm_seen = store_mtime(ARM_FILE)
     errstreak = 0
     while True:
@@ -2971,10 +2897,6 @@ def watch_worker(launch=True):
       if i != inc_seen:
         inc_seen = i
         reload_anchor()
-      d2 = store_mtime(IDENTITY_FILE)
-      if d2 != idn_seen:
-        idn_seen = d2
-        reload_identity()
       # aggressive/settle/toggle all write a timestamp to ARM_FILE; adopt
       # it as the new armed_at (now = kick, a past ts = settle to steady).
       # Then publish status each tick for `session-mgr status` + tray.
@@ -3232,7 +3154,6 @@ def _snss_build(window, tab, url, title, ver=3):
 def selftest():
   """Offline unit checks for the plugin framework + Chrome-identity machinery
   -- no compositor, deterministic. Run with `session-mgr selftest`."""
-  global IDENTITY_RULES
   fails = []
 
   def ck(name, cond):
@@ -3564,19 +3485,6 @@ def selftest():
   # identity() is a STRICT no-op for a non-plugin app
   ck("noop-slack", identity(V("slack", "Slack")) == "Slack")
 
-  saved = IDENTITY_RULES
-  IDENTITY_RULES = []
-  ck("norm-query",
-     normalize_url("https://github.com/jello-d/vigilance?tab=x")
-     == "github.com/jello-d/vigilance")
-  ck("norm-frag",
-     normalize_url("https://mail.google.com/mail/u/0/#inbox")
-     == "mail.google.com/mail/u/0")
-  IDENTITY_RULES = [(re.compile(r"^mail\.google\.com"), "gmail")]
-  ck("norm-rule",
-     normalize_url("https://mail.google.com/mail/u/0/#inbox") == "gmail")
-  IDENTITY_RULES = saved
-
   # parse_snss recovers the active-tab url from a synthetic session file
   import tempfile
   fd, path = tempfile.mkstemp()
@@ -3659,24 +3567,6 @@ def main():
     print(f"# {len(ANCHOR_RULES)} rule(s), {len(ANCHOR_ERRORS)} error(s)"
           f" from {INCLUDE_FILE}", file=sys.stderr)
     sys.exit(1 if ANCHOR_ERRORS else 0)
-  elif verb == "identity":      # show URL rules + resolve live Chrome windows
-    for rx, canon in IDENTITY_RULES:
-      print(f"{rx.pattern} :: {canon}")
-    for n, text, msg in IDENTITY_ERRORS:
-      print(f"error: line {n}: {msg}: {text!r}", file=sys.stderr)
-    print(f"# {len(IDENTITY_RULES)} rule(s), "
-          f"{len(IDENTITY_ERRORS)} error(s) from {IDENTITY_FILE}",
-          file=sys.stderr)
-    try:
-      for v in WayfireSocket().list_views(filter_mapped_toplevel=True):
-        t = v.get("title", "")
-        p = _owner(v)
-        if p is not None:
-          print(f"# [{p.name}] {t[:38]!r} -> {identity(v)}",
-                file=sys.stderr)
-    except Exception as e:
-      print(f"# (no live join: {e})", file=sys.stderr)
-    sys.exit(1 if IDENTITY_ERRORS else 0)
   elif verb == "plugins":       # list loaded plugins (built-in + user)
     for p in plugins():
       hooks = [h for h in ("owns", "identity", "transient", "window_id",
@@ -3726,7 +3616,7 @@ def main():
     print("usage: session-mgr capture | "
           "restore [--dry-run] [--only S] [--from SPEC] | "
           "watch [--no-launch] | resume | stop | launch | aggressive | "
-          "settle | toggle | status | exclude | include | identity | "
+          "settle | toggle | status | exclude | include | "
           "plugins | reload | wind-down | display-changed | doctor | "
           "selftest",
           file=sys.stderr)

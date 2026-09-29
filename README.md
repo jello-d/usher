@@ -89,8 +89,6 @@ session_restore = session-mgr watch
 
 - `~/.config/session/exclude` — `<app-regex> :: <title-regex>` never-place list.
 - `~/.config/session/include` — the same shape; the steady-state anchor list.
-- `~/.config/session/identity` — `<url-regex> :: <canonical>` URL-normalization
-  rules for the chrome plugin (e.g. collapse a Gmail path to a stable id).
 - `~/.config/session/plugins/*.py` — user window plugins.
 
 Example defaults ship in [`share/session/`](share/session/). The
