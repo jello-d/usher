@@ -34,8 +34,9 @@ from .engine import (AGGR_CAP, ARM_FILE, EXCLUDE_FILE, IDLE_SETTLE,
                      apply_invert, connect, do_capture, identity, is_anchored,
                      is_desync_error,
                      is_transient, kkey, launch_missing, learn,
-                     load_knowledge, logline, persist, place, reload_anchor,
-                     reload_exclude, rekey_chrome, save_knowledge, snapshot,
+                     load_knowledge, logline, persist, place, plugins_sig,
+                     reload_anchor, reload_exclude, reload_plugins,
+                     rekey_chrome, save_knowledge, snapshot,
                      store_mtime, take_mode, target_geometry, unidentified)
 
 
@@ -613,6 +614,7 @@ class Watcher:
                 "exc": store_mtime(EXCLUDE_FILE),
                 "inc": store_mtime(INCLUDE_FILE),
                 "arm": store_mtime(ARM_FILE),
+                "plugins": plugins_sig(),
                 "chrome": chrome.session_sig()}
         errstreak = 0
         while True:
@@ -649,6 +651,13 @@ class Watcher:
         if i != seen["inc"]:
             seen["inc"] = i
             reload_anchor()
+        # A USER PLUGIN is the same class of config as those two files and now
+        # reloads the same way. Identity may change for the app it claims, so
+        # its windows relearn; that is what editing a plugin asks for.
+        pl = plugins_sig()
+        if pl != seen["plugins"]:
+            seen["plugins"] = pl
+            reload_plugins()
         # aggressive/settle/toggle all write a timestamp to ARM_FILE; adopt it
         # as the new armed_at (now = kick, a past ts = settle to steady).
         a = store_mtime(ARM_FILE)

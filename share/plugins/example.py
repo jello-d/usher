@@ -20,6 +20,13 @@
 # Registry order is chrome, mux, kitty, then user plugins; the FIRST plugin
 # whose owns() is true handles the window.
 #
+# EDITS APPLY AUTOMATICALLY: the running watcher notices this directory change
+# within a second and rebuilds the registry, exactly as it does for
+# session/exclude and session/include. A file that does not import is logged
+# and skipped, leaving the three built-ins, so a half-saved edit cannot take
+# the daemon down. Watch ~/.local/state/session-layout/watch.log for the
+# "plugins reloaded" line.
+#
 # This example gives Spotify a stable identity, because its title drifts per
 # track and without this it would never match its saved slot.
 

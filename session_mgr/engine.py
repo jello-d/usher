@@ -425,13 +425,17 @@ def place_of(view, outputs):
     }
 
 
+# The snapshot FORMAT version, written by snapshot() and checked by
+# load_snapshot(). One constant, so the writer and the reader cannot disagree.
+SNAPSHOT_VERSION = 1
+
+
 def snapshot(sock):
     outputs = {o["name"]: o for o in sock.list_outputs()}
     inverts = load_inverts()
     windows = []
     for v in sock.list_views(filter_mapped_toplevel=True):
         title = v.get("title", "")
-        app = v.get("app-id") or v.get("app_id") or ""
         if SKIP_TITLE.search(title) or is_transient(v):
             continue   # work / scratch / transient-chrome: never record it
         p = place_of(v, outputs)
@@ -463,7 +467,7 @@ def snapshot(sock):
             "raw_geometry": p["raw"],
         })
     return {
-        "version": 1,
+        "version": SNAPSHOT_VERSION,
         "time": int(time.time()),
         "host": os.uname().nodename,
         "outputs": [{"name": o["name"], "geometry": o["geometry"],
@@ -603,7 +607,37 @@ def plugins():
     return _PLUGINS
 
 
+def plugins_sig():
+    """A signature of the user plugin dir: which *.py files are there and when
+    each was last written. Changes on an add, a remove and an edit alike, which
+    the same shape as chrome.session_sig.
+
+    NOT THE DIRECTORY'S OWN MTIME, which was the first attempt and was wrong in
+    an instructive way: importing a plugin writes a `__pycache__` directory
+    beside it, that bumps the directory's mtime, and the watch therefore fired
+    a second time on a change its own reload had caused. Measured -- two
+    "plugins reloaded" lines a second apart. A trigger must not include
+    anything the action it triggers modifies."""
+    try:
+        return tuple(sorted(
+            (f, os.path.getmtime(f))
+            for f in glob.glob(os.path.join(PLUGIN_DIR, "*.py"))))
+    except OSError:
+        return ()
+
+
 def reload_plugins():
+    """Drop the registry cache so the next plugins() rebuilds it, and say so.
+
+    WIRED TO THE PLUGIN DIR'S MTIME, which it was not for a long time: it
+    existed, nothing called it, and two comments in other modules cited it as
+    the reason _PLUGINS must not be imported by value. A reload function with
+    no trigger is the same shape as data captured and never read.
+
+    A user editing a plugin now sees it take effect within a second, which is
+    what session/exclude and session/include already promise. Safe because
+    _load_user_plugins is best-effort: a half-saved file is logged and skipped,
+    leaving the three built-ins, and the next save fixes it."""
     global _PLUGINS
     _PLUGINS = None
     ps = plugins()
@@ -1490,14 +1524,26 @@ def _announce(msg):
 
 
 def load_snapshot():
-    """The last snapshot, or None if there is not a readable one. The single
-    reader of current.json, so relaunch and doctor always look at the same
-    thing."""
+    """The last snapshot, or None if there is not a readable one we understand.
+    The single reader of current.json, so relaunch and doctor always look at
+    the same thing.
+
+    THE VERSION STAMP IS CHECKED. snapshot() has written `version` since the
+    beginning and nothing read it, which made the stamp a decoration: a future
+    format could not be detected, only misread, and the relaunch paths would
+    act on fields that had moved. Refusing is the safe failure -- no snapshot
+    means no relaunch, rather than a wrong one -- and it is loud in the log."""
     try:
         with open(os.path.join(STATE, "current.json")) as f:
-            return json.load(f)
+            snap = json.load(f)
     except (OSError, ValueError):
         return None
+    got = snap.get("version")
+    if got != SNAPSHOT_VERSION:
+        logline(f"snapshot version {got!r} is not {SNAPSHOT_VERSION}:"
+                f" refusing to read it rather than guess at its shape")
+        return None
+    return snap
 
 
 def saved_sizes(saved):
@@ -2845,8 +2891,8 @@ def _t_migration_body(ck):
     # every chrome + kitty entry it had just learned, and each new monitor set
     # silently losing its browser and terminal placements exactly once.
     import tempfile
-    _st, _prev = STATE, os.environ.get("XDG_STATE_HOME")
-    _tmp = tempfile.mkdtemp()
+    _st = STATE            # STATE is what this sandboxes; XDG_STATE_HOME is
+    _tmp = tempfile.mkdtemp()   # read at import and cannot matter here
     try:
         globals()["STATE"] = _tmp
         load_knowledge()                     # first touch of a fresh profile
