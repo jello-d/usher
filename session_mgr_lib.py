@@ -49,6 +49,7 @@ import signal
 import struct
 import subprocess
 import sys
+import threading
 import time
 from collections import Counter
 from datetime import date
@@ -2715,7 +2716,7 @@ def do_watch(launch=True):
     _supervise(script, launch, holder)
 
 
-def watch_worker(launch=True):
+class Watcher:
     """The daemon proper: place windows to their known spot as they appear
     (react), and continuously record the layout into the knowledge base
     (capture). Runs as a child of do_watch's supervisor; an uncaught crash
@@ -2724,76 +2725,161 @@ def watch_worker(launch=True):
     Placement and capture each get their own IPC socket so neither blocks the
     events.
 
-    If a `session-mgr resume` armed the adopt flag, the FIRST worker to
-    reach init consumes it and LEARNS the current hand-arranged layout as
-    the baseline
-    instead of restoring the remembered one -- for use after killing session and
-    fixing windows by hand, so it does not undo the good state. Then it watches
-    normally; respawns (flag gone) restore as usual."""
-    import threading
-    os.makedirs(STATE, exist_ok=True)
-    kb = load_knowledge()
-    lock = threading.Lock()
-    # dirty: knowledge needs a capture. layout: roll history too (not tab-flip).
-    st = {"dirty": True, "layout": True, "last": time.time(),
-          "armed_at": time.time(),   # aggressive-mode clock (reset by the kick)
-          "last_map": time.time()}   # last new toplevel map (feeds IDLE_SETTLE)
-    placed = set()
-    pending = {}           # vid -> {"v": latest view, "due": place-after time}:
-    #                        the settle-debounce queue, drained by placer_loop
-    deadline = {}          # vid -> time after which we no longer place it
-    identified = set()     # vids we have ever been able to RECOGNISE (see
-    #                        _place_view: the grace runs from that moment, not
-    #                        from the map, so a slow login sequence still lands)
-    groups = {}            # vid -> {"app", "titles": set}: in-session tab-group
-    place_sock = connect()
-    logline("session-mgr watch: starting")
-    for _n, _text, _msg in EXCLUDE_ERRORS:
-        logline(f"exclude rule error (line {_n}): {_msg}: {_text!r}")
+    WHY A CLASS. Three threads share one pile of mutable placement state --
+    what is already placed, what is pending a settle, each window's grace
+    deadline, the aggressive-mode clock, the knowledge base. That sharing is
+    inherent to the design, and as nested closures it was expressed by nine
+    captured locals inside one 400-line function, which is why the function
+    could not be split: any extraction would have had to take them all as
+    arguments. The state is unchanged; calling it `self` is what lets each
+    phase be a method you can read on its own.
 
-    def try_place(v):
-        # A desync-class IPC error (timeout/off-by-one) poisons place_sock the
-        # same way it poisons the capture socket, and would then silently fail
-        # EVERY placement for the rest of the session -- so rebuild it on one.
-        # A benign server error-response (e.g. "view is not toplevel" for a
-        # popup) leaves the socket in sync: log it and move on, never reconnect.
-        nonlocal place_sock
-        try:
-            return _place_view(v)
-        except Exception as e:
-            if is_desync_error(e):
-                logline(f"place desync: {e}; reconnecting place socket")
-                try:
-                    place_sock.close()
-                except Exception:
-                    pass
-                try:
-                    place_sock = connect()
-                except Exception as e2:
-                    logline(f"place reconnect failed: {e2}")
-            else:
-                logline(f"place error: {e}")
-            return None
+    If a `session-mgr resume` armed the adopt flag, the FIRST worker to reach
+    init consumes it and LEARNS the current hand-arranged layout as the
+    baseline instead of restoring the remembered one -- for use after killing
+    session and fixing windows by hand, so it does not undo the good state.
+    Then it watches normally; respawns (flag gone) restore as usual."""
 
-    def _steady_at():
+    def __init__(self, launch=True):
+        os.makedirs(STATE, exist_ok=True)
+        self.launch = launch
+        self.mode = None
+        self.kb = load_knowledge()
+        self.lock = threading.Lock()
+        # dirty: knowledge needs a capture. layout: roll history too (not on a
+        # tab-flip).
+        self.st = {"dirty": True, "layout": True, "last": time.time(),
+                   "armed_at": time.time(),  # aggressive clock (reset by kick)
+                   "last_map": time.time()}  # last new toplevel map, which
+        #                                      feeds IDLE_SETTLE
+        self.placed = set()
+        self.pending = {}      # vid -> {"v": latest view, "due": place-after
+        #                        time}: the settle-debounce queue, drained by
+        #                        _placer_loop
+        self.deadline = {}     # vid -> time after which we no longer place it
+        self.identified = set()   # vids we have ever been able to RECOGNISE
+        #                           (see _recognise: the grace runs from that
+        #                           moment, not from the map, so a slow login
+        #                           sequence still lands)
+        self.groups = {}       # vid -> {"app", "titles": set}: the in-session
+        #                        tab-group, fed to learn()
+        self.place_sock = None
+
+    def run(self):
+        """Connect, start the capture thread, act once on the start mode, then
+        watch events forever. The ORDER is the same one the function had: the
+        capture loop is running before the mode is consumed, and the relaunch
+        happens only after we are watching, so the windows it spawns produce
+        map events we catch."""
+        self.place_sock = connect()
+        logline("session-mgr watch: starting")
+        for _n, _text, _msg in EXCLUDE_ERRORS:
+            logline(f"exclude rule error (line {_n}): {_msg}: {_text!r}")
+        threading.Thread(target=self._capture_loop, daemon=True).start()
+        # Consume the one-shot adopt flag (armed by `session-mgr resume`): the
+        # first worker to reach here adopts; a respawn sees it gone and
+        # restores.
+        self.mode = take_mode()
+        self._init_layout()
+        watch = connect()
+        watch.watch(list(KNOWLEDGE_TRIGGERS | PLACE_EVENTS))
+        print(f"session-mgr watch: {len(self.kb)} known windows; watching",
+              flush=True)
+        logline(f"watching, {len(self.kb)} known windows")
+        self._init_launch()
+        threading.Thread(target=self._placer_loop, daemon=True).start()
+        self._event_loop(watch)
+
+    # --- startup: the one-shot decisions -------------------------------------
+
+    def _init_layout(self):
+        """Act on the start MODE, once. quiet touches nothing, adopt takes the
+        current layout as the new truth, restore (the default) places what is
+        already open."""
+        if self.mode == "quiet":
+            # A code reload: express NO opinion about the layout. No
+            # init-place, no capture, no grace deadlines. The windows keep
+            # their positions AND the store keeps its memory of where they
+            # belong, so a reload can never be the reason the two silently
+            # converge on the wrong answer.
+            logline("reload: neither restoring nor re-baselining")
+        elif self.mode == "adopt":
+            # Capture-and-resume: adopt the CURRENT layout as the baseline and
+            # do NOT restore. No init-place and no grace deadlines for open
+            # windows, so they stay exactly where they are; the refreshed
+            # knowledge means new windows FROM HERE are maintained against the
+            # good state, not the stale pre-kill one. _capture_loop keeps it
+            # current after this.
+            try:
+                do_capture()
+                self.kb = load_knowledge()   # so _place_view sees the fresh KB
+                logline("adopt: captured current layout as baseline; "
+                        "not restoring")
+            except Exception as e:
+                logline(f"adopt capture error: {e}")
+        else:
+            self._init_place()
+
+    def _init_place(self):
+        """Place anything already open when we start (the event loop handles
+        the rest). These get a grace window from NOW, so init-place lands but
+        later stray title changes on them do not."""
+        now = time.time()
+        n_placed = 0
+        for v in self.place_sock.list_views(filter_mapped_toplevel=True):
+            if v.get("id") is not None:
+                self.deadline[v["id"]] = now + PLACE_GRACE
+            try:
+                if self._try_place(v):
+                    n_placed += 1
+            except Exception as e:
+                logline(f"init place error: {e}")
+        logline(f"init-placed {n_placed} window(s)")
+
+    def _init_launch(self):
+        """Relaunch missing terminals, once we are watching, so their map
+        events are caught and placed by the event loop. Chrome restores itself.
+        Drop the LAUNCHED marker only after launch_missing RETURNS, so the
+        supervisor keeps launch on for a successor if this worker dies first.
+
+        `quiet` (session-mgr reload) suppresses the relaunch too, and MUST do
+        so here rather than through the `launch` argument. A reload signals the
+        running supervisor, which re-execs with its OWN original argv, so the
+        launch flag the reload was invoked with never reaches the worker --
+        while a fresh supervisor generation deletes the LAUNCHED marker,
+        re-arming the relaunch. A deploy therefore spawned a terminal every
+        time. The mode travels in the flag file, which the worker DOES read, so
+        that is the only place the suppression can actually take effect."""
+        if self.launch and self.mode != "quiet":
+            try:
+                launch_missing()
+                open(LAUNCHED, "w").close()
+            except Exception as e:
+                logline(f"launch_missing error: {e}")
+        elif self.mode == "quiet":
+            logline("reload: relaunch suppressed")
+
+    # --- the aggressive/steady clock, and what it publishes -------------------
+
+    def _steady_at(self):
         # steady when (FLOOR passed AND quiet for SETTLE) OR past CAP; the kick
         # resets armed_at and a new map pushes last_map -- both extend
         # aggressive.
-        with lock:
-            armed = st["armed_at"]
-            last_map = st["last_map"]
+        with self.lock:
+            armed = self.st["armed_at"]
+            last_map = self.st["last_map"]
         return min(armed + AGGR_CAP,
                    max(armed + START_FLOOR, last_map + IDLE_SETTLE))
 
-    def aggressive_now():
-        return time.time() < _steady_at()
+    def _aggressive_now(self):
+        return time.time() < self._steady_at()
 
-    def write_status():
+    def _write_status(self):
         # Publish {mode, seconds_left} for `session-mgr status` + the tray. The
         # steady-at estimate assumes no more windows arrive; a map or a kick
         # moves it out. Atomic replace so a reader never sees a half file.
         now = time.time()
-        steady_at = _steady_at()
+        steady_at = self._steady_at()
         # arc = fraction of the aggressive window still to run, for the tray's
         # depleting ring; ~1.0 right after a kick, 0.0 once steady.
         arc = max(0.0, min(1.0, (steady_at - now) / START_FLOOR))
@@ -2808,9 +2894,37 @@ def watch_worker(launch=True):
         except OSError:
             pass
 
-    def _place_view(v):
+    # --- placement -----------------------------------------------------------
+
+    def _try_place(self, v):
+        """_place_view with the IPC error policy wrapped round it. A desync-
+        class error (timeout / off-by-one) poisons place_sock the same way it
+        poisons the capture socket, and would then silently fail EVERY
+        placement for the rest of the session -- so rebuild it on one. A benign
+        server error-response (e.g. "view is not toplevel" for a popup) leaves
+        the socket in sync: log it and move on, never reconnect."""
+        try:
+            return self._place_view(v)
+        except Exception as e:
+            if is_desync_error(e):
+                logline(f"place desync: {e}; reconnecting place socket")
+                try:
+                    self.place_sock.close()
+                except Exception:
+                    pass
+                try:
+                    self.place_sock = connect()
+                except Exception as e2:
+                    logline(f"place reconnect failed: {e2}")
+            else:
+                logline(f"place error: {e}")
+            return None
+
+    def _place_view(self, v):
+        """Decide whether this view may be placed right now, and where. Returns
+        True only if it was actually moved."""
         vid = v.get("id")
-        if vid is None or vid in placed:
+        if vid is None or vid in self.placed:
             return
         if v.get("parent", -1) != -1:
             return   # a dialog / child view (a file picker, a "Save As" sheet):
@@ -2822,46 +2936,55 @@ def watch_worker(launch=True):
             # here; the parent field (-1 == none) is the reliable tell,
             # where is_transient's title match is not (a portal file
             # chooser has a null/foreign title).
-        app = v.get("app-id") or v.get("app_id") or ""
+        app = app_of(v)
         title = v.get("title", "")
         if SKIP_TITLE.search(title) or is_transient(v):
             return   # work / scratch / transient-chrome: leave where it opened
-        with lock:
-            e = (kb.get(kkey(app, ""))
-                 or kb.get(kkey(app, identity(v))))
-        # THE GRACE RUNS FROM RECOGNITION, NOT FROM THE MAP. A window can be
-        # unidentifiable for a long time after it appears: a terminal that has
-        # to wait for a keyring to be unlocked before its ssh connects and the
-        # remote tmux paints a banner is a bare shell until then, and its real
-        # title can arrive minutes later. Measuring the grace from the map meant
-        # that window was already past it, so it was never placed and the human
-        # had to do it by hand.
-        #
-        # So the FIRST time a window can be recognised, restart its grace and
-        # feed the settle clock, exactly as if it had just mapped -- because
-        # from usher's point of view it just has. This needs no model of the
-        # sequence, no knowledge of keyrings or agents, and no new persistent
-        # state: it simply stays willing to place a window until it has had one
-        # real chance. Still bounded, since the aggressive check below governs.
-        if e is not None and vid not in identified:
-            identified.add(vid)
-            late = time.time() > deadline.get(vid, 0)
-            deadline[vid] = time.time() + PLACE_GRACE
-            with lock:
-                st["last_map"] = time.time()
-            if late:
-                logline(f"recognised late, re-graced: {app[:16]} | "
-                        f"{title[:34]}")
-        if time.time() > deadline.get(vid, 0):
+        with self.lock:
+            e = (self.kb.get(kkey(app, ""))
+                 or self.kb.get(kkey(app, identity(v))))
+        if e is not None and vid not in self.identified:
+            self._recognise(vid, app, title)
+        if time.time() > self.deadline.get(vid, 0):
             return   # past the grace window: the window is settled, hands off
-        if not aggressive_now() and not is_anchored(app, title):
+        if not self._aggressive_now() and not is_anchored(app, title):
             return   # steady state: only session/include anchors are (re)placed
         if not e:
             return   # never seen this identity -> we don't know where it goes
-        outs = {o["name"]: o for o in place_sock.list_outputs()}
+        outs = {o["name"]: o for o in self.place_sock.list_outputs()}
         o = outs.get(e["output"])
         if not o:
             return
+        return self._seat_view(v, e, o)
+
+    def _recognise(self, vid, app, title):
+        """THE GRACE RUNS FROM RECOGNITION, NOT FROM THE MAP. A window can be
+        unidentifiable for a long time after it appears: a terminal that has to
+        wait for a keyring to be unlocked before its ssh connects and the
+        remote tmux paints a banner is a bare shell until then, and its real
+        title can arrive minutes later. Measuring the grace from the map meant
+        that window was already past it, so it was never placed and the human
+        had to do it by hand.
+
+        So the FIRST time a window can be recognised, restart its grace and
+        feed the settle clock, exactly as if it had just mapped -- because from
+        usher's point of view it just has. This needs no model of the sequence,
+        no knowledge of keyrings or agents, and no new persistent state: it
+        simply stays willing to place a window until it has had one real
+        chance. Still bounded, since the aggressive check still governs."""
+        self.identified.add(vid)
+        late = time.time() > self.deadline.get(vid, 0)
+        self.deadline[vid] = time.time() + PLACE_GRACE
+        with self.lock:
+            self.st["last_map"] = time.time()
+        if late:
+            logline(f"recognised late, re-graced: {app[:16]} | {title[:34]}")
+
+    def _seat_view(self, v, e, o):
+        """Move the view onto its remembered slot (unless it is already exactly
+        there), carry the invert with it, and say so in the log."""
+        vid = v["id"]
+        app, title = app_of(v), v.get("title", "")
         # Skip if already exactly there (init-place over an in-place session
         # would otherwise re-issue every window). The event view carries
         # geometry for init (list_views); a freshly-mapped view may not, and
@@ -2873,17 +2996,17 @@ def watch_worker(launch=True):
                     g.get("width") == t["width"] and
                     g.get("height") == t["height"] and
                     v.get("output-name") == e["output"]):
-                placed.add(vid)
+                self.placed.add(vid)
                 # Invert follows the window even when it needs no move. placed
                 # dedups, so this fires once per map and never fights a later
                 # Super+N un-invert.
                 if e.get("inverted"):
-                    apply_invert(place_sock, vid)
+                    apply_invert(self.place_sock, vid)
                 return
-        place(place_sock, vid, e, o)
-        placed.add(vid)
+        place(self.place_sock, vid, e, o)
+        self.placed.add(vid)
         if e.get("inverted"):
-            apply_invert(place_sock, vid)
+            apply_invert(self.place_sock, vid)
         msg = (f"placed  {app[:18]:18} {e['output']} "
                f"ws{tuple(e['workspace'])} | {title[:32]}"
                f"{' [inv]' if e.get('inverted') else ''}")
@@ -2897,53 +3020,44 @@ def watch_worker(launch=True):
         logline(msg)
         return True
 
-    def capture_loop():
+    def _placer_loop(self):
+        """Settle-debounce placer. Moves a window only once its title has been
+        QUIET for PLACE_SETTLE: a restoring client churns its title as tabs
+        load, and reconfiguring it mid-restore can make it drop the window. The
+        event loop only records the latest view + a due time in `pending`; this
+        thread does the actual place when the churn stops, reusing place_sock
+        (nothing else touches it once init is done, so it has one writer)."""
+        while True:
+            time.sleep(0.1)
+            now = time.time()
+            ready = []
+            with self.lock:
+                for vid in list(self.pending):
+                    if vid in self.placed:
+                        self.pending.pop(vid, None)
+                    elif now >= self.pending[vid]["due"]:
+                        ready.append(self.pending.pop(vid)["v"])
+            for v in ready:
+                self._try_place(v)
+
+    # --- capture -------------------------------------------------------------
+
+    def _capture_loop(self):
+        """Every second: pick up config edits, publish status, and write a
+        snapshot once the layout has been quiet for DEBOUNCE."""
         cap = connect()
-        inv_seen = store_mtime(INVERT_STORE)
-        exc_seen = store_mtime(EXCLUDE_FILE)
-        inc_seen = store_mtime(INCLUDE_FILE)
-        arm_seen = store_mtime(ARM_FILE)
+        seen = {"inv": store_mtime(INVERT_STORE),
+                "exc": store_mtime(EXCLUDE_FILE),
+                "inc": store_mtime(INCLUDE_FILE),
+                "arm": store_mtime(ARM_FILE)}
         errstreak = 0
         while True:
             time.sleep(1)
-            # Auto-incorporate session/exclude + session/include edits: reload
-            # when either file changes, so a new never-place or anchor rule
-            # applies on save.
-            e = store_mtime(EXCLUDE_FILE)
-            if e != exc_seen:
-                exc_seen = e
-                reload_exclude()
-            i = store_mtime(INCLUDE_FILE)
-            if i != inc_seen:
-                inc_seen = i
-                reload_anchor()
-            # aggressive/settle/toggle all write a timestamp to ARM_FILE; adopt
-            # it as the new armed_at (now = kick, a past ts = settle to steady).
-            # Then publish status each tick for `session-mgr status` + tray.
-            a = store_mtime(ARM_FILE)
-            if a != arm_seen:
-                arm_seen = a
-                try:
-                    with lock:
-                        st["armed_at"] = float(open(ARM_FILE).read().strip())
-                    logline("aggressive re-armed (kick)"
-                            if aggressive_now() else "settled to steady")
-                except (OSError, ValueError):
-                    pass
-            write_status()
-            # Inversion has no view event: a Super+N toggle only writes the
-            # invert store. Treat a change to that file as a capture trigger, so
-            # invert/un-invert persists on its own without waiting for a move.
-            # (apply_invert also writes it during restore -- harmless, just a
-            # redundant capture of state we set ourselves.)
-            m = store_mtime(INVERT_STORE)
-            if m != inv_seen:
-                inv_seen = m
-                with lock:
-                    st["dirty"] = True
-                    st["last"] = time.time()
-            with lock:
-                due = st["dirty"] and time.time() - st["last"] >= DEBOUNCE
+            self._poll_files(seen)
+            self._write_status()
+            with self.lock:
+                due = (self.st["dirty"]
+                       and time.time() - self.st["last"] >= DEBOUNCE)
             if not due:
                 continue
             # A transient IPC timeout (the compositor stalls under a slow
@@ -2951,173 +3065,146 @@ def watch_worker(launch=True):
             # next tick retries. Without the guard the capture thread died
             # silently and snapshots simply stopped.
             try:
-                snap = snapshot(cap)
-                with lock:
-                    roll = st["layout"]
-                    learn(kb, groups, snap["windows"], snap["time"])
-                    st["dirty"] = False
-                    st["layout"] = False
-                    save_knowledge(kb)
-                persist(snap, roll=roll)
+                self._capture_once(cap)
                 errstreak = 0
             except Exception as e:
                 errstreak += 1
-                logline(f"capture error: {e} (streak {errstreak})")
-                # A request timeout leaves its response unread in cap's buffer,
-                # desyncing it off-by-one: every later call then reads the
-                # PREVIOUS call's response (the name/mapped KeyError storm).
-                # Reusing it never resyncs, so on a desync-class error drop the
-                # socket and reconnect; st["dirty"] stays set, so the next tick
-                # retries on the fresh socket. A benign error would not desync,
-                # so it is left alone -- the streak backstop below still covers
-                # a persistent one.
-                if is_desync_error(e):
-                    try:
-                        cap.close()
-                    except Exception:
-                        pass
-                    try:
-                        cap = connect()
-                    except Exception as e2:
-                        logline(f"cap reconnect failed: {e2}")
-                # Fail loud: a sustained streak means the error is not clearing
-                # (compositor wedged, or a class reconnect cannot fix). Exit so
-                # the supervisor does a clean full respawn instead of limping on
-                # a broken capture thread.
-                if errstreak >= CAPTURE_FAIL_LIMIT:
-                    logline(f"capture failing {errstreak}x; exit for respawn")
-                    os._exit(1)
+                cap = self._capture_failed(e, cap, errstreak)
 
-    threading.Thread(target=capture_loop, daemon=True).start()
-
-    # Consume the one-shot adopt flag (armed by `session-mgr resume`): the first
-    # worker to reach here adopts; a respawn sees it gone and restores.
-    mode = take_mode()
-    if mode == "quiet":
-        # A code reload: express NO opinion about the layout. No init-place, no
-        # capture, no grace deadlines. The windows keep their positions AND the
-        # store keeps its memory of where they belong, so a reload can never be
-        # the reason the two silently converge on the wrong answer.
-        logline("reload: neither restoring nor re-baselining")
-    elif mode == "adopt":
-        # Capture-and-resume: adopt the CURRENT layout as the baseline and do
-        # NOT restore. No init-place and no grace deadlines for open windows, so
-        # they stay exactly where they are; the refreshed knowledge means new
-        # windows FROM HERE are maintained against the good state, not the stale
-        # pre-kill one. capture_loop keeps it current after this.
-        try:
-            do_capture()
-            kb = load_knowledge()   # closure: try_place sees the refreshed KB
-            logline("adopt: captured current layout as baseline; not restoring")
-        except Exception as e:
-            logline(f"adopt capture error: {e}")
-    else:
-        # Place anything already open when we start (react handles the rest);
-        # they get a grace window from now, so init-place lands but later stray
-        # title changes on them do not.
-        now = time.time()
-        n_placed = 0
-        for v in place_sock.list_views(filter_mapped_toplevel=True):
-            if v.get("id") is not None:
-                deadline[v["id"]] = now + PLACE_GRACE
+    def _poll_files(self, seen):
+        """Adopt edits to the files that steer us, by mtime. Auto-incorporating
+        session/exclude + session/include means a new never-place or anchor
+        rule applies on save; ARM_FILE is the one seam aggressive/settle/toggle
+        drive; and a change to the invert store is the only signal a Super+N
+        toggle gives us, since inversion has no view event of its own."""
+        e = store_mtime(EXCLUDE_FILE)
+        if e != seen["exc"]:
+            seen["exc"] = e
+            reload_exclude()
+        i = store_mtime(INCLUDE_FILE)
+        if i != seen["inc"]:
+            seen["inc"] = i
+            reload_anchor()
+        # aggressive/settle/toggle all write a timestamp to ARM_FILE; adopt it
+        # as the new armed_at (now = kick, a past ts = settle to steady).
+        a = store_mtime(ARM_FILE)
+        if a != seen["arm"]:
+            seen["arm"] = a
             try:
-                if try_place(v):
-                    n_placed += 1
-            except Exception as e:
-                logline(f"init place error: {e}")
-        logline(f"init-placed {n_placed} window(s)")
+                with self.lock:
+                    self.st["armed_at"] = float(
+                        open(ARM_FILE).read().strip())
+                logline("aggressive re-armed (kick)"
+                        if self._aggressive_now() else "settled to steady")
+            except (OSError, ValueError):
+                pass
+        # Treat a change to the invert store as a capture trigger, so
+        # invert/un-invert persists on its own without waiting for a move.
+        # (apply_invert also writes it during restore -- harmless, just a
+        # redundant capture of state we set ourselves.)
+        m = store_mtime(INVERT_STORE)
+        if m != seen["inv"]:
+            seen["inv"] = m
+            with self.lock:
+                self.st["dirty"] = True
+                self.st["last"] = time.time()
 
-    watch = connect()
-    watch.watch(list(KNOWLEDGE_TRIGGERS | PLACE_EVENTS))
-    print(f"session-mgr watch: {len(kb)} known windows; watching", flush=True)
-    logline(f"watching, {len(kb)} known windows")
+    def _capture_once(self, cap):
+        """One snapshot: learn from it, save the knowledge, roll the history if
+        this was a layout change rather than a tab flip."""
+        snap = snapshot(cap)
+        with self.lock:
+            roll = self.st["layout"]
+            learn(self.kb, self.groups, snap["windows"], snap["time"])
+            self.st["dirty"] = False
+            self.st["layout"] = False
+            save_knowledge(self.kb)
+        persist(snap, roll=roll)
 
-    # Relaunch missing terminals now that we are watching, so their map events
-    # are caught and placed by the loop below. Chrome restores itself. Drop the
-    # LAUNCHED marker only after launch_missing returns, so the supervisor keeps
-    # launch on for a successor if this worker dies before reaching here.
-    # `quiet` (session-mgr reload) suppresses the relaunch too, and MUST do it
-    # here rather than through the `launch` argument. A reload signals the
-    # running supervisor, which re-execs with its OWN original argv, so the
-    # launch flag the reload was invoked with never reaches the worker -- while
-    # a fresh supervisor generation deletes the LAUNCHED marker, re-arming the
-    # relaunch. A deploy therefore spawned a terminal every time. The mode
-    # travels in the flag file, which the worker does read, so that is the only
-    # place the suppression can actually take effect.
-    if launch and mode != "quiet":
-        try:
-            launch_missing()
-            open(LAUNCHED, "w").close()
-        except Exception as e:
-            logline(f"launch_missing error: {e}")
-    elif mode == "quiet":
-        logline("reload: relaunch suppressed")
+    def _capture_failed(self, e, cap, errstreak):
+        """Handle a failed capture and return the socket to keep using. A
+        request timeout leaves its response unread in cap's buffer, desyncing
+        it off-by-one: every later call then reads the PREVIOUS call's response
+        (the name/mapped KeyError storm). Reusing it never resyncs, so on a
+        desync-class error drop the socket and reconnect; st["dirty"] stays
+        set, so the next tick retries on the fresh socket. A benign error would
+        not desync, so it is left alone -- the streak backstop still covers a
+        persistent one."""
+        logline(f"capture error: {e} (streak {errstreak})")
+        if is_desync_error(e):
+            try:
+                cap.close()
+            except Exception:
+                pass
+            try:
+                cap = connect()
+            except Exception as e2:
+                logline(f"cap reconnect failed: {e2}")
+        # Fail loud: a sustained streak means the error is not clearing
+        # (compositor wedged, or a class reconnect cannot fix). Exit so the
+        # supervisor does a clean full respawn instead of limping on a broken
+        # capture thread.
+        if errstreak >= CAPTURE_FAIL_LIMIT:
+            logline(f"capture failing {errstreak}x; exit for respawn")
+            os._exit(1)
+        return cap
 
-    # Settle-debounce placer. Moves a window only once its title has been QUIET
-    # for PLACE_SETTLE: a restoring client churns its title as tabs load, and
-    # reconfiguring it mid-restore can make it drop the window. The event loop
-    # only records the latest view + a due time in `pending`; this thread does
-    # the actual place when the churn stops, reusing place_sock (nothing else
-    # touches it once init is done, so the socket has one writer).
-    def placer_loop():
+    # --- events --------------------------------------------------------------
+
+    def _event_loop(self, watch):
+        """Read compositor events until the compositor goes away. Guard the
+        WHOLE event body: a stalled-compositor IPC timeout -- or any unforeseen
+        error -- on one event must skip that event, never fall out of the loop
+        and end the daemon. The login-storm crash that piled Chrome up came in
+        through exactly this path (a placement call)."""
         while True:
-            time.sleep(0.1)
-            now = time.time()
-            ready = []
-            with lock:
-                for vid in list(pending):
-                    if vid in placed:
-                        pending.pop(vid, None)
-                    elif now >= pending[vid]["due"]:
-                        ready.append(pending.pop(vid)["v"])
-            for v in ready:
-                try_place(v)
+            try:
+                msg = watch.read_next_event()
+            except Exception as e:
+                logline(f"watch loop exit: {e}")   # compositor gone: teardown
+                break
+            try:
+                self._on_event(msg)
+            except Exception as e:
+                logline(f"event error ({msg.get('event', '?')}): {e}")
 
-    threading.Thread(target=placer_loop, daemon=True).start()
+    def _on_event(self, msg):
+        ev = msg.get("event", "")
+        v = msg.get("view", {}) or {}
+        if ev == "view-mapped" and v.get("id") is not None:
+            self.deadline[v["id"]] = time.time() + PLACE_GRACE  # start grace
+            with self.lock:
+                self.st["last_map"] = time.time()  # feed the IDLE_SETTLE clock
+        if ev in PLACE_EVENTS:
+            vid = v.get("id")
+            if vid is not None and vid not in self.placed:
+                # Defer to _placer_loop. Browsers wait PLACE_SETTLE (re-armed
+                # on every title change) so we never move one mid-restore;
+                # other apps are stable at map -> a tiny settle, placed on the
+                # next tick.
+                wait = (PLACE_SETTLE if is_browser(app_of(v))
+                        else PLACE_SETTLE_FAST)
+                with self.lock:
+                    self.pending[vid] = {"v": v, "due": time.time() + wait}
+        elif ev == "view-unmapped" and v.get("id") is not None:
+            self.placed.discard(v["id"])
+            self.identified.discard(v["id"])
+            self.deadline.pop(v["id"], None)
+            with self.lock:
+                self.pending.pop(v["id"], None)
+        if ev in KNOWLEDGE_TRIGGERS:
+            with self.lock:
+                self.st["dirty"] = True
+                self.st["last"] = time.time()
+                if ev in LAYOUT_TRIGGERS:
+                    self.st["layout"] = True
 
-    while True:
-        try:
-            msg = watch.read_next_event()
-        except Exception as e:
-            logline(f"watch loop exit: {e}")   # compositor gone: real teardown
-            break
-        # Guard the WHOLE event body: a stalled-compositor IPC timeout -- or any
-        # unforeseen error -- on one event must skip that event, never fall out
-        # of the loop and end the daemon. The login-storm crash that piled
-        # Chrome up came in through exactly this path (a placement call).
-        try:
-            ev = msg.get("event", "")
-            v = msg.get("view", {}) or {}
-            if ev == "view-mapped" and v.get("id") is not None:
-                deadline[v["id"]] = time.time() + PLACE_GRACE   # start grace
-                with lock:
-                    st["last_map"] = time.time()   # feed the IDLE_SETTLE clock
-            if ev in PLACE_EVENTS:
-                vid = v.get("id")
-                if vid is not None and vid not in placed:
-                    # Defer to placer_loop. Browsers wait PLACE_SETTLE (re-
-                    # armed on every title change) so we never move one mid-
-                    # restore; other apps are stable at map -> a tiny settle,
-                    # placed on the next tick.
-                    app = v.get("app-id") or v.get("app_id") or ""
-                    wait = (PLACE_SETTLE if is_browser(app)
-                            else PLACE_SETTLE_FAST)
-                    with lock:
-                        pending[vid] = {"v": v, "due": time.time() + wait}
-            elif ev == "view-unmapped" and v.get("id") is not None:
-                placed.discard(v["id"])
-                identified.discard(v["id"])
-                deadline.pop(v["id"], None)
-                with lock:
-                    pending.pop(v["id"], None)
-            if ev in KNOWLEDGE_TRIGGERS:
-                with lock:
-                    st["dirty"] = True
-                    st["last"] = time.time()
-                    if ev in LAYOUT_TRIGGERS:
-                        st["layout"] = True
-        except Exception as e:
-            logline(f"event error ({msg.get('event', '?')}): {e}")
+
+def watch_worker(launch=True):
+    """The supervised worker (the internal `_worker` verb): one Watcher, run
+    until the compositor goes away or it crashes for the supervisor to
+    catch."""
+    Watcher(launch).run()
 
 
 def _signal_watcher(sig, action, done):
