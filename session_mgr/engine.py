@@ -41,11 +41,12 @@ from datetime import date
 # global of its own (its one cache is mutated in place, never reassigned), so
 # there is nothing here that can go stale. The engine's users of it are
 # ChromePlugin, chrome_profiles_for, and the selftest fixtures.
-from .chrome import (CHROME_APPS, CHROME_FLAGS, CHROME_STAGGER,
-                     browser_pids, chrome_bind_windows, chrome_profile_map,
+from .chrome import (CHROME_FLAGS, CHROME_STAGGER, browser_pids,
+                     chrome_bind_windows, chrome_profile_map, chrome_slot,
                      chrome_session_titles, chrome_window_for,
                      chrome_window_tabs, is_browser_cmdline, is_chrome,
-                     parse_snss, session_files, session_history, snss_build)
+                     is_chrome_slot, parse_snss, session_files,
+                     session_history, snss_build)
 
 # pywayfire is needed only to talk to the live compositor -- guarded so the
 # module still imports (and `session-mgr selftest` runs) without it.
@@ -1038,18 +1039,39 @@ def kkey(app_id, title):
 # sharing one slot; schema 5 moved a terminal off the session entirely
 # onto its COMMAND (term:...), so switching sessions in a window no
 # longer forfeits its place; schema 6 did the same for CHROME, moving it
-# off the active-tab URL onto the window's stable SessionID. The old keys
-# can never match again, so migrate_kb drops them once (the store is a
-# rebuildable cache).
-KB_SCHEMA = "6"
-# WHICH apps a bump invalidates, which is not always "all of them" -- schema 5
-# changed only the terminal key and deliberately spared chrome's 1045 entries.
-# Schema 6 DOES change chrome's key shape, so both go. Here the drop is the
-# point rather than a cost: the entries being discarded are the per-URL spam
-# that keying on the active tab produced.
-_MIGRATE_APPS = CHROME_APPS | {"kitty"}
+# off the active-tab URL onto the window's SessionID. The old keys can never
+# match again, so the migration drops them once (the store is a rebuildable
+# cache).
+#
+# Schema 7 is the first bump that changes NO key shape. It stopped usher
+# LEARNING a window its plugin could not identify, which invalidated exactly
+# the chrome entries the old title fallback had written -- 265 of 326 stored
+# placements on manifestor, 287 of 334 on manifold, none of them matchable by
+# anything. See _migrate_store: this one is keyed on the SHAPE of the stored
+# key, not on the app, because dropping the app wholesale would take the
+# working slots with it.
+KB_SCHEMA = "7"
+_MIGRATE_APPS = {"kitty"}
 
-CHROME_SLOT_RE = re.compile(r"^chrome:win:(\d+)$")
+
+def _migrate_wholesale(app):
+    """True if a PRE-6 store's entry for this app is unmatchable WHATEVER its
+    key: chrome and kitty, whose key shapes both changed before schema 6.
+
+    Which apps a bump invalidates wholesale is not always "all of them" --
+    schema 5 changed only the terminal key and deliberately spared chrome's
+    1045 entries -- so this is the pre-6 rule only. From 6 onward the shapes
+    are current and only _migrate_store's key-SHAPE rule applies.
+
+    CASE-INSENSITIVELY for chrome, which the set-membership test this replaces
+    was not. XWayland reports `Google-chrome` where native Wayland reports
+    `google-chrome`, and BOTH are in a real store (measured 2026-09-29: every
+    one of this box's six profile stores held capitalised entries that every
+    bump since schema 2 had quietly walked past). A migration that misses a
+    spelling of the app it is migrating leaves exactly the entries it was
+    written to remove."""
+    return is_chrome(app) or app in _MIGRATE_APPS
+
 
 
 def rekey_chrome(kb):
@@ -1089,9 +1111,9 @@ def rekey_chrome(kb):
         return 0
     stale = {}
     for k in kb:
-        m = CHROME_SLOT_RE.match(k.split("\x00", 1)[-1])
-        if m and int(m.group(1)) not in cur:
-            stale[int(m.group(1))] = k
+        key = k.split("\x00", 1)[-1]
+        if is_chrome_slot(key) and int(key.rsplit(":", 1)[1]) not in cur:
+            stale[int(key.rsplit(":", 1)[1])] = k
     if not stale:
         return 0
     bound = chrome_bind_windows(
@@ -1099,38 +1121,89 @@ def rekey_chrome(kb):
     moved = 0
     for old, new in bound.items():
         app = stale[old].split("\x00", 1)[0]
-        newkey = kkey(app, f"chrome:win:{new}")
+        newkey = kkey(app, chrome_slot(new))
         if newkey in kb:
             continue
         e = kb.pop(stale[old])
         # "title" in a kb entry is the KEY-title, i.e. identity() -- the trap
         # this file keeps falling into. It has to move with the key.
-        e["title"] = f"chrome:win:{new}"
+        e["title"] = chrome_slot(new)
         kb[newkey] = e
         moved += 1
     return moved
 
 
-def migrate_kb(kb):
-    """One-time store migration, idempotent via a schema stamp beside the kb.
-    On a stale/absent schema, drop every Chrome + kitty title-keyed entry so
-    relearn under the new identities, then stamp -- so a boot after the upgrade
-    collapses the accumulated per-title pile instead of carrying it."""
-    sp = schema_path()
+def _migrate_store(kb, frm):
+    """Apply every invalidation between schema `frm` and KB_SCHEMA to one
+    store, in place. Returns how many entries it dropped.
+
+    A BUMP MUST DROP ONLY WHAT IT INVALIDATED, and the two rules in play
+    invalidated different things, so this needs the FROM version rather than
+    one blunt sweep:
+
+      before 6   chrome's and kitty's KEY SHAPES changed, repeatedly (2 moved
+                 chrome onto the active-tab URL, 3 moved kitty onto
+                 kitty:<cwd>, 4 host-qualified mux, 5 moved terminals onto
+                 term:<command>, 6 moved chrome onto its SessionID). Nothing
+                 stored for those apps under an older schema can ever match
+                 again, so they go wholesale.
+      7          NO key shape changed. usher simply stopped LEARNING a chrome
+                 window its plugin could not identify, which invalidated
+                 exactly what that fallback had written -- chrome keyed by a
+                 raw window title -- and nothing else. Dropping all of chrome
+                 here would have discarded 45 working slots across two boxes
+                 to relearn them identically, which is the mistake schema 5
+                 nearly made.
+    """
+    before = len(kb)
     try:
-        cur = open(sp).read().strip()
-    except OSError:
-        cur = ""
-    if cur == KB_SCHEMA:
-        return
-    for k in [k for k in kb if k.split("\x00", 1)[0] in _MIGRATE_APPS]:
+        old = int(frm)
+    except (TypeError, ValueError):
+        old = 0
+    if old < 6:
+        for k in [k for k in kb
+                  if _migrate_wholesale(k.split("\x00", 1)[0])]:
+            del kb[k]
+    for k in [k for k in kb
+              if is_chrome(k.split("\x00", 1)[0])
+              and not is_chrome_slot(k.split("\x00", 1)[1])]:
         del kb[k]
-    try:
-        os.makedirs(STATE, exist_ok=True)
-        save_knowledge(kb)
-        write_json(sp, KB_SCHEMA)
-    except OSError:
-        pass
+    return before - len(kb)
+
+
+def migrate_stores():
+    """Bring EVERY display profile's store up to KB_SCHEMA, not only the one
+    for the monitors attached right now. Idempotent via the per-profile schema
+    stamp beside each store.
+
+    There is one store per monitor set, and migrating only the set you happen
+    to be plugged into leaves the others to rot until those monitors come
+    back, which may be never. Measured on manifestor 2026-09-29: five of six
+    stores were dormant, three of them still stamped schema 4, and 265 of 326
+    entries across the lot were chrome keyed by a raw title -- 81% of
+    everything the box had learned, none of it matchable. The one store the
+    old per-load migration could reach held 58 of those 326 entries."""
+    for path in sorted(glob.glob(os.path.join(STATE, "knowledge-*.json"))):
+        prof = os.path.basename(path)[len("knowledge-"):-len(".json")]
+        sp = schema_path(prof)
+        try:
+            frm = open(sp).read().strip()
+        except OSError:
+            frm = ""
+        if frm == KB_SCHEMA:
+            continue
+        try:
+            kb = json.load(open(path))
+        except (OSError, ValueError):
+            continue
+        n = _migrate_store(kb, frm)
+        try:
+            write_json(path, json.dumps(kb))
+            write_json(sp, KB_SCHEMA)
+        except OSError:
+            continue
+        logline(f"store {prof}: schema {frm or 'unstamped'} -> {KB_SCHEMA},"
+                f" dropped {n} entry(s) it invalidated, {len(kb)} left")
 
 
 def load_knowledge():
@@ -1138,6 +1211,7 @@ def load_knowledge():
     nothing learned yet starts empty (and seeds from the last snapshot), which
     is right: the placements from another desk would not fit here anyway."""
     adopt_legacy_store()
+    migrate_stores()      # every profile's store, not just the one we are on
     try:
         kb = json.load(open(kb_path()))
     except (FileNotFoundError, ValueError):
@@ -1157,7 +1231,6 @@ def load_knowledge():
         kb = {}
         upsert(kb, snap["windows"], snap["time"])
         return kb
-    migrate_kb(kb)
     return kb
 
 
@@ -2690,6 +2763,44 @@ def _t_migration_body(ck):
                       f)
         _merged = load_knowledge()
         ck("legacy-merged-into-existing", len(_merged) == 2)
+
+        # THE SCHEMA 7 RULE, which DELETES stored placements, so it is worth
+        # pinning from both directions. A chrome entry whose key is not a slot
+        # is what the retired title fallback wrote and nothing can ever match
+        # it; a chrome SLOT is current and must survive; another app's
+        # title-keyed entry is that app's only possible key and must survive.
+        _e7 = lambda t: {"app_id": "google-chrome", "title": t,
+                         "appid_only": False, "last_seen": 1_800_000_000}
+        _s7 = {kkey("google-chrome", "chrome:win:42"): _e7("chrome:win:42"),
+               kkey("Google-chrome", "chrome:win:43"): _e7("chrome:win:43"),
+               kkey("google-chrome", "Inbox (7) - Google Chrome"):
+                   _e7("Inbox (7) - Google Chrome"),
+               kkey("google-chrome", "chrome:win:notanumber"):
+                   _e7("chrome:win:notanumber"),
+               kkey("slack", "Slack"): {"app_id": "slack", "title": "Slack",
+                                        "appid_only": False,
+                                        "last_seen": 1_800_000_000},
+               kkey("kitty", "term:resume"): {"app_id": "kitty",
+                                              "title": "term:resume",
+                                              "appid_only": False,
+                                              "last_seen": 1_800_000_000}}
+        _from6 = dict(_s7)
+        ck("migrate7-drops-title-keyed-chrome",
+           _migrate_store(_from6, "6") == 2)
+        ck("migrate7-keeps-the-slots",
+           sorted(k.split("\x00")[1] for k in _from6)
+           == ["Slack", "chrome:win:42", "chrome:win:43", "term:resume"])
+        ck("migrate7-is-idempotent", _migrate_store(_from6, "7") == 0)
+        # from a PRE-6 store the key shapes themselves are stale, so chrome and
+        # kitty go wholesale -- the older rule, still applied from older stamps
+        _from4 = dict(_s7)
+        _migrate_store(_from4, "4")
+        ck("migrate-pre6-drops-chrome-and-kitty",
+           sorted(k.split("\x00")[1] for k in _from4) == ["Slack"])
+        _unstamped = dict(_s7)
+        _migrate_store(_unstamped, "")
+        ck("migrate-unstamped-treated-as-oldest",
+           sorted(k.split("\x00")[1] for k in _unstamped) == ["Slack"])
         ck("legacy-does-not-clobber",
            _merged[kkey("google-chrome", "example.com")]["title"]
            == "example.com")

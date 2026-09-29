@@ -17,19 +17,50 @@ wayfire exposes is the TITLE, the active tab's page title, which is volatile
 (unread counts "Inbox (7)", tab switches, navigation). Keying on the title never
 matched, so Chrome was never restored; keying on the active-tab URL matched, and
 then dragged a window to another desktop whenever an old page was revisited, and
-left 1053 store entries describing six windows. The durable handle is the
-SessionID Chrome itself gives the window, which SURVIVES A RESTART (measured:
-all six windows kept theirs through a --restore-last-session cycle). We read the
-session file (read-only; no --remote-debugging-port, no new attack surface),
-join a live window to its session window by the momentary page title (wayland
-and SNSS reflect the same Chrome state at any instant), and key on the window
-id. A window not yet in the session file falls back to its raw title, which is
-the remaining path by which title-shaped spam can enter the store.
+left 1053 store entries describing six windows. The handle that works is the
+SessionID Chrome itself gives the window. We read the session file (read-only;
+no --remote-debugging-port, no new attack surface), join a live window to its
+session window by the momentary page title (wayland and SNSS reflect the same
+Chrome state at any instant), and key on the window id.
+
+IT DOES NOT SURVIVE A RESTART, which an earlier version of this comment claimed
+on the strength of one observation. It is a monotonic per-session counter:
+every restore mints a fresh block, measured twice on both the clean-exit and
+the crash path. chrome_bind_windows is what carries a window across that
+boundary, and the id is durable for exactly as long as the browser runs, which
+is all identity needs it to be.
+
+A window not yet in the session file has NO identity here -- chrome_window_for
+returns None and usher declines to remember it at all, rather than falling back
+to the raw title it happens to be wearing. That fallback was 86% of a real
+store, none of it matchable.
 """
 import glob
 import os
+import re
 import shlex
 import struct
+
+# THE SLOT KEY, built and recognised in ONE place. Two sites used to spell it
+# out -- the identity that writes it and the migration that validates it -- and
+# a store whose writer and checker disagree about a key shape is how this
+# codebase has lost placements before. Change the shape here and both follow.
+_CHROME_SLOT = "chrome:win:"
+_CHROME_SLOT_RE = re.compile(r"^chrome:win:\d+$")
+
+
+def chrome_slot(win):
+    """The kb key for Chrome window id `win`."""
+    return f"{_CHROME_SLOT}{win}"
+
+
+def is_chrome_slot(key):
+    """True if `key` is a well-formed Chrome window slot -- i.e. one the
+    current code could have written. A stored chrome key that is NOT one is a
+    raw window title, left over from the identity fallback that no longer
+    exists."""
+    return bool(_CHROME_SLOT_RE.match(key or ""))
+
 
 CHROME_APPS = {"google-chrome", "chromium"}
 
@@ -43,6 +74,8 @@ def is_chrome(app):
     is_browser() (a substring test) still treated them as browsers, so they got
     the settle delay and none of the benefit."""
     return (app or "").lower() in CHROME_APPS
+
+
 # Seconds between starting one Chrome profile and the next. Long enough for the
 # first invocation to become the browser process and open its singleton socket,
 # which is what the second one needs to talk to.
@@ -276,7 +309,7 @@ def chrome_window_for(title):
     makes a window a stranger, and revisiting a page seen weeks ago on another
     desktop no longer drags the window there, which the URL key did."""
     hit = chrome_session_titles().get(_chrome_page_title(title))
-    return f"chrome:win:{hit[0]}" if hit else None
+    return chrome_slot(hit[0]) if hit else None
 
 
 def chrome_window_tabs(path):
@@ -414,7 +447,7 @@ def chrome_profile_map():
         except Exception:
             continue
         for win, _url in found.values():
-            out.setdefault(f"chrome:win:{win}", prof)
+            out.setdefault(chrome_slot(win), prof)
     return out
 
 
