@@ -6,7 +6,7 @@
 harness_init tools
 
 _bad=0
-for _f in "$HERE/session_mgr.py" \
+for _f in "$HERE/session_mgr_lib.py" \
           "$HERE/indicator/session_mgr_indicator/__main__.py" \
           "$HERE/share/plugins"/*.py; do
   [ -e "$_f" ] || continue
