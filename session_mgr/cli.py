@@ -13,7 +13,7 @@ import os
 import sys
 import time
 
-from . import engine, watch
+from . import doctor, engine, watch
 
 
 def main():
@@ -84,7 +84,7 @@ def main():
     elif verb == "display-changed":   # hwdp's changed hook; no-op if same set
         sys.exit(engine.do_display_changed())
     elif verb == "doctor":        # what is it doing, and what is it NOT doing
-        sys.exit(engine.do_doctor())
+        sys.exit(doctor.do_doctor())
     elif verb == "selftest":      # offline unit checks (no compositor needed)
         sys.exit(engine.selftest())
     elif verb in ("aggressive", "settle", "toggle"):
