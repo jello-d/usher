@@ -684,6 +684,27 @@ def _single_id(v):
     return None
 
 
+def unidentified(v):
+    """True if this window's app HAS a plugin and that plugin declined to
+    identify it -- so usher does not know WHICH window this is, and must
+    neither remember it nor match it against anything remembered.
+
+    identity() always answers, falling back to the raw title, and for an app no
+    plugin claims that is right: the title is the only handle there is. This is
+    the stricter question, and the one both LEARNING and PLACING have to ask,
+    because for an owned app a title the plugin declined to resolve is known to
+    be the wrong key. Chrome hits it whenever its session file has not caught up
+    with a window.
+
+    ONE PREDICATE, TWO CALL SITES, deliberately. Every silent failure in this
+    file's history came from two places disagreeing about what a window's key
+    is (see the RAW TITLE vs IDENTITY notes), and a store that can be written
+    under a key the matcher will never look up -- or matched under a key the
+    writer will never produce -- is that same fault wearing a new hat."""
+    v = pview(v)
+    return is_owned(v["app"]) and not _single_id(v)
+
+
 def plugin_transient(v):
     """True if this window's OWNING plugin marks it transient (a scratch
     terminal). Only the owner is consulted -- a plugin's hooks apply to the
@@ -1235,19 +1256,41 @@ def _learn_fold(groups, windows, ambiguous):
                 g["titles"].add(w["title"])
 
 
-def _learn_stamp(kb, groups, windows, counts, when):
-    """Write each live view's placement under the right key."""
+def _learn_stamp(kb, groups, windows, counts, when, hold=()):
+    """Write each live view's placement under the right key. `hold` is the set
+    of view ids whose CURRENT position must not be believed yet -- see the
+    watcher's _held: a window the placer has not got to is sitting where its
+    app dropped it, and writing that overwrites the slot the placer is about
+    to aim at."""
     # Stamp: unique-app_id -> app_id key; a plugin single-identity (Chrome ->
     # its ONE active-tab URL, no title accumulation, restored whatever tab was
     # active) -> that key; other shared apps (mux terminals) -> every title in
     # the view's group, all at the view's current placement.
     for w in windows:
         app, vid = w["app_id"], w.get("id")
+        if vid in hold:
+            continue
         key = _single_id(w)
         if is_unique(app, counts):
             kb[kkey(app, "")] = kb_entry(w, w["title"], True, when)
         elif key:
             kb[kkey(app, key)] = kb_entry(w, key, False, when)
+        elif unidentified(w):
+            # AN OWNED WINDOW ITS PLUGIN COULD NOT IDENTIFY IS NOT LEARNED.
+            # Falling through to the title path stored a key known to be wrong.
+            # Chrome hits this whenever its session file has not caught up with
+            # a window, which is often, and every title change then minted
+            # another entry: measured on manifold 2026-09-29, 286 of a
+            # 333-entry store were chrome keyed by raw TITLE -- 86% of
+            # everything usher knew, none of it matchable, and exactly the
+            # tab-in-titlebar spam three schema bumps have now tried to kill.
+            #
+            # The window is simply not remembered until its id resolves, which
+            # is normally seconds. The cost is a window whose session file
+            # never catches up never being remembered, and that is the right
+            # trade: an entry nothing can ever match is not memory, it is
+            # litter, and it crowds out the entries that work.
+            continue
         elif vid is not None and vid in groups:
             for t in groups[vid]["titles"]:
                 kb[kkey(app, t)] = kb_entry(w, t, False, when)
@@ -1276,7 +1319,7 @@ def _learn_purge_terminals(kb, windows):
         del kb[k]
 
 
-def learn(kb, groups, windows, when):
+def learn(kb, groups, windows, when, hold=()):
     """Watch-time knowledge update with view-id tab-grouping.
 
     Each live view -- keyed by its wayfire id, stable for the window's whole
@@ -1297,7 +1340,10 @@ def learn(kb, groups, windows, when):
     live = {w["id"] for w in windows if w.get("id") is not None}
     _learn_degroup(kb, groups, ambiguous, live)
     _learn_fold(groups, windows, ambiguous)
-    _learn_stamp(kb, groups, windows, counts, when)
+    _learn_stamp(kb, groups, windows, counts, when, hold)
+    # `hold` deliberately does NOT reach the degroup or the terminal purge:
+    # those ask "is this window still HERE", which a held window plainly is.
+    # Hiding it from them would drop the very entry we are protecting.
     _learn_purge_terminals(kb, windows)
     prune_kb(kb, when)
 
@@ -2477,6 +2523,45 @@ def _t_learn(ck):
     learn(_kb, _groups, [LW(1, "tackup:main⠀⠀⠀⠀[manifold]")], 1_800_000_001)
     ck("learn-survives-session-switch",
        [v["title"] for v in _kb.values()] == ["term:resume"])
+    # AN OWNED WINDOW ITS PLUGIN CANNOT IDENTIFY IS NOT LEARNED AT ALL. A
+    # Chrome window whose title is in no session file has no slot, and the
+    # title it happens to be wearing is not one: storing it was 86% of a real
+    # 333-entry store, none of it ever matchable again. An UNOWNED app still
+    # keys by title, which for it is the only handle there is.
+    _kbc, _gc = {}, {}
+    learn(_kbc, _gc, [LW(9, "Nothing Like This - Google Chrome",
+                         app="google-chrome"),
+                      LW(8, "Nothing Like This", app="Google-chrome"),
+                      LW(7, "Some Document", app="libreoffice"),
+                      LW(6, "Other Document", app="libreoffice")],
+          1_800_000_000)
+    ck("learn-skips-unidentified-chrome",
+       not any(k.split("\x00")[0].lower() == "google-chrome" for k in _kbc))
+    ck("learn-keeps-unowned-title-keys",
+       sorted(k.split("\x00")[1] for k in _kbc)
+       == ["Other Document", "Some Document"])
+
+    # A HELD WINDOW IS NOT LEARNED, but is still LIVE for everything else.
+    # Holding is how the capture loop stops overwriting the slot the placer is
+    # about to aim at; pushing it any further would drop the very entry it
+    # exists to protect, since the terminal purge asks "is this window still
+    # here" and a held window plainly is.
+    _kbh, _gh = {}, {}
+    learn(_kbh, _gh, [LW(1, "usher:main\u2800\u2800\u2800\u2800[manifestor]")],
+          1_800_000_000)
+    learn(_kbh, _gh, [LW(1, "usher:main\u2800\u2800\u2800\u2800[manifestor]")],
+          1_800_000_001, hold={1})
+    ck("learn-hold-keeps-the-entry",
+       [v["title"] for v in _kbh.values()] == ["term:resume"])
+    ck("learn-hold-does-not-restamp",
+       all(v["last_seen"] == 1_800_000_000 for v in _kbh.values()))
+    _kbh2, _gh2 = {}, {}
+    learn(_kbh2, _gh2, [LW(2, "Some Document", app="libreoffice"),
+                        LW(3, "Other Document", app="libreoffice")],
+          1_800_000_000, hold={2})
+    ck("learn-hold-skips-only-the-held",
+       [k.split("\x00")[1] for k in _kbh2] == ["Other Document"])
+
     # a terminal whose window is gone IS dropped (the point of the purge)
     learn(_kb, _groups, [], 1_800_000_002)
     ck("learn-drops-absent-mux",

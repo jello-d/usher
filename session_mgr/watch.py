@@ -32,10 +32,10 @@ from .engine import (AGGR_CAP, ARM_FILE, EXCLUDE_FILE, IDLE_SETTLE,
                      START_FLOOR, STATE, STATUS_FILE, _signal_watcher,
                      acquire_singleton, app_of, apply_invert, connect,
                      do_capture, identity, is_anchored, is_desync_error,
-                     is_transient, kkey, launch_missing, learn, load_knowledge,
-                     logline, persist, place, reload_anchor, reload_exclude,
-                     rekey_chrome, save_knowledge, snapshot, store_mtime,
-                     take_mode, target_geometry)
+                     is_transient, kkey, launch_missing, learn,
+                     load_knowledge, logline, persist, place, reload_anchor,
+                     reload_exclude, rekey_chrome, save_knowledge, snapshot,
+                     store_mtime, take_mode, target_geometry, unidentified)
 
 
 # Layout-significant events: re-snapshot AND roll the history/milestone ring.
@@ -439,6 +439,13 @@ class Watcher:
         title = v.get("title", "")
         if SKIP_TITLE.search(title) or is_transient(v):
             return   # work / scratch / transient-chrome: leave where it opened
+        if unidentified(v):
+            return   # its plugin cannot say which window this is, so the only
+            # key we could look it up under is one the store is
+            # deliberately never written under. Matching on the title
+            # anyway is how "revisit an old page, watch the window jump
+            # to another desktop" worked, and the same predicate
+            # governs both sides so the two cannot drift apart.
         with self.lock:
             e = (self.kb.get(kkey(app, ""))
                  or self.kb.get(kkey(app, identity(v))))
@@ -538,6 +545,47 @@ class Watcher:
                         ready.append(self.pending.pop(vid)["v"])
             for v in ready:
                 self._try_place(v)
+            with self.lock:
+                again = self.st.pop("recheck", False)
+            if again:
+                self._recheck_all()
+
+    def _recheck_all(self):
+        """Give every live window another chance at placement, because what
+        usher KNOWS just changed rather than what the windows are doing.
+
+        Placement is event-driven: a window is considered when it maps or
+        renames. That is right while the store is fixed, and WRONG the moment
+        the store changes underneath it. A Chrome window that was
+        unidentifiable when its last event arrived becomes identifiable the
+        instant its session file catches up or its slot is re-keyed -- and
+        nothing tells us so, because the window is not doing anything. One
+        whose title has settled emits no further events at all, so it is never
+        reconsidered and simply stays where Chrome put it.
+
+        MEASURED, twice, on the same window: an article page that finished
+        loading early sat at Chrome's default position through an entire
+        session start, while its five noisier siblings landed correctly. That
+        is the difference between "nearly always" and pixel perfect, and it is
+        a gap in the TRIGGER, not in any of the deciding.
+
+        Cheap and bounded: `placed` already dedups, so anything that landed is
+        a set lookup, and the grace still governs the rest. Runs on the placer
+        thread because place_sock has exactly one writer."""
+        try:
+            views = self.place_sock.list_views(filter_mapped_toplevel=True)
+        except Exception as e:
+            logline(f"recheck: {e}")
+            return
+        n = 0
+        for v in views:
+            try:
+                if self._try_place(v):
+                    n += 1
+            except Exception as e:
+                logline(f"recheck place error: {e}")
+        if n:
+            logline(f"re-checked after a store change: placed {n} window(s)")
 
     # --- capture -------------------------------------------------------------
 
@@ -618,6 +666,8 @@ class Watcher:
         if c != seen["chrome"]:
             seen["chrome"] = c
             self._rekey_chrome()
+            with self.lock:
+                self.st["recheck"] = True
 
     def _rekey_chrome(self):
         """Move the chrome slots onto the current session's window ids, and
@@ -635,13 +685,42 @@ class Watcher:
             logline(f"chrome: re-keyed {moved} window slot(s) onto the"
                     f" restarted browser's session ids")
 
+    def _held(self, windows):
+        """The view ids whose CURRENT position must not be believed yet.
+
+        While placement is AGGRESSIVE, a window the placer has not reached is
+        sitting wherever its app dropped it, and learning that OVERWRITES the
+        remembered slot the placer is about to aim at. The capture loop and the
+        placer were racing over the same fact, and capture won because it runs
+        every second.
+
+        MEASURED, and it is what stood between this and pixel perfect: a Chrome
+        window that resolved its identity a few seconds late had its slot
+        replaced by Chrome's cascade position on every single restart, so by
+        the time it became placeable the store had already been taught that the
+        cascade WAS its home. Two failures compounding -- one late identity,
+        one eager capture -- and only the second is fixable here.
+
+        A window is released the moment it is placed, or when its grace runs
+        out and usher is no longer going to act on it. In steady state nothing
+        is placed, so nothing is held."""
+        if not self._aggressive_now():
+            return frozenset()
+        now = time.time()
+        return frozenset(w["id"] for w in windows
+                         if w.get("id") is not None
+                         and w["id"] not in self.placed
+                         and now <= self.deadline.get(w["id"], 0))
+
     def _capture_once(self, cap):
         """One snapshot: learn from it, save the knowledge, roll the history if
-        this was a layout change rather than a tab flip."""
+        this was a layout change rather than a tab flip. The SNAPSHOT is always
+        whole -- only what we LEARN from it is held back."""
         snap = snapshot(cap)
+        hold = self._held(snap["windows"])
         with self.lock:
             roll = self.st["layout"]
-            learn(self.kb, self.groups, snap["windows"], snap["time"])
+            learn(self.kb, self.groups, snap["windows"], snap["time"], hold)
             self.st["dirty"] = False
             self.st["layout"] = False
             save_knowledge(self.kb)
