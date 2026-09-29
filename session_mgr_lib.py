@@ -2596,6 +2596,47 @@ def take_mode():
   return mode if mode in MODES else "adopt"
 
 
+def _supervise(script, launch, holder):
+  """Respawn the worker forever, with backoff. The worker is this script
+  RE-EXEC'd, so it reloads its code from disk on every respawn; killing the
+  worker is how an edit is picked up without touching the supervisor that
+  holds the singleton lock."""
+  base = [sys.executable, script, "_worker"]
+  backoff = 2
+  while True:
+    # Relaunch missing mux terminals on the first worker that actually
+    # REACHES launch_missing (which drops LAUNCHED), NOT merely the first
+    # spawned. The first worker often dies to the compositor-startup race
+    # before it can launch; welding launch to it lost the relaunch entirely.
+    # While the marker is absent, every spawn keeps launch on, so a crashed-
+    # early worker just hands the launch to its successor. launch_missing is
+    # idempotent (skips sessions a live window already shows), so at worst a
+    # rare double-pass is harmless.
+    argv = base if (launch and not os.path.exists(LAUNCHED)) \
+        else base + ["--no-launch"]
+    try:
+      proc = subprocess.Popen(argv)
+    except OSError as e:
+      logline(f"spawn failed: {e}; retry in {backoff}s")
+      time.sleep(backoff)
+      backoff = min(backoff * 2, 30)
+      continue
+    holder["proc"] = proc
+    started = time.time()
+    try:
+      rc = proc.wait()
+    except Exception as e:
+      logline(f"wait: {e}")
+      rc = -1
+    holder["proc"] = None
+    ran = int(time.time() - started)
+    if ran >= 60:
+      backoff = 2                # a healthy run resets the backoff
+    logline(f"worker exited (rc {rc}, ran {ran}s); respawn in {backoff}s")
+    time.sleep(backoff)
+    backoff = min(backoff * 2, 30)
+
+
 def do_watch(launch=True):
   """Supervisor: hold the single-instance lock, then spawn a worker and
   respawn it with backoff if it dies. The worker is this same script
@@ -2671,40 +2712,7 @@ def do_watch(launch=True):
   except OSError:
     pass
 
-  base = [sys.executable, script, "_worker"]
-  backoff = 2
-  while True:
-    # Relaunch missing mux terminals on the first worker that actually
-    # REACHES launch_missing (which drops LAUNCHED), NOT merely the first
-    # spawned. The first worker often dies to the compositor-startup race
-    # before it can launch; welding launch to it lost the relaunch entirely.
-    # While the marker is absent, every spawn keeps launch on, so a crashed-
-    # early worker just hands the launch to its successor. launch_missing is
-    # idempotent (skips sessions a live window already shows), so at worst a
-    # rare double-pass is harmless.
-    argv = base if (launch and not os.path.exists(LAUNCHED)) \
-        else base + ["--no-launch"]
-    try:
-      proc = subprocess.Popen(argv)
-    except OSError as e:
-      logline(f"spawn failed: {e}; retry in {backoff}s")
-      time.sleep(backoff)
-      backoff = min(backoff * 2, 30)
-      continue
-    holder["proc"] = proc
-    started = time.time()
-    try:
-      rc = proc.wait()
-    except Exception as e:
-      logline(f"wait: {e}")
-      rc = -1
-    holder["proc"] = None
-    ran = int(time.time() - started)
-    if ran >= 60:
-      backoff = 2                # a healthy run resets the backoff
-    logline(f"worker exited (rc {rc}, ran {ran}s); respawn in {backoff}s")
-    time.sleep(backoff)
-    backoff = min(backoff * 2, 30)
+  _supervise(script, launch, holder)
 
 
 def watch_worker(launch=True):
