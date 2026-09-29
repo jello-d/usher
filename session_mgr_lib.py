@@ -1978,57 +1978,11 @@ def apply_invert(sock, view_id):
     logline(f"invert store write error: {e}")
 
 
-def do_restore(dry, only=None, source=None):
-  sock = WayfireSocket()
-  if source is None:
-    entries = list(load_knowledge().values())
-    print(f"from the knowledge base (profile {profile_id()})")
-  else:
-    label, snap = source
-    entries = entries_from_snapshot(snap)
-    print(f"from milestone {label} ({len(entries)} remembered window(s))")
-  live = sock.list_views(filter_mapped_toplevel=True)
-  outs = {o["name"]: o for o in sock.list_outputs()}
-
-  pairs, unlive, unlayout = match(live, entries)
-  acted = 0
-  unplaceable = []
-  for lv, e in pairs:
-    if only and (only not in (lv.get("title") or "")) \
-            and (only not in app_of(lv)):
-      continue
-    o = outs.get(e["output"])
-    if not o:
-      # The window matched a remembered slot on an output that is NOT
-      # attached right now (undocked, a monitor off, a different desk).
-      # Nothing sane to do with it, but SAY SO: skipping in silence is
-      # how a layout learned on another monitor set looks like usher
-      # simply not working. See `doctor` and the per-profile store.
-      unplaceable.append((lv, e))
-      continue
-    geom = target_geometry(e, o)
-    g = lv.get("geometry", {}) or {}
-    same = (g.get("x") == geom["x"] and g.get("y") == geom["y"] and
-            lv.get("output-name") == e["output"])
-    label = f"{app_of(lv)[:18]:18} -> {e['output']} " \
-        f"ws{tuple(e['workspace'])} pos{tuple(e['pos'])}" \
-        + (" [inv]" if e.get("inverted") else "")
-    if dry:
-      print(("  ok   " if same else "  MOVE ") + label)
-      continue
-    if not same:
-      place(sock, lv["id"], e, o)
-      acted += 1
-      print("  placed " + label)
-    # Invert follows the WINDOW, not the move. A window Chrome already
-    # restored at its target position is matched-but-not-moved, and must
-    # still get its inversion back -- the "forgets some" bug was applying
-    # invert only inside the move branch.
-    if e.get("inverted"):
-      apply_invert(sock, lv["id"])
-      if same:
-        print("  inverted " + label)
-
+def _restore_report(pairs, live, unlive, unlayout, unplaceable, outs, dry,
+                    acted):
+  """The summary a restore prints. Lifted out because a restore that places
+  nothing and a restore that COULD place nothing look identical until this
+  says which, and it is the part most likely to grow."""
   print(f"matched {len(pairs)}/{len(live)}  unmatched-live {len(unlive)}  "
         f"unmatched-layout {len(unlayout)}  "
         f"unplaceable {len(unplaceable)}  "
@@ -2263,6 +2217,33 @@ def do_display_changed():
 WIND_DOWN_TIMEOUT = float(os.environ.get("SESSION_WIND_DOWN_TIMEOUT", 8))
 
 
+def _wind_down_wait(pids):
+  """Wait for everything a plugin asked to quit, under ONE bounded deadline.
+  Bounded because this runs between a human pressing Reboot and the machine
+  rebooting, so it must never be the reason that does not happen."""
+  if not pids:
+    print("session-mgr: nothing asked to quit; session captured")
+    return 0
+  print(f"session-mgr: asked {len(pids)} process(es) to quit")
+  end = time.time() + WIND_DOWN_TIMEOUT
+  while time.time() < end:
+    alive = []
+    for p in pids:
+      try:
+        os.kill(p, 0)
+        alive.append(p)
+      except OSError:
+        pass
+    if not alive:
+      print("session-mgr: all exited cleanly")
+      return 0
+    pids = alive
+    time.sleep(0.2)
+  print(f"session-mgr: {len(pids)} still running after "
+        f"{WIND_DOWN_TIMEOUT:g}s; going ahead anyway")
+  return 0
+
+
 def do_wind_down():
   """Bring the session to a clean stop: capture, stand down, let go.
 
@@ -2304,27 +2285,7 @@ def do_wind_down():
     except Exception as e:
       print(f"session-mgr: wind-down ({getattr(p, 'name', '?')}): {e}",
             file=sys.stderr)
-  if not pids:
-    print("session-mgr: nothing asked to quit; session captured")
-    return 0
-  print(f"session-mgr: asked {len(pids)} process(es) to quit")
-  end = time.time() + WIND_DOWN_TIMEOUT
-  while time.time() < end:
-    alive = []
-    for p in pids:
-      try:
-        os.kill(p, 0)
-        alive.append(p)
-      except OSError:
-        pass
-    if not alive:
-      print("session-mgr: all exited cleanly")
-      return 0
-    pids = alive
-    time.sleep(0.2)
-  print(f"session-mgr: {len(pids)} still running after "
-        f"{WIND_DOWN_TIMEOUT:g}s; going ahead anyway")
-  return 0
+  return _wind_down_wait(pids)
 
 
 def do_doctor():
@@ -2365,6 +2326,61 @@ def do_doctor():
     _doctor_placement(out, kb, live, outs)
   print("\n".join(lines))
   return rc
+
+
+def do_restore(dry, only=None, source=None):
+  sock = WayfireSocket()
+  if source is None:
+    entries = list(load_knowledge().values())
+    print(f"from the knowledge base (profile {profile_id()})")
+  else:
+    label, snap = source
+    entries = entries_from_snapshot(snap)
+    print(f"from milestone {label} ({len(entries)} remembered window(s))")
+  live = sock.list_views(filter_mapped_toplevel=True)
+  outs = {o["name"]: o for o in sock.list_outputs()}
+
+  pairs, unlive, unlayout = match(live, entries)
+  acted = 0
+  unplaceable = []
+  for lv, e in pairs:
+    if only and (only not in (lv.get("title") or "")) \
+            and (only not in app_of(lv)):
+      continue
+    o = outs.get(e["output"])
+    if not o:
+      # The window matched a remembered slot on an output that is NOT
+      # attached right now (undocked, a monitor off, a different desk).
+      # Nothing sane to do with it, but SAY SO: skipping in silence is
+      # how a layout learned on another monitor set looks like usher
+      # simply not working. See `doctor` and the per-profile store.
+      unplaceable.append((lv, e))
+      continue
+    geom = target_geometry(e, o)
+    g = lv.get("geometry", {}) or {}
+    same = (g.get("x") == geom["x"] and g.get("y") == geom["y"] and
+            lv.get("output-name") == e["output"])
+    label = f"{app_of(lv)[:18]:18} -> {e['output']} " \
+        f"ws{tuple(e['workspace'])} pos{tuple(e['pos'])}" \
+        + (" [inv]" if e.get("inverted") else "")
+    if dry:
+      print(("  ok   " if same else "  MOVE ") + label)
+      continue
+    if not same:
+      place(sock, lv["id"], e, o)
+      acted += 1
+      print("  placed " + label)
+    # Invert follows the WINDOW, not the move. A window Chrome already
+    # restored at its target position is matched-but-not-moved, and must
+    # still get its inversion back -- the "forgets some" bug was applying
+    # invert only inside the move branch.
+    if e.get("inverted"):
+      apply_invert(sock, lv["id"])
+      if same:
+        print("  inverted " + label)
+
+  _restore_report(pairs, live, unlive, unlayout, unplaceable,
+                  outs, dry, acted)
 
 
 # Layout-significant events: re-snapshot AND roll the history/milestone ring.
