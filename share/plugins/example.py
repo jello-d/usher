@@ -13,18 +13,18 @@
 
 
 class SpotifyPlugin:
-    name = "spotify"
+  name = "spotify"
 
-    def owns(self, v):
-        return v["app"] == "spotify"
+  def owns(self, v):
+    return v["app"] == "spotify"
 
-    def identity(self, v):
-        return "spotify"        # one window, one durable key (ignore the title)
+  def identity(self, v):
+    return "spotify"        # one window, one durable key (ignore the title)
 
-    # Optional hooks (defaults are fine to omit):
-    #   def transient(self, v):        return False   # never capture/place it
-    #   def window_id(self, v):        return None    # a stable per-window id
-    #   def relaunch_missing(self, saved, live): return 0   # respawn missing
+  # Optional hooks (defaults are fine to omit):
+  #   def transient(self, v):        return False   # never capture/place it
+  #   def window_id(self, v):        return None    # a stable per-window id
+  #   def relaunch_missing(self, saved, live): return 0   # respawn missing
 
 
 PLUGIN = SpotifyPlugin()
