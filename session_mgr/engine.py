@@ -43,8 +43,8 @@ from datetime import date
 # ChromePlugin, chrome_profiles_for, and the selftest fixtures.
 from .chrome import (CHROME_APPS, CHROME_FLAGS, CHROME_STAGGER, browser_pids,
                      chrome_profile_map, chrome_session_titles,
-                     chrome_window_for, is_chrome, parse_snss, session_files,
-                     snss_build)
+                     chrome_window_for, is_browser_cmdline, is_chrome,
+                     parse_snss, session_files, snss_build)
 
 # pywayfire is needed only to talk to the live compositor -- guarded so the
 # module still imports (and `session-mgr selftest` runs) without it.
@@ -2478,6 +2478,31 @@ def _t_chrome(ck):
     ck("chrome-already-live",
        _ch.relaunch_missing([{"app_id": "google-chrome"}],
                             [_tv("google-chrome", "x")]) == 0)
+
+    # WIND-DOWN FINDS THE BROWSER, in both of the framings /proc/<pid>/cmdline
+    # actually comes in. These are real captures: Chrome rewrites its own argv
+    # into ONE space-joined string, so the NUL-separated form the kernel
+    # documents is the MINORITY here, and reading only that form made
+    # browser_pids() return [] on both boxes -- wind-down signalling nothing,
+    # which is the whole of what it is for.
+    ck("browser-cmdline-space-joined",
+       is_browser_cmdline(
+           b"/opt/google/chrome/chrome --restore-last-session"
+           b" --hide-crash-restore-bubble --profile-directory=Profile 2\0"))
+    ck("browser-cmdline-nul-separated",
+       is_browser_cmdline(
+           b"/opt/google/chrome/chrome\0--restore-last-session\0"))
+    ck("browser-cmdline-skips-renderer",
+       not is_browser_cmdline(
+           b"/opt/google/chrome/chrome --type=renderer --top-chrome-webui\0"))
+    ck("browser-cmdline-skips-nul-renderer",
+       not is_browser_cmdline(
+           b"/opt/google/chrome/chrome\0--type=zygote\0"))
+    ck("browser-cmdline-skips-other-apps",
+       not is_browser_cmdline(b"/usr/bin/kitty --title x\0")
+       and not is_browser_cmdline(b"")
+       and not is_browser_cmdline(
+           b"/opt/google/chrome/chrome_crashpad_handler\0--monitor-self\0"))
 
 
 def _t_learn(ck):

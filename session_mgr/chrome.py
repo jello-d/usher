@@ -260,25 +260,46 @@ _BROWSER_EXES = {"chrome", "chromium", "chromium-browser", "google-chrome",
                  "google-chrome-stable"}
 
 
+def is_browser_cmdline(raw):
+    """True if this raw /proc/<pid>/cmdline is a BROWSER process: a browser
+    executable with no `--type=` among its arguments. Everything else with the
+    same name is a renderer, a gpu process or a zygote (55 of them against 1
+    browser, measured), and signalling those achieves nothing useful.
+
+    THERE ARE TWO FRAMINGS AND ONLY ONE IS THE DOCUMENTED ONE.
+    /proc/<pid>/cmdline is meant to be NUL-SEPARATED, and for most processes it
+    is. CHROME REWRITES ITS OWN ARGV AREA into a single space-joined string:
+    measured 2026-09-29, 41 of 45 chrome processes on manifestor and 83 of 86
+    on manifold carry ONE element, the browser among them. Splitting on NUL
+    alone therefore produced a single "argv[0]" holding the entire command
+    line, whose basename is never a browser name -- so this said False for
+    every process on the box, browser_pids() returned [], and `wind-down`
+    SIGNALLED NOTHING. That is the one thing wind-down exists to do.
+
+    Treating NUL as whitespace reads both framings. Only two things are read
+    here -- the first token, and whether any token is `--type=` -- so an
+    argument that itself contains a space (`--profile-directory=Profile 2`)
+    splitting into two tokens cannot affect the answer."""
+    argv = raw.replace(b"\0", b" ").split()
+    if not argv:
+        return False
+    exe = os.path.basename(argv[0].decode("utf-8", "replace"))
+    return (exe in _BROWSER_EXES
+            and not any(a.startswith(b"--type=") for a in argv))
+
+
 def browser_pids():
-    """The BROWSER processes, which is the one per running browser that has no
-    `--type=` in its argv. Everything else with the same name is a renderer,
-    a gpu process or a zygote (55 of them against 1 browser, measured), and
-    signalling those achieves nothing useful."""
+    """Every live browser process, by is_browser_cmdline."""
     out = []
     for d in os.listdir("/proc"):
         if not d.isdigit():
             continue
         try:
             with open(f"/proc/{d}/cmdline", "rb") as f:
-                argv = f.read().split(b"\0")
+                raw = f.read()
         except OSError:
             continue
-        if not argv or not argv[0]:
-            continue
-        exe = os.path.basename(argv[0].decode("utf-8", "replace"))
-        if exe in _BROWSER_EXES and not any(a.startswith(b"--type=")
-                                            for a in argv):
+        if is_browser_cmdline(raw):
             out.append(int(d))
     return out
 
