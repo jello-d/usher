@@ -3,7 +3,7 @@
 usher \- record the Wayland window layout and place windows back
 .SH SYNOPSIS
 .B session-mgr
-.I watch | capture | restore | resume | stop | status | plugins | selftest ...
+.I watch | reload | capture | restore | launch | wind-down | doctor | ...
 .SH DESCRIPTION
 .B usher
 seats windows into a steady arrangement on a wlroots/Wayfire session. Instead of
@@ -61,6 +61,35 @@ List the loaded window plugins (built-in + user).
 .B identity
 Show the URL-normalization rules and how live windows resolve.
 .TP
+.B launch
+Respawn saved-but-absent windows now, without starting the daemon.
+.TP
+.B reload
+Pick up new code in a running daemon and change NOTHING else: no restore, no
+re-baselining of the remembered layout, no relaunch. This is what a deploy
+wants;
+.B resume
+looks right for it and is not, because it captures.
+.TP
+.B wind-down
+Bring the session to a clean stop, for a power menu to call before it reboots:
+capture while the layout is still true, stop the watcher so nothing overwrites
+that capture, then ask each app to exit cleanly under a bounded deadline. Does
+not reboot or log out. Always exits 0.
+.TP
+.B display-changed
+For a display-change hook. Re-places against the profile for the new monitor
+set, and does nothing at all when the set has not actually changed.
+.TP
+.B aggressive | settle | toggle
+Re-arm aggressive placement, force steady now, or flip between them.
+.TP
+.B stop
+Stop the running daemon cleanly.
+.TP
+.B exclude | include
+Show the never-place and anchor rules as loaded, with any parse errors.
+.TP
 .B doctor
 Report what usher is and is not doing: the store (entries per app, the display
 profile, schema), the plugin registry, the cross-tool contracts, and per window
@@ -88,22 +117,26 @@ A pre-profile store is adopted into the current profile once, so no learned
 placement is lost on upgrade.
 .SH IDENTITY AND PLUGINS
 A window is matched to its saved slot by (app_id, key). App-SPECIFIC identity
-and respawn live in PLUGINS. Three ship built in \(en the volatile window title
-is never the key:
+and respawn live in PLUGINS. Three ship built in, and none keys on what the
+window is currently SHOWING \(en a window that can display many things would
+otherwise lose its place whenever you switched:
 .TP
 .B chrome
-keys a Chrome/Chromium window by its active-tab URL (read from the browser's
-SNSS session file), normalized to host/path.
+keys a window by its SessionID, read from the browser's own session file and
+stable across a restart. Starts the browser per profile, with
+.BR --restore-last-session ,
+when the last session had Chrome windows and none is running.
 .TP
 .B mux
-keys a mux terminal by its tmux SESSION name and the HOST it runs on
-(\fBmux@<host>:<session>\fR), and respawns it with \fBmux go\fR \(en or with
-\fBmux latch <host>:<session>\fR when that host is not this box, so a remote
-session returns to its own machine, waits for a credential rather than failing
-once at login, and never collides with a same-named local one. Candidates come
-from
-mux's durable session set (\fBmux resume --list\fR), so they survive a reboot
-(a soft dependency: absent \fBmux\fR degrades to a no-op).
+keys a terminal by the COMMAND it runs
+.RB ( term:resume ", or " term:latch\ <host>:<session> ),
+so switching sessions inside a window does not forfeit its place. Relaunch
+replays that command: a
+.B mux latch
+is reproduced exactly, and anything else was a local mux, for which
+.B mux resume
+rebuilds the whole recorded set rather than the one session a titlebar happened
+to name (a soft dependency: absent \fBmux\fR degrades to a no-op).
 .TP
 .B kitty
 keys any other kitty terminal by its shell's working directory (from /proc) and
@@ -120,7 +153,8 @@ object \(en see the shipped
 Each plugin claims an app's windows
 .RB ( owns )
 and may implement
-.BR identity ", " transient ", " window_id ", and " relaunch_missing ,
+.BR identity ", " transient ", " window_id ", " relaunch_command ", "
+.BR relaunch_missing ", and " wind_down ,
 each taking a normalized view
 .RB ( v["app"] ", " v["title"] ", " v["pid"] ).
 .SH FILES

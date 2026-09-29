@@ -1141,6 +1141,17 @@ def _proc_argv(pid):
     return []
 
 
+def _latch_target_in(argv):
+  """The HOST[:SESSION] in one process's argv, if it is a mux latch. Pure, so
+  the matching is testable without a live process tree -- which matters
+  because this is what decides whether a window is replayed as a latch or
+  falls back to `mux resume`."""
+  for i, a in enumerate(argv):
+    if os.path.basename(a) == "mux-latch" and i + 1 < len(argv):
+      return argv[i + 1]
+  return None
+
+
 def _term_latch_target(pid):
   """The HOST[:SESSION] a `mux latch` running in this window is holding, or
   None.
@@ -1153,13 +1164,14 @@ def _term_latch_target(pid):
   command a human would have typed for that is `mux resume`.
 
   Matched on the argv rather than argv0, because latch runs as
-  `/bin/sh .../libexec/mux-latch <target>` and argv0 is the shell."""
+  `/bin/sh .../libexec/mux-latch <target>` and argv0 is the shell. The scan
+  itself is _latch_target_in, kept separate so it can be tested without a
+  process tree."""
   for p in [pid] + _proc_children(pid):
     for kid in [p] + _proc_children(p):
-      argv = _proc_argv(kid)
-      for i, a in enumerate(argv):
-        if os.path.basename(a) == "mux-latch" and i + 1 < len(argv):
-          return argv[i + 1]
+      hit = _latch_target_in(_proc_argv(kid))
+      if hit:
+        return hit
   return None
 
 
@@ -3260,6 +3272,23 @@ def selftest():
   ck("mux-host-label", mux_host_of("[WORK] proj:main") is None)
   ck("mux-host-both",
      mux_host_of("[WORK] proj:main⠀⠀⠀⠀[manifold]") == "manifold")
+  # latch detection, the thing that decides replay-exactly vs fall back to
+  # `mux resume`. Verified live once; this pins the matching itself.
+  ck("latch-argv", _latch_target_in(
+     ["/bin/sh", "/home/x/.cache/pkgs/mux/bin/../libexec/mux-latch",
+      "manifestor:tackup"]) == "manifestor:tackup")
+  ck("latch-argv-host-only",
+     _latch_target_in(["/bin/sh", "/opt/mux/libexec/mux-latch",
+                       "manifold"]) == "manifold")
+  ck("latch-argv-none", _latch_target_in(
+     ["tmux", "-L", "global", "attach-session", "-t", "=wf"]) is None)
+  # a latch with NO target names no host, so there is nothing to replay
+  ck("latch-argv-bare",
+     _latch_target_in(["/bin/sh", "/opt/mux/libexec/mux-latch"]) is None)
+  # must not match a lookalike basename
+  ck("latch-argv-lookalike",
+     _latch_target_in(["/opt/mux/libexec/mux-latcher", "box"]) is None)
+
   # THE SLOT. A terminal owns its place by the COMMAND it runs, so the two
   # windows below are the same slot despite showing different sessions --
   # which is the entire point of the change, and what the session-shaped key

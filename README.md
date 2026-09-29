@@ -30,28 +30,32 @@ actually are and puts them back where you left them. The one command
 ## Plugins
 
 How to identify and respawn a given app's windows lives in a **plugin**. Three
-ship built in — none uses the volatile title:
+ship built in, and none keys on what the window is currently *showing* — a
+window that can display many things would otherwise lose its place every time
+you switched:
 
-- **chrome** — keys a Chrome/Chromium window by its **active-tab URL** (read
-  from the browser's own SNSS session file), normalized to host/path.
-- **mux** — keys a [mux](https://github.com/jello-d/mux) terminal by its tmux
-  **session** name *and the host it runs on* (`mux@<host>:<session>`), both read
-  from the title mux stamps, and respawns it with `mux go`. A session reached
-  on another box is respawned with `mux latch <host>:<session>`, which holds the
-  attachment open and waits for a credential rather than failing once at login,
-  so a remote session comes back on its own box and never collides with a
-  same-named local one.
-  Candidates come from mux's durable session **set** (`mux resume --list`), not
-  the live server, so they survive a reboot. `mux` is a *soft* dependency: if it
-  is absent the plugin degrades to a no-op.
+- **chrome** — keys a Chrome/Chromium window by its **SessionID**, read from
+  the browser's own session file and stable across a restart. Keying on the
+  active tab instead meant a thousand entries describing six windows, and
+  revisiting an old page could drag the window to another desktop. Starts the
+  browser per profile, with `--restore-last-session`, when the last session had
+  Chrome windows and none is running.
+- **mux** — keys a [mux](https://github.com/jello-d/mux) terminal by the
+  **command it runs** (`term:resume`, or `term:latch <host>:<session>`), so
+  switching sessions inside a window does not forfeit its place. Relaunch
+  replays that command: a `mux latch` is reproduced exactly, and anything else
+  was a local mux, for which `mux resume` rebuilds the whole recorded set
+  rather than the single session a titlebar happened to name. `mux` is a
+  *soft* dependency: absent, the plugin degrades to a no-op.
 - **kitty** — keys any other kitty terminal by its shell's **working directory**
   (from `/proc`) and respawns it as a shell there.
 
 Add your own: drop a `*.py` file into `~/.config/session/plugins/` defining a
 top-level `PLUGIN` object. See [`share/plugins/example.py`](
-share/plugins/example.py). Each plugin claims an app's windows (`owns`) and
-may implement `identity` / `transient` / `window_id` / `relaunch_missing`, each
-taking a normalized view (`v["app"]`, `v["title"]`, `v["pid"]`).
+share/plugins/example.py). Each plugin claims an app's windows (`owns`) and may
+implement `identity` / `transient` / `window_id` / `relaunch_command` /
+`relaunch_missing` / `wind_down`, each taking a normalized view (`v["app"]`,
+`v["title"]`, `v["pid"]`).
 
 ## Install
 
