@@ -63,7 +63,6 @@ except ImportError:
 SKIP_TITLE = re.compile(os.environ.get("SESSION_SKIP_TITLE", r"^\[WORK"))
 
 
-DEFAULT_TERM_TITLE = "terminal"
 
 # This box's short hostname, matching tmux's #{host_short} (and `hostname -s`).
 # It is what tells a LOCAL mux session from one reached over ssh: mux stamps the
@@ -71,20 +70,6 @@ DEFAULT_TERM_TITLE = "terminal"
 # the durable "this session lives on a different machine" signal. See
 # mux_host_of.
 LOCAL_HOST = os.uname().nodename.split(".")[0]
-
-
-def is_scratch_term(app, title):
-    """A plain (unnamed) terminal: kitty wearing the constant default title that
-    kshrc stamps ("terminal") for a non-tmux shell. It has no cross-session
-    identity, so never capture or place it -- it opens where you are and is
-    never resized. Give a terminal a real name with ~/bin/settitle, or let mux
-    stamp its session name, and it becomes a normal placed window. Also skips
-    the legacy per-boot "ksh"/"ksh: N" titles from the old unique-title scheme,
-    so stale store entries self-heal during the transition."""
-    if app != "kitty":
-        return False
-    return (title == DEFAULT_TERM_TITLE
-            or title == "ksh" or title.startswith("ksh:"))
 
 
 # --- never-place rules: transient windows session must ignore ---------------
@@ -201,7 +186,6 @@ def is_mux_term(app, title):
     window. These are the only terminals session tracks, places, and relaunches
     -- and the ones a single window cycles through as it switches sessions."""
     return (app == "kitty" and ":" in title
-            and not is_scratch_term(app, title)
             and not SKIP_TITLE.search(title))
 
 
@@ -513,10 +497,9 @@ def write_json(path, blob):
 # into ~/.config/session/plugins/*.py (each a module defining a top-level PLUGIN
 # with the WindowPlugin surface: duck-typed, no import of this script needed).
 # The engine consults the registry (order matters: FIRST owner wins) at each
-# app-specific site: identity, transient, per-window id, force-title keying, and
-# relaunch. Every window hook takes a normalized VIEW (see pview: app/title,
-# so a plugin can read /proc) and is optional but owns.
-HOME = os.path.expanduser("~")
+# app-specific site: identity, transient and relaunch. Every window hook takes
+# a normalized VIEW (see pview: app, title, pid so a plugin can read /proc, and
+# id so it can cache what it worked out) and every one is optional but owns.
 
 
 def chrome_profiles_for(saved):
@@ -718,8 +701,8 @@ def unidentified(v):
 def plugin_transient(v):
     """True if this window's OWNING plugin marks it transient (a scratch
     terminal). Only the owner is consulted -- a plugin's hooks apply to the
-    windows it claims, never another plugin's (e.g. kitty's cwd==$HOME scratch
-    test must not fire on a mux window whose shell sits at $HOME)."""
+    windows it claims, never another plugin's (kitty's unreadable-cwd test must
+    not fire on a mux window, whose identity comes from its command)."""
     v = pview(v)
     p = _owner(v)
     if p is not None:
@@ -993,31 +976,38 @@ class MuxPlugin(WindowPlugin):
 
 
 class KittyPlugin(WindowPlugin):
-    """Non-mux kitty terminals -- a shell or a program (e.g. Claude Code) in a
+    """Non-mux kitty terminals: a shell or a program (e.g. Claude Code) in a
     working dir. Claims any kitty window mux did not (registry order). Identity
     is the shell's CWD from /proc (`kitty:<cwd>`), so the window keeps its place
-    across restarts regardless of the volatile title. A bare shell sitting at
-    $HOME is a scratch terminal (transient). Respawns a missing one as a plain
-    shell in that cwd (`kitty --directory` -- deliberately NOT re-running the
-    captured command)."""
+    across restarts regardless of the volatile title. Respawns a missing one as
+    a plain shell in that cwd (`kitty --directory`, deliberately NOT re-running
+    the captured command).
+
+    A SHELL AT $HOME USED TO BE A SCRATCH TERMINAL, excluded end to end: never
+    captured, never placed, never brought back. That was the same kind of
+    exception as chrome's retired `^New Tab$` rule and it is retired for the
+    same two reasons. Aggressive-vs-steady means a terminal opened during
+    normal use is left exactly where it opens, so the whack-a-mole the rule
+    was written against cannot happen; and when USHER is the one spawning the
+    window at session start, it can put it where it belongs. The goal is every
+    window you left open coming back at the right size in the right place, and
+    an exception is a window usher gives up on."""
     name = "kitty"
 
     def owns(self, v):
         return v["app"] == "kitty"
 
     def transient(self, v):
-        # a live window: a shell at $HOME (or an unreadable proc) is scratch. A
-        # stored entry (pid<0) is never re-judged transient, because it was kept
-        # at
-        # capture; fall back to the title scratch test so prune_kb stays safe.
+        # ONLY when there is nothing to key on at all: /proc unreadable, so we
+        # cannot say which window this is. A stored entry (pid<0) is never
+        # re-judged, because its key was resolved at capture and is right.
         if v["pid"] and v["pid"] > 0:
-            cwd = _term_cwd(v["pid"])
-            return (not cwd) or cwd == HOME
-        return is_scratch_term(v["app"], v["title"])
+            return not _term_cwd(v["pid"])
+        return False
 
     def identity(self, v):
         cwd = _term_cwd(v["pid"])
-        return f"kitty:{cwd}" if cwd and cwd != HOME else None
+        return f"kitty:{cwd}" if cwd else None
 
     def relaunch_missing(self, saved, live):
         return kitty_relaunch_missing(saved, live)
@@ -2348,6 +2338,33 @@ def _t_registry(ck):
     ps = {getattr(p, "name", "?"): p for p in plugins()}
     ck("plugins-builtin", all(n in ps for n in ("chrome", "mux", "kitty")))
     ck("owns-chrome", ps["chrome"].owns(_tv("google-chrome")))
+
+    # A PLAIN TERMINAL AT $HOME IS A NORMAL WINDOW, not an exception. It used
+    # to be excluded end to end (never captured, never placed, never brought
+    # back), which is the same shape as chrome's retired ^New Tab$ rule and is
+    # retired for the same reasons: steady state leaves a terminal opened
+    # mid-session where it opens, and when usher spawns one at session start it
+    # can place it. The cwd IS the key, so drive these by stubbing the one
+    # thing that reads it.
+    _kp, _home = ps["kitty"], os.path.expanduser("~")
+    _kv = {"app": "kitty", "title": "terminal", "pid": 4242, "id": None}
+    _real_cwd = _term_cwd
+    try:
+        globals()["_term_cwd"] = lambda _pid: _home
+        ck("kitty-home-has-an-identity", _kp.identity(_kv) == f"kitty:{_home}")
+        ck("kitty-home-is-not-transient", not _kp.transient(_kv))
+        # the one case still transient: no readable cwd, so usher cannot say
+        # which window this is, and a key it invented would be a lie.
+        globals()["_term_cwd"] = lambda _pid: None
+        ck("kitty-unreadable-cwd-is-transient", _kp.transient(_kv))
+        ck("kitty-unreadable-cwd-has-no-identity", _kp.identity(_kv) is None)
+    finally:
+        globals()["_term_cwd"] = _real_cwd
+    ck("kitty-stored-entry-is-not-transient",
+       not _kp.transient({"app": "kitty", "title": "kitty:/tmp", "pid": -1,
+                          "id": None}))
+    # a constant title is no longer special to anything
+    ck("plain-title-is-not-a-mux-term", not is_mux_term("kitty", "terminal"))
     # XWayland reports `Google-chrome`; both forms exist in a real store, and
     # only matching the lower-case one left those windows unclaimed
     ck("owns-chrome-xwayland", ps["chrome"].owns(_tv("Google-chrome")))

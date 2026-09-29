@@ -258,6 +258,8 @@ class Watcher:
         #                           sequence still lands)
         self.groups = {}       # vid -> {"app", "titles": set}: the in-session
         #                        tab-group, fed to learn()
+        self.hold_until = 0    # when the earliest HELD window is released, so
+        #                        a quiet session still comes back to learn it
         self.place_sock = None
 
     def run(self):
@@ -663,6 +665,11 @@ class Watcher:
         # that rotation is exactly this signature changing. It is also the one
         # moment the PREVIOUS file is still on disk to bind against, so this
         # cannot be deferred to something slower.
+        if self.hold_until and time.time() > self.hold_until:
+            self.hold_until = 0
+            with self.lock:
+                self.st["dirty"] = True
+                self.st["last"] = 0      # due at once, no debounce wait
         c = chrome.session_sig()
         if c != seen["chrome"]:
             seen["chrome"] = c
@@ -719,6 +726,19 @@ class Watcher:
         whole -- only what we LEARN from it is held back."""
         snap = snapshot(cap)
         hold = self._held(snap["windows"])
+        # WHEN THE HOLD LIFTS, COME BACK. Capture is event-driven, so a window
+        # held through the pass that recorded it gets no second look until
+        # something else happens to dirty the store. In a busy session that is
+        # immediate and invisible; in a quiet one the window sits in the
+        # snapshot with no learned slot indefinitely, so it comes back at the
+        # next login and has nowhere to be put. Measured by spawning one
+        # terminal and then doing nothing for two minutes.
+        #
+        # Only the "grace expired, never placed" release needs this. A window
+        # that gets PLACED leaves the hold too, but placing it moves it, and a
+        # geometry change is already a capture trigger.
+        self.hold_until = min((self.deadline.get(i, 0) for i in hold),
+                              default=0)
         with self.lock:
             roll = self.st["layout"]
             learn(self.kb, self.groups, snap["windows"], snap["time"], hold)
