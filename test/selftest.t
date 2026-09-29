@@ -7,6 +7,6 @@
 harness_init selftest
 
 command -v python3 >/dev/null 2>&1 || { pass "skipped (no python3)"; exit 0; }
-python3 "$HERE/session_mgr_lib.py" selftest >/dev/null 2>&1 \
+PYTHONPATH="$HERE" python3 -m session_mgr selftest >/dev/null 2>&1 \
   || fail "session_mgr selftest failed"
 pass "session_mgr selftest"

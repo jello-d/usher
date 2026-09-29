@@ -6,7 +6,10 @@
 harness_init tools
 
 _bad=0
-for _f in "$HERE/session_mgr_lib.py" \
+# The engine package is globbed, NOT listed: a listed selector silently shrinks
+# to cover less than it did the moment a module is added or renamed, which is
+# the same shape of quiet no-op this suite exists to catch.
+for _f in "$HERE/session_mgr"/*.py \
           "$HERE/indicator/session_mgr_indicator/__main__.py" \
           "$HERE/share/plugins"/*.py; do
   [ -e "$_f" ] || continue

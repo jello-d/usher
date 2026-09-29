@@ -2,7 +2,7 @@
 # each of them.
 #
 # Call `harness_init <name>`: sets HERE (the repo root, so a test reaches
-# session_mgr_lib.py, setup.sh, indicator/, share/), a private scratch dir T
+# session_mgr/, setup.sh, indicator/, share/), a private scratch dir T
 # (removed on exit), and the pass/fail helpers. Everything a test touches is
 # confined to T; nothing outside it is written. POSIX sh; run one with
 # `sh test/<name>.t`, all with test/run.
