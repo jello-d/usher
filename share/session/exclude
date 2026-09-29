@@ -1,9 +1,31 @@
-# session/exclude -- windows session never captures and never places.
+# session/exclude -- windows usher never captures and never places.
 #
-# session records where your windows sit and puts them back on restart. A few
-# windows must be exempt: transient states that should open wherever you
-# currently are (a blank New Tab, the Chrome profile picker), not be dragged to
-# a remembered spot. This file is that repository -- grow it as you meet more.
+# MOSTLY EMPTY ON PURPOSE, and it did not start that way. The goal is pixel
+# perfect placement of every window you left open, so an exception here is a
+# window usher gives up on. Two changes removed the reason for nearly all of
+# them:
+#
+#  - AGGRESSIVE vs STEADY. Placement is aggressive only for a while after
+#    session start (or an `aggressive` kick); after that ONLY session/include
+#    anchors are placed. So a window that opens during normal use is left
+#    exactly where it opens, and the whack-a-mole these rules were written to
+#    stop cannot happen in the first place.
+#  - A WINDOW ITS PLUGIN CANNOT IDENTIFY IS NOT LEARNED. Chrome keys a window
+#    by its SessionID, not by the page title in the titlebar, and when that id
+#    cannot be resolved usher stores nothing at all rather than falling back to
+#    the title. A transient TITLE can therefore never become a remembered slot,
+#    which is the whole of what the Chrome rules below used to prevent.
+#
+# Those Chrome rules are gone: ^New Tab$, ^New Incognito Tab$, ^Google Chrome$,
+# ^Sign in, ^Settings -.*. Each named a title a Chrome window wears for a
+# moment, and a title is no longer a key. A Settings window you leave open now
+# comes back where you left it, which is the point of the whole program.
+#
+# WHAT IS STILL WORTH EXCLUDING is a different class, and the distinction is
+# the useful part: not "a window we know, in a transient state", but "an app
+# usher has no handle for at all". An app with no plugin can only be keyed by
+# its title, so an app whose title is really a document name mints one dead
+# store entry per document. That is what the one rule below is.
 #
 # One rule per line, always the same shape:
 #
@@ -17,23 +39,16 @@
 #   ^google-chrome$ :: .*    every google-chrome window
 #
 # A window matching ANY rule here is never recorded and never moved. A line
-# beginning with # is a comment; blank lines are ignored. `session exclude`
+# beginning with # is a comment; blank lines are ignored. `session-mgr exclude`
 # prints the rules as loaded and flags any bad line. Edits apply AUTOMATICALLY:
 # the running watcher re-reads this file within a second of saving.
 #
 # NOTE: the work/personal boundary (titles starting "[WORK") is NOT here -- it
-# is a hardcoded safety wall inside session, not a tunable. Never rely on this
+# is a hardcoded safety wall inside usher, not a tunable. Never rely on this
 # file for it.
 
-# Chrome transient states: blank tabs and the pre-load window title. A stored
-# "New Tab" would drag every future new tab to one spot; a bare "Google Chrome"
-# entry (worn briefly before a page title loads) would fight every window
-# mid-load. Chrome sometimes appends " - Google Chrome", hence the optional
-# suffix. Covers google-chrome and chromium.
-google-chrome|chromium :: ^Google Chrome$
-google-chrome|chromium :: ^New Tab( - Google Chrome)?$
-google-chrome|chromium :: ^New Incognito Tab( - Google Chrome)?$
-google-chrome|chromium :: ^Sign in
-google-chrome|chromium :: ^Settings -.* Google Chrome$
-
+# An image viewer titles its window with the FILENAME, so every picture you
+# open would become its own store entry pointing at a place. No plugin claims
+# it, so there is no better handle to key on; excluding it is the honest
+# answer rather than remembering a thousand filenames.
 org.gnome.Loupe :: ^.*$
