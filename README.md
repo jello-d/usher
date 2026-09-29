@@ -1,14 +1,14 @@
 # usher
 
-Record the Wayland window layout and place windows back — a plugin-based session
-manager for wlroots/[Wayfire](https://github.com/WayfireWM/wayfire).
+Record the Wayland window layout and place windows back: a plugin-based
+session manager for wlroots/[Wayfire](https://github.com/WayfireWM/wayfire).
 
 Instead of hand-written placement rules, `usher` records where your windows
 actually are and puts them back where you left them. The one command
 `session-mgr` is both the login daemon and its controller.
 
 - **Aggressive then steady.** For a window's first moments after login (or a
-  re-arm) every mapped window is placed back — what lets a browser open all its
+  re-arm) every mapped window is placed back, which lets a browser open all its
   windows and have them land. Then it goes steady: a reopened window just
   appears where you are and stays. `~/.config/session/include` lists the few
   windows to keep snapping back even then; `~/.config/session/exclude` lists
@@ -30,24 +30,24 @@ actually are and puts them back where you left them. The one command
 ## Plugins
 
 How to identify and respawn a given app's windows lives in a **plugin**. Three
-ship built in, and none keys on what the window is currently *showing* — a
-window that can display many things would otherwise lose its place every time
-you switched:
+ship built in, and none keys on what the window is currently *showing*,
+because a window that can display many things would otherwise lose its place
+every time you switched:
 
-- **chrome** — keys a Chrome/Chromium window by its **SessionID**, read from
+- **chrome**: keys a Chrome/Chromium window by its **SessionID**, read from
   the browser's own session file and stable across a restart. Keying on the
   active tab instead meant a thousand entries describing six windows, and
   revisiting an old page could drag the window to another desktop. Starts the
   browser per profile, with `--restore-last-session`, when the last session had
   Chrome windows and none is running.
-- **mux** — keys a [mux](https://github.com/jello-d/mux) terminal by the
+- **mux**: keys a [mux](https://github.com/jello-d/mux) terminal by the
   **command it runs** (`term:resume`, or `term:latch <host>:<session>`), so
   switching sessions inside a window does not forfeit its place. Relaunch
   replays that command: a `mux latch` is reproduced exactly, and anything else
   was a local mux, for which `mux resume` rebuilds the whole recorded set
   rather than the single session a titlebar happened to name. `mux` is a
   *soft* dependency: absent, the plugin degrades to a no-op.
-- **kitty** — keys any other kitty terminal by its shell's **working directory**
+- **kitty**: keys any other kitty terminal by its shell's **working directory**
   (from `/proc`) and respawns it as a shell there.
 
 Add your own: drop a `*.py` file into `~/.config/session/plugins/` defining a
@@ -87,9 +87,9 @@ session_restore = session-mgr watch
 
 ## Config
 
-- `~/.config/session/exclude` — `<app-regex> :: <title-regex>` never-place list.
-- `~/.config/session/include` — the same shape; the steady-state anchor list.
-- `~/.config/session/plugins/*.py` — user window plugins.
+- `~/.config/session/exclude`: `<app-regex> :: <title-regex>` never-place list.
+- `~/.config/session/include`: the same shape; the steady-state anchor list.
+- `~/.config/session/plugins/*.py`: user window plugins.
 
 Example defaults ship in [`share/session/`](share/session/). The
 daemon soft-degrades when any are absent.
