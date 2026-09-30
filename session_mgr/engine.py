@@ -1794,12 +1794,20 @@ def kitty_relaunch_missing(saved, live):
     return n
 
 
-def launch_missing(*_):
-    """Ask every plugin to respawn any of its saved-but-absent windows. Loads
+def launch_missing(snap=None):
+    """Ask every plugin to respawn any of its saved-but-absent windows. Takes
     the last snapshot + the live views ONCE and hands both to each plugin's
     relaunch_missing; sums the counts. Chrome self-restores (its plugin returns
-    0); mux reopens terminals. (The unused arg keeps the old call sites.)"""
-    saved = (load_snapshot() or {}).get("windows", [])
+    0); mux reopens terminals.
+
+    PASS THE SNAPSHOT IN. Reading it here is a race the daemon loses: by the
+    time the worker reaches its relaunch, its own capture loop has already
+    written a snapshot of a session where nothing has mapped yet, so this read
+    zero saved windows and relaunched nothing. The caller holds the one taken
+    before any of that started. Falling back to a read keeps the one-shot verbs
+    working, where nothing else is running to clobber it."""
+    saved = ((snap if snap is not None else load_snapshot()) or {}).get(
+        "windows", [])
     try:
         live = WayfireSocket().list_views(filter_mapped_toplevel=True)
     except Exception:
@@ -2594,6 +2602,50 @@ def _t_terminals(ck):
        mux_candidates([{"app_id": "kitty", "key": "kitty:/tmp"}], []) == [])
 
 
+def _t_launch_source(ck):
+    """launch_missing must use the snapshot it is GIVEN, not re-read one.
+
+    THE RACE THIS PINS: the worker starts its capture loop before it reaches
+    the relaunch, and at session start that loop writes a snapshot with ZERO
+    windows, because nothing has mapped yet. A launch_missing that reads the
+    file therefore relaunched nothing, and a whole session came back empty.
+    Whether it happened at all was a thread race, which is why it survived
+    several logins.
+    """
+    import contextlib
+    import io
+    real = (load_snapshot, plugins)
+    seen = []
+
+    class _P:
+        def relaunch_missing(self, saved, live):
+            seen.append([w.get("cmd") for w in saved])
+            return 0
+
+    try:
+        globals()["load_snapshot"] = lambda *a: {
+            "windows": [{"app_id": "kitty", "cmd": "FROM THE FILE"}]}
+        globals()["plugins"] = lambda: [_P()]
+        given = {"windows": [{"app_id": "kitty", "cmd": "FROM THE CALLER"}]}
+        with contextlib.redirect_stdout(io.StringIO()):
+            launch_missing(given)
+        ck("launch-uses-the-snapshot-it-is-given",
+           seen and seen[-1] == ["FROM THE CALLER"])
+        # ...and a one-shot verb with no daemon running still gets a snapshot.
+        with contextlib.redirect_stdout(io.StringIO()):
+            launch_missing()
+        ck("launch-falls-back-to-reading-when-given-nothing",
+           seen[-1] == ["FROM THE FILE"])
+        # AN EMPTY SNAPSHOT MUST NOT BE MISTAKEN FOR "nothing was saved": it is
+        # what the caller hands us at a cold start, and relaunching from it is
+        # the bug. Passing it through unchanged is what lets the caller decide.
+        with contextlib.redirect_stdout(io.StringIO()):
+            launch_missing({"windows": []})
+        ck("launch-passes-an-empty-snapshot-through", seen[-1] == [])
+    finally:
+        globals()["load_snapshot"], globals()["plugins"] = real
+
+
 def _t_relaunch(ck):
     """the relaunch paths, RUN with the spawn stubbed."""
     # RUN the relaunch paths end to end with the spawn stubbed. Checking
@@ -3304,7 +3356,8 @@ def selftest():
         if not cond:
             fails.append(name)
 
-    for area in (_t_registry, _t_terminals, _t_relaunch, _t_chrome, _t_learn,
+    for area in (_t_registry, _t_terminals, _t_launch_source,
+                 _t_relaunch, _t_chrome, _t_learn,
                  _t_geometry, _t_placement, _t_snapshots, _t_profiles,
                  _t_migration, _t_watcher, _t_contracts):
         area(ck)

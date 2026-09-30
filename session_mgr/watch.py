@@ -270,6 +270,8 @@ class Watcher:
         #                           have not arrived.
         self.hold_until = 0    # when the earliest HELD window is released, so
         #                        a quiet session still comes back to learn it
+        self.saved = None      # the snapshot the RELAUNCH works from, read in
+        #                        run() before the capture loop can overwrite it
         self.place_sock = None
 
     def run(self):
@@ -287,6 +289,20 @@ class Watcher:
         # the dead ids and must be moved across before the first placement or
         # the first capture.
         self._rekey_chrome()
+        # READ THE SAVED LAYOUT BEFORE ANYTHING CAN OVERWRITE IT. The relaunch
+        # is driven by the last snapshot, and it does not run until _init_launch
+        # below, eleven lines and a socket connect later. The capture loop
+        # starting on the next line writes current.json within a second, and at
+        # session start it writes ZERO WINDOWS, because none have mapped yet. So
+        # whether anything is relaunched came down to a race between two
+        # threads, and losing it means the login brings back nothing at all.
+        #
+        # Measured 2026-09-30 on a summoned login: the good 8-window capture
+        # from the logout was replaced by a 0-window one at 18:09:57, the
+        # relaunch read that and launched nothing, and the session came back
+        # with one window. The same startup on a faster run at 22:30 won the
+        # race and restored everything, which is exactly why this hid.
+        self.saved = engine.load_snapshot()
         threading.Thread(target=self._capture_loop, daemon=True).start()
         # Consume the one-shot adopt flag (armed by `session-mgr resume`): the
         # first worker to reach here adopts; a respawn sees it gone and
@@ -364,7 +380,7 @@ class Watcher:
         that is the only place the suppression can actually take effect."""
         if self.launch and self.mode != "quiet":
             try:
-                launch_missing()
+                launch_missing(self.saved)
                 open(LAUNCHED, "w").close()
             except Exception as e:
                 logline(f"launch_missing error: {e}")
