@@ -1031,13 +1031,18 @@ class KittyPlugin(WindowPlugin):
     def owns(self, v):
         return v["app"] == "kitty"
 
-    def transient(self, v):
-        # ONLY when there is nothing to key on at all: /proc unreadable, so we
-        # cannot say which window this is. A stored entry (pid<0) is never
-        # re-judged, because its key was resolved at capture and is right.
-        if v["pid"] and v["pid"] > 0:
-            return not _term_cwd(v["pid"])
-        return False
+    # NO transient HOOK, deliberately. Retiring the scratch exception left it
+    # with nothing genuine to report, and what it was reduced to -- "I cannot
+    # read the cwd" -- is a DIFFERENT QUESTION that already has an owner.
+    #
+    # `transient` means "never remember this window". `unidentified` means "I
+    # cannot say WHICH window this is, ask again". Conflating them cost real
+    # behaviour: a kitty window cannot be identified for its first 0.25s (the
+    # shell is not in /proc yet), so it reported transient, and _place_view
+    # tests transient BEFORE it tests identity and returns there. Every non-mux
+    # terminal was therefore dropped in the one 0.15s window it gets, and only
+    # landed if _recheck_all happened along. Measured on manifestor: mapped at
+    # 19:28:48, placed at 19:29:12, by an unrelated Chrome session-file write.
 
     def identity(self, v):
         cwd = _term_cwd(v["pid"])
@@ -2436,11 +2441,18 @@ def _t_registry(ck):
         globals()["_term_cwd"] = lambda _pid: _home
         ck("kitty-home-has-an-identity", _kp.identity(_kv) == f"kitty:{_home}")
         ck("kitty-home-is-not-transient", not _kp.transient(_kv))
-        # the one case still transient: no readable cwd, so usher cannot say
-        # which window this is, and a key it invented would be a lie.
+        # AN UNREADABLE CWD IS "ASK AGAIN", NOT "NEVER REMEMBER THIS", and
+        # this check used to assert the opposite -- a test pinning a mistaken
+        # belief. transient means never remember; unidentified means cannot say
+        # WHICH window yet. Conflating them cost real behaviour: a kitty cannot
+        # be identified for its first 0.25s (no shell in /proc yet) so it read
+        # as transient, and _place_view tests transient BEFORE identity and
+        # returns there, dropping every non-mux terminal in the one 0.15s
+        # window it gets.
         globals()["_term_cwd"] = lambda _pid: None
-        ck("kitty-unreadable-cwd-is-transient", _kp.transient(_kv))
         ck("kitty-unreadable-cwd-has-no-identity", _kp.identity(_kv) is None)
+        ck("kitty-unreadable-cwd-is-unidentified", unidentified(_kv))
+        ck("kitty-unreadable-cwd-is-NOT-transient", not _kp.transient(_kv))
     finally:
         globals()["_term_cwd"] = _real_cwd
     ck("kitty-stored-entry-is-not-transient",

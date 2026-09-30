@@ -445,12 +445,26 @@ class Watcher:
         if SKIP_TITLE.search(title) or is_transient(v):
             return   # work / scratch / transient-chrome: leave where it opened
         if unidentified(v):
-            return   # its plugin cannot say which window this is, so the only
-            # key we could look it up under is one the store is
-            # deliberately never written under. Matching on the title
-            # anyway is how "revisit an old page, watch the window jump
-            # to another desktop" worked, and the same predicate
-            # governs both sides so the two cannot drift apart.
+            # Its plugin cannot say which window this is, so the only key we
+            # could look it up under is one the store is deliberately never
+            # written under. Matching on the title anyway is how "revisit an
+            # old page, watch the window jump to another desktop" worked, and
+            # the same predicate governs learning and placing so they cannot
+            # drift apart.
+            #
+            # NOT YET is the common case, so RE-QUEUE rather than drop, and
+            # RE-READ THE VIEW when the retry comes due. A plugin reads live
+            # state that lags the map -- measured, a kitty window's identity
+            # resolves 0.25s after mapping while the placer first looks at
+            # 0.15s -- and the event payload we were handed is a snapshot of
+            # that moment, so retrying it asks the same question forever. The
+            # grace bounds the retrying, which is the same "stay willing until
+            # the window has had one real chance" rule the grace exists for.
+            if time.time() <= self.deadline.get(vid, 0):
+                with self.lock:
+                    self.pending[vid] = {"v": v, "refetch": True,
+                                         "due": time.time() + PLACE_SETTLE}
+            return
         with self.lock:
             e = (self.kb.get(kkey(app, ""))
                  or self.kb.get(kkey(app, identity(v))))
@@ -559,13 +573,32 @@ class Watcher:
                     if vid in self.placed:
                         self.pending.pop(vid, None)
                     elif now >= self.pending[vid]["due"]:
-                        ready.append(self.pending.pop(vid)["v"])
-            for v in ready:
+                        ready.append(self.pending.pop(vid))
+            for item in ready:
+                v = item["v"]
+                if item.get("refetch"):
+                    v = self._fresh_view(v.get("id")) or v
                 self._try_place(v)
             with self.lock:
                 again = self.st.pop("recheck", False)
             if again:
                 self._recheck_all()
+
+    def _fresh_view(self, vid):
+        """The compositor's CURRENT view dict for vid, or None if it is gone.
+        A retry has to re-read: the payload an event handed us describes the
+        instant it fired, and the whole reason for retrying is that something
+        about the window was not readable yet. Runs on the placer thread, which
+        is the one writer place_sock has."""
+        if vid is None:
+            return None
+        try:
+            for v in self.place_sock.list_views(filter_mapped_toplevel=True):
+                if v.get("id") == vid:
+                    return v
+        except Exception as e:
+            logline(f"refetch view {vid}: {e}")
+        return None
 
     def _recheck_all(self):
         """Give every live window another chance at placement, because what
