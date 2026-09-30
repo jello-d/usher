@@ -3,7 +3,7 @@
 A pure REPORTER. It reads the store, the plugin registry, the cross-tool
 contracts and the live compositor, and says per window what would be
 relaunched or placed AND WHY NOT. It changes nothing, and nothing in the
-engine calls it -- cli does, and that is the only inbound edge.
+engine calls it: cli does, and that is the only inbound edge.
 
 It exists because almost every fault this tree has had was SILENT: a scrape
 that matched nothing, a purge that deleted what it had just learned, a legacy
@@ -11,7 +11,7 @@ store orphaned by a migration that declined to run. None of those showed a
 symptom you could name; every one of them is visible here. Run it before
 forming any theory about what usher is doing.
 
-The exit code is non-zero ONLY for a CONTRACT breach -- the class of fault
+The exit code is non-zero ONLY for a CONTRACT breach: the class of fault
 that otherwise shows no symptom at all. A store that looks odd is reported and
 exits 0, because "odd" is often correct.
 """
@@ -76,10 +76,10 @@ def _doctor_store(out):
         except (OSError, ValueError):
             n = "?"
         out(f"  ORPHANED     knowledge.json holds {n} entries and is NOT in"
-            " use -- it should have been merged into the profile above")
+            " use: it should have been merged into the profile above")
     snap = load_snapshot()
     if snap is None:
-        out("  snapshot     current.json MISSING -- nothing to relaunch from")
+        out("  snapshot     current.json MISSING: nothing to relaunch from")
     else:
         age = int(time.time()) - snap.get("time", 0)
         out(f"  snapshot     {len(snap.get('windows', []))} window(s),"
@@ -210,7 +210,7 @@ def _unmatched_why(lv):
     manifold, a Gmail window that appears in none of the twelve session files
     spanning five days, while the other nine windows join instantly and the
     current file was written 89 seconds ago. Chrome writes three kinds and
-    saves two -- normal windows to Sessions/Session_*, app and PWA windows to
+    saves two: normal windows to Sessions/Session_*, app and PWA windows to
     Sessions/Apps_* (which usher skips, since those carry stable app-ids
     already), and off-the-record windows nowhere at all, by design.
 
@@ -228,7 +228,7 @@ def _doctor_blind(out, what, *fix):
 
     IT HAS TO SHOUT, because the sections it disables are exactly the ones
     that read as findings. With no live windows the relaunch section says
-    every saved window needs starting and the browser is not running -- every
+    every saved window needs starting and the browser is not running: every
     line of it false, none of it marked as such, and the report exited 0. That
     happened twice in one afternoon over a NON-INTERACTIVE ssh, which carries
     none of the session environment, and both times it looked like a real
@@ -239,14 +239,14 @@ def _doctor_blind(out, what, *fix):
     for line in fix:
         out(f"  !!! {line}")
     out("  !!! The store and contract checks above STAND. Everything needing")
-    out("  !!! live windows is SKIPPED, not answered -- with none to look at,")
+    out("  !!! live windows is SKIPPED, not answered, with none to look at,")
     out("  !!! those sections would call every saved window missing.")
     out("")
 
 
 def _doctor_compositor(out):
     """Connect to the live session, or say LOUDLY why not. Returns
-    (live, outs, ok) -- and `ok` is NOT `bool(live)`, because a reachable
+    (live, outs, ok), and `ok` is NOT `bool(live)`, because a reachable
     session with no windows open is a real answer and an unreachable one is
     not."""
     out("== compositor ==")
@@ -275,7 +275,7 @@ def _doctor_compositor(out):
         return [], {}, False
     out(f"  outputs      {', '.join(sorted(outs))}")
     if not live:
-        out("  (no windows open -- the sections below are answered, not"
+        out("  (no windows open: the sections below are answered, not"
             " skipped)")
     return live, outs, True
 
@@ -284,7 +284,7 @@ def do_doctor():
     """The whole report. Returns an exit code, non-zero for either of the two
     things that must not pass silently: a CONTRACT breach (1), which is the
     class of fault that otherwise shows no symptom, or a report that COULD NOT
-    LOOK (2) -- see _doctor_blind."""
+    LOOK (2): see _doctor_blind."""
     lines = []
 
     def out(s):

@@ -5,7 +5,7 @@ others, which is what keeps the engine free of any reference to the daemon.
 Every name is reached through its module (engine.do_capture, watch.do_watch)
 rather than imported: it is a dispatch, so the qualification says which layer
 a verb lands in, and it cannot accidentally freeze one of the engine globals
-that reload_exclude / reload_anchor / reload_plugins REBIND at runtime -- the
+that reload_exclude / reload_anchor / reload_plugins REBIND at runtime: the
 exclude and include verbs read two of them.
 """
 import json
@@ -32,7 +32,7 @@ def main():
             source = engine.resolve_snapshot(args[k + 1] if k + 1 < len(args)
                                              else "list")
         engine.do_restore(dry="--dry-run" in args, only=only, source=source)
-    elif verb == "watch":         # start, or reload if running -- RESTORE mode
+    elif verb == "watch":         # start, or reload if running: RESTORE mode
         engine.arm_mode("restore")
         watch.do_watch(launch="--no-launch" not in args)
     elif verb == "resume":        # start/reload in ADOPT (no restore)

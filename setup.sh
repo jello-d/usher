@@ -96,19 +96,19 @@ do_uninstall() {
 do_check() {
   echo "== $PKG (window placement) =="
   if [ -x "$VENV/bin/session-mgr" ]; then ok "venv app ($VENV)"
-  else bad "venv app missing ($VENV) -- run: install"; fi
+  else bad "venv app missing ($VENV); run: install"; fi
   if "$VENV/bin/python" -c 'import wayfire' 2>/dev/null; then ok "dep wayfire"
   else bad "wayfire not importable in the venv"; fi
   if [ -x "$_bin/session-mgr" ]; then ok "$_bin/session-mgr"
   else bad "$_bin/session-mgr missing"; fi
   if command -v mux >/dev/null 2>&1; then ok "mux present (terminal restore)"
-  else warn "mux absent -- the mux plugin's terminal restore degrades"; fi
+  else warn "mux absent: the mux plugin's terminal restore degrades"; fi
   if ! command -v hwdp >/dev/null 2>&1; then
-    warn "hwdp absent -- one layout for all monitor sets (profile 'default')"
+    warn "hwdp absent: one layout for all monitor sets (profile 'default')"
   elif [ "$(readlink "$(_hook_dst)" 2>/dev/null)" = "$(_hook_src)" ]; then
     ok "hwdp display-change hook linked"
   else
-    warn "hwdp present but no display-change hook -- run: setup.sh hooks"
+    warn "hwdp present but no display-change hook; run: setup.sh hooks"
   fi
 }
 

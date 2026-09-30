@@ -3,7 +3,7 @@
 The DOMAIN KNOWLEDGE, kept apart from the engine that consumes it: how an SNSS
 session file is framed, which file belongs to which profile, how a live window
 title joins to a session window, and which of the fifty-odd chrome processes is
-the browser. A LEAF -- it imports nothing from the rest of the package, so the
+the browser. A LEAF: it imports nothing from the rest of the package, so the
 engine can import it at module level with no cycle.
 
 The adapter that makes any of this reachable is ChromePlugin, which stays in
@@ -12,7 +12,7 @@ an app, and this module is the app.
 
 WHY A WINDOW'S IDENTITY IS ITS SessionID. Chrome gives every browser window the
 one app-id "google-chrome" and one pid (the browser process), so neither app-id
-nor /proc can tell its windows apart -- the only per-window discriminator
+nor /proc can tell its windows apart: the only per-window discriminator
 wayfire exposes is the TITLE, the active tab's page title, which is volatile
 (unread counts "Inbox (7)", tab switches, navigation). Keying on the title never
 matched, so Chrome was never restored; keying on the active-tab URL matched, and
@@ -30,7 +30,7 @@ the crash path. chrome_bind_windows is what carries a window across that
 boundary, and the id is durable for exactly as long as the browser runs, which
 is all identity needs it to be.
 
-A window not yet in the session file has NO identity here -- chrome_window_for
+A window not yet in the session file has NO identity here: chrome_window_for
 returns None and usher declines to remember it at all, rather than falling back
 to the raw title it happens to be wearing. That fallback was 86% of a real
 store, none of it matchable.
@@ -55,7 +55,7 @@ def chrome_slot(win):
 
 
 def is_chrome_slot(key):
-    """True if `key` is a well-formed Chrome window slot -- i.e. one the
+    """True if `key` is a well-formed Chrome window slot, i.e. one the
     current code could have written. A stored chrome key that is NOT one is a
     raw window title, left over from the identity fallback that no longer
     exists."""
@@ -70,7 +70,7 @@ def is_chrome(app):
     through XWayland reports `Google-chrome` where the native Wayland one
     reports `google-chrome`, and BOTH turn up in a real store here. Matching
     only the lower-case form left the capitalised windows unclaimed by the
-    plugin -- no URL identity, and invisible to the browser relaunch -- while
+    plugin (no URL identity, and invisible to the browser relaunch) while
     is_browser() (a substring test) still treated them as browsers, so they got
     the settle delay and none of the benefit."""
     return (app or "").lower() in CHROME_APPS
@@ -197,7 +197,7 @@ def _snss_scan(path):
 
 def parse_snss(path):
     """Parse one SNSS session file into {active_page_title: (window_id, url)}
-    for its open windows -- each window's selected tab, at that tab's current
+    for its open windows: each window's selected tab, at that tab's current
     navigation. Never raises: a malformed record is skipped, a bad file
     yields {}.
 
@@ -248,7 +248,7 @@ _snss_cache = {"sig": None, "map": {}}
 def session_history():
     """{profile dir: [Session_* file, ...]}, NEWEST FIRST, per Chrome profile.
 
-    Browser windows only -- PWAs live in a separate Apps session and already
+    Browser windows only: PWAs live in a separate Apps session and already
     carry stable app-ids.
 
     THE OLDER FILES ARE THE POINT. Chrome keeps the PREVIOUS session's file
@@ -275,7 +275,7 @@ def session_files():
 
 
 def session_sig():
-    """A cheap signature of the current session files -- paths and mtimes, no
+    """A cheap signature of the current session files: paths and mtimes, no
     parsing. It changes exactly when Chrome writes one, and the PATHS change
     when it rotates them, which is the moment a restart becomes visible to us.
     One definition, used both to invalidate the title cache and to trigger the
@@ -378,7 +378,7 @@ def chrome_window_tabs(path):
     fingerprint.
 
     A tab's URL is the navigation it has SELECTED. If that record is missing
-    -- a half-written file, a tab mid-navigation -- fall back to its highest
+    (a half-written file, a tab mid-navigation) fall back to its highest
     recorded navigation rather than dropping the tab, since a fingerprint with
     a hole in it still matches and a missing tab weakens it."""
     tabs = _snss_scan(path)
@@ -406,8 +406,8 @@ def chrome_bind_windows(cur, prev):
     chrome_window_tabs output.
 
     WHY THIS HAS TO EXIST. Chrome mints FRESH SessionIDs for every restored
-    window -- measured twice on 2026-09-29, on the clean-exit and the crash
-    path, six windows each time, zero overlap either way -- so a slot
+    window: measured twice on 2026-09-29, on the clean-exit and the crash
+    path, six windows each time, zero overlap either way, so a slot
     remembered against the old id matches nothing after a restart, and every
     Chrome window comes back a stranger. What survives a restore is the
     CONTENT: the window comes back with its tabs. Chrome leaves the previous
@@ -416,7 +416,7 @@ def chrome_bind_windows(cur, prev):
 
     Greedy by overlap, largest first, each id used once, ties broken by id so
     the answer is deterministic. A pair must ALSO carry MOST OF THE OLD
-    window's tabs -- more than half -- because that is the actual question: is
+    window's tabs (more than half) because that is the actual question: is
     most of what that window was showing here again? Measuring the smaller of
     the two instead lets a ten-tab window claim a two-tab one on a single
     shared page, which two unrelated windows can easily have. Unmatched is the
@@ -454,12 +454,12 @@ def is_browser_cmdline(raw):
     measured 2026-09-29, 41 of 45 chrome processes on manifestor and 83 of 86
     on manifold carry ONE element, the browser among them. Splitting on NUL
     alone therefore produced a single "argv[0]" holding the entire command
-    line, whose basename is never a browser name -- so this said False for
+    line, whose basename is never a browser name, so this said False for
     every process on the box, browser_pids() returned [], and `wind-down`
     SIGNALLED NOTHING. That is the one thing wind-down exists to do.
 
     Treating NUL as whitespace reads both framings. Only two things are read
-    here -- the first token, and whether any token is `--type=` -- so an
+    here (the first token, and whether any token is `--type=`) so an
     argument that itself contains a space (`--profile-directory=Profile 2`)
     splitting into two tokens cannot affect the answer."""
     argv = raw.replace(b"\0", b" ").split()
@@ -509,7 +509,7 @@ def chrome_profile_map():
 
 def snss_build(tabs, ver=3):
     """Build a minimal SNSS blob from [(window, tab, url, title), ...], for
-    selftest -- the inverse of the parser, Pickle 4-byte alignment and all.
+    selftest: the inverse of the parser, Pickle 4-byte alignment and all.
 
     Tabs are indexed within their window in the order given, and each window's
     FIRST tab is the selected one, which is the tab parse_snss reads. Takes a

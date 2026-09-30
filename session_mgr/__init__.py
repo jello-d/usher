@@ -1,8 +1,8 @@
-"""session-mgr -- record the Wayland window layout and place windows back.
+"""session-mgr: record the Wayland window layout and place windows back.
 
 The successor to wayfire-rule-enforcer. Instead of hand-written placement
 rules, it records where windows actually are and puts them back. `watch` is
-BOTH the daemon (started at login) and the CLI controller for it -- like
+BOTH the daemon (started at login) and the CLI controller for it: like
 kanshi-mgr, one command runs the thing and drives it.
 
   session-mgr watch        the daemon: record continuously, place on map
@@ -16,7 +16,7 @@ kanshi-mgr, one command runs the thing and drives it.
   session-mgr include      show the anchor rules (session/include)
 
 Placement is AGGRESSIVE then STEADY. For START_FLOOR seconds after login (or
-an `aggressive` kick) every mapped window is placed back -- what lets Chrome
+an `aggressive` kick) every mapped window is placed back: what lets Chrome
 launch and its windows land. Once IDLE_SETTLE seconds pass with no new window
 (capped at AGGR_CAP) it goes STEADY: a reopened window just appears where you
 are and stays. session/include lists the few windows to keep snapping back

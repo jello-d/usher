@@ -9,10 +9,10 @@ Nothing here duplicates the placement logic.
 
 Three states by FRAME colour, one identity glyph (a 2x2 window grid, top-left
 window focused):
-  steady      green   -- windows stay where they are
-  aggressive  amber   -- placing windows back; a depleting ring counts the
+  steady      green: windows stay where they are
+  aggressive  amber: placing windows back; a depleting ring counts the
                          seconds until it settles (arc drains clockwise)
-  down        grey    -- session-mgr not running (STATUS_FILE absent or stale)
+  down        grey: session-mgr not running (STATUS_FILE absent or stale)
 
 Deps: dbus-next (pure-Python D-Bus) + Pillow. Drawn per size, ARGB32 in network
 byte order per the StatusNotifierItem spec. `session-mgr-indicator render-test
@@ -36,9 +36,9 @@ _TINT = 0.14                    # state hue bleed into the screen
 # the louder gadgets win the glance; down is neutral grey. _DULL is what the
 # aggressive border leaves behind as it recedes: the "not working" grey.
 FRAME = {
-    "steady":     (0x54, 0x86, 0x50),   # muted green -- at rest, quiet
-    "aggressive": (0xF2, 0x3A, 0x2C),   # red -- actively placing; stands out
-    "down":       (0x84, 0x84, 0x8A),   # neutral grey -- daemon off
+    "steady":     (0x54, 0x86, 0x50),   # muted green: at rest, quiet
+    "aggressive": (0xF2, 0x3A, 0x2C),   # red: actively placing; stands out
+    "down":       (0x84, 0x84, 0x8A),   # neutral grey: daemon off
 }
 _DULL = FRAME["down"]                   # the receded (elapsed) border grey
 
@@ -234,9 +234,9 @@ def _run():
     def _tip(state, sec):
         if state == "aggressive":
             return (f"Window placement: AGGRESSIVE ({sec}s to steady)"
-                    " -- click to settle now")
+                    ", click to settle now")
         if state == "steady":
-            return "Window placement: STEADY -- click to kick aggressive"
+            return "Window placement: STEADY, click to kick aggressive"
         return "session-mgr not running"
 
     def _sig(state, arc):

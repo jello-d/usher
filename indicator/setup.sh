@@ -71,7 +71,7 @@ check() {
   bad() { printf '  %s[FAIL]%s %s\n' "$_R" "$_O" "$*"; RC=1; }
 
   if [ -x "$VENV/bin/session-mgr-indicator" ]; then ok "venv app ($VENV)"
-  else bad "venv app missing ($VENV) -- run: install app"; fi
+  else bad "venv app missing ($VENV); run: install app"; fi
   if "$VENV/bin/python" -c 'import dbus_next, PIL' 2>/dev/null
   then ok "deps import (dbus-next, Pillow)"
   else bad "deps not importable in the venv"; fi

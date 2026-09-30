@@ -86,13 +86,13 @@ EXCLUDE_FILE = os.environ.get(
 
 def load_exclude_rules(path=EXCLUDE_FILE):
     """Parse session/exclude into compiled (app_re, title_re) pairs. Every rule
-    is one line, '<app-regex> :: <title-regex>' -- both fields required, use
+    is one line, '<app-regex> :: <title-regex>': both fields required, use
     '.*' for "any". A line starting with # is a comment, blanks ignored.
     Patterns are Python regexes matched with re.search, so they are UNANCHORED
     (a substring test): add ^...$ to pin, exactly as the work boundary's own
     ^\\[WORK does. Returns (rules, errors): a line missing '::' or with a bad
-    regex is collected into errors -- surfaced by `session-mgr exclude`,
-    logged by the watcher -- and skipped, never crashing the headless
+    regex is collected into errors: surfaced by `session-mgr exclude`,
+    logged by the watcher, and skipped, never crashing the headless
     daemon. A missing
     or unreadable file yields ([], []); the built-in work-boundary and
     scratch-terminal skips still apply. Read once per process, so an edit is
@@ -122,10 +122,10 @@ EXCLUDE_RULES, EXCLUDE_ERRORS = load_exclude_rules()
 
 
 def is_transient(v):
-    """True if the window must open wherever the user is -- never captured (a
+    """True if the window must open wherever the user is: never captured (a
     stored "New Tab" would drag every future new tab to one spot), never placed.
     Takes a view/window/entry dict. Two sources: a session/exclude config rule
-    (blank New Tab, profile picker, a pre-load "Google Chrome" title -- config-
+    (blank New Tab, profile picker, a pre-load "Google Chrome" title: config-
     driven, grows without a code change) OR a plugin's transient() (a scratch
     terminal). plugin_transient is only reached if no exclude rule matched."""
     v = pview(v)
@@ -136,7 +136,7 @@ def is_transient(v):
 
 
 def reload_exclude():
-    """Re-read session/exclude into the module globals, live -- the watch loop
+    """Re-read session/exclude into the module globals, live: the watch loop
     calls this when the file's mtime changes, so an edit applies on save with no
     reload. is_transient reads EXCLUDE_RULES on each call, so the swap is picked
     up immediately (the GIL makes the rebinding atomic across the threads)."""
@@ -164,7 +164,7 @@ ANCHOR_RULES, ANCHOR_ERRORS = load_exclude_rules(INCLUDE_FILE)
 
 
 def is_anchored(app, title):
-    """True if the window matches a session/include rule -- the opt-in set that
+    """True if the window matches a session/include rule: the opt-in set that
     is STILL placed in the conservative steady state."""
     t = title.strip()
     return any(ar.search(app) and tr.search(t) for ar, tr in ANCHOR_RULES)
@@ -183,8 +183,9 @@ def reload_anchor():
 def is_mux_term(app, title):
     """A named mux terminal: kitty whose title is 'session:window' (a mux
     session attached). NOT a plain 'terminal', a scratch 'ksh:', or a work
-    window. These are the only terminals session tracks, places, and relaunches
-    -- and the ones a single window cycles through as it switches sessions."""
+    window. These are the only terminals session tracks, places and
+    relaunches, and the ones a single window cycles through as it switches
+    sessions."""
     return (app == "kitty" and ":" in title
             and not SKIP_TITLE.search(title))
 
@@ -281,8 +282,8 @@ def adopt_legacy_store():
     """Fold a pre-profile knowledge.json into the CURRENT profile, once.
 
     MERGES, and that is the whole point. The first version only adopted when
-    the profile store did not exist yet, so if anything created one first -- a
-    seed from a snapshot, a run before the displays came up -- adoption was
+    the profile store did not exist yet, so if anything created one first: a
+    seed from a snapshot, a run before the displays came up: adoption was
     skipped FOREVER and the legacy store was orphaned in silence. Measured on
     manifold: 1019 learned placements sat in a file nothing read while the live
     store knew 24, so almost nothing was ever placed and it looked like usher
@@ -347,7 +348,7 @@ def load_inverts():
     """View-ids recorded colour-inverted, per toggle_invert_focused's store
     (keyed by view id as a string; presence == invert was toggled on). The store
     is invert-SPECIFIC but only session-live in spirit: view ids reset every
-    wayfire session while this file persists, so it accumulates stale ids -- see
+    wayfire session while this file persists, so it accumulates stale ids: see
     is_inverted for why we gate it on the live shader. Best-effort: a missing or
     corrupt file means none are inverted."""
     try:
@@ -370,12 +371,12 @@ def store_mtime(path):
 def is_inverted(sock, vid, inverts):
     """True iff the view is colour-inverted RIGHT NOW: recorded in the invert
     store AND actually carrying a live filter shader. The store alone is not
-    enough -- it is keyed by view id, and ids reset each session while the file
+    enough: it is keyed by view id, and ids reset each session while the file
     persists, so a stale id reused by a fresh window would read as inverted (the
     "negates some that never were" bug). Gating on the compositor's live
     view-has-shader kills that: a reused id whose window carries no shader is
-    excluded. (view-has-shader is not shader-specific -- one "filters"
-    transformer name covers invert/monochrome/... -- but the store gate keeps
+    excluded. (view-has-shader is not shader-specific: one "filters"
+    transformer name covers invert/monochrome/..., but the store gate keeps
     the result invert-specific, and only Super+N writes the store.)"""
     if vid is None or str(vid) not in inverts:
         return False
@@ -510,7 +511,7 @@ def chrome_profiles_for(saved):
     """The profile directories to start, one per profile that actually had a
     window last session, in first-seen order. Falls back to a single unnamed
     launch (Chrome's own choice, possibly the picker) when nothing can be
-    matched -- no worse than before, and only when there is nothing to go on."""
+    matched: no worse than before, and only when there is nothing to go on."""
     pm = chrome_profile_map()
     out = []
     for w in saved:
@@ -597,7 +598,7 @@ _PLUGINS = None
 
 
 def plugins():
-    """The loaded plugin list -- built-ins first, then user plugins -- lazily
+    """The loaded plugin list (built-ins first, then user plugins) lazily
     built and cached. reload_plugins() drops the cache. mux is BEFORE kitty so a
     mux-attached kitty window is claimed by mux, the rest by kitty."""
     global _PLUGINS
@@ -615,7 +616,7 @@ def plugins_sig():
     NOT THE DIRECTORY'S OWN MTIME, which was the first attempt and was wrong in
     an instructive way: importing a plugin writes a `__pycache__` directory
     beside it, that bumps the directory's mtime, and the watch therefore fired
-    a second time on a change its own reload had caused. Measured -- two
+    a second time on a change its own reload had caused. Measured: two
     "plugins reloaded" lines a second apart. A trigger must not include
     anything the action it triggers modifies."""
     try:
@@ -682,7 +683,7 @@ def _owner(v):
 
 
 def identity(v):
-    """The kb KEY-title for a window -- the single chokepoint every keying site
+    """The kb KEY-title for a window: the single chokepoint every keying site
     routes through (upsert, learn, match, place). An owning plugin's identity()
     wins (Chrome's URL, mux's session, kitty's cwd); otherwise the raw title."""
     v = pview(v)
@@ -713,7 +714,7 @@ def _single_id(v):
 
 def unidentified(v):
     """True if this window's app HAS a plugin and that plugin declined to
-    identify it -- so usher does not know WHICH window this is, and must
+    identify it, so usher does not know WHICH window this is, and must
     neither remember it nor match it against anything remembered.
 
     identity() always answers, falling back to the raw title, and for an app no
@@ -726,15 +727,15 @@ def unidentified(v):
     ONE PREDICATE, TWO CALL SITES, deliberately. Every silent failure in this
     file's history came from two places disagreeing about what a window's key
     is (see the RAW TITLE vs IDENTITY notes), and a store that can be written
-    under a key the matcher will never look up -- or matched under a key the
-    writer will never produce -- is that same fault wearing a new hat."""
+    under a key the matcher will never look up, or matched under a key the
+    writer will never produce: is that same fault wearing a new hat."""
     v = pview(v)
     return is_owned(v["app"]) and not _single_id(v)
 
 
 def plugin_transient(v):
     """True if this window's OWNING plugin marks it transient (a scratch
-    terminal). Only the owner is consulted -- a plugin's hooks apply to the
+    terminal). Only the owner is consulted: a plugin's hooks apply to the
     windows it claims, never another plugin's (kitty's unreadable-cwd test must
     not fire on a mux window, whose identity comes from its command)."""
     v = pview(v)
@@ -748,7 +749,7 @@ def plugin_transient(v):
 
 
 def is_owned(app):
-    """True if some plugin claims this app-id -- so its windows never drop to an
+    """True if some plugin claims this app-id, so its windows never drop to an
     app_id-only key (the old FORCE_TITLE_APPS rule, now plugin-driven). By app
     alone (chrome/kitty own by app-id; mux is a title-keyed subset of the kitty
     app, already covered)."""
@@ -788,7 +789,7 @@ def _proc_argv0(pid):
 
 
 def _term_cwd(pid):
-    """The working dir of a kitty window's SHELL -- its first non-helper child's
+    """The working dir of a kitty window's SHELL: its first non-helper child's
     cwd. kitty itself stays at $HOME (--directory), but the shell's cwd tracks
     the user's cd, so it is where the window 'is'. '' if unreadable/none."""
     if not pid or pid < 0:
@@ -814,7 +815,7 @@ def _proc_argv(pid):
 
 def _latch_target_in(argv):
     """The HOST[:SESSION] in one process's argv, if it is a mux latch. Pure, so
-    the matching is testable without a live process tree -- which matters
+    the matching is testable without a live process tree, which matters
     because this is what decides whether a window is replayed as a latch or
     falls back to `mux resume`."""
     for i, a in enumerate(argv):
@@ -847,7 +848,7 @@ def _term_latch_target(pid):
 
 
 def mux_session_of(title):
-    """The mux SESSION from a `session:window` banner -- the durable unit that
+    """The mux SESSION from a `session:window` banner: the durable unit that
     `mux go`/`mux ls` name (#{session_name}). Strips a leading [LABEL] context
     prefix, then takes up to the first ":". None if not a session banner."""
     t = re.sub(r"^\[[^\]]*\]\s*", "", title.strip())
@@ -863,9 +864,9 @@ def mux_host_of(title):
     session reached over ssh reads as the REMOTE box and a local one as this
     box.
 
-    mux added the tag for exactly this consumer -- its own comment says a local
+    mux added the tag for exactly this consumer: its own comment says a local
     session and an ssh'd one sharing a name "would otherwise snap the two
-    windows onto each other" -- so reading it is the whole local/remote story;
+    windows onto each other", so reading it is the whole local/remote story;
     no /proc sniffing is needed, and unlike /proc it still works for a STORED
     entry, whose pid is long dead.
 
@@ -918,9 +919,9 @@ class ChromePlugin(WindowPlugin):
         """SIGTERM the BROWSER process. Measured on Chrome 154: it exits in
         about a second and records profile.exit_type = "SessionEnded".
 
-        That is the whole point. Killed mid-flight -- which is what a bare
+        That is the whole point. Killed mid-flight, which is what a bare
         `systemctl reboot` does, since it tears the session down with the
-        compositor still needed -- the profile keeps exit_type = "Crashed",
+        compositor still needed: the profile keeps exit_type = "Crashed",
         and every subsequent login opens with a "Chrome didn't shut down
         correctly" prompt instead of the windows."""
         pids = browser_pids()
@@ -934,13 +935,13 @@ class ChromePlugin(WindowPlugin):
     def relaunch_missing(self, saved, live):
         """Start the browser if the last session had Chrome windows and none
         is running now. Chrome restores its OWN windows, but only once
-        something starts it -- so on a login where nothing did, usher was
+        something starts it, so on a login where nothing did, usher was
         leaving the largest part of the desk shut. It starts the browser and
         nothing more: which windows come back stays Chrome's business.
 
         Started PER PROFILE, naming each one. A bare `google-chrome` on a box
         with several profiles and no `Default` opens the profile PICKER and
-        waits for a human, restoring nothing at all -- so the one thing usher
+        waits for a human, restoring nothing at all, so the one thing usher
         had to get right about starting it was which profile to start."""
         if not any(is_chrome(w.get("app_id")) for w in saved):
             return 0
@@ -974,7 +975,7 @@ class ChromePlugin(WindowPlugin):
 
 
 class MuxPlugin(WindowPlugin):
-    """mux-attached kitty terminals -- a kitty window wearing a mux
+    """mux-attached kitty terminals: a kitty window wearing a mux
     `session:window` banner (is_mux_term). Identity is the mux SESSION plus the
     HOST it lives on (`mux@<host>:<session>`), both parsed from the title: the
     session is the durable unit `mux go` names, and the host is the trailing tag
@@ -983,7 +984,7 @@ class MuxPlugin(WindowPlugin):
 
     Claims a REMOTE session (one whose host is not this box) as readily as a
     local one: it is the same kind of window doing the same job, wants the same
-    slot back, and differs only in how it respawns -- `mux go` here, the same
+    slot back, and differs only in how it respawns: `mux go` here, the same
     through `ssh` there. Respawn is the sole mux-BINARY touchpoint, best-effort
     so it no-ops without mux (the soft dep)."""
     name = "mux"
@@ -1032,8 +1033,8 @@ class KittyPlugin(WindowPlugin):
         return v["app"] == "kitty"
 
     # NO transient HOOK, deliberately. Retiring the scratch exception left it
-    # with nothing genuine to report, and what it was reduced to -- "I cannot
-    # read the cwd" -- is a DIFFERENT QUESTION that already has an owner.
+    # with nothing genuine to report. What it was reduced to, "I cannot read
+    # the cwd", is a DIFFERENT QUESTION that already has an owner.
     #
     # `transient` means "never remember this window". `unidentified` means "I
     # cannot say WHICH window this is, ask again". Conflating them cost real
@@ -1097,9 +1098,9 @@ def _migrate_wholesale(app):
     """True if a PRE-6 store's entry for this app is unmatchable WHATEVER its
     key: chrome and kitty, whose key shapes both changed before schema 6.
 
-    Which apps a bump invalidates wholesale is not always "all of them" --
+    Which apps a bump invalidates wholesale is not always "all of them":
     schema 5 changed only the terminal key and deliberately spared chrome's
-    1045 entries -- so this is the pre-6 rule only. From 6 onward the shapes
+    1045 entries, so this is the pre-6 rule only. From 6 onward the shapes
     are current and only _migrate_store's key-SHAPE rule applies.
 
     CASE-INSENSITIVELY for chrome, which the set-membership test this replaces
@@ -1118,8 +1119,8 @@ def rekey_chrome(kb):
     and return how many moved.
 
     CHROME DOES NOT KEEP A WINDOW'S SessionID ACROSS A RESTART. It mints a
-    fresh block for the restored windows -- measured twice on 2026-09-29, on
-    the clean-exit and the crash path, zero overlap either way -- so after any
+    fresh block for the restored windows: measured twice on 2026-09-29, on
+    the clean-exit and the crash path, zero overlap either way, so after any
     browser restart every `chrome:win:<id>` in the store is a dead key and
     every Chrome window is a stranger with no remembered place. That is not a
     small thing: it is the whole of why Chrome windows stopped being placed at
@@ -1134,7 +1135,7 @@ def rekey_chrome(kb):
     CONSERVATIVE BY CONSTRUCTION, because this rewrites the store:
       - only slots the current session does NOT know are candidates, so a
         run with nothing stale is a no-op and running it twice is safe;
-      - a current window that ALREADY has a slot is left alone -- the store's
+      - a current window that ALREADY has a slot is left alone: the store's
         own answer for it is at least as good as this guess;
       - nothing binds unless the tab sets agree, and not binding is the safe
         outcome (the slot stays put and ages out on the TTL).
@@ -1189,8 +1190,8 @@ def _migrate_store(kb, frm):
                  again, so they go wholesale.
       7          NO key shape changed. usher simply stopped LEARNING a chrome
                  window its plugin could not identify, which invalidated
-                 exactly what that fallback had written -- chrome keyed by a
-                 raw window title -- and nothing else. Dropping all of chrome
+                 exactly what that fallback had written: chrome keyed by a
+                 raw window title, and nothing else. Dropping all of chrome
                  here would have discarded 45 working slots across two boxes
                  to relearn them identically, which is the mistake schema 5
                  nearly made.
@@ -1220,7 +1221,7 @@ def migrate_stores():
     to be plugged into leaves the others to rot until those monitors come
     back, which may be never. Measured on manifestor 2026-09-29: five of six
     stores were dormant, three of them still stamped schema 4, and 265 of 326
-    entries across the lot were chrome keyed by a raw title -- 81% of
+    entries across the lot were chrome keyed by a raw title: 81% of
     everything the box had learned, none of it matchable. The one store the
     old per-load migration could reach held 58 of those 326 entries."""
     for path in sorted(glob.glob(os.path.join(STATE, "knowledge-*.json"))):
@@ -1277,13 +1278,13 @@ def load_knowledge():
 def is_unique(app, counts):
     """True if this app_id identifies exactly one window (so it can key by
     app_id alone, title-independent). A plugin-owned app is never unique, even
-    when momentarily alone -- its windows share an app_id (see is_owned)."""
+    when momentarily alone: its windows share an app_id (see is_owned)."""
     return counts[app] == 1 and not is_owned(app)
 
 
 def kb_entry(w, title, appid_only, when):
     """A knowledge record for one identity at window w's current placement.
-    `title` is the KEY-title (identity() -- a URL for Chrome); `label` keeps the
+    `title` is the KEY-title (identity(): a URL for Chrome); `label` keeps the
     human window title for logs, since the key may no longer read as one."""
     return {
         "app_id": w["app_id"], "title": title, "appid_only": appid_only,
@@ -1307,7 +1308,7 @@ def prune_kb(kb, when):
     for an app now keyed by app_id (an app_id-only key ends in NUL).
 
     A plugin-owned app must never carry an app_id-only key. If a stale one
-    lingers -- e.g. written before the app got a plugin -- it is doubly
+    lingers (e.g. written before the app got a plugin), it is doubly
     corrosive: it mis-matches every window of that app by app_id alone, AND,
     via appid_keyed below, it deletes every per-title entry the app just
     learned, so the app can never relearn (kitty's mux terminals hit exactly
@@ -1378,7 +1379,7 @@ def _learn_fold(groups, windows, ambiguous):
 
 def _learn_stamp(kb, groups, windows, counts, when, hold=()):
     """Write each live view's placement under the right key. `hold` is the set
-    of view ids whose CURRENT position must not be believed yet -- see the
+    of view ids whose CURRENT position must not be believed yet: see the
     watcher's _held: a window the placer has not got to is sitting where its
     app dropped it, and writing that overwrites the slot the placer is about
     to aim at."""
@@ -1442,8 +1443,8 @@ def _learn_purge_terminals(kb, windows):
 def learn(kb, groups, windows, when, hold=()):
     """Watch-time knowledge update with view-id tab-grouping.
 
-    Each live view -- keyed by its wayfire id, stable for the window's whole
-    life -- owns the set of titles it has shown. Every title in the set is
+    Each live view: keyed by its wayfire id, stable for the window's whole
+    life: owns the set of titles it has shown. Every title in the set is
     stamped to the view's CURRENT placement, so a window drags its whole learned
     tab-set with it when it moves (no stragglers pointing at the old screen),
     and on restore it lands correctly whatever tab happens to be active.
@@ -1536,8 +1537,8 @@ def load_snapshot():
     THE VERSION STAMP IS CHECKED. snapshot() has written `version` since the
     beginning and nothing read it, which made the stamp a decoration: a future
     format could not be detected, only misread, and the relaunch paths would
-    act on fields that had moved. Refusing is the safe failure -- no snapshot
-    means no relaunch, rather than a wrong one -- and it is loud in the log."""
+    act on fields that had moved. Refusing is the safe failure: no snapshot
+    means no relaunch, rather than a wrong one, and it is loud in the log."""
     try:
         with open(os.path.join(STATE, "current.json")) as f:
             snap = json.load(f)
@@ -1568,8 +1569,8 @@ def saved_sizes(saved):
 def _size_opts(size):
     """kitty's initial-size flags. Plain numbers are PIXELS (kitty.conf here
     uses the `c` suffix for cells). kitty rounds to whole cells and adds its
-    padding, so this lands CLOSE rather than exact -- 2176x1761 for a 2132x1690
-    request when measured -- and the normal placement pass makes it exact. The
+    padding, so this lands CLOSE rather than exact: 2176x1761 for a 2132x1690
+    request when measured, and the normal placement pass makes it exact. The
     point is that the window never appears at the wrong size."""
     if not size:
         return []
@@ -1588,7 +1589,7 @@ def spawn_term(cmd, size=None):
     fresh attach, not a switch-client that hijacks another window.
 
     The command is passed in rather than derived here. Every mux verb needs a
-    TTY -- arranging one is what mux is FOR -- so a window is the right place
+    TTY (arranging one is what mux is FOR) so a window is the right place
     for all of them, local and remote alike, and usher's job is only to put a
     window around the command it recorded."""
     env = {k: v for k, v in os.environ.items() if k != "TMUX"}
@@ -1616,7 +1617,7 @@ def mux_session_set():
 
     This is mux's durable session SET (recorded per socket under $MUX_CACHE,
     additive as sessions are built or attached, subtractive on `mux kill`), NOT
-    the live tmux server -- which is the whole point, because the case that
+    the live tmux server, which is the whole point, because the case that
     matters is a COLD BOOT, where no session is live but `mux go` rebuilds from
     exactly this set. Reading the live server instead meant there was never
     anything to relaunch after a reboot.
@@ -1627,7 +1628,7 @@ def mux_session_set():
     asserts the bare-name shape against the real binary, so a future change to
     mux's output fails LOUD here instead of silently going inert again.
 
-    Empty when mux is absent or errors -- the soft-dep no-op."""
+    Empty when mux is absent or errors: the soft-dep no-op."""
     try:
         out = subprocess.run(
             [os.path.expanduser("~/.local/bin/mux"), "resume", "--list"],
@@ -1638,7 +1639,7 @@ def mux_session_set():
 
 
 def live_keys(live):
-    """The resolved identities of the windows currently on screen -- the ONE
+    """The resolved identities of the windows currently on screen: the ONE
     definition of "already showing" that every relaunch path tests against, so
     the question is answered the same way for each. Comparing identities rather
     than raw state is what keeps the plugins from tripping over each other: a
@@ -1726,7 +1727,7 @@ def mux_relaunch_missing(saved, live):
 
 def _spawn_kitty(cwd, size=None):
     """Open a plain kitty shell in cwd (a fresh per-window id). Deliberately NOT
-    re-running the window's captured program -- restoring the place + directory,
+    re-running the window's captured program: restoring the place + directory,
     not the command."""
     env = {k: v for k, v in os.environ.items() if k != "TMUX"}
     subprocess.Popen(["kitty"] + _size_opts(size) + ["--directory", cwd],
@@ -1798,7 +1799,7 @@ def entries_from_snapshot(snap):
     them: the windows are long dead, so /proc-derived identities like kitty's
     cannot be recomputed. A snapshot written before the `key` field existed
     degrades to what its raw title yields, which for terminals will simply not
-    match anything -- honest, and better than matching the wrong window."""
+    match anything: honest, and better than matching the wrong window."""
     windows = snap.get("windows", [])
     counts = Counter(w.get("app_id", "") for w in windows)
     out = []
@@ -1834,7 +1835,7 @@ def _available():
 
 def resolve_snapshot(spec):
     """(label, snapshot) for a --from spec. `latest` is the newest rolled
-    snapshot (undo a shuffle you just made); a date -- or today/yesterday --
+    snapshot (undo a shuffle you just made); a date (or today/yesterday)
     is that day's FIRST snapshot, the stable 'how it looked that morning'."""
     miles, hist = _available()
     if spec in ("list", ""):
@@ -1866,7 +1867,7 @@ def resolve_snapshot(spec):
 def match(live, entries):
     """Greedily match each live window to a knowledge entry, consume-once. An
     app_id-keyed entry matches on app_id alone (unique-app_id apps whose title
-    drifts); the rest need an exact identity too (raw title, or -- for Chrome --
+    drifts); the rest need an exact identity too (raw title, or, for Chrome,
     the active-tab URL via identity()). Returns (pairs, unmatched_live,
     unmatched_entries)."""
     rem = list(entries)
@@ -1912,8 +1913,8 @@ def apply_fullscreen(sock, view_id):
 
     ONLY EVER SET, NEVER CLEARED, exactly as apply_invert is. A remembered
     entry saying "not fullscreen" is not evidence that a window which IS
-    fullscreen should be dragged out of it -- the human may have pressed F11
-    ten seconds ago -- and this runs once per map, so it cannot fight them.
+    fullscreen should be dragged out of it: the human may have pressed F11
+    ten seconds ago, and this runs once per map, so it cannot fight them.
 
     AFTER place(), not instead of it. A fullscreen window's captured geometry
     is the whole output, so the geometry alone makes it LOOK right while
@@ -1970,8 +1971,8 @@ PROFILE_MARK = "session-mgr.profile"   # last profile we acted on, per boot
 def do_display_changed():
     """The display-change entry point, for hwdp's `changed` hook.
 
-    That edge fires on EVERY output burst -- a monitor blanking and waking, a
-    kanshi reapply, a re-detect -- not only when the set of monitors actually
+    That edge fires on EVERY output burst: a monitor blanking and waking, a
+    kanshi reapply, a re-detect, not only when the set of monitors actually
     differs. Re-arming aggressive placement on each of those was a mistake:
     aggressive means every mapped window is put back where it is remembered, so
     a window deliberately moved during the session would be yanked home every
@@ -2048,7 +2049,7 @@ def _wind_down_wait(pids):
 def do_wind_down():
     """Bring the session to a clean stop: capture, stand down, let go.
 
-    The counterpart of the relaunch path, and the same shape -- each plugin
+    The counterpart of the relaunch path, and the same shape: each plugin
     knows how to release its own app, exactly as it knows how to bring it back.
 
     THE ORDER IS THE WHOLE THING:
@@ -2064,7 +2065,7 @@ def do_wind_down():
 
     Deliberately does NOT reboot, log out, or stop anything else. Power is the
     caller's business; usher's is knowing what the session was and letting it
-    go tidily. Always exits 0 -- a failure here must never strand somebody at a
+    go tidily. Always exits 0: a failure here must never strand somebody at a
     machine that will not shut down."""
     try:
         do_capture()
@@ -2176,9 +2177,9 @@ LOG_CAP = 256 * 1024   # rotate watch.log past this; bounds it to ~2x LOG_CAP
 def logline(msg):
     """Append a timestamped line to the daemon's own log. Autostart discards a
     child's stdout/stderr, so without this a death (or a skipped event) is
-    invisible -- which is exactly how a slow-login crash went unnoticed. Best
+    invisible, which is exactly how a slow-login crash went unnoticed. Best
     effort: logging must never itself take the daemon down. Rotated at LOG_CAP
-    (one generation kept) so a respawn loop cannot fill the disk -- the tree
+    (one generation kept) so a respawn loop cannot fill the disk: the tree
     has a 14G-session-log scar behind that caution."""
     try:
         os.makedirs(STATE, exist_ok=True)
@@ -2197,7 +2198,7 @@ def logline(msg):
 def connect(retries=25, delay=0.2):
     """Open an IPC socket, retrying while the compositor's socket comes up. At
     autostart the ipc plugin may not have exported WAYFIRE_SOCKET yet, and
-    WayfireSocket() raises at once with no retry of its own -- so a daemon that
+    WayfireSocket() raises at once with no retry of its own, so a daemon that
     connects eagerly can die before it ever watches (kanshi-mgr retries the
     same way, ~5s). Only the initial connect retries; a mid-session drop is a
     real teardown and is handled by the caller."""
@@ -2213,7 +2214,7 @@ def connect(retries=25, delay=0.2):
 
 def is_desync_error(e):
     """True if e means the IPC socket is POISONED (off-by-one) and only a
-    reconnect can cure it -- as opposed to a benign server error-response (e.g.
+    reconnect can cure it, as opposed to a benign server error-response (e.g.
     "view is not toplevel") that leaves the socket in sync. The desync CAUSE is
     a request timeout, whose response is left unread in the buffer; the SYMPTOM,
     on the next call, is wrong-shaped data (KeyError/TypeError/IndexError) or a
@@ -2228,12 +2229,12 @@ def is_desync_error(e):
 
 def acquire_singleton():
     """One watcher only. Two would double-place every window and race the
-    knowledge writes -- a hand-launched stopgap outliving the next autostart is
+    knowledge writes: a hand-launched stopgap outliving the next autostart is
     the concrete case. flock auto-releases when the holder exits (even a
     crash), so the slot frees itself with no stale-pidfile cleanup. Returns the
     held fd (keep it for the process lifetime), None if another watcher holds
     it, or "unlocked" if the lock infra itself is unavailable (never let a lock
-    failure disable restore -- degrade to unlocked and say so)."""
+    failure disable restore: degrade to unlocked and say so)."""
     import fcntl
     d = os.environ.get("XDG_RUNTIME_DIR") or STATE
     try:
@@ -2252,7 +2253,7 @@ def acquire_singleton():
 
 
 def runtime_dir():
-    """XDG_RUNTIME_DIR (session-private tmpfs) or STATE as fallback -- the one
+    """XDG_RUNTIME_DIR (session-private tmpfs) or STATE as fallback: the one
     place the lock file and the adopt flag live."""
     return os.environ.get("XDG_RUNTIME_DIR") or STATE
 
@@ -2332,7 +2333,7 @@ def do_stop():
     """Stop the watcher cleanly: SIGTERM the supervisor, whose stop handler
     terminates the worker and exits (releasing the lock). Replaces the
     `pkill -f 'session-mgr watch'` dance, which races the respawn and can
-    match the wrong process -- including the shell running the pkill."""
+    match the wrong process: including the shell running the pkill."""
     _signal_watcher(signal.SIGTERM, "stop", "stopped")
 
 
@@ -2442,7 +2443,7 @@ def _t_registry(ck):
         ck("kitty-home-has-an-identity", _kp.identity(_kv) == f"kitty:{_home}")
         ck("kitty-home-is-not-transient", not _kp.transient(_kv))
         # AN UNREADABLE CWD IS "ASK AGAIN", NOT "NEVER REMEMBER THIS", and
-        # this check used to assert the opposite -- a test pinning a mistaken
+        # this check used to assert the opposite: a test pinning a mistaken
         # belief. transient means never remember; unidentified means cannot say
         # WHICH window yet. Conflating them cost real behaviour: a kitty cannot
         # be identified for its first 0.25s (no shell in /proc yet) so it read
@@ -2508,7 +2509,7 @@ def _t_terminals(ck):
     """a terminal's SLOT, and which windows need respawning."""
     ps = {getattr(p, "name", "?"): p for p in plugins()}
     # THE SLOT. A terminal owns its place by the COMMAND it runs, so the two
-    # windows below are the same slot despite showing different sessions --
+    # windows below are the same slot despite showing different sessions:
     # which is the entire point of the change, and what the session-shaped key
     # could not do.
     ck("slot-local", _mux_slot(None) == "term:resume")
@@ -2724,7 +2725,7 @@ def _t_chrome(ck):
     # actually comes in. These are real captures: Chrome rewrites its own argv
     # into ONE space-joined string, so the NUL-separated form the kernel
     # documents is the MINORITY here, and reading only that form made
-    # browser_pids() return [] on both boxes -- wind-down signalling nothing,
+    # browser_pids() return [] on both boxes: wind-down signalling nothing,
     # which is the whole of what it is for.
     ck("browser-cmdline-space-joined",
        is_browser_cmdline(
@@ -2824,7 +2825,7 @@ def _t_placement(ck):
     """place_of and target_geometry: the two halves of WHERE a window goes.
 
     They are inverses, and both were completely untested, which is a strange
-    place for this repo to have a hole -- a bug in either misplaces every
+    place for this repo to have a hole: a bug in either misplaces every
     window, and the note in place_of already says "if a restored window ever
     lands one workspace off, this offset is the thing to re-check first"."""
     _o = {"DP-1": {"id": 1, "geometry": {"x": 0, "y": 0, "width": 1000,
@@ -2881,7 +2882,7 @@ def _t_placement(ck):
     # Deliberately an app NO plugin owns, so identity() is the raw title and
     # the matcher is what is under test rather than the plugin registry. (A
     # kitty titled "kitty:/a" would be claimed by MuxPlugin, which owns any
-    # kitty whose title has a colon -- which is why that fixture is wrong.)
+    # kitty whose title has a colon, which is why that fixture is wrong.)
     _en = [{"app_id": "libreoffice", "title": "A.odt", "appid_only": False},
            {"app_id": "libreoffice", "title": "B.odt", "appid_only": False},
            {"app_id": "slack", "title": "anything", "appid_only": True}]
@@ -3136,8 +3137,8 @@ def _t_watcher(ck):
     The notes said the only way to verify watch.py was to run the daemon. That
     is half true: placement and capture need a live socket, but the STATE
     MACHINE does not, and Watcher.__init__ opens nothing. Two of one day's bugs
-    lived exactly here -- the capture loop racing the placer over one window's
-    position, and a hold that never released -- and both were found by hand in
+    lived exactly here: the capture loop racing the placer over one window's
+    position, and a hold that never released, and both were found by hand in
     a session that should have been a test.
 
     Imported here rather than at the top because watch imports THIS module; at
@@ -3243,7 +3244,7 @@ def _t_watcher(ck):
 
 
 def selftest():
-    """Offline unit checks for the plugin framework and the store -- no
+    """Offline unit checks for the plugin framework and the store: no
     compositor, deterministic. Run with `session-mgr selftest`.
 
     Split by AREA rather than written as one list, so a failure names the area

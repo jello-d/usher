@@ -93,12 +93,12 @@ CAPTURE_FAIL_LIMIT = 15
 class Supervisor:
     """Hold the single-instance lock, spawn a worker, and respawn it with
     backoff if it dies. The worker is this same script RE-EXEC'd (the `_worker`
-    verb), not a fork -- so it reloads its code from disk on every respawn
+    verb), not a fork, so it reloads its code from disk on every respawn
     (kill the worker to pick up an edit), and only the supervisor holds the
     lock (the worker no longer inherits the fd, so an orphan can never block a
     restart). If a watcher is ALREADY running, run() reloads it in place
     (SIGHUP re-exec, picking up a code edit and the armed mode) instead of
-    exiting -- so re-running watch/resume IS the reload. Two paths in one
+    exiting, so re-running watch/resume IS the reload. Two paths in one
     script, self-contained (contrast kanshi/kanshi-mgr); session teardown reaps
     both via the cgroup kill, so the supervisor need not detect session end
     itself."""
@@ -222,7 +222,7 @@ class Watcher:
     Placement and capture each get their own IPC socket so neither blocks the
     events.
 
-    WHY A CLASS. Three threads share one pile of mutable placement state --
+    WHY A CLASS. Three threads share one pile of mutable placement state:
     what is already placed, what is pending a settle, each window's grace
     deadline, the aggressive-mode clock, the knowledge base. That sharing is
     inherent to the design, and as nested closures it was expressed by nine
@@ -233,7 +233,7 @@ class Watcher:
 
     If a `session-mgr resume` armed the adopt flag, the FIRST worker to reach
     init consumes it and LEARNS the current hand-arranged layout as the
-    baseline instead of restoring the remembered one -- for use after killing
+    baseline instead of restoring the remembered one, for use after killing
     session and fixing windows by hand, so it does not undo the good state.
     Then it watches normally; respawns (flag gone) restore as usual."""
 
@@ -349,7 +349,7 @@ class Watcher:
         `quiet` (session-mgr reload) suppresses the relaunch too, and MUST do
         so here rather than through the `launch` argument. A reload signals the
         running supervisor, which re-execs with its OWN original argv, so the
-        launch flag the reload was invoked with never reaches the worker --
+        launch flag the reload was invoked with never reaches the worker,
         while a fresh supervisor generation deletes the LAUNCHED marker,
         re-arming the relaunch. A deploy therefore spawned a terminal every
         time. The mode travels in the flag file, which the worker DOES read, so
@@ -404,7 +404,7 @@ class Watcher:
         """_place_view with the IPC error policy wrapped round it. A desync-
         class error (timeout / off-by-one) poisons place_sock the same way it
         poisons the capture socket, and would then silently fail EVERY
-        placement for the rest of the session -- so rebuild it on one. A benign
+        placement for the rest of the session, so rebuild it on one. A benign
         server error-response (e.g. "view is not toplevel" for a popup) leaves
         the socket in sync: log it and move on, never reconnect."""
         try:
@@ -454,9 +454,9 @@ class Watcher:
             #
             # NOT YET is the common case, so RE-QUEUE rather than drop, and
             # RE-READ THE VIEW when the retry comes due. A plugin reads live
-            # state that lags the map -- measured, a kitty window's identity
+            # state that lags the map: measured, a kitty window's identity
             # resolves 0.25s after mapping while the placer first looks at
-            # 0.15s -- and the event payload we were handed is a snapshot of
+            # 0.15s, and the event payload we were handed is a snapshot of
             # that moment, so retrying it asks the same question forever. The
             # grace bounds the retrying, which is the same "stay willing until
             # the window has had one real chance" rule the grace exists for.
@@ -492,7 +492,7 @@ class Watcher:
         had to do it by hand.
 
         So the FIRST time a window can be recognised, restart its grace and
-        feed the settle clock, exactly as if it had just mapped -- because from
+        feed the settle clock, exactly as if it had just mapped, because from
         usher's point of view it just has. This needs no model of the sequence,
         no knowledge of keyrings or agents, and no new persistent state: it
         simply stays willing to place a window until it has had one real
@@ -549,7 +549,7 @@ class Watcher:
         """Re-apply the window STATE a geometry move does not carry: the
         colour-invert shader, and fullscreen. Both are only ever set, never
         cleared (see apply_fullscreen), and both belong here rather than inside
-        the move branch -- a window an app already restored at its target
+        the move branch: a window an app already restored at its target
         position is matched-but-not-moved and must still get its state back,
         which is exactly the bug that made invert "forget some"."""
         if e.get("inverted"):
@@ -608,7 +608,7 @@ class Watcher:
         renames. That is right while the store is fixed, and WRONG the moment
         the store changes underneath it. A Chrome window that was
         unidentifiable when its last event arrived becomes identifiable the
-        instant its session file catches up or its slot is re-keyed -- and
+        instant its session file catches up or its slot is re-keyed, and
         nothing tells us so, because the window is not doing anything. One
         whose title has settled emits no further events at all, so it is never
         reconsidered and simply stays where Chrome put it.
@@ -761,8 +761,8 @@ class Watcher:
         window that resolved its identity a few seconds late had its slot
         replaced by Chrome's cascade position on every single restart, so by
         the time it became placeable the store had already been taught that the
-        cascade WAS its home. Two failures compounding -- one late identity,
-        one eager capture -- and only the second is fixable here.
+        cascade WAS its home. Two failures compounding: one late identity,
+        one eager capture, and only the second is fixable here.
 
         A window is released the moment it is placed, or when its grace runs
         out and usher is no longer going to act on it. In steady state nothing
@@ -778,7 +778,7 @@ class Watcher:
     def _capture_once(self, cap):
         """One snapshot: learn from it, save the knowledge, roll the history if
         this was a layout change rather than a tab flip. The SNAPSHOT is always
-        whole -- only what we LEARN from it is held back."""
+        whole: only what we LEARN from it is held back."""
         snap = snapshot(cap)
         hold = self._held(snap["windows"])
         # WHEN THE HOLD LIFTS, COME BACK. Capture is event-driven, so a window
@@ -809,7 +809,7 @@ class Watcher:
         (the name/mapped KeyError storm). Reusing it never resyncs, so on a
         desync-class error drop the socket and reconnect; st["dirty"] stays
         set, so the next tick retries on the fresh socket. A benign error would
-        not desync, so it is left alone -- the streak backstop still covers a
+        not desync, so it is left alone: the streak backstop still covers a
         persistent one."""
         logline(f"capture error: {e} (streak {errstreak})")
         if is_desync_error(e):
@@ -834,8 +834,8 @@ class Watcher:
 
     def _event_loop(self, watch):
         """Read compositor events until the compositor goes away. Guard the
-        WHOLE event body: a stalled-compositor IPC timeout -- or any unforeseen
-        error -- on one event must skip that event, never fall out of the loop
+        WHOLE event body: a stalled-compositor IPC timeout, or any unforeseen
+        error, on one event must skip that event, never fall out of the loop
         and end the daemon. The login-storm crash that piled Chrome up came in
         through exactly this path (a placement call)."""
         while True:
