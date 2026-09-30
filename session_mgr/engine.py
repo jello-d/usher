@@ -1417,30 +1417,51 @@ def _learn_stamp(kb, groups, windows, counts, when, hold=()):
                 kb[kkey(app, t)] = kb_entry(w, t, False, when)
 
 
-def _learn_purge_terminals(kb, windows):
-    """Drop terminal entries no live window shows."""
-    # Mux terminals: keep only the session each window CURRENTLY shows. A window
-    # that cycled sessions leaves the old titles in the store, where they would
-    # relaunch as phantom windows or yank a different window that later shows
-    # that session. Drop any mux-terminal entry no live window shows.
-    #
-    # BOTH sides must be IDENTITIES. A kb entry's "title" field is the KEY-title
-    # (kb_entry stamps identity(), not the window title), so comparing it to raw
-    # window titles never matched and this block deleted every terminal entry it
-    # had just written, on every pass, so terminals were never placed
-    # at all. And the entry is selected by its KEY SHAPE, not by is_mux_term on
-    # that key: is_mux_term only asks "kitty, with a colon?", which a
-    # kitty:<cwd> key also satisfies, so the mux purge was sweeping plain kitty
-    # windows out too.
+def _learn_purge_terminals(kb, windows, seen):
+    """Drop the terminal entries whose window we WATCHED GO.
+
+    ABSENCE FROM ONE SNAPSHOT IS NOT EVIDENCE OF A CLOSED WINDOW, and reading
+    it as such cost every terminal its slot at every login. The daemon captures
+    as soon as it is watching, which is BEFORE the terminals it just launched
+    have mapped: manifestor's 22:30:35 snapshot held zero windows, six seconds
+    ahead of the two kitty windows arriving. This purge then concluded both were
+    gone and deleted the slots, so the placer had nothing to aim at, the windows
+    stayed where kitty dropped them, and once the hold expired the capture loop
+    learned the cascade position AS the slot. Chrome was untouched and placed
+    perfectly, because chrome entries age out on the TTL instead of being purged
+    on absence, which is once again why this read as "restore works, mostly".
+
+    So the question is not "is it here?" but "did we see it go?", which needs a
+    memory of what was ever here: `seen` is this daemon generation's set of
+    terminal identities actually observed alive. An entry we have never seen
+    cannot be distinguished from one whose window has not mapped yet, so it is
+    left alone and `prune_kb`'s TTL remains the backstop for a genuinely stale
+    one. A reload starts a fresh generation with an empty memory, so the purge
+    goes briefly quiet until each terminal is observed once; that is the
+    conservative direction and it costs nothing.
+
+    The real job is unchanged: a window that is closed during a session is seen
+    and then missing, so it is dropped. Switching what a window DISPLAYS never
+    needed this, since schema 5 keys a terminal by its COMMAND.
+
+    BOTH sides must be IDENTITIES. A kb entry's "title" field is the KEY-title
+    (kb_entry stamps identity(), not the window title), so comparing it to raw
+    window titles never matched and this block deleted every terminal entry it
+    had just written, on every pass, so terminals were never placed at all. And
+    the entry is selected by its KEY SHAPE, not by is_mux_term on that key:
+    is_mux_term only asks "kitty, with a colon?", which a kitty:<cwd> key also
+    satisfies, so the mux purge was sweeping plain kitty windows out too."""
     live_terms = {identity(w) for w in windows
                   if is_mux_term(w["app_id"], w["title"])}
+    seen.update(live_terms)
     for k in [k for k, v in kb.items()
               if TERM_KEY_RE.match(v.get("title", ""))
+              and v.get("title") in seen
               and v.get("title") not in live_terms]:
         del kb[k]
 
 
-def learn(kb, groups, windows, when, hold=()):
+def learn(kb, groups, windows, when, hold=(), seen=None):
     """Watch-time knowledge update with view-id tab-grouping.
 
     Each live view: keyed by its wayfire id, stable for the window's whole
@@ -1465,7 +1486,13 @@ def learn(kb, groups, windows, when, hold=()):
     # `hold` deliberately does NOT reach the degroup or the terminal purge:
     # those ask "is this window still HERE", which a held window plainly is.
     # Hiding it from them would drop the very entry we are protecting.
-    _learn_purge_terminals(kb, windows)
+    #
+    # `seen` is the daemon generation's memory of which terminals have actually
+    # been observed alive, and it is what makes "gone" decidable. A caller that
+    # keeps no such memory can conclude nothing, so it purges NOTHING: that is
+    # the fail-safe direction, since the cost of keeping a stale entry is one
+    # phantom relaunch and the cost of dropping a live one is losing its slot.
+    _learn_purge_terminals(kb, windows, set() if seen is None else seen)
     prune_kb(kb, when)
 
 
@@ -2807,10 +2834,32 @@ def _t_learn(ck):
     ck("learn-hold-skips-only-the-held",
        [k.split("\x00")[1] for k in _kbh2] == ["Other Document"])
 
-    # a terminal whose window is gone IS dropped (the point of the purge)
-    learn(_kb, _groups, [], 1_800_000_002)
-    ck("learn-drops-absent-mux",
-       not any(v["title"].startswith("term:") for v in _kb.values()))
+    # THE TWO HALVES OF "GONE", which one boolean used to answer for both and
+    # got the login case exactly backwards. The old check here demonstrated the
+    # purge with an EMPTY window list and no memory, which is the one input
+    # where nothing can be concluded: that is the shape of every session start,
+    # and it deleted both terminal slots seconds before their windows mapped.
+    #
+    # NOT YET SEEN, absent: could be closed, could be still starting. KEEP.
+    _kbs = {"kitty\x00term:resume": dict(_kb["kitty\x00term:resume"])}
+    learn(_kbs, {}, [], 1_800_000_002, seen=set())
+    ck("learn-keeps-a-terminal-never-seen-alive",
+       "kitty\x00term:resume" in _kbs)
+    # WATCHED GO: observed alive on an earlier pass, absent now. DROP.
+    _seen = set()
+    learn(_kbs, {}, [LW(1, "usher:main⠀⠀⠀⠀[manifestor]")], 1_800_000_002,
+          seen=_seen)
+    ck("learn-remembers-a-live-terminal", "term:resume" in _seen)
+    learn(_kbs, {}, [], 1_800_000_003, seen=_seen)
+    ck("learn-drops-a-terminal-we-watched-go",
+       not any(v["title"].startswith("term:") for v in _kbs.values()))
+    # AND A CALLER THAT KEEPS NO MEMORY PURGES NOTHING, rather than purging
+    # everything, which is the fail-safe direction: one phantom relaunch costs
+    # less than a lost slot.
+    _kbn = {"kitty\x00term:resume": dict(_kb["kitty\x00term:resume"])}
+    learn(_kbn, {}, [], 1_800_000_002)
+    ck("learn-without-a-memory-purges-nothing",
+       "kitty\x00term:resume" in _kbn)
     # ...but a kitty:<cwd> entry is NOT swept by the mux purge (it merely has a
     # colon in it, which is all is_mux_term ever tested for)
     _kb["kitty\x00kitty:/tmp"] = {"app_id": "kitty", "title": "kitty:/tmp",

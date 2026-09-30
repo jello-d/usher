@@ -260,6 +260,14 @@ class Watcher:
         #                           sequence still lands)
         self.groups = {}       # vid -> {"app", "titles": set}: the in-session
         #                        tab-group, fed to learn()
+        self.seen_terms = set()   # terminal identities this generation has
+        #                           actually OBSERVED alive. The terminal purge
+        #                           may only drop what is in here, because a
+        #                           window absent from a snapshot has either
+        #                           closed or not mapped yet and nothing else
+        #                           tells the two apart. Empty at startup, which
+        #                           is exactly when the windows we just launched
+        #                           have not arrived.
         self.hold_until = 0    # when the earliest HELD window is released, so
         #                        a quiet session still comes back to learn it
         self.place_sock = None
@@ -796,7 +804,8 @@ class Watcher:
                               default=0)
         with self.lock:
             roll = self.st["layout"]
-            learn(self.kb, self.groups, snap["windows"], snap["time"], hold)
+            learn(self.kb, self.groups, snap["windows"], snap["time"], hold,
+                  seen=self.seen_terms)
             self.st["dirty"] = False
             self.st["layout"] = False
             save_knowledge(self.kb)
