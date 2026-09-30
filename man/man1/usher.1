@@ -11,7 +11,7 @@ hand-written placement rules it records where windows actually are and puts them
 back. The one command
 .B session-mgr
 is both the login daemon and its controller. Placement is AGGRESSIVE for a
-window after login (or a re-arm), then STEADY \(en a reopened window just
+window after login (or a re-arm), then STEADY: a reopened window just
 appears where you are; the opt-in
 .I session/include
 anchors keep snapping back even then, and
@@ -121,7 +121,7 @@ placement is lost on upgrade.
 .SH IDENTITY AND PLUGINS
 A window is matched to its saved slot by (app_id, key). App-SPECIFIC identity
 and respawn live in PLUGINS. Three ship built in, and none keys on what the
-window is currently SHOWING \(en a window that can display many things would
+window is currently SHOWING: a window that can display many things would
 otherwise lose its place whenever you switched:
 .TP
 .B chrome
@@ -155,7 +155,7 @@ file in
 .I ~/.config/session/plugins/
 defining a top-level
 .B PLUGIN
-object \(en see the shipped
+object: see the shipped
 .I share/plugins/example.py .
 Each plugin claims an app's windows
 .RB ( owns )
