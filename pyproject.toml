@@ -7,7 +7,12 @@ dependencies = ["wayfire==3.2"]
 classifiers = ["License :: OSI Approved :: Apache Software License"]
 
 [project.scripts]
-session-mgr = "session_mgr.cli:main"
+usher = "session_mgr.cli:main"
+usher-mgr = "session_mgr.cli:main_mgr"
+# One release only, so the rename can be staged across two repos. See
+# cli.main_legacy for why two names on PATH is acceptable here and when to drop
+# this line.
+session-mgr = "session_mgr.cli:main_legacy"
 
 [build-system]
 requires = ["setuptools>=61"]

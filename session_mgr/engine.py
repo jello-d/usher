@@ -77,11 +77,15 @@ LOCAL_HOST = os.uname().nodename.split(".")[0]
 # wherever you are, never be captured or placed: a blank New Tab, the Chrome
 # profile picker, and so on. The old hardcoded Chrome list now ships as the
 # file's default content. See the file's header for the format.
+# ONE definition of where usher's user config lives. It was built inline three
+# times and a fourth was about to be added; the same fact in four places is the
+# thing this tree's single-source rule exists to stop.
+CONFIG_DIR = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
+    "session")
+
 EXCLUDE_FILE = os.environ.get(
-    "SESSION_EXCLUDE_FILE",
-    os.path.join(
-        os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
-        "session", "exclude"))
+    "SESSION_EXCLUDE_FILE", os.path.join(CONFIG_DIR, "exclude"))
 
 
 def load_exclude_rules(path=EXCLUDE_FILE):
@@ -155,10 +159,7 @@ def reload_exclude():
 # opens where you are and stays (default follow-me: an empty/absent file
 # anchors nothing). Exclude still wins: a window matching both is never placed.
 INCLUDE_FILE = os.environ.get(
-    "SESSION_INCLUDE_FILE",
-    os.path.join(
-        os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
-        "session", "include"))
+    "SESSION_INCLUDE_FILE", os.path.join(CONFIG_DIR, "include"))
 
 ANCHOR_RULES, ANCHOR_ERRORS = load_exclude_rules(INCLUDE_FILE)
 
@@ -590,9 +591,24 @@ class WindowPlugin:
 PLUGIN_HOOKS = ("owns", "identity", "transient", "relaunch_command",
                 "relaunch_missing", "wind_down")
 
-PLUGIN_DIR = os.path.join(
-    os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
-    "session", "plugins")
+PLUGIN_DIR = os.path.join(CONFIG_DIR, "plugins")
+
+# THE SESSION-START SEAM. usher does not know how this machine starts a console
+# session, and must not: greetd, a different display manager or a bare
+# `startx` are all somebody else's business. It knows only that ONE executable
+# can do it, found here, usually as a symlink so `ls -l` names the provider.
+#
+# A SINGLE PATH, NOT A `.d` DIRECTORY, and the difference is the shape of the
+# job. A directory fits a fan-out event (hwdp's changed.d, which usher itself
+# hooks into): every provider runs, none of them answers. Starting a session is
+# one ACTION with one result, needing its exit status and its stdio, since a
+# password prompt has to reach the terminal. Two providers would be a bug, not
+# a feature.
+#
+# The provider gets the action as its argument and OBTAINS ITS OWN PRIVILEGE if
+# it needs any, which is what lets this stay a plain symlink to a root-owned
+# helper rather than usher deciding who should be root.
+SESSION_START = os.path.join(CONFIG_DIR, "session-start")
 
 _PLUGINS = None
 
@@ -2646,6 +2662,52 @@ def _t_launch_source(ck):
         globals()["load_snapshot"], globals()["plugins"] = real
 
 
+def _t_cli_split(ck):
+    """The two front ends: one table, and each refuses the other's verbs.
+
+    usher-mgr is the service (autostart, systemd, hooks) and usher is the human
+    CLI. The split is the AUDIENCE column of cli.VERBS, so the failure this
+    guards is the table and the usage text drifting apart, or a verb becoming
+    undispatchable because nobody said who it was for.
+    """
+    from . import cli
+    # EVERY VERB THE DISPATCH HANDLES MUST BE IN THE TABLE, or it is unreachable
+    # and the usage text cannot mention it. Read the dispatch's own source for
+    # the literals rather than trusting a second list here.
+    import inspect
+    import re
+    src = inspect.getsource(cli._dispatch)
+    handled = set(re.findall(r'verb == "([a-z_-]+)"', src))
+    handled |= set(re.findall(r'"([a-z_-]+)"',
+                             " ".join(re.findall(r'verb in \(([^)]*)\)', src))))
+    missing = sorted(handled - set(cli.VERBS))
+    ck("every-dispatched-verb-is-in-the-table", not missing)
+    # ...and every table entry is actually dispatched, so the usage text cannot
+    # advertise a verb that does nothing.
+    undispatched = sorted(v for v in cli.VERBS if v not in handled)
+    ck("every-table-verb-is-dispatched", not undispatched)
+    # THE AUDIENCES ARE THE THREE WE MEAN, so a typo cannot silently make a verb
+    # reachable from neither front end.
+    ck("audiences-are-known",
+       {a for a, _h in cli.VERBS.values()} <= {"mgr", "cli", "both"})
+    # The service verbs stay off the CLI and vice versa: this is the split.
+    ck("watch-is-the-services", cli.VERBS["watch"][0] == "mgr")
+    ck("cleanly-is-the-humans", cli.VERBS["cleanly"][0] == "cli")
+    ck("selftest-is-for-both", cli.VERBS["selftest"][0] == "both")
+    # An internal verb carries no help, so it never appears in usage.
+    ck("internal-verbs-are-hidden",
+       cli.VERBS["_worker"][1] is None and cli.VERBS["_super"][1] is None)
+    # THE SEAM: usher must not hardcode how a session starts. It reads one
+    # path, and the path is beside the other user config rather than in a
+    # second config dir.
+    ck("session-start-seam-sits-with-the-other-config",
+       SESSION_START == os.path.join(CONFIG_DIR, "session-start"))
+    ck("config-dir-is-single-sourced",
+       EXCLUDE_FILE.startswith(CONFIG_DIR)
+       and INCLUDE_FILE.startswith(CONFIG_DIR)
+       and PLUGIN_DIR.startswith(CONFIG_DIR))
+
+
 def _t_relaunch(ck):
     """the relaunch paths, RUN with the spawn stubbed."""
     # RUN the relaunch paths end to end with the spawn stubbed. Checking
@@ -3356,7 +3418,8 @@ def selftest():
         if not cond:
             fails.append(name)
 
-    for area in (_t_registry, _t_terminals, _t_launch_source,
+    for area in (_t_registry, _t_terminals, _t_cli_split,
+                 _t_launch_source,
                  _t_relaunch, _t_chrome, _t_learn,
                  _t_geometry, _t_placement, _t_snapshots, _t_profiles,
                  _t_migration, _t_watcher, _t_contracts):
