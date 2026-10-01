@@ -1,13 +1,13 @@
 [project]
-name = "session-mgr-indicator"
+name = "usher-indicator"
 version = "0.1.0"
-description = "SNI tray indicator for usher (session-mgr) placement"
+description = "SNI tray indicator for usher window placement"
 requires-python = ">=3.9"
 dependencies = ["dbus-next>=0.2.3", "Pillow>=9"]
 classifiers = ["License :: OSI Approved :: Apache Software License"]
 
 [project.scripts]
-session-mgr-indicator = "session_mgr_indicator.__main__:main"
+usher-indicator = "usher_indicator.__main__:main"
 
 [build-system]
 requires = ["setuptools>=61"]

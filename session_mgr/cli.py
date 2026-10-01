@@ -61,9 +61,21 @@ VERBS = {
 PROG = "usher"     # set per entry point, so messages name what was typed
 
 
+def gate_blocks(who, audience):
+    """Does an ENTRY with this audience refuse a VERB with that one?
+
+    THE RULE, named once. A verb's audience says who it is for ("mgr", "cli",
+    "both"); an entry's says what it accepts ("mgr", "cli", "any"). Conflating
+    them is what refused `session-mgr watch`, so the rule lives here and the
+    tests call THIS rather than restating it, because a second copy of a
+    predicate is a second thing to get wrong.
+    """
+    return audience != "any" and who != "both" and who != audience
+
+
 def _usage(audience):
     shown = [(v, h) for v, (a, h) in VERBS.items()
-             if h and a in (audience, "both")]
+             if h and (audience == "any" or a in (audience, "both"))]
     print(f"usage: {PROG} <verb> [options]\n", file=sys.stderr)
     for v, h in shown:
         print(f"  {v:16} {h}", file=sys.stderr)
@@ -270,6 +282,18 @@ def _do_arm(act):
 
 
 def _run(prog, audience):
+    """Dispatch for one entry point.
+
+    TWO DIFFERENT THINGS, and conflating them broke the autostart. A VERB's
+    audience says who it is for ("mgr", "cli", or "both"); an ENTRY's audience
+    says what it will accept ("mgr", "cli", or "any"). The first version used
+    "both" for the permissive entry as well, so the gate read `who != "both" and
+    who != audience` with audience="both" and who="mgr" as TRUE on both halves
+    and refused. `session-mgr watch` and `session-mgr _super` therefore failed,
+    which killed the daemon on its next reload (the supervisor re-execs itself
+    through that verb) and would have killed the autostart at the next login.
+    Caught only because a live reload left no daemon behind.
+    """
     global PROG
     PROG = prog
     args = sys.argv[1:]
@@ -277,7 +301,7 @@ def _run(prog, audience):
     who = VERBS.get(verb, (None, None))[0]
     if who is None:
         _usage(audience)
-    if who != "both" and who != audience:
+    if gate_blocks(who, audience):
         other = "usher-mgr" if who == "mgr" else "usher"
         sys.exit(f"{prog}: `{verb}` belongs to {other}. Try: {other} {verb}")
     _dispatch(verb, args)
@@ -305,4 +329,4 @@ def main_legacy():
     is nothing to shadow and nothing to rot. Delete it once a fleet-wide grep
     for session-mgr is clean.
     """
-    _run("session-mgr", "both")
+    _run("session-mgr", "any")

@@ -2219,7 +2219,11 @@ AGGR_CAP = float(os.environ.get("SESSION_AGGR_CAP", 900))        # 15 min cap
 # (Phase-2) tray gadget.
 RUNTIME_DIR = os.environ.get("XDG_RUNTIME_DIR") or STATE
 ARM_FILE = os.path.join(RUNTIME_DIR, "session-mgr.arm")
-STATUS_FILE = os.path.join(RUNTIME_DIR, "session-mgr.status")
+# The tray indicator READS this every second, so the name is a contract with
+# usher_indicator.STATUS_FILE and the two must move together. It is runtime
+# state under XDG_RUNTIME_DIR, recreated each boot, so renaming it needed no
+# migration: an old file simply stops being written and goes at reboot.
+STATUS_FILE = os.path.join(RUNTIME_DIR, "usher.status")
 
 
 LOG_CAP = 256 * 1024   # rotate watch.log past this; bounds it to ~2x LOG_CAP
@@ -2697,6 +2701,20 @@ def _t_cli_split(ck):
     # An internal verb carries no help, so it never appears in usage.
     ck("internal-verbs-are-hidden",
        cli.VERBS["_worker"][1] is None and cli.VERBS["_super"][1] is None)
+    # THE PERMISSIVE ENTRY MUST ACCEPT EVERY VERB, and this is the check that
+    # the autostart needed. A verb's audience ("who is it for") and an entry's
+    # audience ("what will it accept") are different things; the first version
+    # used "both" for each, so the gate refused `session-mgr watch` and
+    # `session-mgr _super`. That killed the daemon on its next reload, because
+    # the supervisor re-execs itself through _super, and would have killed the
+    # autostart at the next login. Nothing offline caught it.
+    for _v, (_who, _h) in cli.VERBS.items():
+        ck(f"legacy-entry-accepts-{_v}", not cli.gate_blocks(_who, "any"))
+    ck("the-mgr-entry-still-refuses-a-cli-verb", cli.gate_blocks("cli", "mgr"))
+    ck("the-cli-entry-still-refuses-a-mgr-verb", cli.gate_blocks("mgr", "cli"))
+    ck("a-both-verb-passes-either-front-end",
+       not cli.gate_blocks("both", "mgr")
+       and not cli.gate_blocks("both", "cli"))
     # THE SEAM: usher must not hardcode how a session starts. It reads one
     # path, and the path is beside the other user config rather than in a
     # second config dir.

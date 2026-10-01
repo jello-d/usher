@@ -1,21 +1,21 @@
-"""session-mgr-indicator - an SNI tray icon for session-mgr's placement mode,
+"""usher-indicator - an SNI tray icon for usher's window-placement mode,
 drawn in the same owned-glyph language as mux-indicator / comms-indicator (a
 near-black rounded tile, frame colour = state) so the tray reads as one system.
 
-It is a thin PRESENTER: the state machine lives in session-mgr, which publishes
-{mode, seconds_left, arc} to STATUS_FILE each tick. This daemon reads that to
-draw, and a left-click shells `session-mgr toggle` (steady <-> aggressive).
-Nothing here duplicates the placement logic.
+It is a thin PRESENTER: the state machine lives in the usher daemon, which
+publishes {mode, seconds_left, arc} to STATUS_FILE each tick. This reads that to
+draw, and a left-click shells `usher toggle` (steady <-> aggressive). Nothing
+here duplicates the placement logic.
 
 Three states by FRAME colour, one identity glyph (a 2x2 window grid, top-left
 window focused):
   steady      green: windows stay where they are
   aggressive  amber: placing windows back; a depleting ring counts the
                          seconds until it settles (arc drains clockwise)
-  down        grey: session-mgr not running (STATUS_FILE absent or stale)
+  down        grey: usher not running (STATUS_FILE absent or stale)
 
 Deps: dbus-next (pure-Python D-Bus) + Pillow. Drawn per size, ARGB32 in network
-byte order per the StatusNotifierItem spec. `session-mgr-indicator render-test
+byte order per the StatusNotifierItem spec. `usher-indicator render-test
 DIR` dumps preview PNGs (dev aid, no D-Bus).
 """
 import asyncio
@@ -172,11 +172,17 @@ def icon_pixmap(state, arc, sizes=(22, 32, 48)):
     return out
 
 
-# --- state feed: read what session-mgr publishes; act via `session-mgr` -------
+# --- state feed: read what the daemon publishes; act through the CLI ----------
+#
+# TWO NAMES, ONE SPLIT. usher-mgr WRITES the status file and `usher` is what we
+# shell to change the mode, because toggling is an interaction and the daemon is
+# a service. The file name must match engine.STATUS_FILE exactly; it is runtime
+# state under XDG_RUNTIME_DIR, so the rename needed no migration, only that both
+# sides move in the same commit.
 STATUS_FILE = os.path.join(
-    os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "session-mgr.status")
-SESSION_MGR = os.environ.get("SESSION_MGR", "session-mgr")   # resolved on PATH
-_STALE = 5.0   # session-mgr writes every 1s; older than this => not running
+    os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "usher.status")
+USHER = os.environ.get("USHER_BIN", "usher")   # resolved on PATH
+_STALE = 5.0   # the daemon writes every 1s; older than this => not running
 
 
 def read_status():
@@ -208,7 +214,7 @@ def _render_test(outdir):
             off = (96 - z) // 2
             sheet.paste(_tile(st, arc, z), (x + off, y + off))
             x += z + gap
-    p = os.path.join(outdir, "session-mgr-indicator.png")
+    p = os.path.join(outdir, "usher-indicator.png")
     sheet.save(p)
     print(p)
 
@@ -237,7 +243,7 @@ def _run():
                     ", click to settle now")
         if state == "steady":
             return "Window placement: STEADY, click to kick aggressive"
-        return "session-mgr not running"
+        return "usher not running"
 
     def _sig(state, arc):
         # Redraw signature: state + a coarse arc bucket, so the depleting ring
@@ -266,7 +272,7 @@ def _run():
 
         @dbus_property(access=PropertyAccess.READ)
         def Id(self) -> "s":
-            return "session-mgr-indicator"
+            return "usher-indicator"
 
         @dbus_property(access=PropertyAccess.READ)
         def Title(self) -> "s":
@@ -319,12 +325,12 @@ def _run():
         async def _toggle(self):
             try:
                 p = await asyncio.create_subprocess_exec(
-                    SESSION_MGR, "toggle",
+                    USHER, "toggle",
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL)
                 await p.communicate()
             except OSError as e:
-                print(f"session-mgr-indicator: toggle failed: {e}", flush=True)
+                print(f"usher-indicator: toggle failed: {e}", flush=True)
             self.refresh()
 
         @signal()
@@ -349,9 +355,9 @@ def _run():
                 obj = bus.get_proxy_object(WATCHER, WATCHER_PATH, intro)
                 w = obj.get_interface(WATCHER)
                 await w.call_register_status_notifier_item(name)
-                print(f"session-mgr-indicator: registered {name}", flush=True)
+                print(f"usher-indicator: registered {name}", flush=True)
             except Exception as e:
-                msg = f"session-mgr-indicator: register failed: {e}"
+                msg = f"usher-indicator: register failed: {e}"
                 print(msg, flush=True)
 
         # (Re)register whenever the tray watcher (waybar) appears, so a
@@ -374,7 +380,7 @@ def _run():
         if owner:
             await register()
         else:
-            print("session-mgr-indicator: waiting for the tray watcher",
+            print("usher-indicator: waiting for the tray watcher",
                   flush=True)
         asyncio.create_task(watch(item))
         await asyncio.get_event_loop().create_future()

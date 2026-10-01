@@ -1,10 +1,10 @@
 #!/bin/sh
 # setup.sh - install / uninstall / check / test the usher window-placement
-# gadget: the session-mgr daemon (a Python venv console script) plus its
+# gadget: the usher daemon (a Python venv console script) plus its
 # optional tray indicator (the `indicator` sub-package). The SINGLE entry point
 # a consumer or a provisioning layer uses.
 #
-#   ./setup.sh install       build the core venv + link session-mgr + man
+#   ./setup.sh install       build the core venv + link the commands + man
 #   ./setup.sh indicator [V] drive the optional tray indicator (passthrough)
 #   ./setup.sh all           install + indicator install
 #   ./setup.sh hooks         link the hwdp display-change hook (install does
@@ -14,7 +14,7 @@
 #   ./setup.sh test          run the in-repo suite (test/run)
 #   ./setup.sh version       the packaged version
 #
-# POSIX sh, non-privileged. The core is Python (session-mgr needs pywayfire), so
+# POSIX sh, non-privileged. The core is Python (usher needs pywayfire), so
 # `install` builds a venv (like the indicator), NOT a bare symlink. PREFIX
 # (default ~/.local), the XDG_* vars, and USHER_VENV override the destinations,
 # so a test drives it against a scratch dir; USHER_SKIP_BUILD adopts an existing
@@ -74,20 +74,30 @@ build_venv() {
   rm -rf "$_root/build" "$_root"/*.egg-info    # in-place build detritus
 }
 
+# EVERY CONSOLE SCRIPT THE PACKAGE PROVIDES, named once so install, uninstall
+# and check cannot disagree. This linked `session-mgr` alone while pyproject had
+# grown to three entry points, which put `usher` in the venv and NOT on PATH:
+# the package was correct and the command did not exist. That is the silent
+# selector-shrink this tree keeps warning about: the install still
+# reports success for the one name it knows.
+#
+# `session-mgr` is the pre-rename name and goes when its callers have moved.
+APPS="usher usher-mgr session-mgr"
+
 do_install() {
   [ -n "${USHER_SKIP_BUILD:-}" ] || build_venv
   mkdir -p "$_bin"
-  ln -sfn "$VENV/bin/session-mgr" "$_bin/session-mgr"
+  for _a in $APPS; do ln -sfn "$VENV/bin/$_a" "$_bin/$_a"; done
   _man_pages | while IFS= read -r _m; do
     _d=$_man/$(basename "$(dirname "$_m")")
     mkdir -p "$_d"; ln -sfn "$_m" "$_d/$(basename "$_m")"; done
-  echo "$PKG: session-mgr -> $_bin/session-mgr (venv $VENV)"
+  echo "$PKG: $APPS -> $_bin (venv $VENV)"
   [ -d "$(_hook_dir)" ] && do_hooks || :
 }
 
 do_uninstall() {
   _rmln "$(_hook_src)" "$(_hook_dst)"
-  _rmln "$VENV/bin/session-mgr" "$_bin/session-mgr"
+  for _a in $APPS; do _rmln "$VENV/bin/$_a" "$_bin/$_a"; done
   _man_pages | while IFS= read -r _m; do
     _rmln "$_m" "$_man/$(basename "$(dirname "$_m")")/$(basename "$_m")"; done
   echo "$PKG: removed the core links (venv $VENV left in place)"
@@ -95,12 +105,14 @@ do_uninstall() {
 
 do_check() {
   echo "== $PKG (window placement) =="
-  if [ -x "$VENV/bin/session-mgr" ]; then ok "venv app ($VENV)"
+  if [ -x "$VENV/bin/usher" ]; then ok "venv app ($VENV)"
   else bad "venv app missing ($VENV); run: install"; fi
   if "$VENV/bin/python" -c 'import wayfire' 2>/dev/null; then ok "dep wayfire"
   else bad "wayfire not importable in the venv"; fi
-  if [ -x "$_bin/session-mgr" ]; then ok "$_bin/session-mgr"
-  else bad "$_bin/session-mgr missing"; fi
+  for _a in $APPS; do
+    if [ -x "$_bin/$_a" ]; then ok "$_bin/$_a"
+    else bad "$_bin/$_a missing"; fi
+  done
   if command -v mux >/dev/null 2>&1; then ok "mux present (terminal restore)"
   else warn "mux absent: the mux plugin's terminal restore degrades"; fi
   if ! command -v hwdp >/dev/null 2>&1; then

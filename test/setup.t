@@ -9,7 +9,9 @@ harness_init setup
 
 BIN=$T/bin; SHR=$T/share; VENV=$T/venv; CFG=$T/config
 mkdir -p "$VENV/bin"
-printf '#!/bin/sh\n' > "$VENV/bin/session-mgr"; chmod +x "$VENV/bin/session-mgr"
+for _a in usher usher-mgr session-mgr; do
+  printf '#!/bin/sh\n' > "$VENV/bin/$_a"; chmod +x "$VENV/bin/$_a"
+done
 # XDG_CONFIG_HOME is sandboxed too: the hwdp display-change hook lands under it,
 # and a test must never reach into the real ~/.config to place one.
 HOOK=$CFG/hwdp/hooks/changed.d/40-usher
@@ -22,10 +24,14 @@ run() {
 # install: the console script + the man page are linked; the indicator is NOT
 # (that is the `indicator` verb, kept out so a host wiring it gets no dupe).
 run install >/dev/null 2>&1 || fail "install errored"
-[ "$(readlink "$BIN/session-mgr")" = "$VENV/bin/session-mgr" ] \
-  || fail "session-mgr not symlinked to the venv console script"
+# ALL THREE, because the install linked only one while the package provided
+# three, and the check reported success anyway.
+for _a in usher usher-mgr session-mgr; do
+  [ "$(readlink "$BIN/$_a")" = "$VENV/bin/$_a" ] \
+    || fail "$_a not symlinked to the venv console script"
+done
 [ -e "$SHR/man/man1/usher.1" ] || fail "man page not linked"
-[ -e "$BIN/session-mgr-indicator" ] \
+[ -e "$BIN/usher-indicator" ] \
   && fail "install linked the indicator (should be indicator-only)"
 
 # the hwdp hook is opt-in by PRESENCE: with no hwdp hook root, install must
@@ -45,7 +51,9 @@ run install >/dev/null 2>&1 || fail "second install errored"
 
 # uninstall: the console-script + man symlinks and the hook are removed
 run uninstall >/dev/null 2>&1 || fail "uninstall errored"
-[ -e "$BIN/session-mgr" ] && fail "session-mgr symlink not removed"
+for _a in usher usher-mgr session-mgr; do
+  [ -e "$BIN/$_a" ] && fail "$_a symlink not removed"
+done
 [ -e "$SHR/man/man1/usher.1" ] && fail "man page not removed"
 [ -e "$HOOK" ] && fail "hwdp hook not removed"
 
