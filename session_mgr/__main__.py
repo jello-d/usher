@@ -11,8 +11,9 @@ IT USES THE PERMISSIVE AUDIENCE ON PURPOSE. The installed commands are split
 other's verbs, which is the point of the split. This entry is neither: it is how
 a dev tree is driven against a live session without installing anything, so it
 has to reach `watch` and `selftest` alike. Narrowing it to the CLI audience
-would have broken the documented way of testing this program.
+would have broken the documented way of testing this program, and it is the
+same gate the retired `session-mgr` name used.
 """
-from .cli import main_legacy
+from .cli import main_any
 
-main_legacy()
+main_any()

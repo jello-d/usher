@@ -9,9 +9,10 @@ TWO FRONT ENDS OVER ONE TABLE, split by who does the typing:
 
 They are one dispatch because two lists of verbs drift: this file used to be a
 single `session-mgr` and the split is in the AUDIENCE column of VERBS, not in
-duplicated code. `session-mgr` itself survives as a third entry accepting both,
-for exactly one release, so a caller that still names it keeps working while
-tackup catches up. See the entry points in pyproject.toml.
+duplicated code. That name is gone now; it survived two releases as a third
+entry point so the rename could be staged across two repos that deploy
+independently, and was dropped once every caller on the fleet had moved and
+both boxes were running the new one.
 
 The top of the three layers, and the only one that knows about both of the
 others, which is what keeps the engine free of any reference to the daemon.
@@ -317,16 +318,17 @@ def main_mgr():
     _run("usher-mgr", "mgr")
 
 
-def main_legacy():
-    """`session-mgr`: the old single name, accepting everything.
+def main_any():
+    """`python -m session_mgr <verb>`: the dev entry, accepting every verb.
 
-    KEPT FOR ONE RELEASE so the rename can be staged across two repos that
-    deploy independently. usher is installed from a pushed-tip pin, so renaming
-    its binary while tackup still called the old name would leave a box with no
-    placement daemon and no tray indicator until the next provision. Two names
-    on PATH is normally banned here, and the rationale is a stale copy silently
-    shadowing a live one; these are two entry points into one package, so there
-    is nothing to shadow and nothing to rot. Delete it once a fleet-wide grep
-    for session-mgr is clean.
+    NOT A CONSOLE SCRIPT. The two installed commands are deliberately split and
+    each refuses the other's verbs; this is neither, because it is how a dev
+    tree is driven against a live session without installing anything, so it has
+    to reach `watch` and `selftest` alike.
+
+    It is also what the retired `session-mgr` used, which is why the permissive
+    audience outlived that name: the gate bug that refused `session-mgr watch`
+    would equally have refused `python -m session_mgr watch`, and the check
+    covering it (legacy-entry-accepts-*) still guards this entry.
     """
-    _run("session-mgr", "any")
+    _run("python -m session_mgr", "any")
