@@ -1551,7 +1551,7 @@ def persist(snap, roll=True):
 
 
 def do_capture():
-    snap = snapshot(WayfireSocket())
+    snap = snapshot(ipc())
     os.makedirs(STATE, exist_ok=True)
     persist(snap)
     kb = load_knowledge()
@@ -1838,7 +1838,7 @@ def launch_missing(snap=None):
     saved = ((snap if snap is not None else load_snapshot()) or {}).get(
         "windows", [])
     try:
-        live = WayfireSocket().list_views(filter_mapped_toplevel=True)
+        live = ipc().list_views(filter_mapped_toplevel=True)
     except Exception:
         live = []
     n = 0
@@ -2141,7 +2141,7 @@ def do_wind_down():
     except Exception:
         pass
     try:
-        live = WayfireSocket().list_views(filter_mapped_toplevel=True)
+        live = ipc().list_views(filter_mapped_toplevel=True)
     except Exception:
         live = []
     pids = []
@@ -2155,7 +2155,7 @@ def do_wind_down():
 
 
 def do_restore(dry, only=None, source=None):
-    sock = WayfireSocket()
+    sock = ipc()
     if source is None:
         entries = list(load_knowledge().values())
         print(f"from the knowledge base (profile {profile_id()})")
@@ -2263,17 +2263,82 @@ def logline(msg):
         pass
 
 
+def pick_socket(names, env=None):
+    """Which compositor socket to use, given the candidate paths.
+
+    PURE, so the decision is testable without a compositor. Returns a path, or
+    None when there is nothing to pick (the caller lets pywayfire report it).
+
+    AN EXPLICIT WAYFIRE_SOCKET ALWAYS WINS, because someone who set it means it.
+    """
+    env = os.environ if env is None else env
+    if env.get("WAYFIRE_SOCKET"):
+        return env["WAYFIRE_SOCKET"]
+    if len(names) == 1:
+        return names[0]
+    if len(names) > 1:
+        # A stale socket from a previous session would have us talk to the
+        # wrong compositor, or fail in a way that reads like a bug. Say so
+        # rather than picking.
+        raise RuntimeError(
+            f"{len(names)} wayfire sockets present, so which session to use "
+            "is ambiguous. Set WAYFIRE_SOCKET and run again: "
+            + ", ".join(names))
+    return None
+
+
+def wayfire_socket():
+    """Find the compositor socket: the environment, else the runtime dir.
+
+    PYWAYFIRE DOES NOT FIND IT, which is the whole reason this exists.
+    WayfireSocket() reads WAYFIRE_SOCKET and otherwise gives up; its
+    `allow_manual_search` searches /tmp ONLY, and this compositor puts its
+    socket in XDG_RUNTIME_DIR, so that option cannot help here either.
+
+    WHY IT MATTERS AWAY FROM THE DAEMON: the session exports WAYFIRE_SOCKET to
+    what the compositor starts, and a shell often does not have it. A tmux
+    server outlives the thing that set it, so every pane under it lacks the
+    variable, which is exactly where a person types `usher cleanly logoff` and
+    was told the compositor could not be reached. Measured: with the variable
+    unset, the verb failed from a tmux pane and worked from the same box the
+    moment it was named.
+
+    XDG_RUNTIME_DIR with a /run/user/<uid> default, since that is the standard
+    name for the directory and a shell that has lost one may have lost both.
+    """
+    rundir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    return pick_socket(sorted(glob.glob(
+        os.path.join(rundir, "wayfire-*.socket"))))
+
+
+def ipc():
+    """One IPC socket, now, with the path DISCOVERED. For the one-shot verbs.
+
+    `connect` is the daemon's door (it retries while the compositor comes up);
+    this is every other caller's. Both exist so that NOTHING ELSE constructs a
+    WayfireSocket: five call sites used to do it directly and therefore skipped
+    the discovery, which is why `usher cleanly logoff` could not reach a
+    compositor that `usher-mgr` was talking to happily. A selftest check now
+    asserts these two are the only constructors.
+    """
+    return WayfireSocket(wayfire_socket())
+
+
 def connect(retries=25, delay=0.2):
     """Open an IPC socket, retrying while the compositor's socket comes up. At
     autostart the ipc plugin may not have exported WAYFIRE_SOCKET yet, and
     WayfireSocket() raises at once with no retry of its own, so a daemon that
     connects eagerly can die before it ever watches (kanshi-mgr retries the
     same way, ~5s). Only the initial connect retries; a mid-session drop is a
-    real teardown and is handled by the caller."""
+    real teardown and is handled by the caller.
+
+    The socket is DISCOVERED (see wayfire_socket) rather than left to
+    pywayfire, which only reads the environment. Re-resolved on every attempt,
+    because the retry loop exists for the case where it does not exist yet."""
     last = None
     for _ in range(retries):
         try:
-            return WayfireSocket()
+            return WayfireSocket(wayfire_socket())
         except Exception as e:      # socket absent/unready: wait and retry
             last = e
             time.sleep(delay)
@@ -2731,6 +2796,56 @@ def _t_cli_split(ck):
     # THE SEAM: usher must not hardcode how a session starts. It reads one
     # path, and the path is beside the other user config rather than in a
     # second config dir.
+    # FINDING THE COMPOSITOR SOCKET. pywayfire reads WAYFIRE_SOCKET and
+    # otherwise gives up, and its own manual search looks in /tmp while this
+    # compositor uses XDG_RUNTIME_DIR, so usher has to pick. A shell often has
+    # no WAYFIRE_SOCKET (a tmux server outlives whatever set it, so no pane
+    # under it has the variable), which is where `usher cleanly logoff` was
+    # told the compositor could not be reached.
+    _s = "/run/user/1000/wayfire-wayland-1-.socket"
+    ck("an-explicit-socket-always-wins",
+       pick_socket(["/run/a.socket"], {"WAYFIRE_SOCKET": _s}) == _s)
+    ck("one-candidate-is-picked", pick_socket([_s], {}) == _s)
+    # NOTHING FOUND is not an error here: pywayfire reports it, and its message
+    # is the one a reader already knows.
+    ck("no-candidate-answers-none", pick_socket([], {}) is None)
+    # TWO IS AMBIGUOUS, and guessing would talk to the wrong compositor or fail
+    # in a way that reads like a bug.
+    try:
+        pick_socket([_s, "/run/user/1000/wayfire-wayland-2-.socket"], {})
+        ck("two-candidates-refuse-rather-than-guess", False)
+    except RuntimeError as e:
+        ck("two-candidates-refuse-rather-than-guess",
+           "ambiguous" in str(e) and "WAYFIRE_SOCKET" in str(e))
+    ck("and-an-explicit-one-resolves-the-ambiguity",
+       pick_socket([_s, "/run/b.socket"], {"WAYFIRE_SOCKET": _s}) == _s)
+    # TWO DOORS TO THE COMPOSITOR AND NO OTHERS. Five call sites once built a
+    # WayfireSocket directly, so they skipped the discovery above and could not
+    # reach a compositor the daemon was talking to happily. The guard is a
+    # source scan, because the failure is a NEW call site rather than a wrong
+    # value, and nothing else can see that.
+    #
+    # VIA THE AST, NOT A GREP. The first version matched text and flagged two
+    # DOCSTRINGS that merely discuss WayfireSocket, which is the usual way a
+    # name-based check turns into noise and then gets switched off. ast sees
+    # calls only.
+    import ast
+    import inspect
+    from . import chrome as _ch
+    from . import doctor as _doc
+    from . import watch as _w
+    _bad = []
+    for _m in (sys.modules[__name__], _doc, _w, _ch):
+        _tree = ast.parse(inspect.getsource(_m))
+        for _node in ast.walk(_tree):
+            if not isinstance(_node, ast.FunctionDef):
+                continue
+            for _sub in ast.walk(_node):
+                if (isinstance(_sub, ast.Call)
+                        and getattr(_sub.func, "id", None) == "WayfireSocket"
+                        and _node.name not in ("ipc", "connect")):
+                    _bad.append(f"{_m.__name__}.{_node.name}")
+    ck("only-ipc-and-connect-build-a-socket", not _bad)
     # THE CONFIG DIR. One place, named for the command, and every config name
     # resolves under it. The per-file fallback to the pre-rename directory is
     # gone: both machines are migrated, so it could only ever resurrect a stale

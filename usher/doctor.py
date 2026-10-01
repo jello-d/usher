@@ -259,22 +259,34 @@ def _doctor_compositor(out):
                       "Run this from the venv (~/.venvs/usher/bin/python),"
                       " not the system python3.")
         return [], {}, False
-    if not os.environ.get("WAYFIRE_SOCKET"):
+    # NOT "is WAYFIRE_SOCKET set?", which is what this used to ask and is no
+    # longer the question. usher DISCOVERS the socket under XDG_RUNTIME_DIR, so
+    # an unset variable is the normal case from a shell and says nothing about
+    # reachability. Asking the old question here made doctor report itself
+    # blind, loudly and wrongly, from exactly the places the discovery was
+    # added to serve: a tmux pane, a plain terminal, an ssh with a runtime dir.
+    try:
+        _sock_path = engine.wayfire_socket()
+    except RuntimeError as e:           # several candidates: ambiguous
+        _doctor_blind(out, str(e),
+                      "Name the one you mean and run again.")
+        return [], {}, False
+    if not _sock_path:
         _doctor_blind(
-            out, "WAYFIRE_SOCKET IS NOT SET",
-            "pywayfire does not go looking for the socket, so there is",
-            "nothing here to connect to. A NON-INTERACTIVE ssh carries none",
-            "of the session environment, which is how this is usually met.",
-            "Pass it:  WAYFIRE_SOCKET=/run/user/$(id -u)/wayfire-<display>"
-            "-.socket")
+            out, "NO COMPOSITOR SOCKET FOUND",
+            "Nothing matching wayfire-*.socket under the runtime dir, and",
+            "WAYFIRE_SOCKET is unset, so there is nothing to connect to. A",
+            "NON-INTERACTIVE ssh carries no XDG_RUNTIME_DIR either, which is",
+            "how this is usually met. Pass it:  WAYFIRE_SOCKET=/run/user/"
+            "$(id -u)/wayfire-<display>-.socket")
         return [], {}, False
     try:
-        sock = WayfireSocket()
+        sock = engine.ipc()
         live = sock.list_views(filter_mapped_toplevel=True)
         outs = {o["name"]: o for o in sock.list_outputs()}
     except Exception as e:
         _doctor_blind(out, f"the compositor did not answer ({e})",
-                      "WAYFIRE_SOCKET is set but stale, or no session is",
+                      f"{_sock_path} exists but is stale, or no session is",
                       "running on this seat.")
         return [], {}, False
     out(f"  outputs      {', '.join(sorted(outs))}")
