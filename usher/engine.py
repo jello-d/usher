@@ -2287,6 +2287,42 @@ def pick_socket(names, env=None):
     return None
 
 
+# Set by wayfire_socket() when it had to HUNT rather than read the environment,
+# so the daemon can log it and doctor can report it. A path, not a bool: the
+# directory searched is the useful half of the message.
+SOCKET_HUNTED = None
+_HUNT_WARNED = False
+
+
+def _warn_hunted(rundir, found):
+    """Say ONCE, on stderr, that the environment was not clean.
+
+    THE FALLBACK WORKING SILENTLY IS HOW THE ORIGINAL BUG HID. A missing
+    WAYFIRE_SOCKET is a FAULT IN WHOEVER SET UP THE SHELL, not a normal
+    condition, and the cost of papering over it quietly is that nobody fixes
+    the shell: usher keeps working, and the next tool that needs the variable
+    fails for a reason nobody connects to this.
+
+    stderr, not the log: a CLI verb must not append to watch.log, which is the
+    forensic record of what usher did to a session. The daemon has its stdio
+    discarded by the compositor autostart, so watch.py logs this separately at
+    startup from SOCKET_HUNTED.
+    """
+    global _HUNT_WARNED
+    if _HUNT_WARNED:
+        return
+    _HUNT_WARNED = True
+    print(f"usher: WAYFIRE_SOCKET is unset, so the socket was found by "
+          f"searching {rundir}", file=sys.stderr)
+    print(f"usher:   using {found}", file=sys.stderr)
+    print("usher:   the session exports that variable, so a shell without it "
+          "predates", file=sys.stderr)
+    print("usher:   whatever set it. A tmux server outlives its own "
+          "environment, so its", file=sys.stderr)
+    print("usher:   panes inherit the gap: restart the shell, or the server.",
+          file=sys.stderr)
+
+
 def wayfire_socket():
     """Find the compositor socket: the environment, else the runtime dir.
 
@@ -2306,9 +2342,16 @@ def wayfire_socket():
     XDG_RUNTIME_DIR with a /run/user/<uid> default, since that is the standard
     name for the directory and a shell that has lost one may have lost both.
     """
+    global SOCKET_HUNTED
+    if os.environ.get("WAYFIRE_SOCKET"):
+        return os.environ["WAYFIRE_SOCKET"]
     rundir = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-    return pick_socket(sorted(glob.glob(
+    found = pick_socket(sorted(glob.glob(
         os.path.join(rundir, "wayfire-*.socket"))))
+    if found:
+        SOCKET_HUNTED = rundir
+        _warn_hunted(rundir, found)
+    return found
 
 
 def ipc():
@@ -2819,6 +2862,57 @@ def _t_cli_split(ck):
            "ambiguous" in str(e) and "WAYFIRE_SOCKET" in str(e))
     ck("and-an-explicit-one-resolves-the-ambiguity",
        pick_socket([_s, "/run/b.socket"], {"WAYFIRE_SOCKET": _s}) == _s)
+    # THE FALLBACK MUST ANNOUNCE ITSELF. Working silently is precisely how the
+    # missing discovery hid: everything kept functioning, so nobody fixed the
+    # shell. A warning that can be removed without a test failing will be.
+    import contextlib
+    import io
+    _real_env, _real_hunted = dict(os.environ), SOCKET_HUNTED
+    _real_warned = _HUNT_WARNED
+    try:
+        globals()["_HUNT_WARNED"] = False
+        globals()["SOCKET_HUNTED"] = None
+        os.environ.pop("WAYFIRE_SOCKET", None)
+        _err = io.StringIO()
+        with contextlib.redirect_stderr(_err):
+            wayfire_socket()
+        _said = _err.getvalue()
+        # It only warns when it actually HUNTED, which on a box with no
+        # compositor socket it will not have done.
+        if SOCKET_HUNTED:
+            ck("a-hunted-socket-warns-on-stderr",
+               "WAYFIRE_SOCKET is unset" in _said and SOCKET_HUNTED in _said)
+            ck("and-names-the-socket-it-chose", "using " in _said)
+            # ONCE per process: a verb that connects repeatedly must not shout
+            # repeatedly.
+            _err2 = io.StringIO()
+            with contextlib.redirect_stderr(_err2):
+                wayfire_socket()
+            ck("but-only-once-per-process", _err2.getvalue() == "")
+        else:
+            ck("a-hunted-socket-warns-on-stderr (no socket here: skipped)",
+               _said == "")
+        # AND IT IS SILENT WHEN THE ENVIRONMENT IS CLEAN, or the warning
+        # becomes noise and gets removed.
+        globals()["_HUNT_WARNED"] = False
+        globals()["SOCKET_HUNTED"] = None
+        os.environ["WAYFIRE_SOCKET"] = "/run/nowhere.sock"
+        _err3 = io.StringIO()
+        with contextlib.redirect_stderr(_err3):
+            _got = wayfire_socket()
+        ck("a-clean-environment-is-silent",
+           _err3.getvalue() == "" and _got == "/run/nowhere.sock"
+           and SOCKET_HUNTED is None)
+    finally:
+        os.environ.clear()
+        os.environ.update(_real_env)
+        globals()["SOCKET_HUNTED"] = _real_hunted
+        # Left ARMED rather than restored: this process genuinely has warned
+        # now, and a later check that connects would otherwise print the five
+        # lines into the suite's output. Honest and quiet.
+        globals()["_HUNT_WARNED"] = True
+        del _real_warned
+
     # TWO DOORS TO THE COMPOSITOR AND NO OTHERS. Five call sites once built a
     # WayfireSocket directly, so they skipped the discovery above and could not
     # reach a compositor the daemon was talking to happily. The guard is a

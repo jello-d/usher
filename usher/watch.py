@@ -282,6 +282,15 @@ class Watcher:
         map events we catch."""
         self.place_sock = connect()
         logline("usher-mgr: starting")
+        # THE DAEMON'S STDERR IS DISCARDED by the compositor autostart, so the
+        # warning engine prints for a CLI caller reaches nobody here. An
+        # unclean SESSION environment is the more serious of the two cases
+        # (every child of the session inherits it), so it goes in the log where
+        # a reader of watch.log will meet it.
+        if engine.SOCKET_HUNTED:
+            logline("WAYFIRE_SOCKET was unset: found the socket by searching "
+                    f"{engine.SOCKET_HUNTED}. The session should export it; "
+                    "something that starts usher does not.")
         for _n, _text, _msg in engine.EXCLUDE_ERRORS:
             logline(f"exclude rule error (line {_n}): {_msg}: {_text!r}")
         # BEFORE anything reads or writes the store. If Chrome restarted while

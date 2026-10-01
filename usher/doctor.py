@@ -290,6 +290,17 @@ def _doctor_compositor(out):
                       "running on this seat.")
         return [], {}, False
     out(f"  outputs      {', '.join(sorted(outs))}")
+    # AN UNCLEAN ENVIRONMENT IS A FINDING, not a detail. usher copes by
+    # searching, so nothing breaks, and that is exactly why it needs saying:
+    # the next tool to want the variable fails for a reason nobody connects
+    # back to this.
+    if engine.SOCKET_HUNTED:
+        out("  !! WAYFIRE_SOCKET was unset; found the socket by searching "
+            f"{engine.SOCKET_HUNTED}")
+        out("     the session exports it, so this shell predates whatever "
+            "did (restart it)")
+    else:
+        out(f"  socket       {engine.wayfire_socket()}  (from the environment)")
     if not live:
         out("  (no windows open: the sections below are answered, not"
             " skipped)")
