@@ -24,7 +24,7 @@
 # within a second and rebuilds the registry, exactly as it does for
 # usher/exclude and usher/include. A file that does not import is logged
 # and skipped, leaving the three built-ins, so a half-saved edit cannot take
-# the daemon down. Watch ~/.local/state/session-layout/watch.log for the
+# the daemon down. Watch ~/.local/state/usher/watch.log for the
 # "plugins reloaded" line.
 #
 # This example gives Spotify a stable identity, because its title drifts per

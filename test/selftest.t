@@ -1,6 +1,6 @@
 #!/bin/sh
 # test/selftest.t - the engine's own offline unit checks (the plugin registry,
-# the chrome/mux/kitty identity parsing, the SNSS reader). `session-mgr
+# the chrome/mux/kitty identity parsing, the SNSS reader). `usher
 # selftest` imports no compositor (pywayfire is guarded), so it runs under
 # plain python3.
 . "$(dirname "$0")/harness_lib"

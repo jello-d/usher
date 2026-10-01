@@ -120,7 +120,7 @@ the id is derived from the outputs the last snapshot saw, and failing that
 everything shares one
 .I default
 profile, which is the historical behaviour. Override with
-.BR SESSION_PROFILE .
+.BR USHER_PROFILE .
 A pre-profile store is adopted into the current profile once, so no learned
 placement is lost on upgrade.
 .SH IDENTITY AND PLUGINS
@@ -182,7 +182,7 @@ never-place rules and steady-state anchors.
 .I ~/.config/usher/plugins/*.py
 user window plugins.
 .TP
-.I ~/.local/state/session-layout/
+.I ~/.local/state/usher/
 the layout store (current snapshot, history, knowledge base).
 .SH SEE ALSO
 .BR mux (1)

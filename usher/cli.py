@@ -7,12 +7,9 @@ TWO FRONT ENDS OVER ONE TABLE, split by who does the typing:
     usher       the CLI. Everything you ask of a running usher, plus the
                 session's own coming and going (`usher cleanly ...`).
 
-They are one dispatch because two lists of verbs drift: this file used to be a
-single `session-mgr` and the split is in the AUDIENCE column of VERBS, not in
-duplicated code. That name is gone now; it survived two releases as a third
-entry point so the rename could be staged across two repos that deploy
-independently, and was dropped once every caller on the fleet had moved and
-both boxes were running the new one.
+They are one dispatch because two lists of verbs drift: this was a single
+command once, and the split is in the AUDIENCE column of VERBS rather than in
+duplicated code.
 
 The top of the three layers, and the only one that knows about both of the
 others, which is what keeps the engine free of any reference to the daemon.
@@ -67,7 +64,7 @@ def gate_blocks(who, audience):
 
     THE RULE, named once. A verb's audience says who it is for ("mgr", "cli",
     "both"); an entry's says what it accepts ("mgr", "cli", "any"). Conflating
-    them is what refused `session-mgr watch`, so the rule lives here and the
+    them once refused the SERVICE ITS OWN VERB, so the rule lives here and the
     tests call THIS rather than restating it, because a second copy of a
     predicate is a second thing to get wrong.
     """
@@ -290,10 +287,11 @@ def _run(prog, audience):
     says what it will accept ("mgr", "cli", or "any"). The first version used
     "both" for the permissive entry as well, so the gate read `who != "both" and
     who != audience` with audience="both" and who="mgr" as TRUE on both halves
-    and refused. `session-mgr watch` and `session-mgr _super` therefore failed,
-    which killed the daemon on its next reload (the supervisor re-execs itself
-    through that verb) and would have killed the autostart at the next login.
-    Caught only because a live reload left no daemon behind.
+    and refused: the permissive entry rejected `watch` and `_super`, the two
+    verbs the service itself needs. That killed the daemon on its next reload,
+    since the supervisor re-execs itself through `_super`, and would have
+    killed the autostart at the next login. Caught only because a live reload
+    left no daemon behind.
     """
     global PROG
     PROG = prog
@@ -326,9 +324,9 @@ def main_any():
     tree is driven against a live session without installing anything, so it has
     to reach `watch` and `selftest` alike.
 
-    It is also what the retired `session-mgr` used, which is why the permissive
-    audience outlived that name: the gate bug that refused `session-mgr watch`
-    would equally have refused `python -m usher watch`, and the check
-    covering it (legacy-entry-accepts-*) still guards this entry.
+    The permissive audience outlived the compatibility command it was added
+    for: the gate bug that refused the service's own verbs would equally have
+    refused `python -m usher watch`, and the checks covering it still guard
+    this entry.
     """
     _run("python -m usher", "any")
