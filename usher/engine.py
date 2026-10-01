@@ -2315,12 +2315,11 @@ def _warn_hunted(rundir, found):
     print(f"usher: WAYFIRE_SOCKET is unset, so the socket was found by "
           f"searching {rundir}", file=sys.stderr)
     print(f"usher:   using {found}", file=sys.stderr)
-    print("usher:   the session exports that variable, so a shell without it "
-          "predates", file=sys.stderr)
-    print("usher:   whatever set it. A tmux server outlives its own "
-          "environment, so its", file=sys.stderr)
-    print("usher:   panes inherit the gap: restart the shell, or the server.",
-          file=sys.stderr)
+    print("usher:   nothing is broken here, but a tool that does NOT search "
+          "will fail", file=sys.stderr)
+    print("usher:   in this shell. Export it, or have whatever manages this "
+          "shell's", file=sys.stderr)
+    print("usher:   environment carry it.", file=sys.stderr)
 
 
 def wayfire_socket():
@@ -2331,13 +2330,17 @@ def wayfire_socket():
     `allow_manual_search` searches /tmp ONLY, and this compositor puts its
     socket in XDG_RUNTIME_DIR, so that option cannot help here either.
 
-    WHY IT MATTERS AWAY FROM THE DAEMON: the session exports WAYFIRE_SOCKET to
-    what the compositor starts, and a shell often does not have it. A tmux
-    server outlives the thing that set it, so every pane under it lacks the
-    variable, which is exactly where a person types `usher cleanly logoff` and
-    was told the compositor could not be reached. Measured: with the variable
-    unset, the verb failed from a tmux pane and worked from the same box the
-    moment it was named.
+    WHY IT MATTERS AWAY FROM THE DAEMON: the compositor exports WAYFIRE_SOCKET
+    to what IT starts, and a shell often does not have it, which is exactly
+    where a person types `usher cleanly logoff` and was told the compositor
+    could not be reached. Measured: with the variable unset the verb failed
+    from a tmux pane and worked the moment it was named.
+
+    DO NOT GUESS AT THE CAUSE IN THE MESSAGE, which the first version did: it
+    blamed a stale shell and advised restarting one. On this fleet nothing
+    propagates the variable at all (mux's environment feature manages four
+    others), so that advice sent a reader after a restart that could not have
+    helped. State the fact and the remedies; the cause is not ours to assert.
 
     XDG_RUNTIME_DIR with a /run/user/<uid> default, since that is the standard
     name for the directory and a shell that has lost one may have lost both.

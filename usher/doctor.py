@@ -297,8 +297,7 @@ def _doctor_compositor(out):
     if engine.SOCKET_HUNTED:
         out("  !! WAYFIRE_SOCKET was unset; found the socket by searching "
             f"{engine.SOCKET_HUNTED}")
-        out("     the session exports it, so this shell predates whatever "
-            "did (restart it)")
+        out("     a tool that does not search will fail in this shell")
     else:
         out(f"  socket       {engine.wayfire_socket()}  (from the environment)")
     if not live:
