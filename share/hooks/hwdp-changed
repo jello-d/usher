@@ -2,7 +2,7 @@
 # hwdp-changed - re-place windows when the MONITOR SET changes.
 #
 # usher keys its remembered layout by the connected display set (see
-# `session-mgr doctor`, the `profile` line), so plugging or unplugging a
+# `usher doctor`, the `profile` line), so plugging or unplugging a
 # monitor switches which layout is the right one. Nothing in the compositor
 # tells usher that happened: it sees windows being shuffled by the output
 # change and, in steady state, leaves them where they land.
@@ -14,7 +14,7 @@
 # burst (a monitor blanking and waking, a kanshi reapply, a re-detect), not
 # only when the set of monitors actually differs, so a hook that re-armed
 # placement on each one would yank a deliberately-moved window home every time
-# a screen blinked. `session-mgr display-changed` compares the profile against
+# a screen blinked. `usher-mgr display-changed` compares the profile against
 # the last one it acted on and does nothing at all when they match; usher owns
 # the notion of a profile, so usher is where that belongs.
 #
@@ -23,6 +23,6 @@
 # monitor set has not changed.
 set -eu
 
-command -v session-mgr >/dev/null 2>&1 || exit 0
+command -v usher-mgr >/dev/null 2>&1 || exit 0
 
-exec session-mgr display-changed >/dev/null 2>&1
+exec usher-mgr display-changed >/dev/null 2>&1

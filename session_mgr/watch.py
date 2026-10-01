@@ -1,6 +1,6 @@
 """The daemon: the supervisor, and the worker it keeps alive.
 
-`session-mgr watch` runs both halves. Supervisor holds the single-instance
+`usher-mgr watch` runs both halves. Supervisor holds the single-instance
 lock, spawns the worker and respawns it with backoff; Watcher IS the worker,
 placing each window onto its known spot as it appears and recording the layout
 into the knowledge base as it changes.
@@ -162,7 +162,7 @@ class Supervisor:
         logline("reload (SIGHUP): re-exec supervisor")
         # Re-exec via the internal _super verb, NOT the original watch/resume
         # argv: a re-exec must supervise WITHOUT re-arming/clearing the adopt
-        # flag, so a `session-mgr resume` that triggered this reload is
+        # flag, so a `usher-mgr resume` that triggered this reload is
         # honoured by the next worker instead of clobbered by a re-run of
         # arm_mode.
         keep = ["--no-launch"] if "--no-launch" in sys.argv[1:] else []
@@ -231,7 +231,7 @@ class Watcher:
     arguments. The state is unchanged; calling it `self` is what lets each
     phase be a method you can read on its own.
 
-    If a `session-mgr resume` armed the adopt flag, the FIRST worker to reach
+    If a `usher-mgr resume` armed the adopt flag, the FIRST worker to reach
     init consumes it and LEARNS the current hand-arranged layout as the
     baseline instead of restoring the remembered one, for use after killing
     session and fixing windows by hand, so it does not undo the good state.
@@ -281,7 +281,7 @@ class Watcher:
         happens only after we are watching, so the windows it spawns produce
         map events we catch."""
         self.place_sock = connect()
-        logline("session-mgr watch: starting")
+        logline("usher-mgr: starting")
         for _n, _text, _msg in engine.EXCLUDE_ERRORS:
             logline(f"exclude rule error (line {_n}): {_msg}: {_text!r}")
         # BEFORE anything reads or writes the store. If Chrome restarted while
@@ -304,14 +304,14 @@ class Watcher:
         # race and restored everything, which is exactly why this hid.
         self.saved = engine.load_snapshot()
         threading.Thread(target=self._capture_loop, daemon=True).start()
-        # Consume the one-shot adopt flag (armed by `session-mgr resume`): the
+        # Consume the one-shot adopt flag (armed by `usher-mgr resume`): the
         # first worker to reach here adopts; a respawn sees it gone and
         # restores.
         self.mode = take_mode()
         self._init_layout()
         watch = connect()
         watch.watch(list(KNOWLEDGE_TRIGGERS | PLACE_EVENTS))
-        print(f"session-mgr watch: {len(self.kb)} known windows; watching",
+        print(f"usher-mgr: {len(self.kb)} known windows; watching",
               flush=True)
         logline(f"watching, {len(self.kb)} known windows")
         self._init_launch()
@@ -370,7 +370,7 @@ class Watcher:
         Drop the LAUNCHED marker only after launch_missing RETURNS, so the
         supervisor keeps launch on for a successor if this worker dies first.
 
-        `quiet` (session-mgr reload) suppresses the relaunch too, and MUST do
+        `quiet` (usher reload) suppresses the relaunch too, and MUST do
         so here rather than through the `launch` argument. A reload signals the
         running supervisor, which re-execs with its OWN original argv, so the
         launch flag the reload was invoked with never reaches the worker,
@@ -403,7 +403,7 @@ class Watcher:
         return time.time() < self._steady_at()
 
     def _write_status(self):
-        # Publish {mode, seconds_left} for `session-mgr status` + the tray. The
+        # Publish {mode, seconds_left} for `usher status` + the tray. The
         # steady-at estimate assumes no more windows arrive; a map or a kick
         # moves it out. Atomic replace so a reader never sees a half file.
         now = time.time()

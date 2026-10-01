@@ -2,15 +2,20 @@
 .SH NAME
 usher \- record the Wayland window layout and place windows back
 .SH SYNOPSIS
-.B session-mgr
-.I watch | reload | capture | restore | launch | wind-down | doctor | ...
+.B usher
+.I save | restore | doctor | status | toggle | cleanly | ...
+.br
+.B usher-mgr
+.I watch | resume | display-changed
 .SH DESCRIPTION
 .B usher
 seats windows into a steady arrangement on a wlroots/Wayfire session. Instead of
 hand-written placement rules it records where windows actually are and puts them
-back. The one command
-.B session-mgr
-is both the login daemon and its controller. Placement is AGGRESSIVE for a
+back. Two commands split the job:
+.B usher-mgr
+is the service the session starts, and
+.B usher
+is how you ask anything of it. Placement is AGGRESSIVE for a
 window after login (or a re-arm), then STEADY: a reopened window just
 appears where you are; the opt-in
 .I session/include
@@ -19,7 +24,7 @@ anchors keep snapping back even then, and
 lists windows never to place.
 .PP
 An optional
-.B session-mgr-indicator
+.B usher-indicator
 tray icon shows the placement mode and toggles it on a left-click (the
 .I indicator
 sub-package).

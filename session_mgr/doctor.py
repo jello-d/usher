@@ -1,4 +1,4 @@
-"""`session-mgr doctor`: say out loud what usher is and is not doing.
+"""`usher doctor`: say out loud what usher is and is not doing.
 
 A pure REPORTER. It reads the store, the plugin registry, the cross-tool
 contracts and the live compositor, and says per window what would be

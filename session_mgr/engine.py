@@ -1,6 +1,6 @@
 """The engine: the store, window identity, the plugins, and the verbs.
 
-Everything session-mgr knows how to DO, minus the daemon that does it
+Everything usher knows how to DO, minus the daemon that does it
 continuously (see session_mgr.watch) and the verb dispatch that invokes it
 (see session_mgr.cli). Nothing here imports either of those.
 
@@ -49,7 +49,7 @@ from .chrome import (CHROME_FLAGS, CHROME_STAGGER, browser_pids,
                      session_history, snss_build, window_slot)
 
 # pywayfire is needed only to talk to the live compositor, and is guarded so the
-# module still imports (and `session-mgr selftest` runs) without it.
+# module still imports (and `usher selftest` runs) without it.
 try:
     from wayfire import WayfireSocket
     from wayfire.extra.wpe import WPE
@@ -95,12 +95,12 @@ def load_exclude_rules(path=EXCLUDE_FILE):
     Patterns are Python regexes matched with re.search, so they are UNANCHORED
     (a substring test): add ^...$ to pin, exactly as the work boundary's own
     ^\\[WORK does. Returns (rules, errors): a line missing '::' or with a bad
-    regex is collected into errors: surfaced by `session-mgr exclude`,
+    regex is collected into errors: surfaced by `usher exclude`,
     logged by the watcher, and skipped, never crashing the headless
     daemon. A missing
     or unreadable file yields ([], []); the built-in work-boundary and
     scratch-terminal skips still apply. Read once per process, so an edit is
-    picked up by the next worker respawn or a re-run of session-mgr watch."""
+    picked up by the next worker respawn or a re-run of usher-mgr watch."""
     rules, errors = [], []
     try:
         with open(path) as f:
@@ -1347,7 +1347,7 @@ def prune_kb(kb, when):
 def upsert(kb, windows, when):
     """One-shot knowledge update (no view-id grouping): record each window's
     CURRENT identity. Unique-app_id windows key by app_id alone; the rest by
-    title. Used by `session-mgr capture` and the seed-from-snapshot path;
+    title. Used by `usher capture` and the seed-from-snapshot path;
     the watch daemon uses learn() instead, which groups a window's tabs by
     view id."""
     counts = Counter(w["app_id"] for w in windows)
@@ -1544,7 +1544,7 @@ def do_capture():
     kb = load_knowledge()
     upsert(kb, snap["windows"], snap["time"])
     save_knowledge(kb)
-    print(f"session-mgr: captured {len(snap['windows'])} window(s); "
+    print(f"usher: captured {len(snap['windows'])} window(s); "
           f"{len(kb)} known -> {STATE}")
 
 
@@ -1565,7 +1565,7 @@ MUX_RESUME = f"{shlex.quote(MUX_BIN)} resume"
 
 def _announce(msg):
     """Say it on stdout AND in the daemon's log. Both matter: stdout is what a
-    person running `session-mgr launch` by hand reads, and the log is the only
+    person running `usher launch` by hand reads, and the log is the only
     copy that survives, since the compositor autostart discards the worker's
     stdout entirely."""
     print(msg, flush=True)
@@ -1896,23 +1896,23 @@ def resolve_snapshot(spec):
         sys.exit(0)
     if spec == "latest":
         if not hist:
-            sys.exit("session-mgr: no history snapshots yet")
+            sys.exit("usher: no history snapshots yet")
         path, label = hist[-1], "latest (history)"
     else:
         d = _spec_to_date(spec)
         if d is None:
-            sys.exit(f"session-mgr: unknown --from '{spec}' (want: latest, "
+            sys.exit(f"usher: unknown --from '{spec}' (want: latest, "
                      f"today, yesterday, or YYYY-MM-DD). Have: "
                      f"{', '.join(miles) or 'no milestones yet'}")
         path, label = os.path.join(STATE, "milestones", f"{d}.json"), d
         if not os.path.exists(path):
-            sys.exit(f"session-mgr: no milestone for {d}. Have: "
+            sys.exit(f"usher: no milestone for {d}. Have: "
                      f"{', '.join(miles) or 'none'}")
     try:
         with open(path) as f:
             return label, json.load(f)
     except (OSError, ValueError) as e:
-        sys.exit(f"session-mgr: cannot read {path}: {e}")
+        sys.exit(f"usher: cannot read {path}: {e}")
 
 
 def match(live, entries):
@@ -2016,7 +2016,7 @@ def _restore_report(pairs, live, unlive, unlayout, unplaceable, outs, dry,
               f"{e['output']}, not attached (have: {have})")
 
 
-PROFILE_MARK = "session-mgr.profile"   # last profile we acted on, per boot
+PROFILE_MARK = "usher.profile"   # last profile we acted on, per boot
 
 
 def do_display_changed():
@@ -2075,9 +2075,9 @@ def _wind_down_wait(pids):
     Bounded because this runs between a human pressing Reboot and the machine
     rebooting, so it must never be the reason that does not happen."""
     if not pids:
-        print("session-mgr: nothing asked to quit; session captured")
+        print("usher: nothing asked to quit; session captured")
         return 0
-    print(f"session-mgr: asked {len(pids)} process(es) to quit")
+    print(f"usher: asked {len(pids)} process(es) to quit")
     end = time.time() + WIND_DOWN_TIMEOUT
     while time.time() < end:
         alive = []
@@ -2088,11 +2088,11 @@ def _wind_down_wait(pids):
             except OSError:
                 pass
         if not alive:
-            print("session-mgr: all exited cleanly")
+            print("usher: all exited cleanly")
             return 0
         pids = alive
         time.sleep(0.2)
-    print(f"session-mgr: {len(pids)} still running after "
+    print(f"usher: {len(pids)} still running after "
           f"{WIND_DOWN_TIMEOUT:g}s; going ahead anyway")
     return 0
 
@@ -2121,7 +2121,7 @@ def do_wind_down():
     try:
         do_capture()
     except Exception as e:
-        print(f"session-mgr: capture failed, winding down anyway: {e}",
+        print(f"usher: capture failed, winding down anyway: {e}",
               file=sys.stderr)
     try:
         do_stop()
@@ -2136,7 +2136,7 @@ def do_wind_down():
         try:
             pids += list(p.wind_down(live) or [])
         except Exception as e:
-            print(f"session-mgr: wind-down ({getattr(p, 'name', '?')}): {e}",
+            print(f"usher: wind-down ({getattr(p, 'name', '?')}): {e}",
                   file=sys.stderr)
     return _wind_down_wait(pids)
 
@@ -2202,7 +2202,7 @@ def do_restore(dry, only=None, source=None):
 
 # --- aggressive vs steady placement (the anti-whack-a-mole state machine) ----
 # Placement is AGGRESSIVE (place any known, non-excluded window) for a window
-# after session start (or a `session-mgr aggressive` kick), then goes STEADY
+# after session start (or a `usher aggressive` kick), then goes STEADY
 # (place ONLY session/include anchors). A GLOBAL phase, orthogonal to the per-
 # view PLACE_GRACE. Steady when the FLOOR has passed AND it has been quiet (no
 # new window mapped) for IDLE_SETTLE, but never past the CAP:
@@ -2215,10 +2215,10 @@ IDLE_SETTLE = float(os.environ.get("SESSION_IDLE_SETTLE", 25))   # 25 s quiet
 AGGR_CAP = float(os.environ.get("SESSION_AGGR_CAP", 900))        # 15 min cap
 
 # Runtime seams (ephemeral, like the singleton lock): the kick writes ARM_FILE,
-# the worker reads it and publishes STATUS_FILE for `session-mgr status` + the
+# the worker reads it and publishes STATUS_FILE for `usher status` + the
 # (Phase-2) tray gadget.
 RUNTIME_DIR = os.environ.get("XDG_RUNTIME_DIR") or STATE
-ARM_FILE = os.path.join(RUNTIME_DIR, "session-mgr.arm")
+ARM_FILE = os.path.join(RUNTIME_DIR, "usher.arm")
 # The tray indicator READS this every second, so the name is a contract with
 # usher_indicator.STATUS_FILE and the two must move together. It is runtime
 # state under XDG_RUNTIME_DIR, recreated each boot, so renaming it needed no
@@ -2376,18 +2376,18 @@ def _signal_watcher(sig, action, done):
     try:
         pid = int(open(path).read().strip())
     except (OSError, ValueError):
-        sys.exit(f"session-mgr: no running watcher to {action}")
+        sys.exit(f"usher: no running watcher to {action}")
     try:
         os.kill(pid, sig)
     except OSError as e:
-        sys.exit(f"session-mgr: cannot signal watcher pid {pid}: {e}")
-    print(f"session-mgr: {done} watcher (pid {pid})")
+        sys.exit(f"usher: cannot signal watcher pid {pid}: {e}")
+    print(f"usher: {done} watcher (pid {pid})")
 
 
 def do_stop():
     """Stop the watcher cleanly: SIGTERM the supervisor, whose stop handler
     terminates the worker and exits (releasing the lock). Replaces the
-    `pkill -f 'session-mgr watch'` dance, which races the respawn and can
+    `pkill -f 'usher-mgr watch'` dance, which races the respawn and can
     match the wrong process: including the shell running the pkill."""
     _signal_watcher(signal.SIGTERM, "stop", "stopped")
 
@@ -2704,8 +2704,8 @@ def _t_cli_split(ck):
     # THE PERMISSIVE ENTRY MUST ACCEPT EVERY VERB, and this is the check that
     # the autostart needed. A verb's audience ("who is it for") and an entry's
     # audience ("what will it accept") are different things; the first version
-    # used "both" for each, so the gate refused `session-mgr watch` and
-    # `session-mgr _super`. That killed the daemon on its next reload, because
+    # used "both" for each, so the gate refused `usher-mgr watch` and
+    # `usher-mgr _super`. That killed the daemon on its next reload, because
     # the supervisor re-execs itself through _super, and would have killed the
     # autostart at the next login. Nothing offline caught it.
     for _v, (_who, _h) in cli.VERBS.items():
@@ -3426,7 +3426,7 @@ def _t_watcher(ck):
 
 def selftest():
     """Offline unit checks for the plugin framework and the store: no
-    compositor, deterministic. Run with `session-mgr selftest`.
+    compositor, deterministic. Run with `usher selftest`.
 
     Split by AREA rather than written as one list, so a failure names the area
     it came from and a new check has an obvious home."""

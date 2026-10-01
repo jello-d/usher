@@ -39,7 +39,7 @@
 #   ^google-chrome$ :: .*    every google-chrome window
 #
 # A window matching ANY rule here is never recorded and never moved. A line
-# beginning with # is a comment; blank lines are ignored. `session-mgr exclude`
+# beginning with # is a comment; blank lines are ignored. `usher exclude`
 # prints the rules as loaded and flags any bad line. Edits apply AUTOMATICALLY:
 # the running watcher re-reads this file within a second of saving.
 #

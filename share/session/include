@@ -1,8 +1,8 @@
-# session/include: the ANCHOR list: windows session-mgr keeps placing even in
+# session/include: the ANCHOR list: windows usher keeps placing even in
 # the CONSERVATIVE steady state.
 #
-# session-mgr places AGGRESSIVELY for the first few minutes after login (or a
-# `session-mgr aggressive` kick): it puts every known window back as it opens,
+# usher places AGGRESSIVELY for the first few minutes after login (or a
+# `usher aggressive` kick): it puts every known window back as it opens,
 # which is what lets Chrome fire up and settle into place. Once it ages into
 # STEADY state it stops teleporting: a window you reopen just appears where you
 # are and STAYS. This file is the opt-in exception, the few windows you want
@@ -19,7 +19,7 @@
 # (UNANCHORED, a substring test); use '.*' for "any", add ^...$ to pin.
 # Lines starting with # are comments; blanks ignored. exclude still WINS: a
 # window matching both is never placed. Edits apply live (the watcher
-# reloads on save). `session-mgr include` shows the rules as loaded.
+# reloads on save). `usher include` shows the rules as loaded.
 #
 # Examples (commented out; uncomment/adapt as you find your anchors). Prefer a
 # unique app_id (an app or a Chrome --app/PWA) over a shared-app title, which
