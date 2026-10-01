@@ -4,8 +4,9 @@ Record the Wayland window layout and place windows back: a plugin-based
 session manager for wlroots/[Wayfire](https://github.com/WayfireWM/wayfire).
 
 Instead of hand-written placement rules, `usher` records where your windows
-actually are and puts them back where you left them. The one command
-`session-mgr` is both the login daemon and its controller.
+actually are and puts them back where you left them. Two commands split the
+job: `usher-mgr` is the service your session starts, and `usher` is how you ask
+anything of it.
 
 - **Aggressive then steady.** For a window's first moments after login (or a
   re-arm) every mapped window is placed back, which lets a browser open all its
@@ -21,12 +22,12 @@ actually are and puts them back where you left them. The one command
   other. [hwdp](https://github.com/jello-d/hwdp) supplies the id when present
   (a *soft* dependency; without it the set is derived from the outputs, and
   failing that everything shares one `default` profile).
-- **It will tell you what it is doing.** `session-mgr doctor` reports the store,
+- **It will tell you what it is doing.** `usher doctor` reports the store,
   the cross-tool contracts, and per window what would happen and why. When it
   *cannot* see the live session it says so loudly and exits non-zero, rather
   than answering the window questions from nothing.
 - **Go back to a past layout.** A daily milestone and a rolling history are
-  kept, so `session-mgr restore --from yesterday` (or `latest`, or a date) puts
+  kept, so `usher restore --from yesterday` (or `latest`, or a date) puts
   the desk back the way it was; `--from list` shows what is available.
 
 ## Plugins
@@ -71,7 +72,7 @@ the store, so it is what to cache a hard-won identity against.
 socket via `pywayfire`), so `setup.sh` builds a venv:
 
 ```sh
-./setup.sh install      # core: build the venv, link session-mgr + man
+./setup.sh install      # core: build the venv, link the commands + man
 ./setup.sh indicator    # optional: the tray indicator (--user service)
 ./setup.sh all          # both
 ./setup.sh hooks        # link the hwdp display-change hook
@@ -90,8 +91,34 @@ Then wire the daemon into your compositor's autostart, e.g. in `wayfire.ini`:
 
 ```ini
 [autostart]
-session_restore = session-mgr watch
+session_restore = usher-mgr watch
 ```
+
+## Commands
+
+Two, split by who does the typing. `usher-mgr` is the service: your session
+autostarts it and a hook calls it. `usher` is everything you ask of a running
+usher. Each refuses the other's verbs and names the one that wants it.
+
+```sh
+usher-mgr watch              # the daemon (the autostart entry)
+usher-mgr resume             # start in ADOPT mode: take the layout as truth
+usher-mgr display-changed    # the hwdp hook; a no-op if the monitor set matches
+
+usher save                   # record the current layout
+usher restore [--dry-run]    # put windows back  [--only S] [--from SPEC]
+usher doctor                 # what it is doing, and what it is NOT
+usher status                 # placement mode and seconds until steady
+usher toggle                 # flip aggressive/steady (the tray click)
+usher cleanly reboot         # wind down, keeping the layout, then reboot
+usher cleanly login          # start the console session from a remote shell
+```
+
+`usher cleanly login` needs a provider: usher knows that one executable can
+start a console session here and deliberately not how, so it execs whatever
+`~/.config/usher/session-start` points at, passing the action as an argument.
+The provider obtains its own privilege if it needs any. Without one, the verb
+says so and tells you where to link it.
 
 ## Config
 
