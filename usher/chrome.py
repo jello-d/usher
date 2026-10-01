@@ -79,7 +79,7 @@ def is_chrome(app):
 # Seconds between starting one Chrome profile and the next. Long enough for the
 # first invocation to become the browser process and open its singleton socket,
 # which is what the second one needs to talk to.
-CHROME_STAGGER = float(os.environ.get("SESSION_CHROME_STAGGER", 4))
+CHROME_STAGGER = float(os.environ.get("USHER_CHROME_STAGGER", 4))
 
 # Flags usher adds when IT starts the browser. Starting the right profile is
 # not enough on its own: Chrome only reopens the previous windows when the
@@ -98,10 +98,10 @@ CHROME_STAGGER = float(os.environ.get("SESSION_CHROME_STAGGER", 4))
 #                               just ASKED for the restore we would be offering
 #                               it a second time.
 #
-# Override with SESSION_CHROME_FLAGS (space separated), empty to pass none.
+# Override with USHER_CHROME_FLAGS (space separated), empty to pass none.
 _CHROME_FLAGS_DEFAULT = "--restore-last-session --hide-crash-restore-bubble"
 CHROME_FLAGS = shlex.split(
-    os.environ.get("SESSION_CHROME_FLAGS", _CHROME_FLAGS_DEFAULT))
+    os.environ.get("USHER_CHROME_FLAGS", _CHROME_FLAGS_DEFAULT))
 # Wayland titles Chrome sets are "<page title> - Google Chrome"; strip that
 # browser suffix to recover the page title the session file stores.
 CHROME_SUFFIXES = (" - Google Chrome", " - Chromium")

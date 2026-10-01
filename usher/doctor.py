@@ -29,9 +29,8 @@ from collections import Counter
 # cannot go stale here; the registry is reached through plugins(), which is a
 # function.
 from .chrome import is_chrome
-# CONFIG_DIR and LEGACY_CONFIG_DIR are reached through the MODULE, not
-# imported by value: selftest rebinds them to drive the fallback, and the
-# same hazard the daemon documents applies here.
+# CONFIG_DIR is reached through the MODULE rather than imported by value, the
+# same hazard the daemon documents for anything that can be rebound.
 from . import engine
 from .engine import (KB_SCHEMA, LOCAL_HOST, PLUGIN_HOOKS, STATE, TERM_KEY_RE,
                      WayfireSocket, app_of, hwdp_id, is_mux_term, live_keys,
@@ -51,17 +50,7 @@ def _doctor_store(out):
     out("== store ==")
     out(f"  state dir    {STATE}")
     out(f"  config dir   {engine.CONFIG_DIR}")
-    # SAY WHEN THE CONFIG IS STILL IN THE OLD PLACE. The fallback keeps a
-    # half-migrated box working, which is exactly what makes it worth
-    # reporting: losing the rule files is SILENT (no rules parses fine and
-    # means "place everything"), so a reader must be able to see that the move
-    # has not finished rather than only that nothing is broken yet.
-    _legacy = engine.using_legacy_config()
-    if _legacy:
-        out(f"  !! reading {', '.join(_legacy)} from the pre-rename "
-            f"{engine.LEGACY_CONFIG_DIR}")
-        out("     a provision moves these; nothing is broken until it does")
-    src = ("SESSION_PROFILE" if os.environ.get("SESSION_PROFILE")
+    src = ("USHER_PROFILE" if os.environ.get("USHER_PROFILE")
            else "hwdp" if hwdp_id() else "derived from outputs")
     out(f"  profile      {profile_id()}  ({src})")
     others = sorted(os.path.basename(p)[len("knowledge-"):-len(".json")]

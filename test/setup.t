@@ -12,10 +12,6 @@ mkdir -p "$VENV/bin"
 for _a in usher usher-mgr; do
   printf '#!/bin/sh\n' > "$VENV/bin/$_a"; chmod +x "$VENV/bin/$_a"
 done
-# A RETIRED name the install must REMOVE, not merely stop creating: it would
-# dangle once pip stops building it, and a dangling command on PATH is worse
-# than none. Planted here so the assertion below has something to catch.
-mkdir -p "$BIN"; ln -sfn "$VENV/bin/session-mgr" "$BIN/session-mgr"
 # XDG_CONFIG_HOME is sandboxed too: the hwdp display-change hook lands under it,
 # and a test must never reach into the real ~/.config to place one.
 HOOK=$CFG/hwdp/hooks/changed.d/40-usher
@@ -37,8 +33,6 @@ done
 [ -e "$SHR/man/man1/usher.1" ] || fail "man page not linked"
 [ -e "$BIN/usher-indicator" ] \
   && fail "install linked the indicator (should be indicator-only)"
-{ [ -e "$BIN/session-mgr" ] || [ -L "$BIN/session-mgr" ]; } \
-  && fail "install left the retired session-mgr link in place"
 
 # the hwdp hook is opt-in by PRESENCE: with no hwdp hook root, install must
 # NOT invent one (a box without hwdp stays untouched).
@@ -57,7 +51,7 @@ run install >/dev/null 2>&1 || fail "second install errored"
 
 # uninstall: the console-script + man symlinks and the hook are removed
 run uninstall >/dev/null 2>&1 || fail "uninstall errored"
-for _a in usher usher-mgr session-mgr; do
+for _a in usher usher-mgr; do
   [ -e "$BIN/$_a" ] || [ -L "$BIN/$_a" ] && fail "$_a symlink not removed"
 done
 [ -e "$SHR/man/man1/usher.1" ] && fail "man page not removed"

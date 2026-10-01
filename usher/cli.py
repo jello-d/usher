@@ -319,7 +319,7 @@ def main_mgr():
 
 
 def main_any():
-    """`python -m session_mgr <verb>`: the dev entry, accepting every verb.
+    """`python -m usher <verb>`: the dev entry, accepting every verb.
 
     NOT A CONSOLE SCRIPT. The two installed commands are deliberately split and
     each refuses the other's verbs; this is neither, because it is how a dev
@@ -328,7 +328,7 @@ def main_any():
 
     It is also what the retired `session-mgr` used, which is why the permissive
     audience outlived that name: the gate bug that refused `session-mgr watch`
-    would equally have refused `python -m session_mgr watch`, and the check
+    would equally have refused `python -m usher watch`, and the check
     covering it (legacy-entry-accepts-*) still guards this entry.
     """
-    _run("python -m session_mgr", "any")
+    _run("python -m usher", "any")

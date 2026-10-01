@@ -1,10 +1,10 @@
 """The engine: the store, window identity, the plugins, and the verbs.
 
 Everything usher knows how to DO, minus the daemon that does it
-continuously (see session_mgr.watch) and the verb dispatch that invokes it
-(see session_mgr.cli). Nothing here imports either of those.
+continuously (see usher.watch) and the verb dispatch that invokes it
+(see usher.cli). Nothing here imports either of those.
 
-Store ($XDG_STATE_HOME/session-layout, default ~/.local/state/...):
+Store ($XDG_STATE_HOME/usher, default ~/.local/state/usher):
   current.json             the latest snapshot
   history/<epoch>.json     rolling recent snapshots (match hints)
   milestones/<date>.json   first snapshot of each day (a stable "yesterday")
@@ -35,7 +35,7 @@ import time
 from collections import Counter
 from datetime import date
 
-# Chrome's own knowledge lives in session_mgr.chrome, which imports NOTHING
+# Chrome's own knowledge lives in usher.chrome, which imports NOTHING
 # from here (it is a leaf), so this can be a plain module-level import with
 # no cycle. Imported by name rather than qualified because chrome rebinds no
 # global of its own (its one cache is mutated in place, never reassigned), so
@@ -59,8 +59,8 @@ except ImportError:
 # The work/personal boundary: this daemon runs as the personal account, so it
 # must not record or move work-enclave windows. mux stamps work terminals with
 # a "[WORK: <label>]" title banner; anything matching this is ignored end to
-# end (never captured, never placed). Override with SESSION_SKIP_TITLE.
-SKIP_TITLE = re.compile(os.environ.get("SESSION_SKIP_TITLE", r"^\[WORK"))
+# end (never captured, never placed). Override with USHER_SKIP_TITLE.
+SKIP_TITLE = re.compile(os.environ.get("USHER_SKIP_TITLE", r"^\[WORK"))
 
 
 
@@ -83,44 +83,22 @@ LOCAL_HOST = os.uname().nodename.split(".")[0]
 _XDG_CONFIG = os.environ.get("XDG_CONFIG_HOME",
                              os.path.expanduser("~/.config"))
 CONFIG_DIR = os.path.join(_XDG_CONFIG, "usher")
-# The pre-rename directory, still READ when the new one has nothing to say.
-#
-# WHY A FALLBACK RATHER THAN A FLAG DAY. These files are tackup's symlinks, and
-# the two repos deploy independently, so there is a window where usher is new
-# and the config is still in the old place. Without this, a box in that window
-# loses its exclude and include rules SILENTLY: no rules parses fine and means
-# "place everything", so the symptom is windows moving that should not, with
-# nothing reporting a fault. `doctor` says when it is reading from here, so the
-# half-migrated state is visible instead of merely survivable.
-LEGACY_CONFIG_DIR = os.path.join(_XDG_CONFIG, "session")
 
 
 def config_path(name):
-    """Where `name` lives: the usher dir, or the old one while it still has it.
+    """Where `name` lives. One directory, no fallback.
 
-    PER FILE, not per directory, because a half-moved config is the realistic
-    state during a rename: tackup may have linked `exclude` into the new dir
-    while a hand-made `plugins/` is still in the old one. Asking per name means
-    each file is found wherever it actually is.
+    This carried a per-file fallback to the pre-rename ~/.config/session for one
+    release, so the two repos could cut over independently. Both machines are
+    migrated and the old directory is gone from each, so the fallback is dead
+    weight that would only ever resurrect a stale file someone restored by
+    accident.
     """
-    new = os.path.join(CONFIG_DIR, name)
-    if os.path.exists(new):
-        return new
-    old = os.path.join(LEGACY_CONFIG_DIR, name)
-    return old if os.path.exists(old) else new
-
-
-def using_legacy_config():
-    """The names still being read from the pre-rename dir, for doctor."""
-    if not os.path.isdir(LEGACY_CONFIG_DIR):
-        return []
-    return sorted(
-        n for n in ("exclude", "include", "plugins", "session-start")
-        if config_path(n).startswith(LEGACY_CONFIG_DIR + os.sep))
+    return os.path.join(CONFIG_DIR, name)
 
 
 EXCLUDE_FILE = os.environ.get(
-    "SESSION_EXCLUDE_FILE", config_path("exclude"))
+    "USHER_EXCLUDE_FILE", config_path("exclude"))
 
 
 def load_exclude_rules(path=EXCLUDE_FILE):
@@ -194,7 +172,7 @@ def reload_exclude():
 # opens where you are and stays (default follow-me: an empty/absent file
 # anchors nothing). Exclude still wins: a window matching both is never placed.
 INCLUDE_FILE = os.environ.get(
-    "SESSION_INCLUDE_FILE", config_path("include"))
+    "USHER_INCLUDE_FILE", config_path("include"))
 
 ANCHOR_RULES, ANCHOR_ERRORS = load_exclude_rules(INCLUDE_FILE)
 
@@ -228,7 +206,7 @@ def is_mux_term(app, title):
 
 STATE = os.path.join(
     os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
-    "session-layout")
+    "usher")
 # Marker a worker drops once it has actually RUN launch_missing, so the launch
 # survives the first worker dying to the compositor-startup race: the supervisor
 # keeps launch on until this exists, not just for the first-spawned worker.
@@ -292,7 +270,7 @@ def profile_id(fresh=False):
     `fresh` bypasses the cache, for the one caller that must not be told the
     old answer: the display-change handler, which runs within a second of the
     change and decides whether anything happened at all."""
-    env = os.environ.get("SESSION_PROFILE")
+    env = os.environ.get("USHER_PROFILE")
     if env:
         return _safe_profile(env)
     now = time.time()
@@ -2102,7 +2080,7 @@ def do_display_changed():
 # Seconds to wait for every app a plugin asked to quit. Bounded on purpose:
 # this runs between a human pressing Reboot and the machine rebooting, so it
 # must never be the reason that does not happen.
-WIND_DOWN_TIMEOUT = float(os.environ.get("SESSION_WIND_DOWN_TIMEOUT", 8))
+WIND_DOWN_TIMEOUT = float(os.environ.get("USHER_WIND_DOWN_TIMEOUT", 8))
 
 
 def _wind_down_wait(pids):
@@ -2245,9 +2223,9 @@ def do_restore(dry, only=None, source=None):
 #                      or now-armed >= CAP )
 # FLOOR is a floor, not a race, so "log in, wander off, come back in 4 min and
 # launch Chrome" still lands. All three are env-overridable.
-START_FLOOR = float(os.environ.get("SESSION_START_FLOOR", 300))  # 5 min
-IDLE_SETTLE = float(os.environ.get("SESSION_IDLE_SETTLE", 25))   # 25 s quiet
-AGGR_CAP = float(os.environ.get("SESSION_AGGR_CAP", 900))        # 15 min cap
+START_FLOOR = float(os.environ.get("USHER_START_FLOOR", 300))  # 5 min
+IDLE_SETTLE = float(os.environ.get("USHER_IDLE_SETTLE", 25))   # 25 s quiet
+AGGR_CAP = float(os.environ.get("USHER_AGGR_CAP", 900))        # 15 min cap
 
 # Runtime seams (ephemeral, like the singleton lock): the kick writes ARM_FILE,
 # the worker reads it and publishes STATUS_FILE for `usher status` + the
@@ -2431,15 +2409,15 @@ def do_stop():
 def _tprofile(name):
     """Pin the display profile for a block and put the environment back, so an
     area that changes it cannot leak into the next."""
-    prev = os.environ.get("SESSION_PROFILE")
-    os.environ["SESSION_PROFILE"] = name
+    prev = os.environ.get("USHER_PROFILE")
+    os.environ["USHER_PROFILE"] = name
     try:
         yield
     finally:
         if prev is None:
-            os.environ.pop("SESSION_PROFILE", None)
+            os.environ.pop("USHER_PROFILE", None)
         else:
-            os.environ["SESSION_PROFILE"] = prev
+            os.environ["USHER_PROFILE"] = prev
 
 
 @contextlib.contextmanager
@@ -2753,41 +2731,24 @@ def _t_cli_split(ck):
     # THE SEAM: usher must not hardcode how a session starts. It reads one
     # path, and the path is beside the other user config rather than in a
     # second config dir.
-    # THE CONFIG DIR AND ITS FALLBACK. Every name resolves under one of the two
-    # directories, never a third place, and the fallback is PER FILE because a
-    # half-moved config is the realistic state during the rename.
-    import tempfile
-    for _n in ("exclude", "include", "plugins", "session-start"):
-        _p = config_path(_n)
-        ck(f"config-{_n}-sits-in-a-config-dir",
-           _p in (os.path.join(CONFIG_DIR, _n),
-                  os.path.join(LEGACY_CONFIG_DIR, _n)))
-    ck("the-two-config-dirs-differ", CONFIG_DIR != LEGACY_CONFIG_DIR)
-    ck("the-new-dir-is-named-for-the-command",
+    # THE CONFIG DIR. One place, named for the command, and every config name
+    # resolves under it. The per-file fallback to the pre-rename directory is
+    # gone: both machines are migrated, so it could only ever resurrect a stale
+    # file someone restored by accident.
+    ck("the-config-dir-is-named-for-the-command",
        os.path.basename(CONFIG_DIR) == "usher")
-    with tempfile.TemporaryDirectory() as _d:
-        _new, _old = os.path.join(_d, "usher"), os.path.join(_d, "session")
-        os.makedirs(_new)
-        os.makedirs(_old)
-        _real = (CONFIG_DIR, LEGACY_CONFIG_DIR)
-        try:
-            globals()["CONFIG_DIR"] = _new
-            globals()["LEGACY_CONFIG_DIR"] = _old
-            # NEITHER has it: answer with the NEW path, so a fresh box is told
-            # where to put the file rather than pointed at the dead one.
-            ck("an-absent-name-answers-the-new-dir",
-               config_path("exclude") == os.path.join(_new, "exclude"))
-            open(os.path.join(_old, "exclude"), "w").close()
-            ck("only-the-old-dir-has-it-so-read-it",
-               config_path("exclude") == os.path.join(_old, "exclude"))
-            ck("and-doctor-can-see-that", "exclude" in using_legacy_config())
-            open(os.path.join(_new, "exclude"), "w").close()
-            ck("the-new-dir-WINS-once-it-has-the-file",
-               config_path("exclude") == os.path.join(_new, "exclude"))
-            ck("and-is-then-not-reported-as-legacy",
-               "exclude" not in using_legacy_config())
-        finally:
-            globals()["CONFIG_DIR"], globals()["LEGACY_CONFIG_DIR"] = _real
+    for _n in ("exclude", "include", "plugins", "session-start"):
+        ck(f"config-{_n}-sits-in-the-config-dir",
+           config_path(_n) == os.path.join(CONFIG_DIR, _n))
+    ck("the-state-dir-is-named-for-the-command",
+       os.path.basename(STATE) == "usher")
+    # AND NOTHING READS THE OLD LOCATIONS ANY MORE, which is the assertion that
+    # keeps a fallback from creeping back in under a different name.
+    ck("no-path-points-at-the-pre-rename-dirs",
+       not any(p.endswith("/session") or "/session/" in p
+               or p.endswith("session-layout")
+               for p in (CONFIG_DIR, STATE, EXCLUDE_FILE, INCLUDE_FILE,
+                         PLUGIN_DIR)))
 
 
 def _t_relaunch(ck):

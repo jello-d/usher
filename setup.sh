@@ -75,29 +75,17 @@ build_venv() {
 }
 
 # EVERY CONSOLE SCRIPT THE PACKAGE PROVIDES, named once so install, uninstall
-# and check cannot disagree. This linked `session-mgr` alone while pyproject had
-# grown to three entry points, which put `usher` in the venv and NOT on PATH:
-# the package was correct and the command did not exist. That is the silent
-# selector-shrink this tree keeps warning about: the install still
-# reports success for the one name it knows.
+# and check cannot disagree. This once linked ONE name while pyproject had grown
+# to three entry points, which put `usher` in the venv and NOT on PATH: the
+# package was correct and the command did not exist, and the install still
+# reported success for the one name it knew.
 #
 APPS="usher usher-mgr"
-# AND WHAT A RENAME MUST REMOVE. `session-mgr` was both commands until the split
-# and is gone from pyproject, so pip no longer builds it: the ~/.local/bin link
-# would be left DANGLING, because install only ever creates the names it knows
-# and nothing was watching the ones it used to. Same shape as the indicator's
-# retired unit. Drop an entry here once no box can still be carrying it.
-RETIRED="session-mgr"
 
 do_install() {
   [ -n "${USHER_SKIP_BUILD:-}" ] || build_venv
   mkdir -p "$_bin"
   for _a in $APPS; do ln -sfn "$VENV/bin/$_a" "$_bin/$_a"; done
-  for _a in $RETIRED; do
-    [ -e "$_bin/$_a" ] || [ -L "$_bin/$_a" ] || continue
-    rm -f "$_bin/$_a"
-    echo "$PKG: retired $_bin/$_a (renamed)"
-  done
   _man_pages | while IFS= read -r _m; do
     _d=$_man/$(basename "$(dirname "$_m")")
     mkdir -p "$_d"; ln -sfn "$_m" "$_d/$(basename "$_m")"; done
@@ -107,7 +95,7 @@ do_install() {
 
 do_uninstall() {
   _rmln "$(_hook_src)" "$(_hook_dst)"
-  for _a in $APPS $RETIRED; do _rmln "$VENV/bin/$_a" "$_bin/$_a"; done
+  for _a in $APPS; do _rmln "$VENV/bin/$_a" "$_bin/$_a"; done
   _man_pages | while IFS= read -r _m; do
     _rmln "$_m" "$_man/$(basename "$(dirname "$_m")")/$(basename "$_m")"; done
   echo "$PKG: removed the core links (venv $VENV left in place)"
@@ -122,13 +110,6 @@ do_check() {
   for _a in $APPS; do
     if [ -x "$_bin/$_a" ]; then ok "$_bin/$_a"
     else bad "$_bin/$_a missing"; fi
-  done
-  # A retired name left behind is a FAILURE, not cosmetic: it dangles once pip
-  # stops building it, and a dangling command on PATH is worse than none.
-  for _a in $RETIRED; do
-    if [ -e "$_bin/$_a" ] || [ -L "$_bin/$_a" ]
-    then bad "$_bin/$_a is retired but still present"
-    else ok "no retired commands left"; fi
   done
   if command -v mux >/dev/null 2>&1; then ok "mux present (terminal restore)"
   else warn "mux absent: the mux plugin's terminal restore degrades"; fi

@@ -11,8 +11,8 @@ _bad=0
 # no-op this suite exists to catch.
 #
 # The comment above used to say exactly that, and the very next line then LISTED
-# indicator/session_mgr_indicator/__main__.py. Renaming the package to
-# usher_indicator left that path dangling and THIS TEST STILL PASSED, because
+# the indicator's old __main__.py by name. Renaming that package left the
+# path dangling and THIS TEST STILL PASSED, because
 # the `[ -e ] || continue` below reads a missing listed file as nothing to do.
 # So the indicator went uncompiled and the suite reported "engine + indicator
 # parse". The skip is right for a glob that matches nothing and wrong for a name
@@ -35,7 +35,7 @@ _compile_group() {   # <name> <min> <file>...
   [ "$_n" -ge "$_min" ] || { echo "  $_name: $_n file(s), expected >= $_min" >&2
     _bad=1; }
 }
-_compile_group engine    5 "$HERE/session_mgr"/*.py
+_compile_group engine    5 "$HERE/usher"/*.py
 _compile_group indicator 2 "$HERE/indicator"/*/*.py
 _compile_group plugins   1 "$HERE/share/plugins"/*.py
 _sh=0
