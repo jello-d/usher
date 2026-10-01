@@ -27,7 +27,11 @@ _compile_group() {   # <name> <min> <file>...
   _name=$1; _min=$2; shift 2
   _n=0
   for _f in "$@"; do
-    [ -e "$_f" ] || continue
+    # -f, NOT -e: the providers glob is BARE (they have bare names, being
+    # executed rather than imported), so it also matches the `__pycache__`
+    # DIRECTORY that running py_compile here leaves behind, and -e let a
+    # directory through to be compiled. The *.py groups never saw this.
+    [ -f "$_f" ] || continue
     _n=$((_n + 1)); _py=$((_py + 1))
     python3 -m py_compile "$_f" 2>/dev/null \
       || { echo "  py: $_f" >&2; _bad=1; }
@@ -38,6 +42,11 @@ _compile_group() {   # <name> <min> <file>...
 _compile_group engine    5 "$HERE/usher"/*.py
 _compile_group indicator 2 "$HERE/indicator"/*/*.py
 _compile_group plugins   1 "$HERE/share/plugins"/*.py
+# The providers are python with BARE names, because they are EXECUTED rather
+# than imported (the naming rule: a shebang script takes a bare name, whatever
+# directory it sits in). py_compile does not care about the suffix, so they are
+# syntax-checked here like everything else; test/providers.t runs them.
+_compile_group providers 1 "$HERE/share/providers"/*
 _sh=0
 for _f in "$HERE/setup.sh" "$HERE/indicator/setup.sh" "$HERE/test/run" \
           "$HERE/test/harness_lib" "$HERE/.githooks/pre-commit" \
@@ -48,8 +57,10 @@ for _f in "$HERE/setup.sh" "$HERE/indicator/setup.sh" "$HERE/test/run" \
     || { echo "  sh: $_f" >&2; _bad=1; }
 done
 # A hook that is not EXECUTABLE is silently ignored by the runner that invokes
-# it, which is the same shape as every other fault this suite now guards.
-for _f in "$HERE/share/hooks"/*; do
+# it, which is the same shape as every other fault this suite now guards. A
+# PROVIDER with no exec bit fails differently and just as quietly: usher's seam
+# execs it, so the mode is the difference between a login and an EACCES.
+for _f in "$HERE/share/hooks"/* "$HERE/share/providers"/*; do
   [ -f "$_f" ] && [ ! -x "$_f" ] && { echo "  not executable: $_f" >&2
     _bad=1; }
 done

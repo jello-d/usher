@@ -120,6 +120,40 @@ start a console session here and deliberately not how, so it execs whatever
 The provider obtains its own privilege if it needs any. Without one, the verb
 says so and tells you where to link it.
 
+### Providers
+
+One ships, in [`share/providers/`](share/providers/):
+
+- `usher-greetd`: starts the console session through
+  [greetd](https://git.sr.ht/~kennylevinsen/greetd), by authenticating you
+  against PAM exactly as the login screen would. Not autologin: nothing starts
+  without your password, and it only works while a greeter is waiting. It
+  finds the running greeter, reads the session that greeter recorded as your
+  last choice, and resolves it through the freedesktop session registry
+  (`$XDG_DATA_DIRS/{wayland,x}sessions`), so there is nothing to configure.
+  All seven greeters packaged for greetd are recognised, including the three
+  that record no choice at all; with no recorded default it offers the list.
+  `--list-sessions` shows what it would do and needs no password.
+
+**usher ships providers and does not install them**, which is a privilege
+boundary rather than an omission. A provider is re-exec'd under sudo, so root
+executes it, so it has to be root-owned in a root-visible tree; this package
+installs as you, into `~/.local`. Copy it yourself, or let a provisioner do
+it:
+
+```sh
+sudo install -o root -g root -m 0755 \
+  share/providers/usher-greetd /usr/local/libexec/usher-greetd
+ln -sfn /usr/local/libexec/usher-greetd ~/.config/usher/session-start
+```
+
+Each provider carries `--selftest`, which needs no root, no display manager
+and no live greeter, so the installed copy can be checked in place:
+
+```sh
+/usr/local/libexec/usher-greetd --selftest
+```
+
 ## Config
 
 - `~/.config/usher/exclude`: `<app-regex> :: <title-regex>` never-place list.

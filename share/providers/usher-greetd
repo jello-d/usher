@@ -1,0 +1,2015 @@
+#!/usr/bin/python3
+"""usher-greetd: usher's binding to greetd, for starting a console session.
+
+The box sits at the login screen and you are somewhere else. This authenticates
+you against PAM exactly as the login screen would and asks greetd to start your
+session on the physical display, so the machine comes up as if you had typed
+your password at the keyboard.
+
+IT IS NOT AUTOLOGIN, and that distinction is the whole design. Nothing starts
+without your password: a power-cycled machine still sits at the greeter, and
+this only works while a greeter is actually waiting. What it removes is the
+requirement to be standing in front of the console, not the requirement to
+authenticate.
+
+WHY IT CAN EXIST AT ALL. A graphical session needs DRM master on seat0, which
+logind grants to the session active on the VT, and an ssh session has no seat
+(measured: `loginctl show-session` reports `Seat=` empty for it). loginctl has
+no verb that creates a session either, only `activate` for one that exists. So
+the only thing that can put a session on that display is the program that owns
+the VT, which is greetd, and greetd's protocol is the only door in.
+
+WHY NO GREETER CHANGES. greetd-ipc(7) is spoken over GREETD_SOCK, which greetd
+hands to the greeter it spawns. Measured on this fleet 2026-09-30: greetd 0.10.3
+ACCEPTS A SECOND CONCURRENT CLIENT on that socket and answers it while regreet
+still holds its own connection. The socket is _greetd-owned and mode 755, so
+connecting needs the write bit, which root has. Root is therefore a legitimate
+second client and the login screen needs no sidecar, no listening socket and no
+modification. That was the alternative design and this is the cheaper and safer
+half of it: the greeter is the one component that, broken, locks you out of the
+machine entirely, so not touching it is worth a sudo prompt.
+
+THE ONE RULE THAT KEEPS THIS FROM BEING A PRIVILEGE HOLE: the username is taken
+from SUDO_UID, never from an argument. A root program that accepted a username
+would let whoever can run it start a session as anybody; taking the caller's own
+identity means it can only ever do for you what you could already do by walking
+to the keyboard. PAM still demands the password either way.
+
+WHICH SESSION IT STARTS IS THE GREETER'S ANSWER, NOT OURS, AND NOT A CONFIG.
+Greeters are sticky: whatever you picked at the login screen last time is what
+the next login defaults to. So the fact is already on the box, maintained by
+the thing whose answer we want, and a shadow config naming a session command
+would be a second copy of it that could only drift.
+
+IT FINDS THE GREETER, READS ITS DEFAULT, AND USES IT. The greeter is detected
+from the process table (greetd's config does not name it: on this fleet it
+execs a wrapper that execs sway with the greeter inside), and failing that,
+the known caches are probed, because a cache on disk is evidence a greeter
+wrote it. The recorded value then resolves through the freedesktop session
+registry, which also gives XDG_SESSION_TYPE from the directory the entry was
+found in.
+
+ALL SEVEN GREETERS PACKAGED FOR greetd ARE ACCOUNTED FOR, and they disagree
+about everything: four storage mechanisms, three value shapes, and three that
+remember nothing at all (see GREETERS). What makes one code path serve them is
+that A RECORDED VALUE IS ALWAYS A POINTER, resolved by MATCHING IT AGAINST THE
+REGISTRY and never by being run. Name, desktop-file path and command all
+resolve that way, so the invariant holds everywhere: THE ONLY COMMAND THIS
+PROGRAM EVER RUNS IS AN `Exec=` OUT OF A DESKTOP FILE IT READ. That is what
+lets a greeter which caches a raw command be supported without weakening the
+rule.
+
+WHEN THERE IS NO DEFAULT IT OFFERS THE LIST. Three greeters record no choice
+ever, so refusing there would make this unusable rather than careful; the menu
+is the information a refusal was going to print anyway. It asks only when
+there is somebody to ask, and a scripted call gets the refusal instead of
+blocking on a question. `--list-sessions` predicts all of this without a
+password, and `--session NAME` overrides for one login.
+
+AND IT REFUSES RATHER THAN GUESSING, since nobody is watching the console: a
+pointer no entry matches, a pointer two entries match, two greeters recording
+different things with neither running, and an X11 entry are all errors.
+
+AND THE PASSWORD IS THE POINT, not a formality. /etc/pam.d/greetd includes
+pam_gnome_keyring, so authenticating here UNLOCKS THE LOGIN KEYRING, which is
+what puts the ssh key into the agent at session start. Autologin would have left
+the keyring locked and the agent empty, which is worse than the status quo, so
+the password buys something concrete beyond the obvious.
+"""
+import argparse
+import getpass
+import json
+import os
+import pwd
+import shlex
+import shutil
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import tomllib
+
+# Where greetd puts its socket. GREETD_SOCK is authoritative when we have it
+# (we usually do not, since we are not the greeter), so the glob is the real
+# path.
+#
+# THE DIGITS ARE GREETD'S PID, so the glob is REQUIRED rather than tidy.
+# /run/greetd-3423.sock belonged to greetd pid 3423, and an earlier version of
+# this comment called the name stable on the evidence that it survived a reboot.
+# It had not survived anything: greetd was the SAME process the whole time, so
+# that was an observation of something which never changed, not of a name that
+# persists. It changes on every greetd restart.
+SOCK_GLOB = "/run/greetd-*.sock"
+
+# WHICH SESSION TO START IS A FACT THE GREETER ALREADY MAINTAINS, so this
+# program reads it rather than carrying a copy. Every greeter is sticky: the
+# session you picked last time is what the next login defaults to, and regreet
+# keeps that here, in a path hardcoded in its binary (read out of its strings,
+# along with the two key names):
+#
+#     /var/lib/regreet/state.toml    last_user, [user_to_last_sess]
+#
+# THE CACHED VALUE IS A DESKTOP ENTRY'S `Name=`, not a file name and not a
+# command. Measured on both boxes: `jello = "Wayfire"`, where the file is
+# wayfire.desktop (lower case) and its Exec is /usr/local/bin/startwayfire. So
+# the cache is a POINTER INTO THE FREEDESKTOP REGISTRY, and the command comes
+# from the entry it names.
+#
+# THE ALTERNATIVE WAS A SHADOW CONFIG naming the session command, and it was
+# the wrong answer for the reason the tree's single-source rule gives: the box
+# would then hold the same fact twice, maintained by two different things, and
+# the copy that drifts is the one a human never looks at. Reading the greeter's
+# own answer means a summoned login reproduces a console login by
+# construction, which is the whole point of the feature.
+#
+# AND regreet IS ONE OF SEVEN, which is why this is a TABLE and not a constant.
+# Read out of the shipped binaries, Python sources and GSettings schemas of
+# every greeter packaged for greetd (2026-10-01), the landscape is:
+#
+#     greeter     remembers           where                      POINTER KIND
+#     regreet     yes                 /var/lib/regreet/          desktop Name
+#                                       state.toml (TOML)
+#     tuigreet    opt-in, --remember  /var/cache/tuigreet/       desktop PATH
+#                 -session              lastsession-path
+#     nwg-hello   yes                 /var/cache/nwg-hello/      Exec COMMAND
+#                                       cache.json (JSON)
+#     phrog       yes                 GSettings mobi.phosh.      a name, in
+#                                       phrog last-session         DCONF
+#     gtkgreet    NO                  /etc/greetd/environments   n/a
+#     wlgreet     NO                  /etc/greetd/wlgreet.toml   n/a
+#     agreety     NO                  nothing                    n/a
+#
+# FOUR STORAGE MECHANISMS, THREE POINTER KINDS, AND THREE THAT REMEMBER
+# NOTHING. The last three are not broken: an unremembered choice is a real
+# state, and the answer there is the session menu, not an error.
+#
+# WHAT MAKES THIS GENERIC RATHER THAN A PILE OF SPECIAL CASES: a cached value
+# is always a POINTER, resolved by MATCHING IT AGAINST THE REGISTRY WE ALREADY
+# SCANNED, never by running it. Name, path and command all resolve that way
+# (see resolve_pointer), so the invariant holds for every greeter: THE ONLY
+# COMMAND WE EVER RUN IS AN `Exec=` OUT OF A DESKTOP FILE WE READ. That is
+# what lets nwg-hello's command-shaped cache be supported without weakening
+# the rule, where simply refusing a command-shaped value would have excluded
+# that greeter entirely.
+#
+# INDEPENDENT CORROBORATION FOR THE OTHER HALF: tuigreet's binary carries
+# XDG_DATA_DIRS, the literal default `/usr/local/share:/usr/share`, `Hidden`,
+# `NoDisplay`, `DesktopNames` and "no Desktop Entry section in desktop file".
+# So the registry derivation below is not this program's invention; a greeter
+# written by somebody else derives it identically. Only the cache varies.
+REGREET_STATE = "/var/lib/regreet/state.toml"
+TUIGREET_CACHE = "/var/cache/tuigreet"
+NWG_HELLO_CACHE = "/var/cache/nwg-hello/cache.json"
+GTKGREET_ENVIRONMENTS = "/etc/greetd/environments"
+# SESSION TYPE COMES FROM THE DIRECTORY, and that is not our invention either:
+# regreet derives it the same way and its binary carries exactly the two
+# literals `XDG_SESSION_TYPE=wayland` and `XDG_SESSION_TYPE=x11` for it.
+SESSION_KINDS = (("wayland-sessions", "wayland"), ("xsessions", "x11"))
+# The spec default for XDG_DATA_DIRS, and WHAT WE ALWAYS USE.
+#
+# NOT THE CALLER'S XDG_DATA_DIRS, which was the first version and was wrong.
+# The question this program asks is "what does the LOGIN SCREEN offer", and
+# the login screen is regreet under greetd, which has no XDG_DATA_DIRS:
+# neither greetd's config.toml nor greeter-resolve sets one, so regreet falls
+# back to the spec default. Reading the variable from our own environment
+# makes the answer depend on WHO ASKS, which is how `--list-sessions` from an
+# interactive shell came to scan six directories (a desktop session exports
+# `/usr/share/gnome` and more) while the login it predicts would scan four.
+# Caught by running it against the real box; the four entries happen to be the
+# same either way here, which is exactly the luck that would have shipped it.
+#
+# So this models the GREETER'S environment, not ours. If greetd is ever given
+# an XDG_DATA_DIRS, this is the line that has to learn about it.
+XDG_DATA_DIRS_DEFAULT = "/usr/local/share:/usr/share"
+# Exec= field codes, which a session entry has nothing to substitute into and
+# must therefore drop rather than hand to the compositor as arguments. Listed
+# explicitly rather than matched by shape, so `%%` (an escaped literal) and a
+# genuine argument are never mistaken for one.
+FIELD_CODES = frozenset(("%f", "%F", "%u", "%U", "%d", "%D", "%n", "%N",
+                         "%i", "%c", "%k", "%v", "%m"))
+
+# What start_session adds to the environment PAM builds, BEYOND the session
+# type derived above.
+#
+# XDG_SESSION_TYPE IS LOAD-BEARING AND WAS THE FIRST REAL BUG THIS SHIPPED.
+# PAM sets it to `tty`, because at the moment the session is created that is
+# what it is; a greeter that starts a wayland session is expected to say so.
+# We did not, so logind reported Type=wayland while the session's own
+# environment said tty, and CHROME PICKS ITS BACKEND FROM THIS VARIABLE. It
+# chose X11, found no X server, and exited:
+#
+#     ERROR:ui/ozone/platform/x11/ozone_platform_x11.cc:257]
+#     Missing X server or $DISPLAY
+#     ERROR:ui/aura/env.cc:246] The platform failed to initialize. Exiting.
+#
+# So a summoned login came up with no browser at all, and the failure was
+# invisible from usher's side, which had faithfully asked for a launch. Setting
+# it makes the environment AGREE WITH LOGIND rather than inventing anything:
+# `loginctl show-session` already called this session wayland. Measured both
+# ways on 2026-09-30, same command, same box: tty exits on the error above,
+# wayland brings all six windows back. It is no longer written here because it
+# is no longer a constant: `session_request` builds it from the directory the
+# entry came from, so the value cannot disagree with the session being started.
+#
+# USHER_SUMMONED is the hook for the session to lock itself on arrival, since
+# one you summoned is one you are not in front of. Nothing consumes it yet, on
+# purpose: whether a window MOVE lands while the lock holds the output
+# inhibited is unmeasured, and usher's restore runs at that exact moment.
+SESSION_ENV = ["USHER_SUMMONED=1"]
+
+
+class SessionError(Exception):
+    """No single session could be chosen, carrying the reason for a human.
+
+    AN EXCEPTION RATHER THAN A CALL TO fail(), so every rule below is testable
+    with no greeter, no root and no desktop files beyond the fixtures. That is
+    the same shape usher's own `pick_socket` settled on, and for the same
+    reason: the refusals are the interesting behaviour here, and a function
+    that exits the process cannot be asked what it would have said.
+    """
+
+
+def session_dirs(roots=None):
+    """Every session-entry directory to scan, with the type each one implies.
+
+    Ordered the way XDG_DATA_DIRS is, because the first match for a given
+    relative name wins and the caller depends on that.
+
+    `roots` IS A PARAMETER FOR TESTS, NOT A HOOK FOR THE ENVIRONMENT: see
+    XDG_DATA_DIRS_DEFAULT for why the ambient variable is deliberately not
+    consulted.
+    """
+    out = []
+    for root in (roots or XDG_DATA_DIRS_DEFAULT).split(":"):
+        if root:
+            for sub, kind in SESSION_KINDS:
+                out.append((os.path.join(root, sub), kind, sub))
+    return out
+
+
+def read_desktop_entry(path):
+    """The `[Desktop Entry]` group of a desktop file, as a dict.
+
+    ONLY THAT GROUP, which is the trap in parsing one of these naively. A
+    desktop file may carry action groups after it (`[Desktop Action
+    new-window]`), each with its OWN Name and Exec, so reading the whole file
+    line by line leaks keys the main group never set, and a visibility key
+    picked up from an action group hides a session that should be offered.
+
+    A DUPLICATED KEY INSIDE one group takes the FIRST value, and that is OUR
+    TIE-BREAK, not a requirement: the spec leaves duplicates undefined. It is
+    pinned by a check so it cannot drift by accident, and it is NOT what
+    protects us from the action groups above. The group filter is. An earlier
+    version of this docstring claimed otherwise, and the regression run that
+    proved every other check bites is what caught it: breaking the filter
+    failed nothing until a fixture put a key in an action group ALONE.
+    """
+    out = {}
+    group = None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if line[:1] == "[" and line[-1:] == "]":
+                    group = line[1:-1]
+                elif group == "Desktop Entry" and line and line[0] != "#":
+                    key, eq, val = line.partition("=")
+                    if eq:
+                        out.setdefault(key.strip(), val.strip())
+    except OSError:
+        return {}
+    return out
+
+
+def list_sessions(dirs=None):
+    """Every session this box offers, as the greeter would list them.
+
+    HONOURS Hidden AND NoDisplay, because regreet does (both names are in its
+    binary). Offering a session the login screen would not show means a
+    summoned login could start something you cannot start at the keyboard,
+    which breaks the one promise this program makes.
+    """
+    seen = set()
+    out = []
+    for path, kind, sub in (session_dirs() if dirs is None else dirs):
+        try:
+            names = sorted(os.listdir(path))
+        except OSError:
+            continue        # a data dir with no sessions in it is normal
+        for fn in names:
+            rel = f"{sub}/{fn}"
+            if not fn.endswith(".desktop") or rel in seen:
+                continue    # an earlier XDG_DATA_DIRS entry already won
+            seen.add(rel)
+            e = read_desktop_entry(os.path.join(path, fn))
+            if e.get("Hidden") == "true" or e.get("NoDisplay") == "true":
+                continue
+            if e.get("Name") and e.get("Exec"):
+                out.append({"name": e["Name"], "exec": e["Exec"],
+                            "kind": kind, "file": os.path.join(path, fn)})
+    return out
+
+
+def exec_argv(exec_value):
+    """A desktop `Exec=` as argv, with field codes removed."""
+    return [a for a in shlex.split(exec_value) if a not in FIELD_CODES]
+
+
+# Why a greeter gave us no pointer. THREE STATES, NOT TWO, which is the whole
+# point of this rework: "no choice recorded yet" and "this greeter never
+# records one" are different facts and only one of them is worth reporting as
+# a gap. Conflating them made gtkgreet look broken.
+NO_RECORD = "no-record"        # it does record, and has not yet for this user
+NEVER_RECORDS = "never"        # it has no concept of a remembered session
+UNREADABLE = "unreadable"      # it records somewhere we cannot read
+
+
+def _regreet_choice(user, path=None):
+    """regreet: a desktop entry NAME, in TOML.
+
+    `path` is for the checks; production always uses the module constant.
+    """
+    try:
+        with open(path or REGREET_STATE, "rb") as fh:
+            state = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError, ValueError):
+        return None
+    got = (state.get("user_to_last_sess") or {}).get(user)
+    return got if isinstance(got, str) and got else None
+
+
+def _tuigreet_choice(_user, cache=None):
+    """tuigreet: a desktop FILE PATH, in a bare file. NOT per user.
+
+    `lastsession-path` is preferred over `lastsession`, which holds a command:
+    both are pointers we can resolve, but a path identifies exactly one entry
+    and a command can be shared by two. Its cache is global rather than
+    per-user (there is a single `lastuser`), so the user is not consulted.
+    """
+    for name in ("lastsession-path", "lastsession"):
+        try:
+            with open(os.path.join(cache or TUIGREET_CACHE,
+                                   name)) as fh:
+                got = fh.read().strip()
+        except OSError:
+            continue
+        if got:
+            return got
+    return None
+
+
+def _nwg_hello_choice(user, path=None):
+    """nwg-hello: the Exec COMMAND, in JSON, keyed by user.
+
+    Its combo box uses the exec as the id and the Name as the label
+    (`combo_session.append(session["exec"], session["name"])`), so what lands
+    in the cache is a command. We never run it; resolve_pointer matches it
+    against the registry's own Exec values, which is what keeps the rule.
+    """
+    try:
+        with open(path or NWG_HELLO_CACHE) as fh:
+            cache = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    got = (cache.get("sessions") or {}).get(user)
+    return got if isinstance(got, str) and got else None
+
+
+# The greeters greetd is known to be driven by: the executable name to detect
+# it by, and how to read its recorded choice. ONE TABLE, because the greeter
+# is the only axis that varies here, and a table is data rather than branches.
+GREETERS = (
+    ("regreet", _regreet_choice),
+    ("tuigreet", _tuigreet_choice),
+    ("nwg-hello", _nwg_hello_choice),
+    # phrog keeps it in the greeter user's DCONF, which needs that user's HOME
+    # and a gsettings call rather than a file read. Named so the report can say
+    # "cannot read" instead of "none recorded", which would be a lie.
+    ("phrog", UNREADABLE),
+    # These three have no concept of a remembered session. gtkgreet reads a
+    # flat list of commands from /etc/greetd/environments and offers it every
+    # time; wlgreet takes its sessions from wlgreet.toml; agreety asks for a
+    # command. Nothing to read, and nothing wrong.
+    ("gtkgreet", NEVER_RECORDS),
+    ("wlgreet", NEVER_RECORDS),
+    ("agreety", NEVER_RECORDS),
+)
+
+
+def running_greeter(procs=None):
+    """Which greeter is on the console RIGHT NOW, or None.
+
+    BY WALKING THE PROCESS TABLE, because that is the only thing that answers
+    "the CURRENT greeter". greetd's config does not: on this fleet
+    `[default_session] command` is `/etc/greetd/greeter-resolve`, a wrapper
+    that picks a sway config and execs sway, with the greeter as sway's child,
+    so the config names neither. And the table is readable exactly when we
+    need it, since this program only works while a greeter is waiting.
+
+    MATCHED ON THE BASENAME OF argv[0], AND NEVER OUR OWN PID. This repo's
+    notes record the self-match trap three times in one day (`pgrep -f
+    usher-mgr` matching the shell running it, `ps | grep -c startwayfire`
+    counting its own pipeline), so the habit is the one those notes land on:
+    read /proc, compare the executable rather than the whole command line, and
+    exclude yourself. `usher-greetd --session regreet` must not detect regreet.
+    """
+    me = os.getpid()
+    known = {name: how for name, how in GREETERS}
+    for pid in (procs if procs is not None else _read_proc_argv0()):
+        if pid[0] == me:
+            continue
+        base = os.path.basename(pid[1])
+        if base in known:
+            return base
+    return None
+
+
+def _read_proc_argv0():
+    """(pid, argv[0]) for every process we can read. Separated so
+    running_greeter is testable without a process table."""
+    out = []
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                raw = fh.read()
+        except OSError:
+            continue
+        # Treat NUL as whitespace, the lesson from chrome's rewritten argv:
+        # a process may hand back one space-joined string instead of NUL
+        # separated fields, and only the first token is read here anyway.
+        toks = raw.replace(b"\0", b" ").split()
+        if toks:
+            out.append((int(pid), toks[0].decode("utf-8", "replace")))
+    return out
+
+
+def greeter_choice(user, greeter=None, probe=True):
+    """(greeter, pointer-or-reason): what the live greeter has recorded.
+
+    The pointer is a string to resolve against the registry; otherwise one of
+    NO_RECORD / NEVER_RECORDS / UNREADABLE, so the caller can say WHICH of the
+    three it is rather than printing "none" for all of them.
+
+    READ-ONLY, DELIBERATELY, whichever greeter it is. These are the greeter's
+    own files in the greeter's own format, so a second writer is a drift
+    source; and a summoned login leaving the console default alone is the
+    behaviour we want anyway. Measured on regreet: two summoned logins on
+    2026-10-01 left state.toml's mtime at the previous CONSOLE login.
+    """
+    g = greeter if greeter is not None else running_greeter()
+    if g is None and not probe:
+        return None, NO_RECORD      # "nothing detected, and do not go looking"
+    if g is not None:
+        how = dict(GREETERS).get(g)
+        if how in (NEVER_RECORDS, UNREADABLE):
+            return g, how
+        got = how(user) if callable(how) else None
+        return g, (got if got else NO_RECORD)
+    # NO GREETER RUNNING IS NOT THE SAME AS NO ANSWER, and making detection a
+    # prerequisite for reading was a regression real data caught at once: run
+    # from inside a session there is no greeter to detect, so a box whose
+    # regreet cache plainly said "Wayfire" started refusing. Detection is
+    # worth having (it names the greeter, and picks whose answer to trust when
+    # two are installed) but it must not be the only way in.
+    #
+    # A CACHE ON DISK IS EVIDENCE A GREETER WROTE IT, and reading one is
+    # harmless, so probe them all. Exactly one answering is the normal case.
+    answers = [(name, how(user)) for name, how in GREETERS
+               if callable(how) and how(user)]
+    if len(answers) == 1:
+        return answers[0]
+    if len(answers) > 1:
+        # Two greeters' caches disagreeing is a box that changed greeter and
+        # kept the old state. Refusing beats picking by mtime, which would be
+        # a guess dressed as a fact.
+        raise SessionError(
+            "two greeters have recorded a session and no greeter is running "
+            "to say which is current ("
+            + ", ".join(f"{n}: {v}" for n, v in answers)
+            + "). Pass --session NAME.")
+    return None, NO_RECORD
+
+
+def resolve_pointer(ptr, entries):
+    """Every entry a greeter's recorded pointer could mean, and HOW it matched.
+
+    (hits, kind). THE ONE IDEA THAT MAKES THIS GENERIC: a greeter's cached
+    value is a POINTER INTO THE REGISTRY, whatever shape it takes, so it is
+    resolved by MATCHING against the entries we already scanned and never by
+    being run. Three kinds are live across the seven greeters:
+
+        Name     "Wayfire"                        regreet
+        path     /usr/share/.../wayfire.desktop   tuigreet
+        command  /usr/local/bin/startwayfire      nwg-hello
+
+    SO THE INVARIANT HOLDS FOR ALL OF THEM: the only command this program ever
+    runs is an `Exec=` out of a desktop file it read and can name. A
+    command-shaped pointer is matched, not executed, which is what lets
+    nwg-hello be supported at all; simply refusing anything command-shaped
+    (the first design) would have excluded that greeter entirely while
+    protecting nothing extra.
+
+    Tried most specific first. A path identifies exactly one file; a Name or a
+    command can be shared, and a caller that gets two refuses.
+    """
+    for kind, key in (("path", "file"), ("name", "name"), ("command", "exec")):
+        hits = [e for e in entries if e[key] == ptr]
+        if hits:
+            return hits, kind
+    return [], None
+
+
+def resolve_session(want, entries, user=None, source=None):
+    """Pick the one session entry to ask greetd for, or raise SessionError.
+
+    REFUSES RATHER THAN GUESSING, four times over, because nobody is watching
+    the console and starting the WRONG session is worse than starting none:
+    nothing to go on with more than one candidate, a pointer no entry matches,
+    a pointer two entries match, and an X11 entry.
+    """
+    names = [e["name"] for e in entries]
+    offers = ", ".join(names) or "none"
+    where = f" (from {source})" if source else ""
+    if not want:
+        if len(entries) == 1:
+            return entries[0]
+        who = f" for {user}" if user else ""
+        raise SessionError(
+            f"there is no recorded session choice{who}{where} and this box "
+            f"offers {len(entries)} ({offers}), so which one to start is not "
+            "knowable. Pass --session NAME.")
+    hits, kind = resolve_pointer(want, entries)
+    if not hits:
+        raise SessionError(
+            f"{want!r}{where} matches no session this box offers ({offers}). "
+            "A recorded choice is only ever MATCHED against the registry, by "
+            "name, by desktop-file path or by command, and never run as a "
+            "command itself, so a session the greeter no longer offers lands "
+            "here. Pass --session NAME.")
+    if len(hits) > 1:
+        raise SessionError(
+            f"{want!r}{where} matches {len(hits)} session entries by {kind} "
+            f"({', '.join(h['file'] for h in hits)}), so which one to start "
+            "is ambiguous. Give one of them a distinct Name, or hide one.")
+    entry = hits[0]
+    if entry["kind"] != "wayland":
+        raise SessionError(
+            f"{entry['name']!r} is an {entry['kind']} session "
+            f"({entry['file']}), and starting one is NOT IMPLEMENTED: the "
+            "greeter prepends its own x11_prefix for those and nothing here "
+            "has ever exercised that path. Refusing beats starting it wrong.")
+    return entry
+
+
+def _no_record_reason(greeter, state):
+    """Say WHICH of the three no-pointer states this is.
+
+    THE WHOLE POINT OF THE REWORK. One message for all three made gtkgreet,
+    which correctly has no concept of a remembered session, read exactly like
+    regreet with a missing file.
+    """
+    if greeter is None:
+        return "no greeter is running, so none could be asked"
+    if state == NEVER_RECORDS:
+        return (f"{greeter} does not record a last session at all; it offers "
+                "its list every time")
+    if state == UNREADABLE:
+        return (f"{greeter} records its choice where this cannot read it "
+                "(dconf, not a file)")
+    return f"{greeter} has recorded no choice for this user yet"
+
+
+def choose_session(entries, greeter, state, ask=None, isatty=None):
+    """Offer the configured sessions and return the chosen entry, or None.
+
+    A MENU RATHER THAN AN ERROR, because three of the seven greeters record no
+    choice and on those boxes refusing would make this program unusable rather
+    than careful. The list is what the refusal was going to print anyway, so
+    asking is strictly more useful than telling.
+
+    ONLY WHEN THERE IS SOMEBODY TO ASK: None when stdin is not a tty, so a
+    scripted or hook-driven call gets the refusal and its message instead of
+    blocking forever on a read nobody will answer. That distinction is the
+    reason this returns None rather than raising.
+
+    STARTABLE ENTRIES ONLY in the menu, with the rest named underneath: an
+    option that can only be refused is not an option, and silently omitting
+    them would be the dishonesty this rework is about.
+    """
+    ok = [e for e in entries if e["kind"] == "wayland"]
+    skipped = [e for e in entries if e["kind"] != "wayland"]
+    if not ok:
+        return None
+    # WHETHER THERE IS SOMEBODY TO ASK AND HOW TO ASK THEM ARE TWO QUESTIONS,
+    # and the first cut ran them together: the tty test fired even when a
+    # caller had supplied a reader, so the menu could not be exercised at all.
+    # Supplying `ask` IS the statement that somebody is there.
+    # `isatty` is injectable for the same reason `ask` is: with only `ask`
+    # overridable, every check supplied a reader and the tty guard below was
+    # never executed by anything. Removing it failed no check at all, which a
+    # planted regression is what found. A check that called this WITHOUT a
+    # reader could not be the answer either: run from a terminal it would
+    # block on input() forever.
+    if ask is None:
+        if not (isatty or sys.stdin.isatty)():
+            return None
+        ask = input
+    print(f"usher-greetd: {_no_record_reason(greeter, state)}.",
+          file=sys.stderr)
+    for i, e in enumerate(ok, 1):
+        print(f"  {i}) {e['name']:<22} {e['exec']}", file=sys.stderr)
+    for e in skipped:
+        print(f"  --) {e['name']:<22} {e['kind']}, cannot be started",
+              file=sys.stderr)
+    try:
+        got = ask(f"Which session? [1-{len(ok)}, or anything else to "
+                  "stop]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("", file=sys.stderr)
+        return None
+    return ok[int(got) - 1] if got.isdigit() and 1 <= int(got) <= len(ok) \
+        else None
+
+
+def pick_session(user, override=None, interactive=False,
+                 entries=None, choice=None):
+    """(entry, source): the session to start and where that came from.
+
+    ONE PATH FOR EVERY CALLER, which is why --list-sessions can promise to
+    predict what a login will do: it runs this, with the menu switched off.
+
+    `entries` AND `choice` ARE INJECTABLE BECAUSE THIS READS TWO SYSTEM
+    SOURCES, and a check that cannot supply both is really a check on the host
+    it runs on. Two of them were: they passed only because this box had no
+    greeter process, and started failing the moment the cache probe was added,
+    which is the same "passing for the wrong reason" this file keeps finding.
+    """
+    entries = list_sessions() if entries is None else entries
+    if override:
+        return resolve_session(override, entries, user, "--session"), \
+            "--session"
+    greeter, got = choice if choice is not None else greeter_choice(user)
+    if got in (NO_RECORD, NEVER_RECORDS, UNREADABLE):
+        if len(entries) == 1:
+            return entries[0], "the only session configured"
+        if interactive:
+            picked = choose_session(entries, greeter, got)
+            if picked:
+                return picked, "chosen at the menu"
+        offers = ", ".join(e["name"] for e in entries) or "none"
+        raise SessionError(
+            f"{_no_record_reason(greeter, got)}, and this box offers "
+            f"{len(entries)} ({offers}), so which one to start is not "
+            "knowable. Pass --session NAME.")
+    return resolve_session(got, entries, user, greeter), greeter
+
+
+def session_request(entry):
+    """The greetd start_session payload for an entry: (cmd, env).
+
+    BOTH HALVES COME FROM THE REGISTRY, which is the property worth keeping:
+    the command is the entry's `Exec=` and the session type is the directory
+    it was found in, so the environment cannot describe a different session
+    from the one being started. Two constants agreeing was the old design and
+    it is what shipped the XDG_SESSION_TYPE bug above.
+    """
+    cmd = exec_argv(entry["exec"])
+    if not cmd:
+        raise SessionError(
+            f"{entry['name']!r} has an Exec= that yields no command "
+            f"({entry['exec']!r}) in {entry['file']}.")
+    return cmd, [f"XDG_SESSION_TYPE={entry['kind']}"] + list(SESSION_ENV)
+
+
+def journal(msg):
+    """Record a milestone where it outlives the terminal.
+
+    THIS PROGRAM'S STDOUT IS EPHEMERAL: it runs under usher's exec, so what it
+    prints reaches exactly one terminal once, and the question "how did the
+    greeter exit this time?" had no answer an hour after the login. For a
+    ROOT-OWNED login helper that is the wrong trade twice over: an audit of who
+    logged in and how belongs in the journal, and a diagnosis nobody can repeat
+    is not a diagnosis.
+
+    Via logger(1) to the journal rather than a file of our own: this is a
+    privileged helper, so it should not invent a log nobody rotates, and the
+    user's watch.log is usher's forensic record and not ours to write into.
+    Best effort, because failing to log must never fail a login.
+    """
+    try:
+        subprocess.run(["logger", "-t", "usher-greetd", "-p", "user.notice",
+                        msg], check=False)
+    except OSError:
+        pass
+
+
+def fail(msg, code=1):
+    print(f"usher-greetd: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def _explain_two_prompts():
+    """Say why the password is asked for twice, BEFORE the first prompt.
+
+    A BARE SECOND `Password:` AFTER A SUDO PROMPT IS WHAT A CAREFUL PERSON
+    SHOULD BALK AT. Two challenges with no account of who is asking is
+    indistinguishable, from the terminal, from something harvesting the first
+    one. The answer is cheap to give and the question is the right one, so it is
+    given unprompted rather than left to trust.
+
+    Printed in the UNPRIVILEGED pass, which is the only moment before sudo's own
+    prompt appears, and to stderr so it cannot be mistaken for protocol output.
+    """
+    me = os.path.abspath(__file__)
+    for line in (
+            "you will be asked for your password TWICE, for two different "
+            "checks:",
+            "  1. sudo, next. Only root and _greetd may connect to greetd's "
+            "socket,",
+            "     so this is you proving to sudo that you are allowed to.",
+            "  2. then the login itself, relayed to PAM through greetd. That "
+            "is the",
+            "     same check the login screen makes, and it unlocks your login",
+            "     keyring, which is how the session gets your ssh key.",
+            "neither is echoed, logged or stored. This program is "
+            "root-owned at",
+            f"  {me}",
+            "and hands the second straight to greetd's socket. Read it if you "
+            "like.",
+    ):
+        print(f"usher-greetd: {line}", file=sys.stderr)
+
+
+def recvall(sock, n):
+    """Read exactly n bytes, because a short read is a desync not an error."""
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise OSError("greetd closed the connection")
+        buf += chunk
+    return buf
+
+
+def rpc(sock, msg):
+    """One greetd-ipc(7) round trip: a 32-bit native-order length, then JSON."""
+    body = json.dumps(msg).encode()
+    sock.sendall(struct.pack("=i", len(body)) + body)
+    n = struct.unpack("=i", recvall(sock, 4))[0]
+    return json.loads(recvall(sock, n).decode())
+
+
+def find_socket():
+    """The live greetd socket, or a refusal that says which thing is wrong.
+
+    A CONNECT IS THE TEST, not the file's existence, because a leftover inode
+    from a restarted greetd would otherwise be indistinguishable from a live
+    one.
+
+    WHAT A CONNECT DOES NOT TELL YOU IS WHETHER A SESSION IS RUNNING, and an
+    earlier version of this docstring claimed it did. greetd runs as ROOT and
+    listens for as long as the service is up, straight through a login and a
+    logout, so the socket answers just as readily while you are sitting in your
+    session. The claim came from `pgrep -u _greetd` finding nothing during a
+    session and being read as "greetd is not listening", which is a check for
+    the wrong user entirely. See already_logged_in for the real test.
+    """
+    import glob
+    paths = [os.environ["GREETD_SOCK"]] if os.environ.get("GREETD_SOCK") \
+        else sorted(glob.glob(SOCK_GLOB))
+    if not paths:
+        fail("no greetd socket found. Is greetd running?")
+    for path in paths:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(10)
+        try:
+            s.connect(path)
+            return s, path
+        except OSError:
+            s.close()
+    fail("found a greetd socket but nothing is listening on it, so either a "
+         "session is already running or greetd is down. Nothing to do.")
+
+
+def graphical_session(user, listing):
+    """The user's seated login session id from `loginctl`, or None.
+
+    SPLIT OUT AND PURE so it can be tested: the parsing is the part that can be
+    wrong, and the command around it cannot run inside a test.
+
+    THREE THINGS MUST AGREE, and any two of them alone give a wrong answer.
+    The columns are SESSION UID USER SEAT LEADER CLASS TTY, and on a box at the
+    login screen they look like this:
+
+        12995  113 _greetd  seat0 239810 greeter       tty7 yes 19h ago
+           13 1000 jello    -     7665   user          -    no  -
+            2 1000 jello    -     3294   manager       -    no  -
+
+    So "does jello have a session" is TRUE while nobody is logged in at all,
+    twice over, because the ssh connection asking the question is one and the
+    user manager is another. A SEAT is what makes a session the one on the
+    physical display, and CLASS separates a real login from the greeter's own
+    seated session and from a manager. Hence user AND seat AND class.
+
+    `-o json` is NOT used deliberately: this loginctl ignores it and prints the
+    table anyway, so asking for JSON silently yields something that is not
+    JSON, which parses to nothing and reads as "no session".
+    """
+    for line in listing.splitlines():
+        col = line.split()
+        if len(col) >= 6 and col[2] == user and col[3] != "-" \
+                and col[5] == "user":
+            return col[0]
+    return None
+
+
+def already_logged_in(user):
+    """The session id if `user` is already logged in on a seat, else None.
+
+    THE GUARD THAT REPLACES A FALSE ASSUMPTION. The greetd socket answers while
+    a session is running (see find_socket), so without this the only thing
+    between a second create_session and a live desktop was a hope about
+    greetd's internals. Asking logind is cheap and is the actual question, since
+    `usher cleanly login` means "there is no session, make one".
+    """
+    done = subprocess.run(["loginctl", "list-sessions", "--no-legend"],
+                          capture_output=True, text=True)
+    if done.returncode != 0:
+        # Fail OPEN rather than refuse: logind being unreadable is not evidence
+        # that a session exists, and greetd still gets the final say.
+        return None
+    return graphical_session(user, done.stdout)
+
+
+def authenticate(sock, user):
+    """Drive the PAM conversation greetd proxies, making no assumptions.
+
+    greetd-ipc(7) is explicit that there is no limit on the number or type of
+    auth messages and that a client must not assume, so this is a loop over
+    whatever PAM asks rather than a hardcoded 'send the password once'. That is
+    also what makes it keep working if the stack gains a second factor.
+    """
+    reply = rpc(sock, {"type": "create_session", "username": user})
+    said = False
+    while reply["type"] == "auth_message":
+        kind = reply.get("auth_message_type")
+        prompt = reply.get("auth_message") or ""
+        if kind == "secret":
+            # NAME THE ASKER ONCE, immediately before the prompt. The prompt's
+            # own wording comes from PAM and we must not reword it (a changed
+            # prompt is exactly what a spoof would do), so the attribution goes
+            # beside it instead.
+            if not said:
+                said = True
+                print(f"usher-greetd: that was sudo. This next prompt is the "
+                      f"LOGIN for {user}, relayed from PAM through greetd; "
+                      "its wording is PAM's own.", file=sys.stderr)
+            answer = getpass.getpass(prompt)
+        elif kind == "visible":
+            answer = input(prompt)
+        else:
+            # info and error are told to us, not asked of us: show them and
+            # answer with no response, which the protocol allows.
+            print(f"usher-greetd: {kind}: {prompt}")
+            answer = None
+        reply = rpc(sock, {"type": "post_auth_message_response",
+                           "response": answer})
+    return reply
+
+
+def configure_session(sock, user, start, cmd=None, env=None):
+    """Authenticate, then either start the session or leave nothing behind.
+
+    (reply, started). ONE CANCEL PATH, covering every way out that is not a
+    started session.
+
+    WHY THIS EXISTS: A MISTYPED PASSWORD USED TO STRAND THE GREETER. greetd
+    keeps "the session that is currently under configuration" in the DAEMON,
+    and greetd-ipc(7) says an auth_message must be answered with either
+    post_auth_message_response or cancel_session. The first version just
+    printed the failure and closed the socket, which answers neither, so a typo
+    left a half-configured session inside greetd and the obvious fix, running
+    the command again, was the one thing that could not work. Measured the hard
+    way: one typo, and no way back in without root.
+
+    AND IT CANCELS BEFORE IT STARTS, which is the half that repairs a box
+    rather than merely not breaking one. A client that died between those two
+    points (a crash, a Ctrl-C, an ssh drop, or the older version of this
+    program) left state only root could clear. Opening with a cancel makes the
+    command IDEMPOTENT in the fleet's sense: running it twice is running it
+    once, and running it after something went wrong is the repair. It is safe
+    with nothing pending, measured on the live socket, where greetd answered
+    `{"type":"success"}` to a cancel with no session under configuration.
+    """
+    # FAIL LOUD RATHER THAN START SOMETHING UNRESOLVED. `cmd` is optional only
+    # because the dry run and most of the protocol checks never start a
+    # session; asking to start without one is a caller bug, not a default to
+    # invent, and inventing one is how the hardcoded command survived so long.
+    if start and not cmd:
+        raise ValueError("a start needs a resolved session command")
+    started = False
+    try:
+        # Clear anything a previous client stranded. Failure is not fatal: an
+        # older greetd might not like it, and create_session will say so.
+        try:
+            rpc(sock, {"type": "cancel_session"})
+        except OSError:
+            pass
+        reply = authenticate(sock, user)
+        if reply["type"] != "success" or not start:
+            return reply, False
+        reply = rpc(sock, {"type": "start_session",
+                           "cmd": cmd, "env": env or []})
+        started = reply["type"] == "success"
+        return reply, started
+    finally:
+        if not started:
+            try:
+                rpc(sock, {"type": "cancel_session"})
+            except OSError:
+                pass
+
+
+def _greeter_sway_sock(uid):
+    """The greeter's sway IPC socket, asked for rather than guessed at.
+
+    THE GUESS FAILED ON A REAL LOGIN, which is why this reads it instead. The
+    first version globbed /run/user/<uid>/sway-ipc.* and /tmp/sway-ipc.<uid>.*,
+    and `_greetd` HAS NO RUNTIME DIR on this fleet (/run/user/113 does not
+    exist), so the first pattern could never match and the release fell back to
+    a signal.
+
+    SWAYSOCK IS AUTHORITATIVE AND THE GREETER'S CHILDREN CARRY IT. sway exports
+    it into what it spawns, so regreet's exec-time environment has the real path
+    whatever sway chose. That is a correct use of /proc/<pid>/environ: the value
+    was present when the child was exec'd, which is exactly what that file
+    records. Reading sway's OWN environ would not work, since sway sets the
+    variable after it starts.
+    """
+    import glob
+    for pid in sorted(os.listdir("/proc")):
+        if not pid.isdigit():
+            continue
+        try:
+            if os.stat(f"/proc/{pid}").st_uid != int(uid):
+                continue
+            with open(f"/proc/{pid}/environ", "rb") as f:
+                for kv in f.read().split(b"\0"):
+                    if kv.startswith(b"SWAYSOCK="):
+                        cand = kv.split(b"=", 1)[1].decode()
+                        if os.path.exists(cand):
+                            return cand
+        except (OSError, ValueError):
+            continue
+    # Fallbacks, for a greeter whose children are gone or which is not sway.
+    for pat in (f"/run/user/{uid}/sway-ipc.*", f"/tmp/sway-ipc.{uid}.*"):
+        found = sorted(glob.glob(pat))
+        if found:
+            return found[-1]
+    return None
+
+
+def release_greeter():
+    """Make the greeter exit THE WAY REGREET DOES, because a later logout
+    returning to the greeter depends on greetd seeing an ordinary exit.
+
+    greetd-ipc(7): "The session will start after the greeter process
+    terminates." In the normal flow regreet calls start_session and then leaves
+    by telling its own compositor to quit, which the greeter config spells out:
+
+        exec "regreet -c ${REGREET_CONF}; swaymsg exit"
+
+    We are not regreet and it has no reason to leave, so without this the
+    session sits configured and unstarted forever.
+
+    WHY `swaymsg exit` RATHER THAN A SIGNAL, which is what the first version
+    did. What greetd does after a session ENDS has to be "bring the greeter
+    back", and greetd's documentation is pointed about caring how the greeter
+    goes away ("to prevent security issues whenever greetd or the greeter
+    exit"). A SIGTERM is not the exit it normally sees. Reproducing regreet's
+    exact exit means the rest of the cycle cannot differ from a console login,
+    which is the strongest available guarantee that a later LOGOUT returns you
+    to the greeter rather than to something subtly different.
+
+    The signal stays as a fallback, because failing to release the greeter
+    would leave the machine with neither a session nor a login screen, which is
+    worse than an unusual exit. Which path was taken is REPORTED, since "it
+    worked" and "it needed the hammer" predict different things about the
+    logout that follows.
+    """
+    uid = str(pwd.getpwnam("_greetd").pw_uid)
+
+    def alive():
+        return subprocess.run(["pgrep", "-u", uid],
+                              capture_output=True).returncode == 0
+
+    if not alive():
+        return "the greeter had already exited"
+    sock = _greeter_sway_sock(uid)
+    why = "no SWAYSOCK and no sway-ipc socket found"
+    if sock:
+        # AS ROOT, with no `sudo -u`. We are already root here, and root can
+        # connect to a socket owned by anyone, so dropping to the greeter's uid
+        # bought nothing and added a second sudo that policy could refuse.
+        done = subprocess.run(["swaymsg", "-s", sock, "exit"],
+                              capture_output=True, text=True)
+        if done.returncode == 0:
+            for _attempt in range(25):
+                if not alive():
+                    return "the greeter exited the way regreet does"
+                time.sleep(0.2)          # 5s for sway to tear its session down
+            why = "swaymsg exited 0 but the greeter stayed up"
+        else:
+            why = (f"swaymsg rc={done.returncode}: "
+                   f"{(done.stderr or '').strip()[:80] or 'no message'}")
+    subprocess.run(["pkill", "-TERM", "-u", uid], capture_output=True)
+    return (f"asked the greeter to exit BY SIGNAL ({why}), so watch that a "
+            "logout still returns to the greeter")
+
+
+def _stub_greetd(path, script, dribble=False):
+    """A fake greetd on a real socket, replying from `script`.
+
+    A REAL socket and REAL length-prefixed frames, because the code under test
+    does binary framing: a mock handing it parsed objects would exercise none of
+    the part that can break. `dribble` writes each reply in small pieces so the
+    client's first recv CANNOT return a whole frame. Without that the framing
+    check passes for the wrong reason, measured: a unix socket buffer delivers
+    70000 bytes in one recv, so gutting recvall down to a single recv still left
+    the check green.
+    """
+    import threading
+    seen = []
+    if os.path.exists(path):
+        os.unlink(path)
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(1)
+
+    def run():
+        conn, _ = srv.accept()
+        try:
+            for reply in script:
+                hdr = conn.recv(4)
+                if len(hdr) != 4:
+                    return
+                seen.append(json.loads(
+                    conn.recv(struct.unpack("=i", hdr)[0]).decode()))
+                body = json.dumps(reply).encode()
+                frame = struct.pack("=i", len(body)) + body
+                if not dribble:
+                    conn.sendall(frame)
+                    continue
+                for off in range(0, len(frame), 512):
+                    conn.sendall(frame[off:off + 512])
+                    time.sleep(0.002)
+        finally:
+            conn.close()
+            srv.close()
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return seen, t
+
+
+def _dial(path):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(5)
+    s.connect(path)
+    return s
+
+
+SECRET = {"type": "auth_message", "auth_message_type": "secret",
+          "auth_message": "Password: "}
+
+
+def _t_conversation(ck, path):
+    """The PAM conversation: the happy path, and a stack that says more."""
+    seen, t = _stub_greetd(path, [SECRET, {"type": "success"}])
+    s = _dial(path)
+    reply = authenticate(s, "tester")
+    s.close()
+    t.join(5)
+    ck("happy-path-succeeds", reply == {"type": "success"})
+    ck("sends-create-session-with-the-username",
+       seen[0] == {"type": "create_session", "username": "tester"})
+    ck("answers-the-secret-prompt-with-the-password",
+       seen[1] == {"type": "post_auth_message_response", "response": "pw"})
+    # A credential path, so check the secret went in exactly one field.
+    ck("password-appears-only-in-the-response-field",
+       sum(1 for m in seen if "pw" in json.dumps(m)) == 1)
+    # greetd-ipc(7) is explicit that a client must not assume the number or
+    # type of auth messages, so a banner or a second factor must not break it.
+    info = {"type": "auth_message", "auth_message_type": "info",
+            "auth_message": "Last login was Tuesday"}
+    seen, t = _stub_greetd(path, [info, SECRET, {"type": "success"}])
+    s = _dial(path)
+    reply = authenticate(s, "tester")
+    s.close()
+    t.join(5)
+    ck("survives-an-informative-message", reply == {"type": "success"})
+    ck("answers-info-with-a-null-response",
+       seen[1] == {"type": "post_auth_message_response", "response": None})
+    ck("still-answers-the-later-secret",
+       seen[2] == {"type": "post_auth_message_response", "response": "pw"})
+
+
+def _t_journal(ck, path):
+    """Milestones must reach the journal, and never the password."""
+    said = []
+    real = subprocess.run
+    try:
+        subprocess.run = lambda argv, **k: said.append(argv) or _Done()
+        journal("a milestone")
+    finally:
+        subprocess.run = real
+    ck("the-journal-goes-through-logger-with-our-tag",
+       said and said[0][:5] == ["logger", "-t", "usher-greetd", "-p",
+                                "user.notice"])
+    ck("and-carries-the-message", said and said[0][-1] == "a milestone")
+    # A FAILING logger MUST NOT FAIL A LOGIN: no journal is worse than no login
+    # by a wide margin.
+    real = subprocess.run
+    try:
+        def _boom(*a, **k):
+            raise OSError("no logger here")
+        subprocess.run = _boom
+        journal("ignored")
+        ck("a-missing-logger-is-survivable", True)
+    except OSError:
+        ck("a-missing-logger-is-survivable", False)
+    finally:
+        subprocess.run = real
+
+
+class _Done:
+    returncode = 0
+    stdout = ""
+    stderr = ""
+
+
+def _t_attribution(ck, path):
+    """The password prompts must say who is asking, and not reword PAM."""
+    import contextlib
+    import io
+    OK = {"type": "success"}
+    seen, t = _stub_greetd(path, [OK, SECRET, OK, OK])
+    s = _dial(path)
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        configure_session(s, "tester", start=False)
+    s.close()
+    t.join(5)
+    said = err.getvalue()
+    # A BARE SECOND `Password:` AFTER A SUDO PROMPT IS WHAT A CAREFUL PERSON
+    # SHOULD BALK AT, so the asker is named beside it.
+    ck("the-login-prompt-names-its-asker",
+       "relayed from PAM through greetd" in said and "tester" in said)
+    ck("and-says-the-first-one-was-sudo", "that was sudo" in said)
+    # ONCE, not per prompt: a stack with several messages must not repeat it.
+    info = {"type": "auth_message", "auth_message_type": "info",
+            "auth_message": "banner"}
+    seen, t = _stub_greetd(path, [OK, info, SECRET, SECRET, OK, OK])
+    s = _dial(path)
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        configure_session(s, "tester", start=False)
+    s.close()
+    t.join(5)
+    ck("but-only-once", err.getvalue().count("that was sudo") == 1)
+    # AND PAM'S OWN WORDING IS NOT TOUCHED. A changed prompt is exactly what
+    # a spoof would do, so the attribution sits beside it, not in place of it.
+    _real = getpass.getpass
+    _asked = []
+    try:
+        globals()["getpass"].getpass = lambda p="": (_asked.append(p), "pw")[1]
+        seen, t = _stub_greetd(path, [OK, SECRET, OK, OK])
+        s = _dial(path)
+        with contextlib.redirect_stderr(io.StringIO()):
+            configure_session(s, "tester", start=False)
+        s.close()
+        t.join(5)
+    finally:
+        globals()["getpass"].getpass = _real
+    ck("pams-prompt-is-passed-through-verbatim",
+       _asked == [SECRET["auth_message"]])
+    # The pre-sudo explanation must exist and name both checks.
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        _explain_two_prompts()
+    pre = err.getvalue()
+    ck("the-two-prompts-are-explained-before-the-first",
+       "TWICE" in pre and "sudo" in pre and "keyring" in pre
+       and os.path.abspath(__file__) in pre)
+
+
+def _t_refusal(ck, path):
+    """A wrong password must surface as an error. The security claim is this."""
+    seen, t = _stub_greetd(path, [SECRET, {
+        "type": "error", "error_type": "auth_error",
+        "description": "Authentication failure"}])
+    s = _dial(path)
+    reply = authenticate(s, "tester")
+    s.close()
+    t.join(5)
+    ck("a-bad-password-returns-error", reply["type"] == "error")
+    ck("and-carries-the-description",
+       reply.get("description") == "Authentication failure")
+
+
+def _t_framing(ck, path):
+    """Short reads and a hung-up peer: the two ways a frame goes wrong."""
+    big = "x" * 70000
+    _seen, t = _stub_greetd(path, [{"type": "error", "error_type": "x",
+                                   "description": big}], dribble=True)
+    s = _dial(path)
+    try:
+        reply = rpc(s, {"type": "create_session", "username": "tester"})
+        ck("reassembles-a-reply-split-across-reads",
+           reply.get("description") == big)
+    except Exception as e:
+        # A short read does not return a wrong answer, it returns a TORN frame,
+        # so the symptom is a decode blowing up rather than a mismatch.
+        ck(f"reassembles-a-reply-split-across-reads ({type(e).__name__})",
+           False)
+    s.close()
+    t.join(5)
+    _seen, t = _stub_greetd(path, [])
+    s = _dial(path)
+    try:
+        rpc(s, {"type": "create_session", "username": "tester"})
+        ck("a-closed-connection-raises", False)
+    except OSError:
+        ck("a-closed-connection-raises", True)
+    s.close()
+
+
+# REAL `loginctl list-sessions` output, captured from this fleet, so the parser
+# is tested against the thing it actually reads rather than an idealised shape.
+AT_GREETER = """    1 1003 manifest-runner -     3296   manager       -    no  -
+12995  113 _greetd         seat0 239810 greeter       tty7 yes 19h ago
+12996  113 _greetd         -     239976 manager-early -    no  -
+   13 1000 jello           -     7665   user          -    no  -
+    2 1000 jello           -     3294   manager       -    no  -"""
+LOGGED_IN = AT_GREETER + """
+  197 1000 jello           seat0 205569 user          tty7 yes  1h ago"""
+
+
+def _t_already_logged_in(ck):
+    """The guard that stops a second session landing on a live desktop."""
+    # AT THE GREETER, jello has TWO sessions already (the ssh one and a user
+    # manager) and _greetd holds a SEATED one. All three must read as "no".
+    ck("greeter-state-is-not-a-login",
+       graphical_session("jello", AT_GREETER) is None)
+    ck("the-greeters-own-seated-session-is-not-mine",
+       graphical_session("_greetd", AT_GREETER) is None)
+    # And a real console login must be found.
+    ck("a-seated-user-session-is-found",
+       graphical_session("jello", LOGGED_IN) == "197")
+    ck("another-users-login-is-not-mine",
+       graphical_session("root", LOGGED_IN) is None)
+
+
+def _t_leaves_nothing_behind(ck, path):
+    """A mistyped password must not strand greetd. This is the regression."""
+    OK = {"type": "success"}
+    ERR = {"type": "error", "error_type": "auth_error",
+           "description": "Authentication failure"}
+    # lead-cancel, create, post, trail-cancel
+    seen, t = _stub_greetd(path, [OK, SECRET, ERR, OK])
+    s = _dial(path)
+    reply, started = configure_session(s, "tester", start=True,
+                                       cmd=["/bin/true"], env=["A=1"])
+    s.close()
+    t.join(5)
+    ck("a-failed-auth-is-reported", reply["type"] == "error")
+    ck("a-failed-auth-does-not-claim-to-have-started", started is False)
+    ck("a-failed-auth-CANCELS-the-pending-session",
+       seen[-1] == {"type": "cancel_session"})
+    # AND IT OPENS WITH ONE, which is what repairs a box some earlier client
+    # stranded, and is why running it again is the fix rather than the problem.
+    ck("it-cancels-before-it-starts",
+       seen[0] == {"type": "cancel_session"})
+    # A DRY RUN AUTHENTICATES AND LEAVES NOTHING EITHER.
+    seen, t = _stub_greetd(path, [OK, SECRET, OK, OK])
+    s = _dial(path)
+    reply, started = configure_session(s, "tester", start=False)
+    s.close()
+    t.join(5)
+    ck("a-dry-run-succeeds-without-starting",
+       reply["type"] == "success" and started is False)
+    ck("a-dry-run-cancels-what-it-configured",
+       seen[-1] == {"type": "cancel_session"})
+    # A REAL START MUST NOT BE CANCELLED, which is the way this fix could go
+    # wrong and would be invisible until a login silently did nothing.
+    seen, t = _stub_greetd(path, [OK, SECRET, OK, OK])
+    s = _dial(path)
+    reply, started = configure_session(s, "tester", start=True,
+                                       cmd=["/bin/true"], env=["A=1"])
+    s.close()
+    t.join(5)
+    ck("a-started-session-is-not-cancelled",
+       started is True and seen[-1]["type"] == "start_session")
+
+
+_FIXTURES = {
+    # The real shape, plus the action-group trap: a second group with its own
+    # Name and Exec, which a line-by-line read would let win.
+    "a/wayland-sessions/wayfire.desktop":
+        "[Desktop Entry]\nName=Wayfire\n"
+        "Exec=/usr/local/bin/startwayfire\nType=Application\n"
+        "\n[Desktop Action new-window]\nName=NotThis\nExec=/bin/false\n",
+    # The action group carries a key the MAIN group does not, which is the
+    # only shape where the group filter is load-bearing: for Name and Exec,
+    # `setdefault` plus `[Desktop Entry]` coming first already protects us, so
+    # a fixture that only duplicated those tested setdefault and not the
+    # filter. Group-blindness here makes a visible session vanish instead.
+    "a/wayland-sessions/actions.desktop":
+        "[Desktop Entry]\nName=HasActions\nExec=/bin/real\n"
+        "Actions=new-window;\n"
+        "\n[Desktop Action new-window]\nName=NotThis\nExec=/bin/false\n"
+        "NoDisplay=true\n",
+    # A key repeated INSIDE [Desktop Entry]: undefined per spec, so the check
+    # on this pins our own tie-break rather than a requirement.
+    "a/wayland-sessions/dup.desktop":
+        "[Desktop Entry]\nName=First\nExec=/bin/first\nName=Second\n",
+    "a/wayland-sessions/hidden.desktop":
+        "[Desktop Entry]\nName=Ghost\nExec=/bin/true\nHidden=true\n",
+    "a/wayland-sessions/nodisplay.desktop":
+        "[Desktop Entry]\nName=Invisible\nExec=/bin/true\nNoDisplay=true\n",
+    "a/wayland-sessions/noexec.desktop":
+        "[Desktop Entry]\nName=Broken\n",
+    "a/wayland-sessions/codes.desktop":
+        "[Desktop Entry]\nName=Codes\nExec=/bin/foo %U --real %f keep\n",
+    "a/wayland-sessions/twin-a.desktop":
+        "[Desktop Entry]\nName=Twin\nExec=/bin/a\n",
+    "a/wayland-sessions/twin-b.desktop":
+        "[Desktop Entry]\nName=Twin\nExec=/bin/b\n",
+    "a/xsessions/lxqt.desktop":
+        "[Desktop Entry]\nName=LXQt Desktop\nExec=startlxqt\n",
+    # Same relative name in a LATER data dir: the earlier one must win.
+    "b/wayland-sessions/wayfire.desktop":
+        "[Desktop Entry]\nName=ShouldNotWin\nExec=/bin/shadow\n",
+}
+
+
+def _fixture_tree():
+    """Write a synthetic session registry to DISK and return (root, dirs).
+
+    STAND-IN DICTS WOULD NOT TEST THE PARSER, and the parser is where both
+    traps live (the action group, and the two visibility keys). `dirs` comes
+    back in session_dirs() shape with root `a` ahead of root `b`.
+    """
+    root = tempfile.mkdtemp(prefix="usher-greetd-sessions-")
+    for rel, body in _FIXTURES.items():
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+    dirs = []
+    for sub_root in ("a", "b"):
+        for sub, kind in SESSION_KINDS:
+            dirs.append((os.path.join(root, sub_root, sub), kind, sub))
+    return root, dirs
+
+
+def _t_desktop_parse(ck, root):
+    """Reading ONE desktop file: the group filter and the key rules."""
+    e = read_desktop_entry(os.path.join(root, "a/wayland-sessions",
+                                        "wayfire.desktop"))
+    ck("desktop-entry-reads-name-and-exec",
+       e.get("Name") == "Wayfire"
+       and e.get("Exec") == "/usr/local/bin/startwayfire")
+    # THE TRAP, and note WHICH assertion is the real one. For Name and Exec,
+    # `setdefault` plus `[Desktop Entry]` coming first already wins, so
+    # asserting those proves nothing about the grouping. The key the action
+    # group alone defines is the one that can only be kept out by the filter,
+    # and keeping it out is what stops a visible session from vanishing.
+    act = read_desktop_entry(os.path.join(root, "a/wayland-sessions",
+                                          "actions.desktop"))
+    ck("desktop-entry-ignores-action-groups",
+       act.get("Name") == "HasActions" and act.get("Exec") == "/bin/real"
+       and act.get("NoDisplay") is None)
+    ck("desktop-entry-duplicate-key-takes-the-first",
+       read_desktop_entry(os.path.join(root, "a/wayland-sessions",
+                                       "dup.desktop")).get("Name") == "First")
+    ck("desktop-entry-missing-file-is-empty",
+       read_desktop_entry(os.path.join(root, "nope.desktop")) == {})
+
+
+def _t_session_listing(ck, dirs):
+    """Building the list of sessions the login screen would offer."""
+    got = list_sessions(dirs)
+    names = [s["name"] for s in got]
+    ck("sessions-skip-hidden", "Ghost" not in names)
+    ck("sessions-skip-nodisplay", "Invisible" not in names)
+    ck("sessions-skip-an-entry-with-no-exec", "Broken" not in names)
+    ck("sessions-find-the-real-one", "Wayfire" in names)
+    # Same fact from the listing side: a session whose only NoDisplay sits in
+    # an action group must still be offered.
+    ck("sessions-keep-one-whose-action-group-says-nodisplay",
+       "HasActions" in names)
+    # Earlier XDG_DATA_DIRS entry wins for the same relative name, so root b's
+    # shadowing wayfire.desktop must not appear at all.
+    ck("earlier-data-dir-wins", "ShouldNotWin" not in names)
+    kinds = {s["name"]: s["kind"] for s in got}
+    ck("session-type-comes-from-the-directory",
+       kinds.get("Wayfire") == "wayland"
+       and kinds.get("LXQt Desktop") == "x11")
+    ck("exec-strips-field-codes",
+       exec_argv("/bin/foo %U --real %f keep")
+       == ["/bin/foo", "--real", "keep"])
+    ck("exec-keeps-a-percent-that-is-not-a-field-code",
+       exec_argv("/bin/foo %%  --pct=50%") == ["/bin/foo", "%%", "--pct=50%"])
+    # THE ANSWER MUST NOT DEPEND ON WHO ASKS. A desktop session exports an
+    # XDG_DATA_DIRS the greeter does not have, so honouring ours made
+    # `--list-sessions` describe a different registry from the login it
+    # predicts. Planted here because the two agreed by luck on this box.
+    was = os.environ.get("XDG_DATA_DIRS")
+    os.environ["XDG_DATA_DIRS"] = "/nonexistent/planted"
+    try:
+        scanned = [d for d, _k, _s in session_dirs()]
+    finally:
+        if was is None:
+            os.environ.pop("XDG_DATA_DIRS", None)
+        else:
+            os.environ["XDG_DATA_DIRS"] = was
+    ck("session-dirs-ignore-the-callers-XDG_DATA_DIRS",
+       not any("planted" in d for d in scanned)
+       and "/usr/share/wayland-sessions" in scanned)
+
+
+def _t_greeter_cache(ck, root):
+    """Each greeter's own format, written in that greeter's own shape.
+
+    THREE READERS AND THREE POINTER KINDS, because the formats were read off
+    the real binaries and sources and no two agree. A fixture using one shape
+    for all three would test nothing but our own assumption.
+    """
+    state = os.path.join(root, "state.toml")
+    with open(state, "w", encoding="utf-8") as fh:
+        fh.write('last_user = "jello"\n\n'
+                 '[user_to_last_sess]\njello = "Wayfire"\n')
+    ck("regreet-gives-the-users-last-session-by-name",
+       _regreet_choice("jello", state) == "Wayfire")
+    ck("regreet-has-nothing-for-another-user",
+       _regreet_choice("nobody", state) is None)
+    ck("regreet-missing-reads-as-no-choice",
+       _regreet_choice("jello", os.path.join(root, "gone.toml")) is None)
+    with open(os.path.join(root, "junk.toml"), "w") as fh:
+        fh.write("this is not = = toml\n")
+    ck("regreet-unparsable-reads-as-no-choice",
+       _regreet_choice("jello", os.path.join(root, "junk.toml")) is None)
+
+    # tuigreet: bare files, and lastsession-path WINS over lastsession,
+    # because a path names one entry where a command can be shared.
+    tg = os.path.join(root, "tuigreet")
+    os.makedirs(tg, exist_ok=True)
+    with open(os.path.join(tg, "lastsession"), "w") as fh:
+        fh.write("/bin/a-command\n")
+    ck("tuigreet-falls-back-to-the-command-file",
+       _tuigreet_choice("jello", tg) == "/bin/a-command")
+    with open(os.path.join(tg, "lastsession-path"), "w") as fh:
+        fh.write("/usr/share/wayland-sessions/wayfire.desktop\n")
+    ck("tuigreet-prefers-the-desktop-file-path",
+       _tuigreet_choice("jello", tg)
+       == "/usr/share/wayland-sessions/wayfire.desktop")
+    ck("tuigreet-missing-reads-as-no-choice",
+       _tuigreet_choice("jello", os.path.join(root, "nope")) is None)
+
+    # nwg-hello: JSON, per user, and the value is a COMMAND.
+    nwg = os.path.join(root, "nwg.json")
+    with open(nwg, "w") as fh:
+        json.dump({"user": "jello",
+                   "sessions": {"jello": "/usr/local/bin/startwayfire"}}, fh)
+    ck("nwg-hello-gives-the-users-last-session-as-a-command",
+       _nwg_hello_choice("jello", nwg) == "/usr/local/bin/startwayfire")
+    ck("nwg-hello-has-nothing-for-another-user",
+       _nwg_hello_choice("nobody", nwg) is None)
+    with open(os.path.join(root, "junk.json"), "w") as fh:
+        fh.write("{not json")
+    ck("nwg-hello-unparsable-reads-as-no-choice",
+       _nwg_hello_choice("jello", os.path.join(root, "junk.json")) is None)
+
+
+def _t_greeter_detect(ck):
+    """Which greeter is running, and the three no-pointer states.
+
+    THE SELF-MATCH TRAP IS THE ONE WORTH PINNING. This repo's notes record it
+    three times in a single day, so a check that our own command line cannot
+    be mistaken for a greeter is worth more than the happy path.
+    """
+    me = os.getpid()
+    ck("detects-a-running-greeter-by-argv0",
+       running_greeter([(1, "/sbin/init"), (42, "/usr/local/bin/regreet")])
+       == "regreet")
+    ck("detects-whichever-greeter-it-is",
+       running_greeter([(42, "/usr/bin/tuigreet")]) == "tuigreet")
+    ck("no-greeter-running-is-not-an-error",
+       running_greeter([(1, "/sbin/init")]) is None)
+    # `usher-greetd --session regreet` must not detect regreet.
+    ck("never-matches-our-own-process",
+       running_greeter([(me, "/usr/local/bin/regreet")]) is None)
+    ck("a-non-greeter-is-not-a-greeter",
+       running_greeter([(42, "/usr/bin/python3")]) is None)
+
+
+
+def _t_greeter_states(ck):
+    """The three no-pointer states, and the probe that runs with no greeter."""
+    # THE THREE STATES, which is the whole reason for this rework.
+    ck("a-greeter-that-never-records-says-so",
+       greeter_choice("jello", "gtkgreet") == ("gtkgreet", NEVER_RECORDS))
+    ck("a-greeter-we-cannot-read-says-so",
+       greeter_choice("jello", "phrog") == ("phrog", UNREADABLE))
+    # ALL THREE MUST READ DIFFERENTLY, pairwise. The first version of this
+    # compared only NEVER_RECORDS against UNREADABLE, so making NEVER_RECORDS
+    # print the no-record wording (the exact conflation this rework exists to
+    # remove) failed nothing. Found by planting it.
+    _reasons = [_no_record_reason("gtkgreet", NEVER_RECORDS),
+                _no_record_reason("phrog", UNREADABLE),
+                _no_record_reason("regreet", NO_RECORD)]
+    ck("all-three-no-record-states-read-differently",
+       len(set(_reasons)) == 3
+       and "dconf" in _reasons[1]
+       and "does not record" in _reasons[0])
+    # probe=False is "nothing detected AND do not go looking", which is the
+    # only way to state this without the host's own greeter cache answering.
+    ck("no-greeter-and-no-probe-reads-as-no-record",
+       greeter_choice("jello", None, probe=False) == (None, NO_RECORD))
+
+    # THE PROBE FALLBACK. Detection and the readers are both stubbed, because
+    # otherwise this would be testing whether THIS box happens to have a
+    # greeter running and a cache on disk, which is exactly what the two
+    # checks fixed above were doing wrong. Stubbed at the globals, the way
+    # this suite already stubs getpass and subprocess.run.
+    _detect, _table = running_greeter, GREETERS
+    try:
+        globals()["running_greeter"] = lambda *a, **k: None
+        globals()["GREETERS"] = (("regreet", lambda _u: "Wayfire"),)
+        ck("with-no-greeter-running-a-cache-on-disk-still-answers",
+           greeter_choice("jello") == ("regreet", "Wayfire"))
+        globals()["GREETERS"] = (("regreet", lambda _u: "Wayfire"),
+                                 ("tuigreet", lambda _u: "/x.desktop"))
+        two = ""
+        try:
+            greeter_choice("jello")
+        except SessionError as exc:
+            two = str(exc)
+        ck("two-greeters-disagreeing-refuses-rather-than-guessing",
+           "two greeters have recorded" in two)
+        globals()["GREETERS"] = (("gtkgreet", NEVER_RECORDS),)
+        ck("a-probe-finding-nothing-reads-as-no-record",
+           greeter_choice("jello") == (None, NO_RECORD))
+    finally:
+        globals()["running_greeter"] = _detect
+        globals()["GREETERS"] = _table
+
+
+def _t_refusals(ck, dirs):
+    """Every rule that refuses rather than guesses, plus the request it builds.
+
+    THESE ARE THE INTERESTING BEHAVIOUR, which is why they are a function of
+    their own: nobody is watching the console, so what this does when it
+    CANNOT decide matters more than the happy path.
+    """
+    entries = list_sessions(dirs)
+    one = [e for e in entries if e["name"] == "Wayfire"]
+
+    def refused(want, ents=None):
+        try:
+            resolve_session(want, entries if ents is None else ents, "jello")
+        except SessionError as exc:
+            return str(exc)
+        return ""
+
+    # ALL THREE POINTER KINDS resolve to the same entry, which is what makes
+    # one code path serve greeters that store three different things. Each
+    # fixture value is the shape that greeter actually writes.
+    wf = os.path.join(dirs[0][0], "wayfire.desktop")
+    for kind, ptr in (("name", "Wayfire"),
+                      ("path", wf),
+                      ("command", "/usr/local/bin/startwayfire")):
+        hits, got = resolve_pointer(ptr, entries)
+        ck(f"resolve-a-{kind}-pointer",
+           got == kind and len(hits) == 1 and hits[0]["name"] == "Wayfire")
+    ck("resolve-matches-on-Name",
+       resolve_session("Wayfire", entries, "jello")["exec"]
+       == "/usr/local/bin/startwayfire")
+    # THE INVARIANT THE POINTER RULE EXISTS FOR, and the user's reservation:
+    # a command-shaped value is MATCHED, never executed, so one the registry
+    # does not contain is refused however plausible it looks.
+    cmdlike = refused("/usr/local/bin/startwayfire --flag")
+    ck("resolve-refuses-a-command-the-registry-does-not-contain",
+       "matches no session" in cmdlike
+       and "never run as a command itself" in cmdlike)
+    ck("resolve-refuses-an-unknown-name",
+       "matches no session" in refused("Nonesuch"))
+    ck("resolve-refuses-an-ambiguous-name", "ambiguous" in refused("Twin"))
+    ck("resolve-refuses-an-x11-session",
+       "NOT IMPLEMENTED" in refused("LXQt Desktop"))
+    ck("resolve-refuses-when-nothing-recorded-and-several-exist",
+       "no recorded session choice" in refused(None))
+    ck("resolve-uses-the-sole-session-when-nothing-is-recorded",
+       resolve_session(None, one, "jello")["name"] == "Wayfire")
+
+
+
+def _t_menu(ck, dirs):
+    """Offering the list when nothing is recorded, and never asking nobody."""
+    entries = list_sessions(dirs)
+    # THE MENU: offered when a greeter records nothing, and only to somebody.
+    picked = choose_session(entries, "gtkgreet", NEVER_RECORDS,
+                            ask=lambda _p: "1")
+    ck("the-menu-returns-the-chosen-session",
+       picked is not None and picked["kind"] == "wayland")
+    # The x11 entry is listed but NOT an option, so the index one past the
+    # startable ones is out of range. Counted rather than hardcoded, since a
+    # fixture change would otherwise make this pass vacuously.
+    _ok = [e for e in entries if e["kind"] == "wayland"]
+    ck("the-menu-offers-only-startable-sessions",
+       len(_ok) < len(entries)
+       and choose_session(entries, "gtkgreet", NEVER_RECORDS,
+                          ask=lambda _p: str(len(_ok) + 1)) is None
+       and choose_session(entries, "gtkgreet", NEVER_RECORDS,
+                          ask=lambda _p: str(len(_ok)))["kind"] == "wayland")
+    ck("the-menu-treats-a-refusal-as-no-choice",
+       choose_session(entries, "gtkgreet", NEVER_RECORDS,
+                      ask=lambda _p: "q") is None)
+    ck("the-menu-treats-an-out-of-range-answer-as-no-choice",
+       choose_session(entries, "gtkgreet", NEVER_RECORDS,
+                      ask=lambda _p: "99") is None)
+    # NOBODY TO ASK MEANS DO NOT ASK. THE ASSERTION IS THAT THE READER IS
+    # NEVER REACHED, not that the answer is None, and the difference is the
+    # whole check: with the guard deleted, input() hits EOF under a redirected
+    # stdin, the EOFError handler returns None, and an outcome-only assertion
+    # sees exactly what success looks like. Two planted regressions passed
+    # that way before this was written as a reachability test.
+    asked = []
+
+    def _boom(_p):
+        asked.append(1)
+        raise AssertionError("asked with no tty")
+
+    globals()["input"] = _boom
+    try:
+        # _boom RAISES, so the call has to be guarded or a regression ABORTS
+        # the suite instead of failing one check. That is how this check first
+        # read as "nothing failed": the run crashed, printed no `selftest
+        # FAIL:` line, and the regression harness grepping for one believed it.
+        quiet, reached = None, False
+        try:
+            quiet = choose_session(entries, "gtkgreet", NEVER_RECORDS,
+                                   ask=None, isatty=lambda: False)
+        except AssertionError:
+            reached = True
+        ck("the-menu-does-not-ask-when-there-is-no-tty",
+           quiet is None and not asked and not reached)
+        # And the other branch, so the guard is not simply always-off: with a
+        # tty the reader IS reached, which _boom proves by being hit.
+        try:
+            choose_session(entries, "gtkgreet", NEVER_RECORDS,
+                           ask=None, isatty=lambda: True)
+        except AssertionError:
+            pass
+        ck("the-menu-does-ask-when-there-is-a-tty", bool(asked))
+    finally:
+        globals().pop("input", None)
+    # A SCRIPTED CALL MUST NOT BLOCK ON A QUESTION. pick_session with the menu
+    # off refuses with the list instead, which is what the seam and the
+    # privileged half both rely on.
+    noask = ""
+    try:
+        pick_session("jello", None, interactive=False, entries=entries,
+                     choice=(None, NO_RECORD))
+    except SessionError as exc:
+        noask = str(exc)
+    ck("with-the-menu-off-it-refuses-instead-of-asking",
+       "not knowable" in noask)
+    # The resolved session travels as one unambiguous --session.
+    ck("the-resolved-session-replaces-any-given-one",
+       _without_session(["-n", "--session", "Old", "login"]) == ["-n", "login"]
+       and _without_session(["--session=Old", "login"]) == ["login"])
+
+
+
+def _t_request(ck, dirs):
+    """The payload handed to greetd: both halves out of the registry."""
+    one = [e for e in list_sessions(dirs) if e["name"] == "Wayfire"]
+    cmd, env = session_request(one[0])
+    ck("request-command-comes-from-the-registry",
+       cmd == ["/usr/local/bin/startwayfire"])
+    # Chrome picks its backend from this. Without it the session says tty,
+    # Chrome chooses X11, finds no X server and exits, so a summoned login
+    # comes up with no browser and nothing reports a failure.
+    ck("request-tells-the-session-it-is-wayland",
+       "XDG_SESSION_TYPE=wayland" in env)
+    ck("request-passes-the-summoned-flag", "USHER_SUMMONED=1" in env)
+
+
+def selftest():
+    """Protocol checks against a stub greetd. Needs no root and no greeter."""
+    results = []
+
+    def ck(name, cond):
+        results.append((name, bool(cond)))
+        print(("  ok   " if cond else "  FAIL ") + name)
+
+    path = os.path.join(os.environ.get("TMPDIR", "/var/tmp"),
+                        f"summon-selftest-{os.getpid()}.sock")
+    fixtures, fdirs = _fixture_tree()
+    real = getpass.getpass
+    globals()["getpass"].getpass = lambda _p="": "pw"
+    try:
+        print("== usher-greetd selftest ==")
+        _t_conversation(ck, path)
+        _t_journal(ck, path)
+        _t_attribution(ck, path)
+        _t_refusal(ck, path)
+        _t_framing(ck, path)
+        _t_already_logged_in(ck)
+        _t_leaves_nothing_behind(ck, path)
+        _t_desktop_parse(ck, fixtures)
+        _t_session_listing(ck, fdirs)
+        _t_greeter_cache(ck, fixtures)
+        _t_greeter_detect(ck)
+        _t_greeter_states(ck)
+        _t_refusals(ck, fdirs)
+        _t_menu(ck, fdirs)
+        _t_request(ck, fdirs)
+        # A START WITH NOTHING RESOLVED MUST NOT FALL BACK, since inventing a
+        # default is exactly what the retired hardcoded command did.
+        bad = False
+        try:
+            configure_session(None, "tester", start=True)
+        except ValueError:
+            bad = True
+        except Exception:
+            pass
+        ck("a-start-without-a-resolved-command-is-refused", bad)
+    finally:
+        globals()["getpass"].getpass = real
+        if os.path.exists(path):
+            os.unlink(path)
+        # The literal is printed before it is removed, per the tree's rule
+        # about never deleting through an unexamined variable. mkdtemp
+        # raises rather than returning an empty path, and the prefix check
+        # is the second belt.
+        if fixtures and os.path.basename(fixtures).startswith(
+                "usher-greetd-sessions-"):
+            shutil.rmtree(fixtures, ignore_errors=True)
+    bad = [n for n, ok in results if not ok]
+    print(f"\n{len(results) - len(bad)} passed, {len(bad)} failed")
+    if bad:
+        print("selftest FAIL: " + ", ".join(bad))
+        return 1
+    print("selftest OK")
+    return 0
+
+
+def _without_session(argv):
+    """argv with any --session removed, so the resolved one can replace it.
+
+    Passing both would leave argparse taking the last, which is the one we
+    want, but relying on that is relying on a parser detail: stripping first
+    means the privileged half sees exactly one and the intent is readable.
+    """
+    out = []
+    skip = False
+    for a in argv:
+        if skip:
+            skip = False
+        elif a == "--session":
+            skip = True
+        elif not a.startswith("--session="):
+            out.append(a)
+    return out
+
+
+def do_list_sessions(user, override=None):
+    """Print what this box offers and which one a login would actually pick.
+
+    DISCOVERABILITY IS THE POINT: `--session` takes a Name from the registry,
+    and without this there is nowhere a human can read those names short of
+    grepping desktop files. It also prints the refusal it WOULD give, which
+    makes every rule in resolve_session inspectable without a login attempt.
+    """
+    entries = list_sessions()
+    scanned = ", ".join(d for d, _kind, _sub in session_dirs())
+    print(f"usher-greetd: sessions offered (scanned {scanned}):")
+    for e in entries:
+        print(f"  {e['name']:<22} {e['kind']:<8} {e['exec']}")
+    if not entries:
+        print("  (none)")
+    greeter, got = greeter_choice(user)
+    print("usher-greetd: greeter on the console: "
+          f"{greeter or '(none running)'}")
+    if got in (NO_RECORD, NEVER_RECORDS, UNREADABLE):
+        print(f"usher-greetd: recorded choice: none, because "
+              f"{_no_record_reason(greeter, got)}")
+    else:
+        hits, kind = resolve_pointer(got, entries)
+        print(f"usher-greetd: recorded choice for {user}: {got}  "
+              f"(a {kind or 'pointer matching nothing'})")
+    if override:
+        print(f"usher-greetd: overridden on the command line: {override}")
+    # Flush before anything reaches stderr, or a refusal printed there jumps
+    # ahead of the listing it is about when both go to a terminal.
+    sys.stdout.flush()
+    # THE MENU IS OFF HERE. This verb reports what a login would do, and one
+    # that stopped to ask a question would be reporting on itself.
+    try:
+        chosen, src = pick_session(user, override, interactive=False)
+        cmd, env = session_request(chosen)
+    except SessionError as e:
+        print(f"usher-greetd: would REFUSE: {e}", file=sys.stderr)
+        return 1
+    print(f"usher-greetd: would start {chosen['name']} (via {src}): "
+          f"{' '.join(cmd)}")
+    print(f"usher-greetd: with {' '.join(env)}")
+    return 0
+
+
+def resolve_then_elevate(args):
+    """Decide WHAT to start, then become root carrying the answer.
+
+    The unprivileged half of a login, and one thing despite the two
+    verbs in its name: everything it reads is world-readable, so the
+    decision belongs on this side of the privilege boundary, and the
+    hop is how the decision gets to the half that can act on it.
+    Never returns: it either execs or fails.
+    """
+    # RESOLVE THE SESSION FIRST, BEFORE ANY PRIVILEGE OR ANY PROMPT. Two
+    # reasons, and the second is why it moved here from after the hop:
+    #
+    #  - a login that cannot be resolved should cost NO password at all
+    #  - when the greeter records nothing, the session MENU belongs before
+    #    the two password prompts rather than wedged between them, which
+    #    is where it landed when resolution ran post-sudo
+    #
+    # Everything it reads is world-readable (the registry, the greeter's
+    # cache, /proc), so no privilege is needed to decide, only to act.
+    #
+    # THE IDENTITY HERE IS getuid()'s, AND THAT DOES NOT WEAKEN THE RULE in
+    # the module docstring. That rule governs who a session is STARTED for,
+    # which is still SUDO_UID and still checked below; this only asks whose
+    # recorded default to offer, and sudo cannot change who invoked us.
+    try:
+        _entry, _src = pick_session(pwd.getpwuid(os.getuid()).pw_name,
+                                    args.session, interactive=True)
+    except SessionError as exc:
+        fail(f"{exc} (`--list-sessions` shows what is available)")
+    print(f"usher-greetd: session {_entry['name']} ({_src})")
+    # RE-EXEC UNDER SUDO RATHER THAN REFUSE. usher reaches this through a
+    # single symlink (~/.config/usher/session-start), and its contract is
+    # that the provider obtains its own privilege: that is what keeps usher
+    # from having to decide who should be root, and what lets the seam be a
+    # plain symlink to this file with no wrapper script in between.
+    #
+    # sudo sets SUDO_UID, which is where the username comes from, so the
+    # identity survives the hop and is still never an argument.
+    if os.environ.get("USHER_GREETD_NO_SUDO"):
+        fail("must run as root, because only root and _greetd may connect "
+             "to the greetd socket.")
+    _explain_two_prompts()
+    os.environ["USHER_GREETD_NO_SUDO"] = "1"   # one hop only, never a loop
+    try:
+        # NO -E. This fleet's sudoers refuses it, so every login printed
+        # "preserving the entire environment is not supported, '-E' is
+        # ignored" before the password prompt, and the variable it was there
+        # to carry never crossed anyway. Nothing is lost: sudo sets SUDO_UID
+        # itself, which is where the username comes from, and the real loop
+        # guard is the geteuid test above rather than the env var.
+        #
+        # THE RESOLVED SESSION TRAVELS AS `--session`, replacing whatever
+        # the caller passed, so the privileged half re-resolves one
+        # unambiguous Name and can never reach the menu or a different
+        # answer. A menu answered once must not be asked again.
+        os.execvp("sudo", ["sudo", sys.executable,
+                           os.path.abspath(__file__)]
+                  + _without_session(sys.argv[1:])
+                  + ["--session", _entry["name"]])
+    except OSError as e:
+        fail(f"cannot re-run under sudo ({e}). Try: sudo {__file__}")
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        prog="usher-greetd",
+        description="Start the console graphical session from a remote shell.")
+    ap.add_argument("-n", "--dry-run", action="store_true",
+                    help="authenticate, then cancel instead of starting the "
+                         "session. Proves the password and the whole protocol "
+                         "path without touching the display, so it is safe to "
+                         "run any time a greeter is up.")
+    # THE SEAM HANDS US THE ACTION AS argv, so the parser has to take it. usher
+    # execs `<provider> login`, and this accepted no positional at all, so the
+    # one call that matters died on `unrecognized arguments: login`. I wrote
+    # both sides of that contract and never ran them against each other: the
+    # dry run was always typed by hand, where no action is passed.
+    #
+    # `choices` rather than ignoring it, because a provider that silently
+    # accepts an action it does not implement is the next version of this bug.
+    ap.add_argument("action", nargs="?", default="login", choices=["login"],
+                    help="what to do; the seam passes this. Only `login` is "
+                         "implemented, and an unknown action is an error "
+                         "rather than a quiet login.")
+    # THE EDGE CASE, NOT THE DEFAULT. The greeter's own sticky choice is the
+    # answer almost always, and this overrides it for the login where you want
+    # something else. A NAME from the registry, never a command: see
+    # resolve_session for why a root helper will not exec an arbitrary string.
+    ap.add_argument("--session", metavar="NAME", default=None,
+                    help="start this session instead of the greeter's last "
+                         "choice. NAME is a desktop entry's Name= as shown by "
+                         "the login screen (for example `Wayfire`); an "
+                         "unknown one is refused with the list.")
+    ap.add_argument("--list-sessions", action="store_true",
+                    help="print the sessions this box offers and which one "
+                         "would be started, then exit. Needs no password.")
+    ap.add_argument("--selftest", action="store_true",
+                    help="run the protocol checks against a stub greetd. "
+                         "Needs neither root nor a live greeter, so it also "
+                         "works against the INSTALLED copy.")
+    args = ap.parse_args()
+
+    if args.selftest:
+        return selftest()
+
+    if args.list_sessions:
+        # BEFORE THE SUDO HOP, because it starts nothing and therefore needs no
+        # privilege: a question about what is available should not cost a
+        # password prompt. Reading the identity from getuid() here does not
+        # weaken the rule in the module docstring, which governs starting a
+        # session AS somebody; this path cannot start anything at all.
+        return do_list_sessions(pwd.getpwuid(os.getuid()).pw_name,
+                                args.session)
+
+    if os.geteuid() != 0:
+        resolve_then_elevate(args)
+    # THE USERNAME IS NEVER AN ARGUMENT. See the module docstring: this is the
+    # line that stops a root helper from being a way to log in as someone else.
+    sudo_uid = os.environ.get("SUDO_UID")
+    if not sudo_uid or not sudo_uid.isdigit() or int(sudo_uid) == 0:
+        fail("cannot tell who invoked this (no SUDO_UID), and it will not "
+             "guess. Run it through sudo as your own user.")
+    user = pwd.getpwuid(int(sudo_uid)).pw_name
+
+    live = already_logged_in(user)
+    if live:
+        fail(f"{user} is already logged in on the console (session {live}). "
+             "Nothing to do.")
+
+    # NORMALLY A NO-OP RE-RESOLVE, because the unprivileged half above passed
+    # the answer as `--session`. It still runs, rather than trusting the
+    # argument, so that `sudo usher-greetd` typed directly by a human behaves
+    # the same as the seam's invocation. interactive=False: the privileged half
+    # never asks a question, so a sudo-only call with no recorded choice
+    # refuses with the list instead of prompting as root.
+    try:
+        entry, src = pick_session(user, args.session, interactive=False)
+        cmd, env = session_request(entry)
+    except SessionError as exc:
+        fail(f"{exc} (`--list-sessions` shows what is available)")
+    print(f"usher-greetd: starting {entry['name']} (via {src}): "
+          f"{' '.join(cmd)}")
+
+    sock, path = find_socket()
+    print(f"usher-greetd: greeter is listening on {path}")
+    try:
+        reply, started = configure_session(sock, user,
+                                           start=not args.dry_run,
+                                           cmd=cmd, env=env)
+        if reply["type"] != "success":
+            # A FAILED AUTHENTICATION IS THE ONE AN AUDIT MOST WANTS, so it is
+            # recorded before the exit. greetd's own description, never the
+            # password, and the wording stays greetd's.
+            journal(f"authentication FAILED for {user}: "
+                    f"{reply.get('description') or reply.get('type')}")
+            fail(f"could not log {user} in: "
+                 f"{reply.get('description') or reply}. "
+                 "Just run it again; a mistyped password leaves nothing "
+                 "behind.")
+        journal(f"authenticated {user}"
+                + (" (dry run, cancelling)" if args.dry_run else ""))
+        if args.dry_run:
+            print(f"usher-greetd: authenticated {user}, then cancelled")
+            print(f"usher-greetd: would start {' '.join(cmd)} "
+                  f"with {' '.join(env)}")
+            return 0
+        if not started:
+            fail("greetd accepted the login but did not start the session")
+    finally:
+        sock.close()
+    _rel = release_greeter()
+    journal(f"started {user}'s session; {_rel}")
+    print(f"usher-greetd: session configured; {_rel}")
+    print(f"usher-greetd: {user}'s session should be coming up on the console")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
