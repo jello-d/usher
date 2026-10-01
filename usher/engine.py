@@ -2916,10 +2916,41 @@ def _t_cli_split(ck):
         globals()["_HUNT_WARNED"] = True
         del _real_warned
 
+    from . import cli as _c
+    # ENDING THE SESSION MEANS SIGNALLING THE PART OF IT WE OWN. The process
+    # map is the REAL chain measured on this box, because the thing that made
+    # the first attempt wrong was an assumption about who owns what:
+    #
+    #   3423     root   greetd
+    #    661839  root   greetd --session-worker 13      <- logind's Leader
+    #     662787 jello  /bin/sh /usr/local/bin/startwayfire
+    #      662894 jello wayfire
+    #
+    # {pid: (ppid, uid)}; 0 is root, 1000 is us.
+    _CHAIN = {1: (0, 0), 3423: (1, 0), 661839: (3423, 0),
+              662787: (661839, 1000), 662894: (662787, 1000)}
+    ck("the-session-top-is-the-leaders-child-not-the-leader",
+       _c.session_tops(_CHAIN, 661839, 1000) == [662787])
+    # NOT the compositor, which is BELOW the top: signalling the session command
+    # is what runs its own teardown, where killing the compositor skips it.
+    ck("and-not-the-compositor-below-it",
+       662894 not in _c.session_tops(_CHAIN, 661839, 1000))
+    # A MANAGER THAT KEEPS NO ROOT WORKER hands us the leader itself.
+    _OURS = {1: (0, 0), 500: (1, 1000), 501: (500, 1000)}
+    ck("a-leader-we-own-is-the-top-itself",
+       _c.session_tops(_OURS, 500, 1000) == [500])
+    # NOTHING OURS AT ALL is a refusal, not a guess: a session belonging to
+    # someone else must never be signalled.
+    ck("a-session-with-nothing-of-ours-yields-nothing",
+       _c.session_tops(_CHAIN, 661839, 4242) == [])
+    # TWO SIBLINGS below the handover are both tops, since either could be the
+    # session command and neither is below the other.
+    _TWO = dict(_CHAIN); _TWO[662999] = (661839, 1000)
+    ck("two-siblings-are-both-tops",
+       _c.session_tops(_TWO, 661839, 1000) == [662787, 662999])
     # ENDING THE SESSION IS BY ITS LEADER, not by the compositor's name. The
     # parse is pure so it can be driven with real `loginctl list-sessions`
     # output, which is the only way to test it without a session to destroy.
-    from . import cli as _c
     _AT_GREETER = """    1 1003 manifest-runner -     3296   manager  -    no -
 25099  113 _greetd         seat0 1570194 greeter  tty7 yes 1d ago
    13 1000 jello           -     7665   user     -    no  -
@@ -2937,12 +2968,31 @@ def _t_cli_split(ck):
        _c.seated_session("jello", _LOGGED_IN) == ("13537", "846241"))
     ck("another-users-login-is-not-ours",
        _c.seated_session("root", _LOGGED_IN) is None)
-    # NO COMPOSITOR NAME ANYWHERE in the leaving path: that is the whole point,
-    # and a reappearing `killall <compositor>` is how it would come back.
+    # NO COMPOSITOR NAME IN THE CODE of the leaving path: that is the whole
+    # point, and a reappearing `killall <compositor>` is how it would come back.
+    #
+    # VIA THE AST, over string literals that are NOT docstrings. The first
+    # version matched text and stripped ONE known phrase, so the second
+    # docstring explaining what `killall wayfire` got wrong failed the check
+    # that exists to keep it gone. That is the same way a name-based check turns
+    # into noise and then gets switched off; prose must be able to discuss what
+    # the code may not do.
+    import ast as _ast
     import inspect as _i
-    _src = _i.getsource(_c)
+    _tree = _ast.parse(_i.getsource(_c))
+    _docs = set()
+    for _n in _ast.walk(_tree):
+        if isinstance(_n, (_ast.Module, _ast.FunctionDef, _ast.ClassDef)):
+            _b = getattr(_n, "body", None)
+            if (_b and isinstance(_b[0], _ast.Expr)
+                    and isinstance(_b[0].value, _ast.Constant)
+                    and isinstance(_b[0].value.value, str)):
+                _docs.add(id(_b[0].value))
+    _lits = [n.value for n in _ast.walk(_tree)
+             if isinstance(n, _ast.Constant) and isinstance(n.value, str)
+             and id(n) not in _docs]
     ck("the-leaving-path-names-no-compositor",
-       "killall" not in _src.replace("NOT `killall wayfire`", ""))
+       not [x for x in _lits if "killall" in x or "wayfire" in x])
 
     # THE SEAM HANDS THE PROVIDER THE ACTION, and this is the caller's half of
     # that contract. Both halves were written here and never run against each

@@ -162,28 +162,87 @@ def seated_session(user, listing):
     return None
 
 
-def _end_session():
-    """End the graphical session by signalling its LEADER. Returns a message.
+def session_tops(procs, leader, uid):
+    """The topmost processes of a session that WE own, given {pid: (ppid, uid)}.
 
-    NOT `killall wayfire`, which is what this replaced and was wrong three ways:
-    it hardcoded the compositor's NAME (so sway, hyprland and any X11 WM were
-    out), it matched by name rather than by session (so every seat's compositor
-    died, and so would any unrelated process wearing that name), and it ignored
-    the session manager that actually knows what a session is.
+    PURE, so the walk is testable without a session to destroy.
+
+    WHY NOT THE LEADER ITSELF, which is the obvious answer and is wrong here.
+    logind records the process that called PAM as a session's leader, and greetd
+    keeps that worker as ROOT so it can run pam_close_session at teardown. So on
+    this stack the leader is root-owned and unsignalable by us:
+
+        3423     root   greetd
+         661839  root   greetd --session-worker 13      <- logind's Leader
+          662787 jello  /bin/sh /usr/local/bin/startwayfire
+           662894 jello wayfire
+
+    ONE LEVEL DOWN IS OURS, and it is the session COMMAND the display manager
+    exec'd as us, whose exit is the session's own graceful teardown. So: walk
+    down from the leader and take every process we own whose PARENT we do not,
+    which is the boundary where the display manager handed the session over.
+    Usually exactly one. If the leader is already ours (a manager that keeps no
+    root worker) that boundary is the leader itself, and this returns it.
+
+    NAMES NO COMPOSITOR, which is the point. `killall wayfire` reached for the
+    right mechanism and hardcoded the wrong thing about it.
+    """
+    def ours(pid):
+        ent = procs.get(pid)
+        return ent is not None and ent[1] == uid
+
+    tops, seen, queue = [], set(), [leader]
+    while queue:
+        pid = queue.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        if ours(pid) and not ours(procs[pid][0]):
+            tops.append(pid)
+            continue                  # its children are below a top; stop here
+        queue.extend(k for k, (pp, _u) in procs.items() if pp == pid)
+    return sorted(tops)
+
+
+def read_procs():
+    """{pid: (ppid, uid)} for every process we can see, for session_tops."""
+    out = {}
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            uid = os.stat(f"/proc/{pid}").st_uid
+            with open(f"/proc/{pid}/stat") as f:
+                # comm can contain spaces and parens, so read ppid AFTER the
+                # last ')': field 4 of what follows.
+                rest = f.read().rsplit(")", 1)[1].split()
+            out[int(pid)] = (int(rest[1]), uid)
+        except (OSError, ValueError, IndexError):
+            continue
+    return out
+
+
+def _end_session(dry=False):
+    """End the graphical session by signalling the part of it WE own.
+
+    (target, message). `target` is None when nothing could be ended.
+
+    NOT `killall wayfire`, which hardcoded the compositor's name, matched by
+    name rather than by session, and ignored the session manager entirely.
 
     NOT `loginctl terminate-session` either, which is the obvious generic answer
-    and does not work here. MEASURED in the policy on this box:
+    and is closed to us. MEASURED with pkcheck, which asks polkit without
+    acting:
 
-        org.freedesktop.login1.manage
-            allow_active: auth_admin_keep
+        org.freedesktop.login1.manage   allow_active=auth_admin_keep
+        "Authorization requires authentication"
 
-    so it asks polkit for ADMIN authentication even for your own active session,
-    which over ssh means a prompt nobody can answer.
+    so it wants ADMIN auth even for your own ACTIVE session, which over ssh is a
+    prompt nobody can answer.
 
-    THE LEADER IS OUR OWN PROCESS, so signalling it needs no privilege at all,
-    and logind defines the session as over when its leader exits. That makes
-    this display-server agnostic for free: whatever the session runs, its leader
-    is what greetd (or any display manager) started.
+    SO WE SIGNAL WHAT THE DISPLAY MANAGER HANDED US: see session_tops. That is
+    discovered rather than named, needs no privilege because it is ours, and its
+    exit is the session's own teardown path.
     """
     import getpass
     done = subprocess.run(["loginctl", "list-sessions", "--no-legend"],
@@ -194,11 +253,30 @@ def _end_session():
     if not found:
         return None, "no seated graphical session to end"
     sid, leader = found
+    procs = read_procs()
+    tops = session_tops(procs, int(leader), os.getuid())
+    if not tops:
+        return None, (f"session {sid} leads from pid {leader}, which is not "
+                      "ours, and nothing below it is either: nothing to signal")
+    what = ", ".join(f"{p} ({_argv_of(p)})" for p in tops)
+    if dry:
+        return tops, f"end session {sid} by signalling {what}"
+    for pid in tops:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError as e:
+            return None, f"cannot signal {pid} in session {sid}: {e}"
+    return tops, f"asked session {sid} to end: signalled {what}"
+
+
+def _argv_of(pid):
+    """A short command line for a pid, for saying WHAT was signalled."""
     try:
-        os.kill(int(leader), signal.SIGTERM)
-    except (OSError, ValueError) as e:
-        return None, f"cannot signal session {sid} leader {leader}: {e}"
-    return sid, f"asked session {sid} to end (leader {leader})"
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            raw = f.read().replace(b"\0", b" ").decode(errors="replace")
+        return raw.strip()[:60] or "?"
+    except OSError:
+        return "?"
 
 
 def _cleanly_leave(verb, dry):
@@ -217,6 +295,10 @@ def _cleanly_leave(verb, dry):
                  "  exists to keep, so it is refusing.\n"
                  f"  To START a session from here: {PROG} cleanly login")
     if dry:
+        if verb == "logoff":
+            _t, msg = _end_session(dry=True)
+            print(f"{PROG}: would wind down, then {msg}")
+            return 0
         print(f"{PROG}: would wind down, then {verb}")
         return 0
     rc = engine.do_wind_down()
