@@ -18,9 +18,9 @@ is the service the session starts, and
 is how you ask anything of it. Placement is AGGRESSIVE for a
 window after login (or a re-arm), then STEADY: a reopened window just
 appears where you are; the opt-in
-.I session/include
+.I usher/include
 anchors keep snapping back even then, and
-.I session/exclude
+.I usher/exclude
 lists windows never to place.
 .PP
 An optional
@@ -157,7 +157,7 @@ respawns it as a shell there.
 A user adds a plugin as a
 .I *.py
 file in
-.I ~/.config/session/plugins/
+.I ~/.config/usher/plugins/
 defining a top-level
 .B PLUGIN
 object: see the shipped
@@ -176,10 +176,10 @@ for a window replayed from the store, so it is what to cache a hard-won
 identity against.
 .SH FILES
 .TP
-.I ~/.config/session/{exclude,include}
+.I ~/.config/usher/{exclude,include}
 never-place rules and steady-state anchors.
 .TP
-.I ~/.config/session/plugins/*.py
+.I ~/.config/usher/plugins/*.py
 user window plugins.
 .TP
 .I ~/.local/state/session-layout/

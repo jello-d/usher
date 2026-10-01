@@ -12,15 +12,15 @@ kanshi-mgr, one command runs the thing and drives it.
   usher toggle       flip aggressive<->steady (the tray left-click)
   usher settle       force steady now (end the aggressive window early)
   usher status       the daemon's mode + seconds until it settles
-  usher exclude      show the never-place rules (session/exclude)
-  usher include      show the anchor rules (session/include)
+  usher exclude      show the never-place rules (usher/exclude)
+  usher include      show the anchor rules (usher/include)
 
 Placement is AGGRESSIVE then STEADY. For START_FLOOR seconds after login (or
 an `aggressive` kick) every mapped window is placed back: what lets Chrome
 launch and its windows land. Once IDLE_SETTLE seconds pass with no new window
 (capped at AGGR_CAP) it goes STEADY: a reopened window just appears where you
-are and stays. session/include lists the few windows to keep snapping back
-even then (opt-in; empty = follow-me). session/exclude always wins.
+are and stays. usher/include lists the few windows to keep snapping back
+even then (opt-in; empty = follow-me). usher/exclude always wins.
 
 THREE LAYERS, and the dependency runs ONE WAY:
 

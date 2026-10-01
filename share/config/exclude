@@ -1,4 +1,4 @@
-# session/exclude: windows usher never captures and never places.
+# usher/exclude: windows usher never captures and never places.
 #
 # MOSTLY EMPTY ON PURPOSE, and it did not start that way. The goal is pixel
 # perfect placement of every window you left open, so an exception here is a
@@ -6,7 +6,7 @@
 # them:
 #
 #  - AGGRESSIVE vs STEADY. Placement is aggressive only for a while after
-#    session start (or an `aggressive` kick); after that ONLY session/include
+#    session start (or an `aggressive` kick); after that ONLY usher/include
 #    anchors are placed. So a window that opens during normal use is left
 #    exactly where it opens, and the whack-a-mole these rules were written to
 #    stop cannot happen in the first place.

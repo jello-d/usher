@@ -1,4 +1,4 @@
-# session/include: the ANCHOR list: windows usher keeps placing even in
+# usher/include: the ANCHOR list: windows usher keeps placing even in
 # the CONSERVATIVE steady state.
 #
 # usher places AGGRESSIVELY for the first few minutes after login (or a
@@ -11,7 +11,7 @@
 # Default is FOLLOW-ME: an empty file anchors nothing, so nothing gets dragged
 # around mid-session. Add entries only for windows you genuinely want pinned.
 #
-# One rule per line, same shape as session/exclude:
+# One rule per line, same shape as usher/exclude:
 #
 #   <app-regex> :: <title-regex>
 #

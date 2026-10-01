@@ -1,6 +1,6 @@
 # example.py: a user window plugin for usher.
 #
-# Drop a copy into ~/.config/session/plugins/ and edit. usher imports every *.py
+# Drop a copy into ~/.config/usher/plugins/ and edit. usher imports every *.py
 # there and takes its top-level PLUGIN object (duck-typed: no import of usher
 # needed). A plugin CLAIMS an app's windows (owns) and may give them a stable
 # identity, a transient test, and a way to respawn a missing one. Every window
@@ -22,7 +22,7 @@
 #
 # EDITS APPLY AUTOMATICALLY: the running watcher notices this directory change
 # within a second and rebuilds the registry, exactly as it does for
-# session/exclude and session/include. A file that does not import is logged
+# usher/exclude and usher/include. A file that does not import is logged
 # and skipped, leaving the three built-ins, so a half-saved edit cannot take
 # the daemon down. Watch ~/.local/state/session-layout/watch.log for the
 # "plugins reloaded" line.

@@ -10,8 +10,8 @@ actually are and puts them back where you left them. The one command
 - **Aggressive then steady.** For a window's first moments after login (or a
   re-arm) every mapped window is placed back, which lets a browser open all its
   windows and have them land. Then it goes steady: a reopened window just
-  appears where you are and stays. `~/.config/session/include` lists the few
-  windows to keep snapping back even then; `~/.config/session/exclude` lists
+  appears where you are and stays. `~/.config/usher/include` lists the few
+  windows to keep snapping back even then; `~/.config/usher/exclude` lists
   windows never to place.
 - **Stable identity, never the title.** A window is matched to its saved slot by
   an app-specific identity, because window titles are too volatile to key on.
@@ -56,7 +56,7 @@ every time you switched:
 - **kitty**: keys any other kitty terminal by its shell's **working directory**
   (from `/proc`) and respawns it as a shell there.
 
-Add your own: drop a `*.py` file into `~/.config/session/plugins/` defining a
+Add your own: drop a `*.py` file into `~/.config/usher/plugins/` defining a
 top-level `PLUGIN` object. See [`share/plugins/example.py`](
 share/plugins/example.py). Each plugin claims an app's windows (`owns`) and may
 implement `identity` / `transient` / `relaunch_command` /
@@ -95,11 +95,11 @@ session_restore = session-mgr watch
 
 ## Config
 
-- `~/.config/session/exclude`: `<app-regex> :: <title-regex>` never-place list.
-- `~/.config/session/include`: the same shape; the steady-state anchor list.
-- `~/.config/session/plugins/*.py`: user window plugins.
+- `~/.config/usher/exclude`: `<app-regex> :: <title-regex>` never-place list.
+- `~/.config/usher/include`: the same shape; the steady-state anchor list.
+- `~/.config/usher/plugins/*.py`: user window plugins.
 
-Example defaults ship in [`share/session/`](share/session/). The
+Example defaults ship in [`share/config/`](share/config/). The
 daemon soft-degrades when any are absent.
 
 ## License

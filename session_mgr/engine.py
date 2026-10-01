@@ -12,7 +12,7 @@ Store ($XDG_STATE_HOME/session-layout, default ~/.local/state/...):
 Identity for matching is (app_id, key), where key = identity(view). Unique-
 app_id windows (slack, --app Gmail) key by app_id alone, title-independent.
 App-SPECIFIC identity + respawn live in PLUGINS (see WindowPlugin): chrome, mux
-and kitty ship built in, users add more in ~/.config/session/plugins/. THE
+and kitty ship built in, users add more in ~/.config/usher/plugins/. THE
 VOLATILE TITLE IS NEVER THE KEY, and neither is whatever the window currently
 shows: chrome keys by the SessionID of the window (from its own session file,
 stable across a restart), mux by the COMMAND the terminal runs (`term:resume`,
@@ -73,23 +73,58 @@ LOCAL_HOST = os.uname().nodename.split(".")[0]
 
 
 # --- never-place rules: transient windows session must ignore ---------------
-# session/exclude is the user-grown repository of windows that must open
+# usher/exclude is the user-grown repository of windows that must open
 # wherever you are, never be captured or placed: a blank New Tab, the Chrome
 # profile picker, and so on. The old hardcoded Chrome list now ships as the
 # file's default content. See the file's header for the format.
 # ONE definition of where usher's user config lives. It was built inline three
 # times and a fourth was about to be added; the same fact in four places is the
 # thing this tree's single-source rule exists to stop.
-CONFIG_DIR = os.path.join(
-    os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
-    "session")
+_XDG_CONFIG = os.environ.get("XDG_CONFIG_HOME",
+                             os.path.expanduser("~/.config"))
+CONFIG_DIR = os.path.join(_XDG_CONFIG, "usher")
+# The pre-rename directory, still READ when the new one has nothing to say.
+#
+# WHY A FALLBACK RATHER THAN A FLAG DAY. These files are tackup's symlinks, and
+# the two repos deploy independently, so there is a window where usher is new
+# and the config is still in the old place. Without this, a box in that window
+# loses its exclude and include rules SILENTLY: no rules parses fine and means
+# "place everything", so the symptom is windows moving that should not, with
+# nothing reporting a fault. `doctor` says when it is reading from here, so the
+# half-migrated state is visible instead of merely survivable.
+LEGACY_CONFIG_DIR = os.path.join(_XDG_CONFIG, "session")
+
+
+def config_path(name):
+    """Where `name` lives: the usher dir, or the old one while it still has it.
+
+    PER FILE, not per directory, because a half-moved config is the realistic
+    state during a rename: tackup may have linked `exclude` into the new dir
+    while a hand-made `plugins/` is still in the old one. Asking per name means
+    each file is found wherever it actually is.
+    """
+    new = os.path.join(CONFIG_DIR, name)
+    if os.path.exists(new):
+        return new
+    old = os.path.join(LEGACY_CONFIG_DIR, name)
+    return old if os.path.exists(old) else new
+
+
+def using_legacy_config():
+    """The names still being read from the pre-rename dir, for doctor."""
+    if not os.path.isdir(LEGACY_CONFIG_DIR):
+        return []
+    return sorted(
+        n for n in ("exclude", "include", "plugins", "session-start")
+        if config_path(n).startswith(LEGACY_CONFIG_DIR + os.sep))
+
 
 EXCLUDE_FILE = os.environ.get(
-    "SESSION_EXCLUDE_FILE", os.path.join(CONFIG_DIR, "exclude"))
+    "SESSION_EXCLUDE_FILE", config_path("exclude"))
 
 
 def load_exclude_rules(path=EXCLUDE_FILE):
-    """Parse session/exclude into compiled (app_re, title_re) pairs. Every rule
+    """Parse usher/exclude into compiled (app_re, title_re) pairs. Every rule
     is one line, '<app-regex> :: <title-regex>': both fields required, use
     '.*' for "any". A line starting with # is a comment, blanks ignored.
     Patterns are Python regexes matched with re.search, so they are UNANCHORED
@@ -128,7 +163,7 @@ EXCLUDE_RULES, EXCLUDE_ERRORS = load_exclude_rules()
 def is_transient(v):
     """True if the window must open wherever the user is: never captured (a
     stored "New Tab" would drag every future new tab to one spot), never placed.
-    Takes a view/window/entry dict. Two sources: a session/exclude config rule
+    Takes a view/window/entry dict. Two sources: a usher/exclude config rule
     (blank New Tab, profile picker, a pre-load "Google Chrome" title: config-
     driven, grows without a code change) OR a plugin's transient() (a scratch
     terminal). plugin_transient is only reached if no exclude rule matched."""
@@ -140,7 +175,7 @@ def is_transient(v):
 
 
 def reload_exclude():
-    """Re-read session/exclude into the module globals, live: the watch loop
+    """Re-read usher/exclude into the module globals, live: the watch loop
     calls this when the file's mtime changes, so an edit applies on save with no
     reload. is_transient reads EXCLUDE_RULES on each call, so the swap is picked
     up immediately (the GIL makes the rebinding atomic across the threads)."""
@@ -153,26 +188,26 @@ def reload_exclude():
 
 
 # --- anchor (include) rules: the OPT-IN set placed in STEADY state -----------
-# session/include mirrors session/exclude's '<app-regex> :: <title-regex>'
+# usher/include mirrors usher/exclude's '<app-regex> :: <title-regex>'
 # format. It is the steady-state whitelist: once the aggressive start window
 # ages out, ONLY windows matching an anchor rule are (re)placed; everything else
 # opens where you are and stays (default follow-me: an empty/absent file
 # anchors nothing). Exclude still wins: a window matching both is never placed.
 INCLUDE_FILE = os.environ.get(
-    "SESSION_INCLUDE_FILE", os.path.join(CONFIG_DIR, "include"))
+    "SESSION_INCLUDE_FILE", config_path("include"))
 
 ANCHOR_RULES, ANCHOR_ERRORS = load_exclude_rules(INCLUDE_FILE)
 
 
 def is_anchored(app, title):
-    """True if the window matches a session/include rule: the opt-in set that
+    """True if the window matches a usher/include rule: the opt-in set that
     is STILL placed in the conservative steady state."""
     t = title.strip()
     return any(ar.search(app) and tr.search(t) for ar, tr in ANCHOR_RULES)
 
 
 def reload_anchor():
-    """Re-read session/include live, exactly as reload_exclude does its file."""
+    """Re-read usher/include live, exactly as reload_exclude does its file."""
     global ANCHOR_RULES, ANCHOR_ERRORS
     ANCHOR_RULES, ANCHOR_ERRORS = load_exclude_rules(INCLUDE_FILE)
     logline(f"anchor reloaded: {len(ANCHOR_RULES)} rule(s),"
@@ -500,7 +535,7 @@ def write_json(path, blob):
 # --- plugin framework: app-specific window identity + restore --------------
 # The engine is app-AGNOSTIC; how to IDENTIFY and RESPAWN a given app's windows
 # lives in a plugin. chrome, mux, and kitty ship built in; a user drops more
-# into ~/.config/session/plugins/*.py (each a module defining a top-level PLUGIN
+# into ~/.config/usher/plugins/*.py (each a module defining a top-level PLUGIN
 # with the WindowPlugin surface: duck-typed, no import of this script needed).
 # The engine consults the registry (order matters: FIRST owner wins) at each
 # app-specific site: identity, transient and relaunch. Every window hook takes
@@ -591,7 +626,7 @@ class WindowPlugin:
 PLUGIN_HOOKS = ("owns", "identity", "transient", "relaunch_command",
                 "relaunch_missing", "wind_down")
 
-PLUGIN_DIR = os.path.join(CONFIG_DIR, "plugins")
+PLUGIN_DIR = config_path("plugins")
 
 # THE SESSION-START SEAM. usher does not know how this machine starts a console
 # session, and must not: greetd, a different display manager or a bare
@@ -608,7 +643,7 @@ PLUGIN_DIR = os.path.join(CONFIG_DIR, "plugins")
 # The provider gets the action as its argument and OBTAINS ITS OWN PRIVILEGE if
 # it needs any, which is what lets this stay a plain symlink to a root-owned
 # helper rather than usher deciding who should be root.
-SESSION_START = os.path.join(CONFIG_DIR, "session-start")
+SESSION_START = config_path("session-start")
 
 _PLUGINS = None
 
@@ -652,7 +687,7 @@ def reload_plugins():
     no trigger is the same shape as data captured and never read.
 
     A user editing a plugin now sees it take effect within a second, which is
-    what session/exclude and session/include already promise. Safe because
+    what usher/exclude and usher/include already promise. Safe because
     _load_user_plugins is best-effort: a half-saved file is logged and skipped,
     leaving the three built-ins, and the next save fixes it."""
     global _PLUGINS
@@ -663,7 +698,7 @@ def reload_plugins():
 
 
 def _load_user_plugins():
-    """Import every ~/.config/session/plugins/*.py and collect its top-level
+    """Import every ~/.config/usher/plugins/*.py and collect its top-level
     PLUGIN object. Best-effort: a bad plugin is logged and skipped, never
     crashing the headless daemon."""
     import importlib.util
@@ -922,7 +957,7 @@ def _mux_slot(latch_target):
 class ChromePlugin(WindowPlugin):
     """Chrome / Chromium: identity is the active-tab URL read from the SNSS
     session file, keyed by its stable window id. Transient states (a blank
-    profile picker) are handled by the session/exclude config, not here."""
+    profile picker) are handled by the usher/exclude config, not here."""
     name = "chrome"
 
     def owns(self, v):
@@ -2203,7 +2238,7 @@ def do_restore(dry, only=None, source=None):
 # --- aggressive vs steady placement (the anti-whack-a-mole state machine) ----
 # Placement is AGGRESSIVE (place any known, non-excluded window) for a window
 # after session start (or a `usher aggressive` kick), then goes STEADY
-# (place ONLY session/include anchors). A GLOBAL phase, orthogonal to the per-
+# (place ONLY usher/include anchors). A GLOBAL phase, orthogonal to the per-
 # view PLACE_GRACE. Steady when the FLOOR has passed AND it has been quiet (no
 # new window mapped) for IDLE_SETTLE, but never past the CAP:
 #   aggressive := not( (now-armed >= FLOOR and now-last_map >= SETTLE)
@@ -2718,12 +2753,41 @@ def _t_cli_split(ck):
     # THE SEAM: usher must not hardcode how a session starts. It reads one
     # path, and the path is beside the other user config rather than in a
     # second config dir.
-    ck("session-start-seam-sits-with-the-other-config",
-       SESSION_START == os.path.join(CONFIG_DIR, "session-start"))
-    ck("config-dir-is-single-sourced",
-       EXCLUDE_FILE.startswith(CONFIG_DIR)
-       and INCLUDE_FILE.startswith(CONFIG_DIR)
-       and PLUGIN_DIR.startswith(CONFIG_DIR))
+    # THE CONFIG DIR AND ITS FALLBACK. Every name resolves under one of the two
+    # directories, never a third place, and the fallback is PER FILE because a
+    # half-moved config is the realistic state during the rename.
+    import tempfile
+    for _n in ("exclude", "include", "plugins", "session-start"):
+        _p = config_path(_n)
+        ck(f"config-{_n}-sits-in-a-config-dir",
+           _p in (os.path.join(CONFIG_DIR, _n),
+                  os.path.join(LEGACY_CONFIG_DIR, _n)))
+    ck("the-two-config-dirs-differ", CONFIG_DIR != LEGACY_CONFIG_DIR)
+    ck("the-new-dir-is-named-for-the-command",
+       os.path.basename(CONFIG_DIR) == "usher")
+    with tempfile.TemporaryDirectory() as _d:
+        _new, _old = os.path.join(_d, "usher"), os.path.join(_d, "session")
+        os.makedirs(_new)
+        os.makedirs(_old)
+        _real = (CONFIG_DIR, LEGACY_CONFIG_DIR)
+        try:
+            globals()["CONFIG_DIR"] = _new
+            globals()["LEGACY_CONFIG_DIR"] = _old
+            # NEITHER has it: answer with the NEW path, so a fresh box is told
+            # where to put the file rather than pointed at the dead one.
+            ck("an-absent-name-answers-the-new-dir",
+               config_path("exclude") == os.path.join(_new, "exclude"))
+            open(os.path.join(_old, "exclude"), "w").close()
+            ck("only-the-old-dir-has-it-so-read-it",
+               config_path("exclude") == os.path.join(_old, "exclude"))
+            ck("and-doctor-can-see-that", "exclude" in using_legacy_config())
+            open(os.path.join(_new, "exclude"), "w").close()
+            ck("the-new-dir-WINS-once-it-has-the-file",
+               config_path("exclude") == os.path.join(_new, "exclude"))
+            ck("and-is-then-not-reported-as-legacy",
+               "exclude" not in using_legacy_config())
+        finally:
+            globals()["CONFIG_DIR"], globals()["LEGACY_CONFIG_DIR"] = _real
 
 
 def _t_relaunch(ck):

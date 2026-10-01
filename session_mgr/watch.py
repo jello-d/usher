@@ -497,7 +497,7 @@ class Watcher:
         if time.time() > self.deadline.get(vid, 0):
             return   # past the grace window: the window is settled, hands off
         if not self._aggressive_now() and not is_anchored(app, title):
-            return   # steady state: only session/include anchors are (re)placed
+            return   # steady state: only usher/include anchors are (re)placed
         if not e:
             return   # never seen this identity -> we don't know where it goes
         outs = {o["name"]: o for o in self.place_sock.list_outputs()}
@@ -696,7 +696,7 @@ class Watcher:
 
     def _poll_files(self, seen):
         """Adopt edits to the files that steer us, by mtime. Auto-incorporating
-        session/exclude + session/include means a new never-place or anchor
+        usher/exclude + usher/include means a new never-place or anchor
         rule applies on save; ARM_FILE is the one seam aggressive/settle/toggle
         drive; and a change to the invert store is the only signal a Super+N
         toggle gives us, since inversion has no view event of its own."""
