@@ -2916,6 +2916,51 @@ def _t_cli_split(ck):
         globals()["_HUNT_WARNED"] = True
         del _real_warned
 
+    # THE SEAM HANDS THE PROVIDER THE ACTION, and this is the caller's half of
+    # that contract. Both halves were written here and never run against each
+    # other: usher exec'd `<provider> login` while the provider's parser took no
+    # positional, so the one invocation that matters died on "unrecognized
+    # arguments: login" and every hand-typed dry run worked. tackup's test now
+    # pins the other half.
+    #
+    # os.execv REPLACES the process, so it is captured rather than called.
+    import tempfile as _tf
+    _real_exec, _real_seam = os.execv, SESSION_START
+    _seen = []
+    try:
+        with _tf.TemporaryDirectory() as _d:
+            _prov = os.path.join(_d, "session-start")
+            with open(_prov, "w") as _f:
+                _f.write("#!/bin/sh\nexit 0\n")
+            os.chmod(_prov, 0o755)
+            globals()["SESSION_START"] = _prov
+            os.execv = lambda path, argv: _seen.append((path, list(argv)))
+            from . import cli as _cli
+            _cli.session_start("login")
+        ck("the-seam-execs-the-provider-with-the-action",
+           _seen == [(_prov, [_prov, "login"])])
+    finally:
+        os.execv = _real_exec
+        globals()["SESSION_START"] = _real_seam
+    # A PROVIDER THAT IS NOT EXECUTABLE IS A SILENT NO-OP, the same class as a
+    # 0644 hook, so it must be refused rather than run.
+    with _tf.TemporaryDirectory() as _d:
+        _dud = os.path.join(_d, "session-start")
+        open(_dud, "w").close()
+        os.chmod(_dud, 0o644)
+        _real_seam = SESSION_START
+        try:
+            globals()["SESSION_START"] = _dud
+            from . import cli as _cli
+            try:
+                _cli.session_start("login")
+                ck("a-non-executable-provider-is-refused", False)
+            except SystemExit as _e:
+                ck("a-non-executable-provider-is-refused",
+                   "not executable" in str(_e))
+        finally:
+            globals()["SESSION_START"] = _real_seam
+
     # TWO DOORS TO THE COMPOSITOR AND NO OTHERS. Five call sites once built a
     # WayfireSocket directly, so they skipped the discovery above and could not
     # reach a compositor the daemon was talking to happily. The guard is a
