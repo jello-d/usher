@@ -2916,6 +2916,34 @@ def _t_cli_split(ck):
         globals()["_HUNT_WARNED"] = True
         del _real_warned
 
+    # ENDING THE SESSION IS BY ITS LEADER, not by the compositor's name. The
+    # parse is pure so it can be driven with real `loginctl list-sessions`
+    # output, which is the only way to test it without a session to destroy.
+    from . import cli as _c
+    _AT_GREETER = """    1 1003 manifest-runner -     3296   manager  -    no -
+25099  113 _greetd         seat0 1570194 greeter  tty7 yes 1d ago
+   13 1000 jello           -     7665   user     -    no  -
+    2 1000 jello           -     3294   manager  -    no  -"""
+    _LOGGED_IN = _AT_GREETER + """
+13537 1000 jello           seat0 846241 user     tty7 yes 1h ago"""
+    # AT THE GREETER jello already has TWO sessions and _greetd holds a SEATED
+    # one, so "does jello have a session" is true while nobody is logged in.
+    ck("no-seated-session-at-the-greeter",
+       _c.seated_session("jello", _AT_GREETER) is None)
+    ck("the-greeters-own-seated-session-is-not-ours",
+       _c.seated_session("_greetd", _AT_GREETER) is None)
+    # AND THE LEADER COMES BACK WITH IT, because that is what gets signalled.
+    ck("a-seated-login-yields-its-id-and-leader",
+       _c.seated_session("jello", _LOGGED_IN) == ("13537", "846241"))
+    ck("another-users-login-is-not-ours",
+       _c.seated_session("root", _LOGGED_IN) is None)
+    # NO COMPOSITOR NAME ANYWHERE in the leaving path: that is the whole point,
+    # and a reappearing `killall <compositor>` is how it would come back.
+    import inspect as _i
+    _src = _i.getsource(_c)
+    ck("the-leaving-path-names-no-compositor",
+       "killall" not in _src.replace("NOT `killall wayfire`", ""))
+
     # THE SEAM HANDS THE PROVIDER THE ACTION, and this is the caller's half of
     # that contract. Both halves were written here and never run against each
     # other: usher exec'd `<provider> login` while the provider's parser took no

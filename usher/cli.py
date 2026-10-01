@@ -21,6 +21,8 @@ exclude and include verbs read two of them.
 """
 import json
 import os
+import signal
+import subprocess
 import sys
 import time
 
@@ -141,6 +143,64 @@ def do_cleanly(args):
     return _cleanly_leave(verb, dry)
 
 
+def seated_session(user, listing):
+    """(session id, leader pid) for `user`'s seated login session, or None.
+
+    PURE, over `loginctl list-sessions` output, so the parsing is testable
+    without a session. Columns are SESSION UID USER SEAT LEADER CLASS TTY.
+
+    THREE THINGS MUST AGREE and any two give a wrong answer: this user has a
+    SEATLESS session for the ssh connection asking the question and another for
+    the user manager, and the greeter holds a SEATED one of its own. So it takes
+    user AND seat AND class to mean the login on the physical display.
+    """
+    for line in listing.splitlines():
+        col = line.split()
+        if (len(col) >= 6 and col[2] == user and col[3] != "-"
+                and col[5] == "user"):
+            return col[0], col[4]
+    return None
+
+
+def _end_session():
+    """End the graphical session by signalling its LEADER. Returns a message.
+
+    NOT `killall wayfire`, which is what this replaced and was wrong three ways:
+    it hardcoded the compositor's NAME (so sway, hyprland and any X11 WM were
+    out), it matched by name rather than by session (so every seat's compositor
+    died, and so would any unrelated process wearing that name), and it ignored
+    the session manager that actually knows what a session is.
+
+    NOT `loginctl terminate-session` either, which is the obvious generic answer
+    and does not work here. MEASURED in the policy on this box:
+
+        org.freedesktop.login1.manage
+            allow_active: auth_admin_keep
+
+    so it asks polkit for ADMIN authentication even for your own active session,
+    which over ssh means a prompt nobody can answer.
+
+    THE LEADER IS OUR OWN PROCESS, so signalling it needs no privilege at all,
+    and logind defines the session as over when its leader exits. That makes
+    this display-server agnostic for free: whatever the session runs, its leader
+    is what greetd (or any display manager) started.
+    """
+    import getpass
+    done = subprocess.run(["loginctl", "list-sessions", "--no-legend"],
+                          capture_output=True, text=True)
+    if done.returncode != 0:
+        return None, "cannot ask logind which session to end"
+    found = seated_session(getpass.getuser(), done.stdout)
+    if not found:
+        return None, "no seated graphical session to end"
+    sid, leader = found
+    try:
+        os.kill(int(leader), signal.SIGTERM)
+    except (OSError, ValueError) as e:
+        return None, f"cannot signal session {sid} leader {leader}: {e}"
+    return sid, f"asked session {sid} to end (leader {leader})"
+
+
 def _cleanly_leave(verb, dry):
     """Wind down, then hand over power. REFUSES if it cannot see the session.
 
@@ -163,12 +223,15 @@ def _cleanly_leave(verb, dry):
     if rc:
         print(f"{PROG}: wind-down reported {rc}; continuing to {verb}",
               file=sys.stderr)
+    if verb == "logoff":
+        # Ending the session makes the display manager bring its greeter back,
+        # which is what makes `usher cleanly login` usable again afterwards.
+        sid, msg = _end_session()
+        print(f"{PROG}: {msg}", file=sys.stderr if sid is None else sys.stdout)
+        return 0 if sid else 1
     print(f"{PROG}: {verb}")
-    # Ending the compositor ends the session, and the display manager brings
-    # its greeter back, which is what makes `cleanly login` usable again.
     cmd = {"reboot": ["systemctl", "reboot"],
-           "shutdown": ["systemctl", "poweroff"],
-           "logoff": ["killall", "wayfire"]}[verb]
+           "shutdown": ["systemctl", "poweroff"]}[verb]
     os.execvp(cmd[0], cmd)
 
 
