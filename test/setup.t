@@ -125,7 +125,7 @@ runh() {   # install with HOME faked, at the PREFIX given as $1
     XDG_CONFIG_HOME="$CFG" USHER_SKIP_BUILD=1 NO_COLOR=1 \
     sh "$HERE/setup.sh" install; }
 
-# A NON-DEFAULT PREFIX MUST LEAVE IT ALONE. The venv it would build is a stub
+# A SANDBOXED INSTALL MUST LEAVE IT ALONE. The venv it would build is a stub
 # (USHER_SKIP_BUILD), so plant one at the scratch VENV path too, or the
 # "is the new venv working" precondition short-circuits and the test passes
 # for the wrong reason.
@@ -135,7 +135,7 @@ printf '#!/bin/sh\n' > "$T/sand/share/usher/venv/bin/usher"
 chmod +x "$T/sand/share/usher/venv/bin/usher"
 runh "$T/sand" >/dev/null 2>&1 || fail "sandboxed install errored"
 [ -d "$H/.venvs/usher" ] \
-  || fail "a non-default PREFIX install deleted the pre-payload venv"
+  || fail "a sandboxed install deleted the pre-payload venv"
 
 # AND THE DEFAULT PREFIX MUST RETIRE IT, or the guard above has simply turned
 # the feature off and nothing would notice.

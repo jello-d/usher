@@ -184,17 +184,25 @@ _retire_old_venv() {
   # ~/.local/bin/{usher,usher-mgr} dangling and the running daemon alive only
   # on open file descriptors. ~/.venvs/usher can only ever belong to an install
   # whose PREFIX was the default, so that is exactly what is tested.
-  [ "$PREFIX" = "$HOME/.local" ] || return 0
-  # BELT AND BRACES, AND SAID SO. OLD_VENV is a literal assembled from $HOME,
-  # so no input can make this case fail; it is here because the standing rule
-  # is that `rm -rf` never runs on a variable whose shape has not been
-  # checked, and a planted regression confirms it catches nothing today. The
-  # guard above is the one doing the work.
-  case $OLD_VENV in
-  "$HOME"/.venvs/?*) ;;
-  *) bad "refusing to remove an old venv at '$OLD_VENV'"; return 0 ;;
+  # THE NEW VENV MUST BE THE REAL ONE, AS A LITERAL. This is the fleet's
+  # agreed form (mux, hush, bt-sane), and the literal is the whole point: the
+  # first version here gated on PREFIX, which worked, but mux's first version
+  # gated on `${XDG_DATA_HOME:-...}` and that is NO GATE AT ALL, because the
+  # recipe's own verification step overrides XDG_DATA_HOME too, so the
+  # comparison holds against a throwaway prefix and the live venv goes anyway.
+  # Written the way the gotcha prescribes it so all the venv packages agree
+  # and an audit of "do they all have the literal gate" has one shape to look
+  # for.
+  #
+  # THE COST IS THE SAFE ONE: a box whose data home genuinely points elsewhere
+  # never gets the retire and keeps a directory nothing reads. Deleting a live
+  # venv is the other kind of wrong, and it is what this cost twice.
+  case $VENV in
+  "$HOME"/.local/share/usher/venv) ;;
+  *) return 0 ;;
   esac
   rm -rf -- "$OLD_VENV"
+  rmdir "$HOME/.venvs" 2>/dev/null || :     # gone once the tray's goes too
   echo "$PKG: retired the pre-payload venv ($OLD_VENV)"
 }
 

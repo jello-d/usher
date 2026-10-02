@@ -62,16 +62,18 @@ app() {
 _retire_old_venv() {
   [ -d "$OLD_VENV" ] || return 0
   [ -x "$VENV/bin/$APP" ] || return 0
-  # ONLY FOR A DEFAULT-LOCATION INSTALL. OLD_VENV is an absolute ~/.venvs path
-  # rather than one derived from BIN_DIR, so without this a sandboxed install
-  # deletes the real one: the core's equivalent did exactly that on its first
-  # scratch-prefix run, which is the measurement this guard comes from.
-  [ "$BIN_DIR" = "$HOME/.local/bin" ] || return 0
-  case $OLD_VENV in
-  "$HOME"/.venvs/?*) ;;
-  *) echo "$APP: refusing to remove an old venv at '$OLD_VENV'" >&2; return 0 ;;
+  # THE NEW VENV MUST BE THE REAL ONE, AS A LITERAL: the fleet's agreed form.
+  # OLD_VENV ignores BIN_DIR and XDG_DATA_HOME because the old path never had
+  # either, so a sandboxed install would otherwise satisfy the check above and
+  # delete the LIVE venv. A variable here is no gate, since the verification
+  # recipe overrides those very variables; the core's conversion lost this
+  # box's venv twice before the literal went in.
+  case $VENV in
+  "$HOME"/.local/share/usher/venv-indicator) ;;
+  *) return 0 ;;
   esac
   rm -rf -- "$OLD_VENV"
+  rmdir "$HOME/.venvs" 2>/dev/null || :     # gone once the core's goes too
   echo "$APP: retired the pre-payload venv ($OLD_VENV)"
 }
 

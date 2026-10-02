@@ -23,9 +23,15 @@ H=$T/home; BIN=$T/bin; SHR=$T/share; CFG=$T/config
 mkdir -p "$H" "$BIN"
 APP=usher-indicator
 
-run() {   # app-install with everything sandboxed, at the BIN dir given as $1
-  env HOME="$H" UI_BIN="$1" XDG_DATA_HOME="$SHR" XDG_CONFIG_HOME="$CFG" \
-    UI_SKIP_BUILD=1 NO_COLOR=1 sh "$HERE/indicator/setup.sh" app
+# ROOT, NOT JUST THE BIN DIR. The retirement gates on where the NEW VENV is,
+# as a literal `$HOME/.local/share/usher/venv-indicator`, so "the default
+# location" means the DATA home and not the bin dir. Driving only UI_BIN left
+# the data home in the sandbox, so the gate correctly refused and the test
+# read that as a missing retirement.
+run() {   # app-install with everything sandboxed under the root given as $1
+  env HOME="$H" UI_BIN="$1/bin" XDG_DATA_HOME="$1/share" \
+    XDG_CONFIG_HOME="$CFG" UI_SKIP_BUILD=1 NO_COLOR=1 \
+    sh "$HERE/indicator/setup.sh" app
 }
 _stub_venv() {   # a venv the retirement will accept as working
   mkdir -p "$1/bin"; printf '#!/bin/sh\n' > "$1/bin/$APP"
@@ -36,8 +42,9 @@ _plant_old() { rm -rf "$H/.venvs"; mkdir -p "$H/.venvs/$APP/bin"
 
 # THE VENV BELONGS INSIDE usher's PAYLOAD, and under a name the core's
 # `venv*` carry glob matches, or the next core install destroys it.
-_stub_venv "$SHR/usher/venv-indicator"
-run "$BIN" >/dev/null 2>&1 || fail "indicator app install errored"
+_stub_venv "$T/sand/share/usher/venv-indicator"
+run "$T/sand" >/dev/null 2>&1 || fail "indicator app install errored"
+BIN=$T/sand/bin; SHR=$T/sand/share
 [ "$(readlink "$BIN/$APP")" = "$SHR/usher/venv-indicator/bin/$APP" ] \
   || fail "$APP does not link into usher's payload venv-indicator"
 case $(basename "$(dirname "$(dirname "$(readlink "$BIN/$APP")")")") in
@@ -49,24 +56,24 @@ esac
 # shipped and had to be caught live: the old path is absolute, so without the
 # guard a sandboxed install deletes it.
 _plant_old
-run "$BIN" >/dev/null 2>&1 || fail "second install errored"
+run "$T/sand" >/dev/null 2>&1 || fail "second install errored"
 [ -d "$H/.venvs/$APP" ] \
   || fail "a sandboxed install deleted the pre-payload venv"
 
 # ...and the default one MUST retire it, or the guard has turned the feature
 # off and nothing would say so.
 _plant_old
-_stub_venv "$SHR/usher/venv-indicator"
-run "$H/.local/bin" >/dev/null 2>&1 || fail "default-bin install errored"
+_stub_venv "$H/.local/share/usher/venv-indicator"
+run "$H/.local" >/dev/null 2>&1 || fail "default-location install errored"
 [ -d "$H/.venvs/$APP" ] \
   && fail "a default-location install did not retire the pre-payload venv"
 
 # A FAILED REBUILD LEAVES THE OLD ONE ALONE: deleting first would leave the
 # tray with no venv at all and a unit restarting a command that is not there.
 _plant_old
-rm -rf "$SHR/usher/venv-indicator"
-mkdir -p "$SHR/usher/venv-indicator/bin"          # present but EMPTY
-run "$H/.local/bin" >/dev/null 2>&1 || fail "install with a dud venv errored"
+rm -rf "$H/.local/share/usher/venv-indicator"
+mkdir -p "$H/.local/share/usher/venv-indicator/bin"   # present but EMPTY
+run "$H/.local" >/dev/null 2>&1 || fail "install with a dud venv errored"
 [ -d "$H/.venvs/$APP" ] \
   || fail "retired the pre-payload venv while the new one was unusable"
 
