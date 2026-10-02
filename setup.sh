@@ -29,7 +29,29 @@ PREFIX=${PREFIX:-$HOME/.local}
 _bin=${XDG_BIN_HOME:-$PREFIX/bin}
 _shr=${XDG_DATA_HOME:-$PREFIX/share}
 _man=$_shr/man
-VENV=${USHER_VENV:-$HOME/.venvs/usher}
+
+# THE PAYLOAD: one self-contained tree, COPIES of what the repo ships, with
+# links into it. The fleet's place-not-link rule
+# (shared-notes/_install-placement.md): an installed package must never link
+# back into its SOURCE, because a departed package's source is a cache clone
+# (~/.cache/tackup/pkgs/usher) that is re-cloned on every sweep and wiped on
+# demand, so every such link dangles.
+#
+# WHAT USHER WAS DOING WRONG was narrower than the rule's general case, and
+# worth naming because the commands were already fine: `~/.local/bin/{usher,
+# usher-mgr}` link into the VENV, and `pip install` COPIES the package into
+# site-packages, so no command ever resolved into the clone. The violations
+# were the MAN PAGE and the HWDP HOOK, both linked straight at $_root, plus
+# two venvs sitting in ~/.venvs outside any payload.
+_pay=$_shr/$PKG
+# The venv lives INSIDE the payload now (was ~/.venvs/usher). A venv is not
+# reachable by self-location anyway, since its console scripts bake an
+# absolute interpreter path, so there is no reason for it to sit apart from
+# the tree it belongs to.
+VENV=${USHER_VENV:-$_pay/venv}
+# Retired by `install`, once the new venv is PROVEN to work: see
+# _retire_old_venv for why that order is the whole safety of it.
+OLD_VENV=$HOME/.venvs/usher
 RC=0
 
 # marker contract: plain [OK]/[FAIL]/[WARN] an integrator's report can restyle;
@@ -49,7 +71,11 @@ _rmln() { [ "$(readlink "$2" 2>/dev/null)" = "$1" ] && rm -f "$2" || :; }
 # link in is the whole wiring. Opt-in by PRESENCE: `install` does it only if
 # hwdp's hook root already exists, so a box without hwdp is untouched and one
 # with it needs no extra step.
-_hook_src() { echo "$_root/share/hooks/hwdp-changed"; }
+# FROM THE PAYLOAD, NOT $_root. This link was one of usher's two place-not-link
+# violations, and the more dangerous of the two: a dangling hook is SILENTLY
+# SKIPPED by the runner that invokes it, so a wiped cache would have cost every
+# monitor-set re-placement with nothing anywhere saying why.
+_hook_src() { echo "$_pay/share/hooks/hwdp-changed"; }
 _hook_dir() { echo "${XDG_CONFIG_HOME:-$HOME/.config}/hwdp/hooks/changed.d"; }
 # Numeric prefix because hwdp runs the dir as a sorted glob and placement must
 # come LAST: restoring windows before the outputs are configured and the
@@ -61,8 +87,116 @@ do_hooks() {
   ln -sfn "$(_hook_src)" "$(_hook_dst)"
   echo "$PKG: display-change hook -> $(_hook_dst)"
 }
-_man_pages() { for _m in "$_root"/man/man*/*.[0-9]; do
-  [ -e "$_m" ] && printf '%s\n' "$_m"; done; }
+# RELATIVE paths (manN/name.N), listed from the SOURCE because that is the one
+# tree guaranteed to be there: install reads it before the payload exists, and
+# uninstall reads it after the payload is gone. The caller joins it to $_pay
+# for the link target and to $_man for the link itself, so neither side has to
+# know whether the other tree is present.
+_man_rel() { for _m in "$_root"/man/man*/*.[0-9]; do
+  [ -e "$_m" ] && printf '%s/%s\n' \
+    "$(basename "$(dirname "$_m")")" "$(basename "$_m")"; done; }
+
+# _payload_stage: build the new payload beside the live one and swap it in.
+#
+# STAGED AND SWAPPED, never emptied in place, because the daemon this installs
+# is what places every window at login and the tray reads its status every
+# second. Emptying the tree first would make both fail for the length of a
+# copy; two renames is as close to atomic as a directory gets.
+_payload_stage() {
+  _ps_new=$_pay.new
+  _ps_old=$_pay.old
+  # EXPANDED AND CHECKED BEFORE ANYTHING IS REMOVED, per the standing rule
+  # that `rm -rf` never runs on an unexamined variable. A sibling repo's own
+  # harness deleted its working tree because an empty value reached `rm -rf`
+  # at trap-fire time.
+  case $_pay in
+  /*/*) ;;
+  *) bad "refusing to stage a payload at '$_pay'"; return 1 ;;
+  esac
+  rm -rf -- "$_ps_new" "$_ps_old"
+  mkdir -p "$_ps_new" || { bad "could not create $_ps_new"; return 1; }
+  # Only what usher actually ships. There is no bin/ or libexec/: the commands
+  # are venv console scripts, which is why the payload carries a venv.
+  for _d in share man; do
+    [ -d "$_root/$_d" ] || continue
+    cp -R "$_root/$_d" "$_ps_new/" || { bad "could not copy $_d"; return 1; }
+  done
+  [ -d "$_ps_new/share/providers" ] || { bad "staged payload has no providers"
+    rm -rf -- "$_ps_new"; return 1; }
+  # CARRY EVERY VENV ACROSS, and the plural is usher's deviation from the
+  # reference implementation. The swap replaces the whole payload and the
+  # venvs live INSIDE it, so without this an install destroys them. usher has
+  # TWO (the core's `venv` and the tray's `venv-indicator`, 14M and 35M), so a
+  # template that moved only `venv` would silently take the indicator's with
+  # it on every provision sweep and leave ~/.local/bin/usher-indicator
+  # dangling until something rebuilt it.
+  #
+  # MOVED RATHER THAN COPIED, which keeps the swap quick and keeps the venv's
+  # baked absolute paths valid: it starts at $_pay/venv* and ends there, with
+  # only the two renames in between.
+  for _v in "$_pay"/venv*; do
+    [ -d "$_v" ] || continue
+    _vb=$(basename "$_v")
+    [ -e "$_ps_new/$_vb" ] && continue
+    mv -- "$_v" "$_ps_new/$_vb" || { bad "could not carry $_vb across"
+      rm -rf -- "$_ps_new"; return 1; }
+  done
+  if [ -e "$_pay" ] || [ -L "$_pay" ]; then
+    mv -- "$_pay" "$_ps_old" || { bad "could not move the old payload"
+      return 1; }
+  fi
+  mv -- "$_ps_new" "$_pay" || {
+    bad "could not swap in the new payload"
+    # ROLL BACK THE VENVS TOO. The old tree's venvs have already moved into
+    # .new, so restoring .old alone would hand back a payload with none, which
+    # is the state this whole function exists to avoid.
+    if [ -e "$_ps_old" ]; then
+      mv -- "$_ps_old" "$_pay"
+      for _v in "$_ps_new"/venv*; do
+        [ -d "$_v" ] || continue
+        [ -e "$_pay/$(basename "$_v")" ] || mv -- "$_v" "$_pay/"
+      done
+    fi
+    return 1; }
+  rm -rf -- "$_ps_old"
+}
+
+# _retire_old_venv: A REBUILD, NOT A MOVE, and that distinction is the whole
+# safety of it. A venv bakes an ABSOLUTE interpreter path into every console
+# script and into pyvenv.cfg, so moving the directory leaves every entry point
+# pointing at a python that is no longer there.
+#
+# AND ONLY ONCE THE NEW ONE WORKS. Deleting first and rebuilding second would,
+# on a failed rebuild, leave the box with neither: no placement daemon at the
+# next login, from a provisioning step that was meant to be routine.
+_retire_old_venv() {
+  [ -d "$OLD_VENV" ] || return 0
+  [ -x "$VENV/bin/usher" ] || return 0
+  # ONLY FOR A DEFAULT-PREFIX INSTALL, and this guard is the whole reason the
+  # function is safe. OLD_VENV is an ABSOLUTE ~/.venvs path: it is not derived
+  # from PREFIX, because the directory it names was never under one. So
+  # without this a scratch-prefix install reaches straight into the real $HOME
+  # and deletes the live venv.
+  #
+  # MEASURED, NOT IMAGINED. The first cut of this had no such guard, and the
+  # very first scratch-PREFIX verification run (the step whose entire promise
+  # is "no touch to the real tree") removed ~/.venvs/usher on this box, leaving
+  # ~/.local/bin/{usher,usher-mgr} dangling and the running daemon alive only
+  # on open file descriptors. ~/.venvs/usher can only ever belong to an install
+  # whose PREFIX was the default, so that is exactly what is tested.
+  [ "$PREFIX" = "$HOME/.local" ] || return 0
+  # BELT AND BRACES, AND SAID SO. OLD_VENV is a literal assembled from $HOME,
+  # so no input can make this case fail; it is here because the standing rule
+  # is that `rm -rf` never runs on a variable whose shape has not been
+  # checked, and a planted regression confirms it catches nothing today. The
+  # guard above is the one doing the work.
+  case $OLD_VENV in
+  "$HOME"/.venvs/?*) ;;
+  *) bad "refusing to remove an old venv at '$OLD_VENV'"; return 0 ;;
+  esac
+  rm -rf -- "$OLD_VENV"
+  echo "$PKG: retired the pre-payload venv ($OLD_VENV)"
+}
 
 build_venv() {
   [ -d "$VENV" ] || python3 -m venv "$VENV"
@@ -83,28 +217,68 @@ build_venv() {
 APPS="usher usher-mgr"
 
 do_install() {
+  # THE PAYLOAD FIRST, because the venv is built INSIDE it and the links all
+  # point into it. Staging also carries an existing venv across the swap, so
+  # the usual case (a provision sweep re-running this) costs a directory
+  # rename rather than a 14M pip rebuild.
+  _payload_stage || return 1
   [ -n "${USHER_SKIP_BUILD:-}" ] || build_venv
   mkdir -p "$_bin"
   for _a in $APPS; do ln -sfn "$VENV/bin/$_a" "$_bin/$_a"; done
-  _man_pages | while IFS= read -r _m; do
-    _d=$_man/$(basename "$(dirname "$_m")")
-    mkdir -p "$_d"; ln -sfn "$_m" "$_d/$(basename "$_m")"; done
-  echo "$PKG: $APPS -> $_bin (venv $VENV)"
+  _man_rel | while IFS= read -r _r; do
+    mkdir -p "$_man/$(dirname "$_r")"
+    ln -sfn "$_pay/man/$_r" "$_man/$_r"; done
+  echo "$PKG: payload $_pay; $APPS -> $_bin (venv $VENV)"
   [ -d "$(_hook_dir)" ] && do_hooks || :
+  _retire_old_venv
 }
 
 do_uninstall() {
   _rmln "$(_hook_src)" "$(_hook_dst)"
   for _a in $APPS; do _rmln "$VENV/bin/$_a" "$_bin/$_a"; done
-  _man_pages | while IFS= read -r _m; do
-    _rmln "$_m" "$_man/$(basename "$(dirname "$_m")")/$(basename "$_m")"; done
-  echo "$PKG: removed the core links (venv $VENV left in place)"
+  _man_rel | while IFS= read -r _r; do
+    _rmln "$_pay/man/$_r" "$_man/$_r"; done
+  # THE PAYLOAD GOES, AND IT TAKES THE VENVS WITH IT, which is worth SAYING
+  # rather than leaving a reader to discover: the tray's unit will keep
+  # restarting a command whose venv is gone until it is re-installed.
+  _had_venv=
+  for _v in "$_pay"/venv*; do [ -d "$_v" ] && _had_venv=1; done
+  if [ -d "$_pay" ] && [ ! -L "$_pay" ]; then
+    case $_pay in
+    /*/*) rm -rf -- "$_pay" ;;
+    *) bad "refusing to remove a payload at '$_pay'" ;;
+    esac
+  fi
+  echo "$PKG: removed $_pay and its links from $PREFIX"
+  [ -z "$_had_venv" ] || echo "$PKG: that INCLUDED the venv(s); re-run" \
+    "'setup.sh all' to restore the daemon and the tray"
 }
 
 do_check() {
   echo "== $PKG (window placement) =="
+  # THE PAYLOAD IS A REAL DIRECTORY, not a symlink, which is the shape the
+  # place-not-link rule is actually about: a payload that is a link into the
+  # source clone looks identical from every other check here.
+  if [ -d "$_pay" ] && [ ! -L "$_pay" ]; then ok "payload ($_pay)"
+  else bad "payload missing or a symlink ($_pay); run: install"; fi
   if [ -x "$VENV/bin/usher" ]; then ok "venv app ($VENV)"
   else bad "venv app missing ($VENV); run: install"; fi
+  # EVERY LINK MUST RESOLVE INTO THE PAYLOAD. Checked by PREFIX rather than by
+  # naming the clone, because this package does not know what installed it;
+  # anything resolving elsewhere is the violation whatever the elsewhere is.
+  _out=
+  for _l in "$_bin/usher" "$_bin/usher-mgr" "$(_hook_dst)"; do
+    [ -L "$_l" ] || continue
+    case $(readlink -f "$_l" 2>/dev/null) in
+    "$_pay"/*) ;;
+    *) _out="$_out $_l" ;;
+    esac
+  done
+  if [ -z "$_out" ]; then ok "links resolve inside the payload"
+  else bad "resolves outside $_pay:$_out"; fi
+  if [ -d "$OLD_VENV" ]; then
+    bad "the pre-payload venv is still there ($OLD_VENV); run: install"
+  fi
   if "$VENV/bin/python" -c 'import wayfire' 2>/dev/null; then ok "dep wayfire"
   else bad "wayfire not importable in the venv"; fi
   for _a in $APPS; do

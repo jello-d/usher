@@ -14,7 +14,7 @@
 # python3 and, for the service, a systemd --user manager. A tray HOST (waybar's
 # tray, or any desktop's) and `usher` on PATH are runtime needs.
 # Overrides:
-#   UI_VENV   venv dir   (default ~/.venvs/usher-indicator)
+#   UI_VENV   venv dir   (default ~/.local/share/usher/venv-indicator)
 #   UI_BIN    bin dir    (default ~/.local/bin)
 #   UI_SKIP_BUILD  adopt an existing venv (the test's stub) instead of pip
 set -eu
@@ -23,8 +23,21 @@ self=$0
 case $self in */*) ;; *) self=$(command -v -- "$self" || echo "$self") ;; esac
 PKG_DIR=$(CDPATH= cd -- "$(dirname -- "$self")" && pwd)
 
-VENV=${UI_VENV:-$HOME/.venvs/usher-indicator}
+# THE VENV LIVES INSIDE usher'S PAYLOAD, per the fleet place-not-link rule.
+# It was ~/.venvs/usher-indicator, and ~/.venvs is nobody's payload: a tree
+# outside ~/.local/share/<pkg> is not removed by an uninstall, not carried by
+# a re-install, and not audited by anything.
+#
+# NAMED `venv-indicator` BESIDE THE CORE'S `venv`, because usher ships two and
+# the core's _payload_stage carries `venv*` across its swap. A name outside
+# that glob would be destroyed on the next core install.
+_usher_pay=${XDG_DATA_HOME:-$HOME/.local/share}/usher
+VENV=${UI_VENV:-$_usher_pay/venv-indicator}
 BIN_DIR=${UI_BIN:-$HOME/.local/bin}
+# Retired by `app`, once the new venv is PROVEN: a venv bakes absolute paths
+# into its console scripts, so this is a REBUILD and never a move, and
+# deleting before the rebuild works would leave the tray with neither.
+OLD_VENV=$HOME/.venvs/usher-indicator
 APP=usher-indicator
 UNIT=$APP.service
 UNIT_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
@@ -41,7 +54,25 @@ app() {
   fi
   mkdir -p "$BIN_DIR"
   ln -sfn "$VENV/bin/$APP" "$BIN_DIR/$APP"
-  echo "$APP: app -> $BIN_DIR/$APP"
+  echo "$APP: app -> $BIN_DIR/$APP (venv $VENV)"
+  _retire_old_venv
+}
+
+# A REBUILD, NOT A MOVE, and only once the new venv answers: see OLD_VENV.
+_retire_old_venv() {
+  [ -d "$OLD_VENV" ] || return 0
+  [ -x "$VENV/bin/$APP" ] || return 0
+  # ONLY FOR A DEFAULT-LOCATION INSTALL. OLD_VENV is an absolute ~/.venvs path
+  # rather than one derived from BIN_DIR, so without this a sandboxed install
+  # deletes the real one: the core's equivalent did exactly that on its first
+  # scratch-prefix run, which is the measurement this guard comes from.
+  [ "$BIN_DIR" = "$HOME/.local/bin" ] || return 0
+  case $OLD_VENV in
+  "$HOME"/.venvs/?*) ;;
+  *) echo "$APP: refusing to remove an old venv at '$OLD_VENV'" >&2; return 0 ;;
+  esac
+  rm -rf -- "$OLD_VENV"
+  echo "$APP: retired the pre-payload venv ($OLD_VENV)"
 }
 
 
