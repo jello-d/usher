@@ -36,7 +36,8 @@ from .engine import (KB_SCHEMA, LOCAL_HOST, PLUGIN_HOOKS, STATE, TERM_KEY_RE,
                      WayfireSocket, app_of, hwdp_id, is_mux_term, live_keys,
                      load_knowledge, load_snapshot, match, mux_candidates,
                      mux_host_of, mux_session_of, mux_session_set, plugins,
-                     profile_id, pview, resolution, saved_key, schema_path)
+                     lock_capability, profile_id, pview, resolution, saved_key,
+                     schema_path)
 
 # Every failure this tool has had was SILENT: the store looked healthy, Chrome
 # kept restoring itself, and the parts that had stopped working stopped saying
@@ -96,6 +97,24 @@ def _doctor_contracts(out):
     because they live in another repo's output format."""
     rc = 0
     out("== contracts ==")
+    # THE CONSOLE LOCK, FIRST, because it is the only line here that is a
+    # SECURITY state rather than a degraded feature. A summoned login creates
+    # a logged-in console nobody is sitting at, so an unlocked one after that
+    # is the fault worth seeing before anything else.
+    _summoned = os.environ.get("USHER_SUMMONED") == "1"
+    _can, _plan, _detail = lock_capability()
+    if _plan == "already":
+        out("  [OK]   the console is locked")
+    elif _can:
+        out(f"  [OK]   the console can be locked ({_plan})")
+    else:
+        out(f"  [WARN] the console CANNOT be locked: {_detail}")
+        out("         a summoned login would leave it logged in and"
+            " unlocked")
+    if _summoned and _plan != "already":
+        # Only loud when this session WAS summoned: an unlocked console you
+        # are sitting at is not a finding.
+        out("  [WARN] this session was SUMMONED and is not locked")
     mux = os.path.expanduser("~/.local/bin/mux")
     if not os.path.exists(mux):
         out(f"  [WARN] mux absent ({mux}); terminal relaunch degrades to a"

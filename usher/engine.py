@@ -2349,6 +2349,228 @@ def do_wind_down():
     return _wind_down_wait(pids)
 
 
+# --- the seated session -------------------------------------------------
+# MOVED DOWN FROM cli (2026-10-03) because the DAEMON needs it too, and the
+# module edge is one-way: cli imports engine, never the reverse.
+#
+# WHY THE DAEMON CANNOT JUST USE `loginctl lock-session` WITH NO ARGUMENT:
+# that acts on the CALLER's session, which is whatever started it. Under the
+# compositor autostart that happens to be the right one; started by hand from
+# an ssh shell it is the SSH session, which has no seat, so locking it protects
+# nothing. Measured while building this: the daemon's XDG_SESSION_ID was 15,
+# the ssh connection. Resolve the seat explicitly instead of inheriting it.
+def seated_session(user, listing):
+    """(session id, leader pid) for `user`'s seated login session, or None.
+
+    PURE, over `loginctl list-sessions` output, so the parsing is testable
+    without a session. Columns are SESSION UID USER SEAT LEADER CLASS TTY.
+
+    THREE THINGS MUST AGREE and any two give a wrong answer: this user has a
+    SEATLESS session for the ssh connection asking the question and another for
+    the user manager, and the greeter holds a SEATED one of its own. So it takes
+    user AND seat AND class to mean the login on the physical display.
+    """
+    for line in listing.splitlines():
+        col = line.split()
+        if (len(col) >= 6 and col[2] == user and col[3] != "-"
+                and col[5] == "user"):
+            return col[0], col[4]
+    return None
+
+
+# --- locking a summoned session -----------------------------------------
+# A LOGIN YOU SUMMONED IS ONE YOU ARE NOT SITTING AT, so `usher cleanly login`
+# leaves a logged-in console unattended and unlocked. usher created that
+# exposure, so usher owes the lock and, more importantly, owes the WARNING
+# when it cannot deliver one. Leaving it to something else means nobody warns.
+#
+# usher DOES NOT LOCK ANYTHING ITSELF. It asks logind, and whatever the session
+# registered as its locker does the work (vigilance here). Same split as "mux
+# owns sessions, usher owns windows": a configured lock COMMAND would be a
+# second copy of a fact the session already publishes, and the copy nobody
+# looks at is the one that drifts.
+#
+# THE GATE IS CAPABILITY, NOT CONFIGURATION (the user's call, and the sharper
+# rule): it does not matter whether a command is written down, it matters
+# whether this box can actually be locked. So the answer is MEASURED, not
+# declared, and the measurement is the lock itself plus LockedHint read back.
+LOCK_WAIT = 8.0            # seconds to wait for LockedHint after asking
+LOCKED_MARKER = "usher.locked"
+
+
+def _loginctl(*args, timeout=10):
+    """(rc, stdout) from loginctl, or (None, "") if it cannot be run."""
+    try:
+        r = subprocess.run(["loginctl", *args], capture_output=True,
+                           text=True, timeout=timeout)
+        return r.returncode, r.stdout
+    except (OSError, subprocess.SubprocessError):
+        return None, ""
+
+
+def lock_plan(have_loginctl, seated, hint, forced=False):
+    """What to do about locking a summoned session. PURE, so the whole matrix
+    is checkable with no session, no logind and no compositor.
+
+    `hint` is the session's CURRENT LockedHint: "yes", "no", or None when it
+    could not be read at all. The asymmetry that drives this: refusing to lock
+    costs a lock, and locking the WRONG thing (or believing a lock that did
+    not happen) costs the console. So every uncertain cell declines and says
+    so, and only `forced` suppresses the complaint.
+
+        loginctl  seated  hint   ->
+        no        -       -         "no-loginctl"   cannot ask anyone
+        yes       no      -         "no-session"    nothing seated to lock
+        yes       yes     yes       "already"       somebody already locked it
+        yes       yes     no        "lock"          ask, then VERIFY
+        yes       yes     None      "unverifiable"  can ask, cannot confirm
+    """
+    if not have_loginctl:
+        return "no-loginctl"
+    if not seated:
+        return "no-session"
+    if hint == "yes":
+        return "already"
+    if hint is None:
+        return "forced-unverifiable" if forced else "unverifiable"
+    return "lock"
+
+
+def session_locked_hint(sid):
+    """The session's LockedHint as "yes"/"no", or None if unreadable.
+
+    ONLY TRUSTWORTHY FOR A LOGIND-INITIATED LOCK, which is what usher does.
+    A locker started some other way (wlogout's power menu runs a bare
+    swaylock) locks the screen without telling logind, so the hint stays "no"
+    over a genuinely locked session. That is a real inconsistency in the
+    caller, not here, and it is why this is never read as "is the screen
+    locked" in general: only as "did the lock I just requested take"."""
+    rc, out = _loginctl("show-session", str(sid), "-p", "LockedHint",
+                        "--value")
+    if rc != 0:
+        return None
+    v = out.strip()
+    return v if v in ("yes", "no") else None
+
+
+def lock_capability():
+    """(ok, plan, detail): can this box lock its seated session right now?
+
+    Deliberately asks the SAME questions lock_now() will, so a pre-flight
+    answer and the real attempt cannot disagree. It genuinely cannot prove a
+    LOCKER exists, because logind's Lock is a signal and its subscribers are
+    not enumerable, so this is honest about the limit: it reports that a lock
+    can be REQUESTED, and the only proof of one being HONOURED is doing it
+    and reading the hint back."""
+    import getpass
+    rc, out = _loginctl("list-sessions", "--no-legend")
+    have = rc is not None
+    seated = seated_session(getpass.getuser(), out) if have else None
+    hint = session_locked_hint(seated[0]) if seated else None
+    plan = lock_plan(have, seated, hint)
+    detail = {
+        "no-loginctl": "loginctl cannot be run, so no lock can be requested",
+        "no-session": "no seated login session on the physical display",
+        "already": "the seated session is already locked",
+        "unverifiable": "LockedHint cannot be read, so a lock cannot be "
+                        "confirmed",
+        "lock": "a lock can be requested and confirmed",
+    }.get(plan, plan)
+    return plan in ("lock", "already"), plan, detail
+
+
+def lock_now(wait=LOCK_WAIT, forced=False):
+    """Lock the seated session and VERIFY it took. (locked, plan, detail).
+
+    REPORTS THE END STATE, NEVER THE CALL RETURNING, which is the lesson the
+    plymouth core-capture script taught the same week: `loginctl lock-session`
+    exits 0 whether or not anything is listening, so its status says nothing
+    at all. The hint read back is the only evidence."""
+    import getpass
+    rc, out = _loginctl("list-sessions", "--no-legend")
+    have = rc is not None
+    seated = seated_session(getpass.getuser(), out) if have else None
+    hint = session_locked_hint(seated[0]) if seated else None
+    plan = lock_plan(have, seated, hint, forced=forced)
+    if plan == "already":
+        return True, plan, "already locked"
+    if plan not in ("lock", "forced-unverifiable"):
+        _, _, detail = lock_capability()
+        return False, plan, detail
+    sid = seated[0]
+    lrc, _ = _loginctl("lock-session", str(sid))
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        if session_locked_hint(sid) == "yes":
+            return True, "locked", f"session {sid} locked and confirmed"
+        time.sleep(0.25)
+    if plan == "forced-unverifiable":
+        return False, "forced-unverifiable", (
+            f"asked logind to lock session {sid} (rc {lrc}); LockedHint is "
+            f"unreadable, so this is NOT confirmed")
+    return False, "not-honoured", (
+        f"asked logind to lock session {sid} (rc {lrc}) and LockedHint never "
+        f"became yes within {wait:.0f}s: nothing is handling the Lock signal")
+
+
+def do_lock(forced=False):
+    """Lock the seated session, and SAY what happened. Non-zero if it did not.
+
+    A verb of its own because the mechanism has to be checkable by hand: the
+    daemon does this at a moment nobody is watching, so "does locking work on
+    this box" must be answerable without arranging a summoned login."""
+    locked, plan, detail = lock_now(forced=forced)
+    print(f"usher: {'locked' if locked else 'NOT locked'} ({plan})")
+    print(f"  {detail}")
+    if not locked and plan == "not-honoured":
+        print("  Nothing is handling logind's Lock signal for this session.")
+        print("  On this fleet that is vigilance-logind.service; check it is")
+        print("  running, or lock from the desktop once to confirm the path.")
+    return 0 if locked else 1
+
+
+def lock_summoned_session():
+    """Lock the console if THIS session was summoned, once per boot.
+
+    WHY HERE AND NOT IN `cleanly login`: that command execs a provider and
+    returns before any session exists, so it cannot lock what has not started.
+    The daemon runs INSIDE the session and is the first usher code to do so.
+
+    WHY EARLY IS FREE, which was the open question the code comment on
+    USHER_SUMMONED left unanswered for days: placement works perfectly well
+    under a lock. Measured twice on 2026-10-03, a window MOVE landing while
+    swaylock held the output, and then the whole relaunch chain (two kitty
+    windows spawned, mapped and placed) running 26 minutes into an active
+    lock. So there is no reason to wait for the layout to settle, and every
+    reason not to: the gap before the lock is the whole exposure.
+
+    ONCE PER BOOT via a runtime marker, because a reload re-execs the
+    supervisor and would otherwise lock the user out mid-session every time
+    code is deployed. The marker lives in the runtime dir, so it is per-boot
+    by construction, exactly like the arm and profile markers."""
+    if os.environ.get("USHER_SUMMONED") != "1":
+        return None
+    marker = os.path.join(runtime_dir(), LOCKED_MARKER)
+    if os.path.exists(marker):
+        return None
+    locked, plan, detail = lock_now()
+    # THE FAILURE IS LOUD AND THE SUCCESS IS NOT SILENT EITHER. An unlocked
+    # console after a summoned login is a security state, so it is recorded
+    # where the forensic record already lives rather than only on a stdout
+    # the autostart discards.
+    if locked:
+        logline(f"summoned login: locked the console ({plan})")
+    else:
+        logline(f"summoned login: COULD NOT LOCK THE CONSOLE ({plan}): "
+                f"{detail}")
+    try:
+        with open(marker, "w") as f:
+            f.write(plan)
+    except OSError:
+        pass
+    return locked
+
+
 # --- predict / verify: the only non-circular end-to-end check ------------
 # `restore --dry-run` compares the STORE against the SCREEN, so it is CIRCULAR:
 # when something teaches the store the wrong answer, both agree and it reports
@@ -3259,6 +3481,114 @@ def _t_resolution(ck):
         globals()["_owner"] = _real
 
 
+def _t_lock(ck):
+    """The lock decision, as the full matrix. PURE, so no session is needed.
+
+    Written as a table because the costs are ASYMMETRIC and every uncertain
+    cell has to decline: refusing to lock costs a lock, while believing a lock
+    that did not happen costs the console. A per-case check would not have
+    made that obvious, and the `None` hint row is the one that matters.
+    """
+    _S = ("13", "999")        # a resolved (session id, leader)
+    rows = [
+        # loginctl, seated, hint,   forced, expected plan
+        (False, _S,   "no",  False, "no-loginctl"),
+        (False, None, None,  False, "no-loginctl"),
+        (True,  None, None,  False, "no-session"),
+        (True,  _S,   "yes", False, "already"),
+        (True,  _S,   "no",  False, "lock"),
+        (True,  _S,   None,  False, "unverifiable"),
+        (True,  _S,   None,  True,  "forced-unverifiable"),
+        # force must NOT invent a session or a loginctl
+        (False, _S,   "no",  True,  "no-loginctl"),
+        (True,  None, None,  True,  "no-session"),
+        # and must not re-lock what is already locked
+        (True,  _S,   "yes", True,  "already"),
+    ]
+    for have, seated, hint, forced, want in rows:
+        got = lock_plan(have, seated, hint, forced=forced)
+        ck(f"lock-plan-{int(have)}-{bool(seated) and 1 or 0}-{hint}-"
+           f"{int(forced)}", got == want)
+
+    # lock_now()'s ORCHESTRATION, with both seams injected. The live path
+    # cannot be exercised here (unlocking from an ssh shell does not take, so
+    # a locked box stays locked), and a one-off live lock proves the MECHANISM
+    # without proving this function drives it correctly. Note it must VERIFY
+    # rather than trust: `loginctl lock-session` exits 0 whether or not
+    # anything is listening, which is the same "report the end state, never
+    # the call returning" rule the plymouth capture script needed.
+    _real_lc, _real_hint = _loginctl, session_locked_hint
+    try:
+        calls = []
+        # THE LISTING MUST NAME THE REAL USER, because lock_now resolves the
+        # seat with getpass.getuser(): a fixture with a made-up name silently
+        # resolves to no-session and every check below then passes or fails
+        # for the wrong reason.
+        import getpass as _gp
+        _me = _gp.getuser()
+
+        def _lc(*a, **k):
+            calls.append(a)
+            if a[0] == "list-sessions":
+                return 0, f"  13 1000 {_me} seat0 999 user tty7 no -\n"
+            return 0, ""
+
+        globals()["_loginctl"] = _lc
+
+        # the hint flips to yes on the second poll: locked, and confirmed
+        seq = iter(["no", "no", "yes", "yes"])
+        globals()["session_locked_hint"] = lambda _s: next(seq, "yes")
+        ok, plan, _d = lock_now(wait=3)
+        ck("lock-now-locks-and-confirms", ok and plan == "locked")
+        ck("lock-now-actually-asked-logind",
+           any(c[0] == "lock-session" for c in calls))
+
+        # the hint NEVER flips: nothing is handling the Lock signal
+        globals()["session_locked_hint"] = lambda _s: "no"
+        ok, plan, detail = lock_now(wait=0.6)
+        ck("lock-now-detects-an-unhonoured-lock",
+           (not ok) and plan == "not-honoured")
+        ck("lock-now-says-nothing-is-handling-it",
+           "nothing is handling" in detail.lower())
+
+        # already locked: no request at all, which keeps a reload from
+        # re-locking a session the user has since unlocked and is using
+        calls.clear()
+        globals()["session_locked_hint"] = lambda _s: "yes"
+        ok, plan, _d = lock_now()
+        ck("lock-now-already-locked-is-ok", ok and plan == "already")
+        ck("lock-now-already-locked-asks-nothing",
+           not any(c[0] == "lock-session" for c in calls))
+
+        # no seated session: must not lock anything, and must not invent one
+        def _lc_empty(*a, **k):
+            calls.append(a)
+            return (0, "") if a[0] == "list-sessions" else (0, "")
+
+        calls.clear()
+        globals()["_loginctl"] = _lc_empty
+        globals()["session_locked_hint"] = lambda _s: "no"
+        ok, plan, _d = lock_now()
+        ck("lock-now-no-session-declines", (not ok) and plan == "no-session")
+        ck("lock-now-no-session-asks-nothing",
+           not any(c[0] == "lock-session" for c in calls))
+    finally:
+        globals()["_loginctl"] = _real_lc
+        globals()["session_locked_hint"] = _real_hint
+
+    # THE TWO INVARIANTS WORTH NAMING SEPARATELY, because a future edit that
+    # breaks either is the one that costs the console rather than a lock.
+    ck("lock-force-cannot-fabricate-a-session",
+       lock_plan(True, None, None, forced=True) == "no-session")
+    ck("lock-unreadable-hint-is-never-plain-lock",
+       lock_plan(True, _S, None) != "lock")
+    ck("lock-capability-is-two-plans",
+       {"lock", "already"} == {p for p in
+                               ("lock", "already", "no-loginctl",
+                                "no-session", "unverifiable")
+                               if p in ("lock", "already")})
+
+
 def _t_terminals(ck):
     """a terminal's SLOT, and which windows need respawning."""
     ps = {getattr(p, "name", "?"): p for p in plugins()}
@@ -3535,14 +3865,14 @@ def _t_cli_split(ck):
     # AT THE GREETER jello already has TWO sessions and _greetd holds a SEATED
     # one, so "does jello have a session" is true while nobody is logged in.
     ck("no-seated-session-at-the-greeter",
-       _c.seated_session("jello", _AT_GREETER) is None)
+       seated_session("jello", _AT_GREETER) is None)
     ck("the-greeters-own-seated-session-is-not-ours",
-       _c.seated_session("_greetd", _AT_GREETER) is None)
+       seated_session("_greetd", _AT_GREETER) is None)
     # AND THE LEADER COMES BACK WITH IT, because that is what gets signalled.
     ck("a-seated-login-yields-its-id-and-leader",
-       _c.seated_session("jello", _LOGGED_IN) == ("13537", "846241"))
+       seated_session("jello", _LOGGED_IN) == ("13537", "846241"))
     ck("another-users-login-is-not-ours",
-       _c.seated_session("root", _LOGGED_IN) is None)
+       seated_session("root", _LOGGED_IN) is None)
     # THIS IS WHAT DECIDES WHETHER `cleanly reboot` REFUSES, so it is pinned
     # from both sides. "Cannot reach the compositor" is TWO facts: a session
     # running that we cannot see (refuse, a layout would be lost) and NO
@@ -3550,14 +3880,14 @@ def _t_cli_split(ck):
     # Met live 2026-10-02 on a box whose greeter had failed, where usher made
     # itself the reason the machine would not go down.
     ck("no-session-means-nothing-to-lose",
-       _c.seated_session("jello", _AT_GREETER) is None)
+       seated_session("jello", _AT_GREETER) is None)
     ck("a-live-session-is-what-makes-a-refusal-right",
-       _c.seated_session("jello", _LOGGED_IN) is not None)
+       seated_session("jello", _LOGGED_IN) is not None)
     # AND THE SEATLESS ssh CONNECTION ASKING THE QUESTION IS NOT A SESSION,
     # which is the one that would invert the whole decision: read it as a
     # login and usher refuses to reboot a box that has no session at all.
     ck("the-asking-ssh-connection-is-not-a-session",
-       _c.seated_session("jello", "   12 1000 jello  -  7041  user  -  no -")
+       seated_session("jello", "   12 1000 jello  -  7041  user  -  no -")
        is None)
     # THE WHOLE MATRIX, as a pure function, because the cell that was wrong
     # could not be checked while the decision was two `if`s around a
@@ -4437,7 +4767,8 @@ def selftest():
     # has now bitten this fleet twice (the greeter regression run, and
     # planting the Resolution guard removal), so it is fixed here rather than
     # in each caller.
-    for area in (_t_registry, _t_resolution, _t_terminals, _t_cli_split,
+    for area in (_t_registry, _t_resolution, _t_lock,
+                 _t_terminals, _t_cli_split,
                  _t_launch_source,
                  _t_relaunch, _t_chrome, _t_learn,
                  _t_geometry, _t_placement, _t_snapshots, _t_profiles,

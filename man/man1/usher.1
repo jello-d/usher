@@ -53,6 +53,14 @@ is that day's FIRST snapshot, the stable "how it looked that morning".
 .B --from list
 shows what is available.
 .TP
+.B lock " [--force]"
+Lock the seated login session and VERIFY it took, by reading logind's
+.I LockedHint
+back: `loginctl lock-session` exits 0 whether or not anything is listening, so
+its status proves nothing. Non-zero if the session did not actually lock.
+usher does not lock anything itself; it asks logind, and whatever the session
+registered as its locker does the work.
+.TP
 .B predict " [--out FILE]"
 Record what the NEXT restore should produce: every live window with the
 workspace, position and size its remembered slot would give it. Writes

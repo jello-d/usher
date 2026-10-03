@@ -45,6 +45,7 @@ VERBS = {
     # predict/verify are a PAIR and only mean anything together: the reference
     # has to predate the event, which is what makes them the one end-to-end
     # check that is not circular the way `restore --dry-run` is.
+    "lock":            ("both", "lock the seated session, and verify it took"),
     "predict":         ("cli", "record what the next restore SHOULD produce"),
     "verify":          ("cli", "diff the live layout against a prediction"),
     "cleanly":         ("cli", "login | logoff | reboot | shutdown"
@@ -143,30 +144,46 @@ def do_cleanly(args):
     # the checks below, every one of which would refuse for the very reason it
     # is being run.
     if verb == "login":
+        # A SUMMONED LOGIN LEAVES A CONSOLE YOU ARE NOT SITTING AT, logged in.
+        # usher creates that exposure, so it says so plainly and refuses if
+        # this box cannot be locked, which is the user's rule: it does not
+        # matter whether a lock is CONFIGURED, it matters whether one can
+        # actually happen.
+        #
+        # THE CHECK IS HONEST ABOUT ITS LIMIT. logind's Lock is a signal and
+        # its subscribers are not enumerable, so "a lock can be REQUESTED and
+        # CONFIRMED" is the strongest thing provable before the session
+        # exists. The daemon verifies the real thing in-session and shouts in
+        # watch.log if it did not take.
+        can, plan, detail = engine.lock_capability()
+        if plan == "no-session":
+            # Expected: nothing is logged in yet, which is WHY we are here.
+            # The lock is the daemon's job once the session exists.
+            can = True
+            detail = ("no session yet, as expected; the daemon locks it on "
+                      "arrival")
+        if not can and not force:
+            print(f"{PROG}: this box cannot lock its console ({plan})",
+                  file=sys.stderr)
+            print(f"{PROG}:   {detail}", file=sys.stderr)
+            print(f"{PROG}: a summoned login would leave the console LOGGED "
+                  f"IN and UNLOCKED,", file=sys.stderr)
+            print(f"{PROG}:   with nobody sitting at it. Refusing.",
+                  file=sys.stderr)
+            print(f"{PROG}: fix the lock, or accept it with:", file=sys.stderr)
+            print(f"{PROG}:   {PROG} cleanly login --force", file=sys.stderr)
+            return 1
         if dry:
             print(f"{PROG}: would run {engine.SESSION_START} login")
+            print(f"{PROG}: lock on arrival: {plan} ({detail})")
+            if not can:
+                print(f"{PROG}: FORCED past an unlockable console")
             return 0
+        if not can:
+            print(f"{PROG}: WARNING: forced past an unlockable console "
+                  f"({plan}); it will be left UNLOCKED", file=sys.stderr)
         session_start("login")     # execs; never returns
     return _cleanly_leave(verb, dry, force)
-
-
-def seated_session(user, listing):
-    """(session id, leader pid) for `user`'s seated login session, or None.
-
-    PURE, over `loginctl list-sessions` output, so the parsing is testable
-    without a session. Columns are SESSION UID USER SEAT LEADER CLASS TTY.
-
-    THREE THINGS MUST AGREE and any two give a wrong answer: this user has a
-    SEATLESS session for the ssh connection asking the question and another for
-    the user manager, and the greeter holds a SEATED one of its own. So it takes
-    user AND seat AND class to mean the login on the physical display.
-    """
-    for line in listing.splitlines():
-        col = line.split()
-        if (len(col) >= 6 and col[2] == user and col[3] != "-"
-                and col[5] == "user"):
-            return col[0], col[4]
-    return None
 
 
 def session_tops(procs, leader, uid):
@@ -256,7 +273,7 @@ def _end_session(dry=False):
                           capture_output=True, text=True)
     if done.returncode != 0:
         return None, "cannot ask logind which session to end"
-    found = seated_session(getpass.getuser(), done.stdout)
+    found = engine.seated_session(getpass.getuser(), done.stdout)
     if not found:
         return None, "no seated graphical session to end"
     sid, leader = found
@@ -303,7 +320,7 @@ def _no_session_here():
                              timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
         return False        # cannot tell, so assume a session and refuse
-    return seated_session(getpass.getuser(), out) is None
+    return engine.seated_session(getpass.getuser(), out) is None
 
 
 def _leave_plan(verb, reachable, session_present, force=False):
@@ -462,6 +479,9 @@ def _dispatch(verb, args):
     """The verb bodies. Gating already happened; this is what each one does."""
     if verb in ("capture", "save"):
         engine.do_capture()
+    elif verb == "lock":
+        sys.exit(engine.do_lock(forced="--force" in args or "-f" in args))
+
     elif verb == "predict":
         k = args.index("--out") if "--out" in args else -1
         out = args[k + 1] if (k >= 0 and k + 1 < len(args)) else None

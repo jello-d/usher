@@ -317,6 +317,13 @@ class Watcher:
         # first worker to reach here adopts; a respawn sees it gone and
         # restores.
         self.mode = take_mode()
+        # LOCK FIRST, BEFORE ANY PLACEMENT, if this session was summoned. The
+        # exposure is the gap between the console being logged in and being
+        # locked, so nothing should widen it, and nothing is lost by closing
+        # it early: placement works under a lock (measured 2026-10-03, both a
+        # window move and a full relaunch chain landing while swaylock held
+        # the output). A no-op unless USHER_SUMMONED=1, and once per boot.
+        engine.lock_summoned_session()
         self._init_layout()
         watch = connect()
         watch.watch(list(KNOWLEDGE_TRIGGERS | PLACE_EVENTS))

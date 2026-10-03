@@ -116,6 +116,7 @@ usher-mgr display-changed    # the hwdp hook; a no-op if the monitor set matches
 
 usher save                   # record the current layout
 usher restore [--dry-run]    # put windows back  [--only S] [--from SPEC]
+usher lock                   # lock the seated session, and verify it took
 usher predict                # record what the next restore SHOULD produce
 usher verify                 # diff the live layout against that prediction
 usher doctor                 # what it is doing, and what it is NOT
@@ -124,6 +125,14 @@ usher toggle                 # flip aggressive/steady (the tray click)
 usher cleanly reboot         # wind down, keeping the layout, then reboot
 usher cleanly login          # start the console session from a remote shell
 ```
+
+A login you summoned is one you are **not sitting at**, so `usher cleanly
+login` refuses unless this box can actually lock its console, and the daemon
+locks it on arrival (before placing anything: placement works fine under a
+lock). usher does not lock anything itself; it asks logind and whatever the
+session registered as its locker does the work. `--force` accepts an unlocked
+console deliberately. The lock is verified by reading `LockedHint` back,
+because `loginctl lock-session` exits 0 whether or not anything is listening.
 
 `usher cleanly login` needs a provider: usher knows that one executable can
 start a console session here and deliberately not how, so it execs whatever
