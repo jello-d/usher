@@ -53,6 +53,22 @@ is that day's FIRST snapshot, the stable "how it looked that morning".
 .B --from list
 shows what is available.
 .TP
+.B predict " [--out FILE]"
+Record what the NEXT restore should produce: every live window with the
+workspace, position and size its remembered slot would give it. Writes
+.I $XDG_STATE_HOME/usher/prediction.json
+unless told otherwise. Always exits 0; this records, it does not judge.
+.TP
+.B verify " [--against FILE]"
+Diff the live layout against a prediction and exit non-zero on any window
+that is missing or in the wrong place. This is the only end-to-end check that
+is not circular:
+.B restore --dry-run
+compares the store against the screen, so when something teaches the store a
+wrong answer the two agree and it reports everything fine. A prediction
+written BEFORE the event cannot have been corrupted by it. Record one, reboot,
+then verify.
+.TP
 .B resume
 Start/reload in ADOPT mode (adopt the current layout as baseline; do not
 restore).

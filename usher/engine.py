@@ -2218,6 +2218,155 @@ def do_wind_down():
     return _wind_down_wait(pids)
 
 
+# --- predict / verify: the only non-circular end-to-end check ------------
+# `restore --dry-run` compares the STORE against the SCREEN, so it is CIRCULAR:
+# when something teaches the store the wrong answer, both agree and it reports
+# everything ok. It did exactly that on manifestor (9/9 ok over a store that
+# had been taught a cascade position) and on manifold (ok while two terminal
+# slots had been shrunk to kitty's default).
+#
+# A PREDICTION BREAKS THE CIRCLE BY PREDATING THE EVENT. Record what SHOULD
+# come back, reboot, then diff. The reference cannot have been corrupted by
+# the thing under test, because it was written before it ran. This is the
+# check that made the 2026-10-03 shrink bug a one-line diff instead of an
+# argument about what the layout used to be.
+PREDICTION = os.path.join(STATE, "prediction.json")
+
+
+def _prediction_rows():
+    """One row per live window: what it IS now and where it SHOULD land.
+
+    Both halves matter. `label` is the RAW title, which is how a chrome window
+    is recognised AFTER a restart (its `chrome:win:<id>` key is minted fresh
+    by the new browser process, so the key cannot be the only handle). `key`
+    is how a TERMINAL is recognised, since `term:resume` is stable across
+    restarts where its banner title is not. Verify tries key first, then
+    label, and says which one hit."""
+    kb = load_knowledge()
+    rows = []
+    for w in snapshot(ipc())["windows"]:
+        app = w.get("app_id") or ""
+        # An app_id-ONLY key ends in NUL (see kkey / appid_only), which is how
+        # a uniquely-identified app like Signal is stored, so both shapes have
+        # to be tried or those windows read as having no slot.
+        e = kb.get(kkey(app, w.get("key") or "")) or kb.get(kkey(app, ""))
+        rows.append({
+            "key": w.get("key"),
+            "app_id": w.get("app_id"),
+            "label": w.get("title"),
+            "cmd": w.get("cmd"),
+            "expect_workspace": e.get("workspace") if e else None,
+            "expect_pos": e.get("pos") if e else None,
+            "expect_size": e.get("size") if e else None,
+            "expect_output": e.get("output") if e else None,
+        })
+    return rows
+
+
+def do_predict(out=None):
+    """Write what the next restore SHOULD produce. Exits 0 always: this
+    records, it does not judge."""
+    path = out or PREDICTION
+    rows = _prediction_rows()
+    doc = {"recorded": time.time(), "host": os.uname().nodename,
+           "profile": profile_id(), "windows": rows}
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(doc, f, indent=1, sort_keys=True)
+    os.replace(tmp, path)
+    noslot = [r["key"] for r in rows if r["expect_workspace"] is None]
+    print(f"predicted {len(rows)} window(s) -> {path}")
+    print(f"  profile {doc['profile']}  host {doc['host']}")
+    if noslot:
+        # A window with no slot cannot be predicted, and saying so here beats
+        # reporting it as a failure later: it was never going to be placed.
+        print(f"  {len(noslot)} with NO remembered slot (will not be placed):")
+        for k in noslot:
+            print(f"      {str(k)[:60]}")
+    return 0
+
+
+def _verify_find(row, live_by_key, live_by_label):
+    """The live window a predicted row refers to, and which matcher found it.
+
+    KEY FIRST, because it is the thing usher actually places on. LABEL second,
+    for the apps whose key is only valid within one process lifetime."""
+    k = row.get("key")
+    if k and k in live_by_key:
+        return live_by_key[k], "key"
+    lab = (row.get("label") or "").strip()
+    if lab and lab in live_by_label:
+        return live_by_label[lab], "label"
+    return None, None
+
+
+def do_verify(against=None, tol=2):
+    """Diff the live layout against a prediction. Non-zero on any miss.
+
+    TOLERANCE, because an exact pixel match is the wrong bar: kitty rounds to
+    whole cells and adds padding, so a window asked for 2138x1672 legitimately
+    comes back a pixel or two off (the notes measured 2176x1761 for a 2132x1690
+    request). A few pixels is agreement; 1085x672 against 2138x1672 is the bug
+    this exists to catch, and no tolerance hides that."""
+    path = against or PREDICTION
+    if not os.path.exists(path):
+        print(f"usher: no prediction at {path}", file=sys.stderr)
+        print("usher: run `usher predict` BEFORE the thing you want to "
+              "test", file=sys.stderr)
+        return 2
+    doc = json.load(open(path))
+    rows = doc["windows"]
+    live = snapshot(ipc())["windows"]
+    by_key = {w.get("key"): w for w in live if w.get("key")}
+    by_label = {(w.get("title") or "").strip(): w for w in live
+                if (w.get("title") or "").strip()}
+
+    age = (time.time() - doc.get("recorded", 0)) / 3600.0
+    print(f"against {path} ({age:.1f}h old, host {doc.get('host')}, "
+          f"profile {doc.get('profile')})")
+    if doc.get("profile") != profile_id():
+        # The single likeliest reason a whole layout fails to come back, and
+        # it is NOT a bug: a different monitor set has its own store, which
+        # starts empty. Say it loudly rather than printing 17 failures.
+        print(f"  PROFILE CHANGED: predicted {doc.get('profile')}, now "
+              f"{profile_id()}")
+        print("  A different monitor set has its own (empty) store, so "
+              "nothing was placed from the predicted one.")
+
+    ok = miss = moved = noslot = 0
+    for r in rows:
+        name = (r.get("label") or r.get("key") or "?")[:40]
+        if r.get("expect_workspace") is None:
+            noslot += 1
+            print(f"  skip   {name}  (had no slot when predicted)")
+            continue
+        w, how = _verify_find(r, by_key, by_label)
+        if w is None:
+            miss += 1
+            print(f"  GONE   {name}")
+            continue
+        bad = []
+        for field, exp in (("workspace", r["expect_workspace"]),
+                           ("pos", r["expect_pos"]),
+                           ("size", r["expect_size"])):
+            got = w.get(field)
+            if exp is None or got is None:
+                continue
+            if any(abs(float(a) - float(b)) > tol for a, b in zip(got, exp)):
+                bad.append(f"{field} {got} != {exp}")
+        if bad:
+            moved += 1
+            print(f"  WRONG  {name}  (by {how})")
+            for b in bad:
+                print(f"           {b}")
+        else:
+            ok += 1
+            print(f"  ok     {name}  (by {how})")
+
+    print(f"verify: {ok} ok, {moved} wrong, {miss} gone, {noslot} unpredicted")
+    return 0 if (moved == 0 and miss == 0) else 1
+
+
 def do_restore(dry, only=None, source=None):
     sock = ipc()
     if source is None:
@@ -2739,6 +2888,27 @@ def _t_registry(ck):
     finally:
         globals()["_term_cwd"] = _real_cwd
         globals()["_term_mux_pending"] = _real_pending
+
+    # predict/verify's matcher. KEY FIRST, LABEL as the fallback, because a
+    # chrome window's key is minted fresh by each browser process while its
+    # title survives the restart, and a terminal's key survives while its
+    # banner title does not. Getting the ORDER wrong would silently verify
+    # the wrong window against the wrong expectation.
+    _lk = {"term:resume": {"key": "term:resume", "title": "a:b"}}
+    _ll = {"a:b": {"key": "term:resume", "title": "a:b"},
+           "Inbox": {"key": "chrome:win:9", "title": "Inbox"}}
+    ck("verify-matches-on-key",
+       _verify_find({"key": "term:resume", "label": "zz"},
+                    _lk, _ll)[1] == "key")
+    ck("verify-falls-back-to-label",
+       _verify_find({"key": "chrome:win:1", "label": "Inbox"},
+                    _lk, _ll)[1] == "label")
+    ck("verify-reports-no-match",
+       _verify_find({"key": "nope", "label": "nope"}, _lk, _ll) == (None, None))
+    # A row with no slot must NOT be matched by an empty label, which would
+    # pair it with whatever window happens to have a blank title.
+    ck("verify-ignores-an-empty-label",
+       _verify_find({"key": None, "label": ""}, _lk, _ll) == (None, None))
 
     ck("kitty-stored-entry-is-not-transient",
        not _kp.transient({"app": "kitty", "title": "kitty:/tmp", "pid": -1,

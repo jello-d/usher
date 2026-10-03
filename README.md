@@ -107,6 +107,8 @@ usher-mgr display-changed    # the hwdp hook; a no-op if the monitor set matches
 
 usher save                   # record the current layout
 usher restore [--dry-run]    # put windows back  [--only S] [--from SPEC]
+usher predict                # record what the next restore SHOULD produce
+usher verify                 # diff the live layout against that prediction
 usher doctor                 # what it is doing, and what it is NOT
 usher status                 # placement mode and seconds until steady
 usher toggle                 # flip aggressive/steady (the tray click)

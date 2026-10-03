@@ -42,6 +42,11 @@ VERBS = {
     "capture":         ("both", "record the current layout (alias of save)"),
     "restore":         ("cli", "put windows back [--dry-run] [--only S] "
                                "[--from SPEC]"),
+    # predict/verify are a PAIR and only mean anything together: the reference
+    # has to predate the event, which is what makes them the one end-to-end
+    # check that is not circular the way `restore --dry-run` is.
+    "predict":         ("cli", "record what the next restore SHOULD produce"),
+    "verify":          ("cli", "diff the live layout against a prediction"),
     "cleanly":         ("cli", "login | logoff | reboot | shutdown"
                                " [--force]"),
     "reload":          ("both", "pick up new code, touch nothing else"),
@@ -457,6 +462,16 @@ def _dispatch(verb, args):
     """The verb bodies. Gating already happened; this is what each one does."""
     if verb in ("capture", "save"):
         engine.do_capture()
+    elif verb == "predict":
+        k = args.index("--out") if "--out" in args else -1
+        out = args[k + 1] if (k >= 0 and k + 1 < len(args)) else None
+        sys.exit(engine.do_predict(out=out))
+
+    elif verb == "verify":
+        k = args.index("--against") if "--against" in args else -1
+        ref = args[k + 1] if (k >= 0 and k + 1 < len(args)) else None
+        sys.exit(engine.do_verify(against=ref))
+
     elif verb == "restore":
         only = None
         if "--only" in args:
