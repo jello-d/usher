@@ -853,6 +853,45 @@ def _latch_target_in(argv):
     return None
 
 
+def _mux_pending_in(argv):
+    """True if this process IS a mux command, or a shell wrapping one.
+
+    PURE, so it is testable without a process tree, for the same reason
+    _latch_target_in is: this decides whether a terminal is allowed to be
+    keyed yet, and getting it wrong COSTS the window its remembered size.
+
+    TWO SHAPES, because spawn_term wraps the command in `ksh -c "<cmd>; exec
+    ksh -i"`, so the mux invocation is INSIDE one argv element rather than
+    being its own:
+
+        ['/bin/sh', '.../libexec/mux-latch', 'manifold']     a real process
+        ['ksh', '-c', '/home/.../mux resume; exec ksh -i']    wrapped
+
+    IT SELF-CLEARS, which is what bounds the deferral: `exec ksh -i` REPLACES
+    the wrapper once the mux command ends, so the argv stops naming mux and
+    the window becomes an ordinary kitty with no timer involved."""
+    for a in argv:
+        if os.path.basename(a) == "mux-latch":
+            return True
+        if MUX_BIN and MUX_BIN in a:
+            return True
+    return False
+
+
+def _term_mux_pending(pid):
+    """True while a mux command is still running in this window's tree.
+
+    Same depth as _term_latch_target, and for the same reason: the command
+    sits under the shell kitty spawned, not under kitty itself."""
+    if not pid or pid < 0:
+        return False
+    for p in [pid] + _proc_children(pid):
+        for kid in [p] + _proc_children(p):
+            if _mux_pending_in(_proc_argv(kid)):
+                return True
+    return False
+
+
 def _term_latch_target(pid):
     """The HOST[:SESSION] a `mux latch` running in this window is holding, or
     None.
@@ -1075,6 +1114,31 @@ class KittyPlugin(WindowPlugin):
     # 19:28:48, placed at 19:29:12, by an unrelated Chrome session-file write.
 
     def identity(self, v):
+        """`kitty:<cwd>`, or None while usher cannot yet say WHICH window
+        this is.
+
+        NONE WHILE A MUX COMMAND IS IN FLIGHT, which is a PRODUCT bug fixed
+        2026-10-03 after it cost manifold both terminal sizes on a real
+        reboot. A relaunched mux terminal MAPS BEFORE mux attaches (a latch
+        has to ssh first), so its title is `ksh` with no colon, `is_mux_term`
+        is False, and this plugin claimed it and answered CONFIDENTLY with a
+        cwd key. The placer then matched the bare-kitty slot and RESIZED the
+        window down to it, and the capture loop learned that size back into
+        `term:latch <host>`. Self-worsening: once the slot says 1085x672 the
+        next relaunch ASKS for 1085x672, so it never recovers.
+
+        Declining is the whole fix and it is the conservative direction: it
+        only ever DEFERS. `unidentified` then keeps both learning and placing
+        off the window, grace-from-recognition re-graces it the instant mux
+        paints its banner, and MuxPlugin claims it with the right key. The
+        alternative (widening MuxPlugin's claim to the process tree) could
+        STEAL a genuine bare-kitty window, which is worse than waiting.
+
+        NOT a `transient` hook: "I cannot tell yet" and "never remember this
+        window" are different questions, and conflating them is what broke
+        non-mux terminals once already."""
+        if _term_mux_pending(v["pid"]):
+            return None
         cwd = _term_cwd(v["pid"])
         return f"kitty:{cwd}" if cwd else None
 
@@ -2635,6 +2699,47 @@ def _t_registry(ck):
         ck("kitty-unreadable-cwd-is-NOT-transient", not _kp.transient(_kv))
     finally:
         globals()["_term_cwd"] = _real_cwd
+    # The 2026-10-03 shrink bug: a relaunched mux terminal maps BEFORE mux
+    # attaches, so its title has no colon and KittyPlugin used to answer with
+    # a cwd key, which the placer then resized the window down to. Both argv
+    # SHAPES are pinned, because spawn_term wraps the command in `ksh -c`.
+    ck("mux-pending-latch-process",
+       _mux_pending_in(["/bin/sh", "/x/libexec/mux-latch", "manifold"]))
+    ck("mux-pending-wrapped-resume",
+       _mux_pending_in(["ksh", "-c", f"{MUX_BIN} resume; exec ksh -i"]))
+    ck("mux-pending-wrapped-latch",
+       _mux_pending_in(["ksh", "-c", f"{MUX_BIN} latch box; exec ksh -i"]))
+    # AND IT MUST NOT FIRE ON AN ORDINARY SHELL, or every plain kitty would
+    # defer forever and never be remembered at all.
+    ck("mux-pending-not-a-plain-shell",
+       not _mux_pending_in(["ksh", "-i"]))
+    ck("mux-pending-not-bare-tmux",
+       not _mux_pending_in(["tmux", "-L", "global", "attach-session"]))
+    # The deferral self-clears: `exec ksh -i` replaces the wrapper, so the
+    # argv stops naming mux with no timer involved.
+    ck("mux-pending-clears-after-exec",
+       not _mux_pending_in(["ksh", "-i"]))
+
+    # AND THE WIRING, which the pure checks above cannot see: identity has to
+    # CONSULT the predicate. Stubbed with a READABLE cwd on purpose, so the
+    # only reason left to decline is the pending mux. With an unreadable one
+    # this would pass for the same reason kitty-unreadable-cwd-has-no-identity
+    # does, i.e. for the wrong reason, which is the trap this file keeps
+    # meeting (see learn-drops-absent-mux).
+    _real_pending = _term_mux_pending
+    try:
+        globals()["_term_cwd"] = lambda _pid: "/home/jello/src/usher"
+        globals()["_term_mux_pending"] = lambda _pid: False
+        ck("kitty-keys-normally-when-no-mux-pending",
+           _kp.identity(_kv) == "kitty:/home/jello/src/usher")
+        globals()["_term_mux_pending"] = lambda _pid: True
+        ck("kitty-defers-while-mux-pending", _kp.identity(_kv) is None)
+        ck("kitty-mux-pending-is-unidentified", unidentified(_kv))
+        ck("kitty-mux-pending-is-NOT-transient", not _kp.transient(_kv))
+    finally:
+        globals()["_term_cwd"] = _real_cwd
+        globals()["_term_mux_pending"] = _real_pending
+
     ck("kitty-stored-entry-is-not-transient",
        not _kp.transient({"app": "kitty", "title": "kitty:/tmp", "pid": -1,
                           "id": None}))
