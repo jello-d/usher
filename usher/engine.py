@@ -2878,14 +2878,42 @@ def _tprofile(name):
 @contextlib.contextmanager
 def _tblind():
     """Force `doctor` to be unable to see the live session, however selftest
-    was invoked. Unsetting the socket covers both branches: with pywayfire
-    importable it is the WAYFIRE_SOCKET case, without it the import case."""
+    was invoked.
+
+    UNSETTING WAYFIRE_SOCKET IS NOT ENOUGH ANY MORE, and this helper claimed
+    it was for two days. usher gained its own socket DISCOVERY (pick_socket
+    searches XDG_RUNTIME_DIR), so with the variable unset it simply FINDS the
+    live socket and is not blind at all. The three doctor-blind checks then
+    failed for anyone whose python can import pywayfire, which is to say from
+    the INSTALLED venv on every box, while `test/run` passed because it uses
+    the system python where the import fails for an unrelated reason.
+
+    THE PROXY TRAP, AGAIN, AND IN THE TEST THIS TIME. doctor itself had
+    exactly this bug (it read "WAYFIRE_SOCKET is unset" as "I cannot see")
+    and it was fixed on 2026-10-01 with the note "grep for the proxy when you
+    remove the dependency". This helper was the proxy nobody grepped for.
+
+    So it points the search at an EMPTY runtime dir as well, which is the
+    condition that genuinely blinds every branch: no variable to read, and
+    nothing to find by searching."""
+    import tempfile
     prev = os.environ.pop("WAYFIRE_SOCKET", None)
+    prev_rt = os.environ.get("XDG_RUNTIME_DIR")
+    empty = tempfile.mkdtemp(prefix="usher-blind-")
+    os.environ["XDG_RUNTIME_DIR"] = empty
     try:
         yield
     finally:
         if prev is not None:
             os.environ["WAYFIRE_SOCKET"] = prev
+        if prev_rt is not None:
+            os.environ["XDG_RUNTIME_DIR"] = prev_rt
+        else:
+            os.environ.pop("XDG_RUNTIME_DIR", None)
+        try:
+            os.rmdir(empty)
+        except OSError:
+            pass
 
 
 @contextlib.contextmanager
