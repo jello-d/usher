@@ -3589,6 +3589,118 @@ def _t_lock(ck):
                                if p in ("lock", "already")})
 
 
+def _t_lifecycle(ck):
+    """A WINDOW'S LIFE, TICK BY TICK, driven through the real decision code.
+
+    THE GAP THIS CLOSES, and it is a structural one rather than a missing
+    case: every other check in this file hands a plugin or the store ONE
+    frozen view, so the suite could not see a SEQUENCE at all. The 2026-10-03
+    shrink bug was a sequence and nothing else. The window was handled
+    correctly at tick 2 and ruinously at tick 1, and the damage was that
+    tick 1's answer got WRITTEN and carried forward. A per-tick check on
+    either tick alone passes.
+
+    So the shape is: script the states a window really moves through, run the
+    real `resolution()` and the real `learn()` at each one, and assert on the
+    TRACE. What matters is not only the final answer but that no wrong answer
+    was ever committed on the way to it."""
+    def drive(ticks, when0=1_800_000_000):
+        """Run a scripted lifecycle. Each tick is (label, window, cwd, mux):
+        `cwd` is what the shell's /proc cwd would answer and `mux` whether a
+        mux command is still starting in the tree, which are the two things
+        that make a terminal's identity arrive LATE.
+
+        Returns (trace, store). learn() applies the readiness gate itself, so
+        calling it every tick is what production does rather than a
+        simplification: a window that is not ready simply does not land."""
+        kb, groups, trace = {}, {}, []
+        _rc, _rp = _term_cwd, _term_mux_pending
+        try:
+            for i, (label, win, cwd, mux) in enumerate(ticks):
+                globals()["_term_cwd"] = lambda _p, _c=cwd: _c
+                globals()["_term_mux_pending"] = lambda _p, _m=mux: _m
+                r = resolution(win)
+                learn(kb, groups, [win], when0 + i)
+                trace.append({"label": label, "state": r.state, "key": r.key,
+                              "store": sorted(k.split("\0")[1] for k in kb)})
+        finally:
+            globals()["_term_cwd"] = _rc
+            globals()["_term_mux_pending"] = _rp
+        return trace, kb
+
+    def W(vid, title, app="kitty", pid=4242):
+        return {"id": vid, "app_id": app, "title": title, "pid": pid,
+                "output": "DP-1", "workspace": [1.0, 1.0],
+                "pos": [0.0, 0.0], "size": [800.0, 600.0]}
+
+    # === TIMELINE 1: THE SHRINK BUG =======================================
+    # usher spawns `kitty ... ksh -c "mux latch host; exec ksh -i"`. The
+    # window MAPS BEFORE mux attaches, because a latch has to ssh first, so
+    # for a moment it is a kitty titled `ksh` with a mux command in its tree.
+    # Pre-fix, KittyPlugin answered `kitty:<cwd>` here, the placer resized the
+    # window onto that slot, and the capture loop learned the shrunken size
+    # back into the terminal's own slot.
+    BANNER = "vigilance:main\u2800\u2800\u2800\u2800[manifold]"
+    trace, kb = drive([
+        ("maps as a bare shell, mux still starting", W(1, "ksh"), "/h", True),
+        ("mux still starting",                       W(1, "ksh"), "/h", True),
+        ("the banner lands",                      W(1, BANNER), "/h", False),
+        ("steady",                                W(1, BANNER), "/h", False),
+    ])
+    ck("life-shrink-t0-is-pending", trace[0]["state"] == Resolution.PENDING)
+    ck("life-shrink-t1-is-pending", trace[1]["state"] == Resolution.PENDING)
+    ck("life-shrink-t2-is-ready", trace[2]["state"] == Resolution.READY)
+    ck("life-shrink-t2-keys-a-terminal",
+       str(trace[2]["key"]).startswith("term:"))
+    # THE INVARIANT, and the actual bug: nothing may be committed while the
+    # answer is still arriving. A cwd key written at t0 is what the placer
+    # then aimed at.
+    ck("life-shrink-nothing-learned-while-pending",
+       trace[0]["store"] == [] and trace[1]["store"] == [])
+    ck("life-shrink-no-cwd-key-EVER",
+       not any(k.startswith("kitty:") for t in trace for k in t["store"]))
+    ck("life-shrink-ends-with-one-terminal-slot",
+       trace[-1]["store"] == [trace[2]["key"]])
+
+    # === TIMELINE 2: A PLAIN KITTY, whose cwd arrives late ================
+    # The same LATENESS without any mux: a kitty has no shell in /proc for its
+    # first ~0.25s. It must be held, not dropped (reading this as "never
+    # remember" is what killed every non-mux terminal once), and then learned
+    # under the cwd key once it is readable.
+    trace, kb = drive([
+        ("maps, no shell in /proc yet", W(2, "terminal"), "", False),
+        ("cwd readable",                W(2, "terminal"), "/w/p", False),
+        ("steady",                      W(2, "terminal"), "/w/p", False),
+    ])
+    ck("life-cwd-t0-is-pending", trace[0]["state"] == Resolution.PENDING)
+    ck("life-cwd-t0-learns-nothing", trace[0]["store"] == [])
+    ck("life-cwd-settles-on-the-cwd-key", trace[-1]["store"] == ["kitty:/w/p"])
+
+    # === TIMELINE 3: THE SWITCH, which must NOT mint a second slot ========
+    # A terminal that changes what it DISPLAYS keeps its slot: that is the
+    # whole point of keying on the command rather than the session, and the
+    # regression it guards made a window a stranger every time you switched.
+    trace, kb = drive([
+        ("showing one session",     W(3, BANNER), "/h", False),
+        ("switched to another",
+         W(3, "tackup:main\u2800\u2800\u2800\u2800[manifold]"), "/h", False),
+    ])
+    ck("life-switch-keeps-one-slot", len(trace[-1]["store"]) == 1)
+    ck("life-switch-keeps-the-same-slot",
+       trace[0]["store"] == trace[1]["store"])
+
+    # === TIMELINE 4: A NEVER, which must never be committed ===============
+    # A stored entry's pid is dead, so its cwd can never be read. Unlike a
+    # PENDING this will not resolve by waiting, and the distinction matters:
+    # the store must not grow a guessed key for it either way.
+    trace, kb = drive([
+        ("a replayed entry, pid long dead",
+         W(4, "terminal", pid=-1), "", False),
+    ])
+    ck("life-never-is-never", trace[0]["state"] == Resolution.NEVER)
+    ck("life-never-learns-nothing", trace[0]["store"] == [])
+
+
 def _t_terminals(ck):
     """a terminal's SLOT, and which windows need respawning."""
     ps = {getattr(p, "name", "?"): p for p in plugins()}
@@ -4768,6 +4880,7 @@ def selftest():
     # planting the Resolution guard removal), so it is fixed here rather than
     # in each caller.
     for area in (_t_registry, _t_resolution, _t_lock,
+                 _t_lifecycle,
                  _t_terminals, _t_cli_split,
                  _t_launch_source,
                  _t_relaunch, _t_chrome, _t_learn,
