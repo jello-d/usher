@@ -1537,10 +1537,23 @@ def _t_greeter_states(ck):
        len(set(_reasons)) == 3
        and "dconf" in _reasons[1]
        and "does not record" in _reasons[0])
-    # probe=False is "nothing detected AND do not go looking", which is the
-    # only way to state this without the host's own greeter cache answering.
-    ck("no-greeter-and-no-probe-reads-as-no-record",
-       greeter_choice("jello", None, probe=False) == (None, NO_RECORD))
+    # probe=False is "do not go looking at the caches", but it does NOT stop
+    # DETECTION, so this check also has to stub running_greeter.
+    #
+    # IT WAS HOST-DEPENDENT AND THE HOST CHANGED UNDER IT. Written while no
+    # greeter was running, `probe=False` alone was enough to make it pass, and
+    # it failed the moment a greeter came back: detection then answered
+    # "regreet" and the cache was read after all. That is the THIRD check in
+    # this file to pass only because of what happened to be running, after the
+    # two fixed in the same sitting, and it is the reason the stub is here
+    # rather than a cleverer argument.
+    _d = running_greeter
+    try:
+        globals()["running_greeter"] = lambda *a, **k: None
+        ck("no-greeter-and-no-probe-reads-as-no-record",
+           greeter_choice("jello", None, probe=False) == (None, NO_RECORD))
+    finally:
+        globals()["running_greeter"] = _d
 
     # THE PROBE FALLBACK. Detection and the readers are both stubbed, because
     # otherwise this would be testing whether THIS box happens to have a
