@@ -279,21 +279,103 @@ def _argv_of(pid):
         return "?"
 
 
+def _no_session_here():
+    """True when this user has NO login on the physical display.
+
+    ASKED OF logind, NOT OF THE COMPOSITOR, which is the whole point: the
+    compositor is the thing we have just failed to reach, so it cannot be the
+    witness to its own absence. `seated_session` already knows the three
+    columns that have to agree (user AND a real seat AND class `user`), which
+    is what excludes the ssh connection asking the question, the user manager,
+    and the greeter's own seated session.
+    """
+    import getpass
+    try:
+        out = subprocess.run(["loginctl", "list-sessions", "--no-legend"],
+                             capture_output=True, text=True,
+                             timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False        # cannot tell, so assume a session and refuse
+    return seated_session(getpass.getuser(), out) is None
+
+
+def _leave_plan(verb, reachable, session_present):
+    """What `cleanly <verb>` should DO, as a pure function of three facts.
+
+    PURE ON PURPOSE, so the whole matrix is checkable without a compositor, a
+    logind or a reboot. The decision it encodes was wrong in one cell for as
+    long as the verb existed, and nothing could have caught that while it was
+    spelled as two `if`s around a `connect()`.
+
+        reachable  session_present  verb      ->
+        yes        -                any          wind-down   capture, then go
+        no         YES              any          refuse      a layout is at risk
+        no         no               reboot       power-only  nothing to lose
+        no         no               shutdown     power-only
+        no         no               logoff       nothing     nothing to end
+    """
+    if reachable:
+        return "wind-down"
+    if session_present:
+        return "refuse"
+    return "nothing" if verb == "logoff" else "power-only"
+
+
 def _cleanly_leave(verb, dry):
-    """Wind down, then hand over power. REFUSES if it cannot see the session.
+    """Wind down, then hand over power. REFUSES if a session is AT RISK.
 
     Refusing early is the whole value: wind-down deliberately continues when its
     capture fails, because a broken usher must never be why a machine will not
     reboot, so checking afterwards would be too late with the browser already
     down.
+
+    BUT "I CANNOT REACH THE COMPOSITOR" IS TWO DIFFERENT FACTS, and treating
+    them alike made usher the reason a machine would not reboot, which is the
+    exact outcome the paragraph above exists to prevent:
+
+        a session IS running and we cannot see it  -> REFUSE. A layout would
+                                                      be lost, and that is
+                                                      what this protects.
+        there is NO session at all                 -> nothing to lose, so
+                                                      refusing protects
+                                                      nothing and only blocks
+                                                      the power action.
+
+    Met live 2026-10-02 on a box whose greeter had failed: no compositor, no
+    layout, and `usher cleanly reboot` refused to reboot it. From the power
+    menu the `;` fallback in wlogout's action covers that, which is why it had
+    never been seen; typed by hand there is no fallback.
+
+    THE SAME SHAPE AS doctor's BLINDNESS BUG, fixed earlier the same day: a
+    test that is a PROXY for the real question keeps answering after the thing
+    it stands for has changed. "Can I reach the compositor" stood in for "is
+    there a layout to lose", and those differ exactly when no session exists.
     """
+    reachable, why = True, ""
     try:
         engine.connect()
-    except Exception as e:
-        sys.exit(f"{PROG}: cannot reach the compositor ({e}).\n"
-                 "  Winding down without a capture would lose the layout this\n"
-                 "  exists to keep, so it is refusing.\n"
+    except Exception as e:                                 # noqa: BLE001
+        reachable, why = False, str(e)
+    # ONE loginctl CALL, and only when it can change the answer.
+    plan = _leave_plan(verb, reachable,
+                       True if reachable else not _no_session_here())
+    if plan == "refuse":
+        sys.exit(f"{PROG}: cannot reach the compositor ({why}).\n"
+                 "  A session IS running, so winding down without a capture\n"
+                 "  would lose the layout this exists to keep: refusing.\n"
                  f"  To START a session from here: {PROG} cleanly login")
+    if plan == "nothing":
+        print(f"{PROG}: no session on the display; nothing to log out of")
+        return 0
+    if plan == "power-only":
+        # SAID OUT LOUD, because a silent skip of the capture is
+        # indistinguishable from a capture that worked.
+        print(f"{PROG}: no session on the display, so nothing to wind down; "
+              f"going straight to {verb}", file=sys.stderr)
+        if dry:
+            print(f"{PROG}: would {verb} (no wind-down needed)")
+            return 0
+        return _hand_over_power(verb)
     if dry:
         if verb == "logoff":
             _t, msg = _end_session(dry=True)
@@ -311,6 +393,16 @@ def _cleanly_leave(verb, dry):
         sid, msg = _end_session()
         print(f"{PROG}: {msg}", file=sys.stderr if sid is None else sys.stdout)
         return 0 if sid else 1
+    return _hand_over_power(verb)
+
+
+def _hand_over_power(verb):
+    """exec the power action. Never returns on success.
+
+    NAMED ONCE because there are now two routes into it (the normal path and
+    the no-session shortcut) and two copies of an `execvp` is how they come to
+    disagree about which systemctl verb a word means.
+    """
     print(f"{PROG}: {verb}")
     cmd = {"reboot": ["systemctl", "reboot"],
            "shutdown": ["systemctl", "poweroff"]}[verb]

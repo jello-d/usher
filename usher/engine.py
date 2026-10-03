@@ -2968,6 +2968,41 @@ def _t_cli_split(ck):
        _c.seated_session("jello", _LOGGED_IN) == ("13537", "846241"))
     ck("another-users-login-is-not-ours",
        _c.seated_session("root", _LOGGED_IN) is None)
+    # THIS IS WHAT DECIDES WHETHER `cleanly reboot` REFUSES, so it is pinned
+    # from both sides. "Cannot reach the compositor" is TWO facts: a session
+    # running that we cannot see (refuse, a layout would be lost) and NO
+    # session at all (nothing to lose, so refusing only blocks the reboot).
+    # Met live 2026-10-02 on a box whose greeter had failed, where usher made
+    # itself the reason the machine would not go down.
+    ck("no-session-means-nothing-to-lose",
+       _c.seated_session("jello", _AT_GREETER) is None)
+    ck("a-live-session-is-what-makes-a-refusal-right",
+       _c.seated_session("jello", _LOGGED_IN) is not None)
+    # AND THE SEATLESS ssh CONNECTION ASKING THE QUESTION IS NOT A SESSION,
+    # which is the one that would invert the whole decision: read it as a
+    # login and usher refuses to reboot a box that has no session at all.
+    ck("the-asking-ssh-connection-is-not-a-session",
+       _c.seated_session("jello", "   12 1000 jello  -  7041  user  -  no -")
+       is None)
+    # THE WHOLE MATRIX, as a pure function, because the cell that was wrong
+    # could not be checked while the decision was two `if`s around a
+    # `connect()`. A reachable compositor always winds down; unreachable with
+    # a session is the refusal this protection exists for; unreachable with NO
+    # session has nothing to lose, so blocking the power action protects
+    # nothing and only strands the machine.
+    for _v in ("reboot", "shutdown", "logoff"):
+        ck(f"reachable-{_v}-winds-down",
+           _c._leave_plan(_v, True, True) == "wind-down")
+        ck(f"unreachable-with-a-session-refuses-{_v}",
+           _c._leave_plan(_v, False, True) == "refuse")
+    ck("no-session-reboots-rather-than-stranding-the-box",
+       _c._leave_plan("reboot", False, False) == "power-only")
+    ck("no-session-shuts-down-rather-than-stranding-the-box",
+       _c._leave_plan("shutdown", False, False) == "power-only")
+    # logoff is the one verb with nothing to do when there is no session: it
+    # must NOT fall through to a power action it was never asked for.
+    ck("no-session-logoff-does-nothing-at-all",
+       _c._leave_plan("logoff", False, False) == "nothing")
     # NO COMPOSITOR NAME IN THE CODE of the leaving path: that is the whole
     # point, and a reappearing `killall <compositor>` is how it would come back.
     #
