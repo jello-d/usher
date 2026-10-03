@@ -2,9 +2,9 @@
 #
 # Drop a copy into ~/.config/usher/plugins/ and edit. usher imports every *.py
 # there and takes its top-level PLUGIN object (duck-typed: no import of usher
-# needed). A plugin CLAIMS an app's windows (owns) and may give them a stable
-# identity, a transient test, and a way to respawn a missing one. Every window
-# hook takes a normalized view dict:
+# needed). A plugin CLAIMS an app's windows (owns) and may RESOLVE their
+# identity, and give a way to respawn a missing one. Every window hook takes a
+# normalized view dict:
 #
 #   v["app"]     the app-id
 #   v["title"]   the current window title, which is usually too volatile to key
@@ -37,13 +37,28 @@ class SpotifyPlugin:
     def owns(self, v):
         return v["app"] == "spotify"
 
-    def identity(self, v):
-        return "spotify"        # one window, one durable key (ignore the title)
+    def resolve(self, v):
+        # THREE ANSWERS, and the third is the whole point of the hook:
+        #
+        #   ("ready", key)     this is definitively window <key>
+        #   ("pending", why)   I will know shortly; ask again
+        #   ("never", why)     I will never know; do not remember it
+        #
+        # usher neither PLACES nor REMEMBERS a window that is not ready, so if
+        # you cannot yet say which window this is, SAY THAT. Returning a key
+        # you are unsure of is the worse failure: it gets written into the
+        # store and then placed against. That really happened here, to the
+        # built-in kitty plugin, and it shrank a terminal to a quarter of its
+        # size on every reboot until someone noticed.
+        #
+        # The `why` is what `usher doctor` prints beside an unmatched window,
+        # so the plugin that knows the reason is the one that supplies it.
+        #
+        # A 2-tuple keeps this file import-free. Returning
+        # Resolution.ready(key) works if you would rather import usher.
+        return "ready", "spotify"   # one window, one durable key
 
     # Optional hooks. Every default is a no-op, so omit what you do not need.
-    #
-    #   def transient(self, v):
-    #       return False   # never capture or place this window
     #
     #   def relaunch_command(self, v):
     #       # How to bring THIS window back, read from the live window while

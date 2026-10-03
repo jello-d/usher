@@ -181,7 +181,7 @@ object: see the shipped
 Each plugin claims an app's windows
 .RB ( owns )
 and may implement
-.BR identity ", " transient ", " relaunch_command ", "
+.BR resolve ", " relaunch_command ", "
 .BR relaunch_missing ", and " wind_down ,
 each taking a normalized view
 .RB ( v["app"] ", " v["title"] ", " v["pid"] ", " v["id"] ).
@@ -190,6 +190,19 @@ is the compositor's view id, stable for exactly one window's lifetime and
 .I None
 for a window replayed from the store, so it is what to cache a hard-won
 identity against.
+.PP
+.B resolve
+answers in three ways and the third is the point:
+.IR ("ready", " key)" ,
+.IR ("pending", " why)" ,
+.IR ("never", " why)" .
+usher neither places nor remembers a window that is not ready, so a plugin
+that cannot yet say WHICH window it is must say that rather than guess: a
+guessed key is written to the store and then placed against, which is worse
+than waiting. The reason is what
+.B doctor
+prints for an unmatched window, so the plugin that knows supplies it. The
+2-tuple keeps plugins free of any usher import.
 .SH FILES
 .TP
 .I ~/.config/usher/{exclude,include}

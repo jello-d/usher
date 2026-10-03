@@ -812,10 +812,35 @@ def resolution(v):
         r = p.resolve(v)
     except Exception as e:
         return Resolution.pending(f"plugin {p.name} raised: {e}")
-    if not isinstance(r, Resolution):
-        return Resolution.pending(
-            f"plugin {p.name} returned {type(r).__name__}, not a Resolution")
-    return r
+    return _as_resolution(r, p.name)
+
+
+def _as_resolution(r, who):
+    """Normalise what a plugin returned, accepting the DUCK-TYPED form.
+
+    A user plugin is explicitly documented as needing NO import of usher
+    (share/plugins/example.py says so, and that is a feature worth keeping:
+    a dropped-in file with no dependency cannot break on an internal move).
+    Requiring a Resolution instance would have quietly ended that, so a plain
+    2-tuple is equally valid and is the form the example teaches:
+
+        ("ready", "spotify")        same as Resolution.ready("spotify")
+        ("pending", "why")          ("never", "why")
+
+    ANYTHING ELSE IS PENDING, NOT READY, including the bare string the OLD
+    contract returned. That is deliberate and it is the fail-safe direction:
+    forgetting a window costs a placement, keying it on a guess corrupts the
+    slot (see the 2026-10-03 shrink bug). The message names the fix."""
+    if isinstance(r, Resolution):
+        return r
+    if (isinstance(r, tuple) and len(r) == 2
+            and r[0] in (Resolution.READY, Resolution.PENDING,
+                         Resolution.NEVER) and isinstance(r[1], str)):
+        return Resolution(r[0], key=r[1] if r[0] == Resolution.READY else None,
+                          why=None if r[0] == Resolution.READY else r[1])
+    return Resolution.pending(
+        f"plugin {who} returned {type(r).__name__}; resolve() must return a "
+        f'Resolution or a 2-tuple like ("ready", key)')
 
 
 def _single_id(v):
@@ -3127,6 +3152,25 @@ def _t_resolution(ck):
                 ck(f"{_n}-ready-has-a-key", bool(_r.key))
             else:
                 ck(f"{_n}-unready-says-why", bool(_r.why))
+
+    # 2b. THE DUCK-TYPED FORM. A user plugin is documented as needing no
+    #     import of usher, so a 2-tuple has to be as good as a Resolution or
+    #     that promise is quietly broken. The OLD contract's bare string must
+    #     NOT be read as a key: that is the fail-safe direction.
+    ck("duck-ready-tuple", _as_resolution(("ready", "k"), "t").key == "k")
+    ck("duck-pending-tuple",
+       _as_resolution(("pending", "w"), "t").state == Resolution.PENDING)
+    ck("duck-never-tuple",
+       _as_resolution(("never", "w"), "t").state == Resolution.NEVER)
+    ck("duck-pending-tuple-keeps-why",
+       _as_resolution(("pending", "w"), "t").why == "w")
+    ck("duck-ready-tuple-has-no-why",
+       _as_resolution(("ready", "k"), "t").why is None)
+    for _bad in ("kitty:/tmp", None, ("ready",), ("bogus", "x"), 7, ()):
+        ck(f"duck-rejects-{type(_bad).__name__}-{str(_bad)[:8]}",
+           _as_resolution(_bad, "t").state == Resolution.PENDING)
+    ck("duck-rejection-names-the-fix",
+       "2-tuple" in (_as_resolution("k", "t").why or ""))
 
     # 3. THE GATE. A window that is not ready must be refused by BOTH call
     #    sites, which is the invariant every silent failure in this repo's

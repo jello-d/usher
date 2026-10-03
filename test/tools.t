@@ -65,6 +65,30 @@ for _f in "$HERE/share/hooks"/* "$HERE/share/providers"/*; do
     _bad=1; }
 done
 [ "$_bad" = 0 ] || fail "a shipped script failed its syntax check"
+
+# THE SHIPPED EXAMPLE PLUGIN MUST SATISFY THE CONTRACT IT TEACHES. It is the
+# file users copy, so if it drifts from the hooks usher actually calls, every
+# plugin written from it starts broken, and nothing else would notice: it
+# imports nothing (deliberately, so a dropped-in plugin cannot break on an
+# internal move) and is never loaded by the suite. Compiling it proves only
+# that it parses. This LOADS it and calls the hooks for real.
+PYTHONPATH="$HERE" python3 - "$HERE" <<'PYEOF' || fail "share/plugins/example.py
+ does not satisfy the plugin contract"
+import importlib.util, sys
+from usher.engine import _as_resolution
+root = sys.argv[1]
+path = root + "/share/plugins/example.py"
+spec = importlib.util.spec_from_file_location("ex", path)
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+p = getattr(m, "PLUGIN", None)
+assert p is not None, "no top-level PLUGIN object"
+v = {"app": "spotify", "title": "Some Track", "pid": 1, "id": 3}
+assert p.owns(v), "owns() does not claim its own app"
+r = _as_resolution(p.resolve(v), "example")
+assert r.is_ready, f"resolve() is not ready: {r!r}"
+assert r.key, "resolve() is ready with no key"
+PYEOF
 # A FLOOR, so an empty set cannot pass. Every selector above is a glob, and a
 # glob that matches nothing checks nothing while still reporting success, which
 # is how a renamed package went uncompiled behind a green test. The numbers only
