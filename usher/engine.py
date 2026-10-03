@@ -3013,10 +3013,10 @@ def _t_registry(ck):
     # meeting (see learn-drops-absent-mux).
     _real_pending = _term_mux_pending
     try:
-        globals()["_term_cwd"] = lambda _pid: "/home/jello/src/usher"
+        globals()["_term_cwd"] = lambda _pid: "/w/proj"
         globals()["_term_mux_pending"] = lambda _pid: False
         ck("kitty-keys-normally-when-no-mux-pending",
-           _kp.resolve(_kv).key == "kitty:/home/jello/src/usher")
+           _kp.resolve(_kv).key == "kitty:/w/proj")
         globals()["_term_mux_pending"] = lambda _pid: True
         ck("kitty-defers-while-mux-pending",
            _kp.resolve(_kv).state == Resolution.PENDING)
