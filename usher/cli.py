@@ -42,7 +42,8 @@ VERBS = {
     "capture":         ("both", "record the current layout (alias of save)"),
     "restore":         ("cli", "put windows back [--dry-run] [--only S] "
                                "[--from SPEC]"),
-    "cleanly":         ("cli", "login | logoff | reboot | shutdown"),
+    "cleanly":         ("cli", "login | logoff | reboot | shutdown"
+                               " [--force]"),
     "reload":          ("both", "pick up new code, touch nothing else"),
     "stop":            ("both", "stop the daemon (SIGTERM, not pkill)"),
     "launch":          ("both", "respawn saved-but-absent windows"),
@@ -118,6 +119,7 @@ def do_cleanly(args):
     (a power menu, a script) could then disagree about it, and did.
     """
     dry = "--dry-run" in args or "-n" in args
+    force = "--force" in args or "-f" in args
     # The VERB is the first non-flag word, so `-n reboot` and `reboot -n` both
     # work. Taking args[0] made `-n` the verb and printed usage, which reads
     # like the dry run is unsupported rather than mis-parsed.
@@ -140,7 +142,7 @@ def do_cleanly(args):
             print(f"{PROG}: would run {engine.SESSION_START} login")
             return 0
         session_start("login")     # execs; never returns
-    return _cleanly_leave(verb, dry)
+    return _cleanly_leave(verb, dry, force)
 
 
 def seated_session(user, listing):
@@ -299,29 +301,48 @@ def _no_session_here():
     return seated_session(getpass.getuser(), out) is None
 
 
-def _leave_plan(verb, reachable, session_present):
-    """What `cleanly <verb>` should DO, as a pure function of three facts.
+def _leave_plan(verb, reachable, session_present, force=False):
+    """What `cleanly <verb>` should DO, as a pure function of four facts.
 
     PURE ON PURPOSE, so the whole matrix is checkable without a compositor, a
-    logind or a reboot. The decision it encodes was wrong in one cell for as
-    long as the verb existed, and nothing could have caught that while it was
-    spelled as two `if`s around a `connect()`.
+    logind or a reboot. The cell that was wrong could not have been caught
+    while this was two `if`s around a `connect()`.
 
-        reachable  session_present  verb      ->
-        yes        -                any          wind-down   capture, then go
-        no         YES              any          refuse      a layout is at risk
-        no         no               reboot       power-only  nothing to lose
-        no         no               shutdown     power-only
-        no         no               logoff       nothing     nothing to end
+        reachable  session  verb    force  ->
+        yes        -        any     -        wind-down  capture, then go
+        no         YES      any     no       refuse     a layout IS at risk
+        no         YES      any     YES      forced     and you said so
+        no         no       reboot   no      no-session refuse, name --force
+        no         no       reboot   YES     forced
+        no         no       logoff   -       nothing    nothing to end
+
+    IT REFUSES WHEN IT CANNOT SEE A SESSION, rather than proceeding, and that
+    is a deliberate reversal of this function's first version. The first cut
+    read "logind reports no seated session" as permission to skip the capture
+    and reboot. But THE COSTS ARE NOT SYMMETRIC: refusing wrongly costs one
+    extra word typed, while proceeding wrongly loses the layout, which is the
+    single thing this program exists to preserve. `_no_session_here` is a
+    HEURISTIC over a text listing, and a heuristic may authorise an annoyance,
+    never an unrecoverable act.
+
+    SO THE OVERRIDE IS EXPLICIT AND IT IS THE SAME COMMAND. `--force` keeps
+    one verb for one intention instead of growing a second spelling, and makes
+    the risk the caller's stated choice rather than usher's guess. Same shape
+    as `pick_socket`, which refuses on two candidates rather than picking one.
+
+    `logoff` NEEDS NO FORCE, because with no session there is nothing to end:
+    the desired state already holds, and nothing is lost by saying so.
     """
     if reachable:
         return "wind-down"
-    if session_present:
-        return "refuse"
-    return "nothing" if verb == "logoff" else "power-only"
+    if verb == "logoff" and not session_present:
+        return "nothing"
+    if force:
+        return "forced"
+    return "refuse" if session_present else "no-session"
 
 
-def _cleanly_leave(verb, dry):
+def _cleanly_leave(verb, dry, force=False):
     """Wind down, then hand over power. REFUSES if a session is AT RISK.
 
     Refusing early is the whole value: wind-down deliberately continues when its
@@ -357,24 +378,47 @@ def _cleanly_leave(verb, dry):
     except Exception as e:                                 # noqa: BLE001
         reachable, why = False, str(e)
     # ONE loginctl CALL, and only when it can change the answer.
-    plan = _leave_plan(verb, reachable,
-                       True if reachable else not _no_session_here())
+    present = True if reachable else not _no_session_here()
+    plan = _leave_plan(verb, reachable, present, force)
     if plan == "refuse":
         sys.exit(f"{PROG}: cannot reach the compositor ({why}).\n"
                  "  A session IS running, so winding down without a capture\n"
                  "  would lose the layout this exists to keep: refusing.\n"
+                 f"  To {verb} anyway and LOSE that layout: "
+                 f"{PROG} cleanly {verb} --force\n"
+                 f"  To START a session from here: {PROG} cleanly login")
+    if plan == "no-session":
+        # REFUSING HERE IS THE POINT. Seeing no session is not the same fact
+        # as there being none, and the capture is the whole job, so the
+        # benefit of the doubt goes to the layout.
+        sys.exit(f"{PROG}: cannot reach the compositor ({why}), and logind "
+                 "reports\n"
+                 "  no session on the display either, so there is probably "
+                 "nothing to\n"
+                 "  capture. 'Probably' is not good enough to skip the "
+                 "capture, so:\n"
+                 f"  To {verb} anyway: {PROG} cleanly {verb} --force\n"
                  f"  To START a session from here: {PROG} cleanly login")
     if plan == "nothing":
         print(f"{PROG}: no session on the display; nothing to log out of")
         return 0
-    if plan == "power-only":
-        # SAID OUT LOUD, because a silent skip of the capture is
-        # indistinguishable from a capture that worked.
-        print(f"{PROG}: no session on the display, so nothing to wind down; "
-              f"going straight to {verb}", file=sys.stderr)
+    if plan == "forced":
+        # SAID OUT LOUD, AND WHICH RISK IT IS, because a silent skip of the
+        # capture is indistinguishable from a capture that worked.
+        warn = ("a session IS running and could not be captured, so its "
+                "layout is being LOST" if present
+                else "no session was found, so there should be nothing to "
+                     "lose")
+        print(f"{PROG}: --force: {warn}; going straight to {verb}",
+              file=sys.stderr)
         if dry:
-            print(f"{PROG}: would {verb} (no wind-down needed)")
+            print(f"{PROG}: would {verb} (forced, no wind-down)")
             return 0
+        if verb == "logoff":
+            sid, msg = _end_session()
+            print(f"{PROG}: {msg}",
+                  file=sys.stderr if sid is None else sys.stdout)
+            return 0 if sid else 1
         return _hand_over_power(verb)
     if dry:
         if verb == "logoff":

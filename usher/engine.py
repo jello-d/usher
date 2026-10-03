@@ -2995,14 +2995,30 @@ def _t_cli_split(ck):
            _c._leave_plan(_v, True, True) == "wind-down")
         ck(f"unreachable-with-a-session-refuses-{_v}",
            _c._leave_plan(_v, False, True) == "refuse")
-    ck("no-session-reboots-rather-than-stranding-the-box",
-       _c._leave_plan("reboot", False, False) == "power-only")
-    ck("no-session-shuts-down-rather-than-stranding-the-box",
-       _c._leave_plan("shutdown", False, False) == "power-only")
-    # logoff is the one verb with nothing to do when there is no session: it
-    # must NOT fall through to a power action it was never asked for.
-    ck("no-session-logoff-does-nothing-at-all",
-       _c._leave_plan("logoff", False, False) == "nothing")
+    # SEEING NO SESSION IS NOT THE SAME FACT AS THERE BEING NONE, and the
+    # capture is the whole job, so the benefit of the doubt goes to the
+    # layout. An earlier version of this proceeded here, trading an
+    # unrecoverable loss for the convenience of one less word.
+    ck("no-session-still-refuses-rather-than-guessing",
+       _c._leave_plan("reboot", False, False) == "no-session")
+    ck("no-session-shutdown-also-refuses",
+       _c._leave_plan("shutdown", False, False) == "no-session")
+    # --force IS THE EXPLICIT OVERRIDE, and it works from BOTH refusals: the
+    # one where a session was found (you are choosing to lose it) and the one
+    # where none was (there should be nothing to lose). Same verb either way.
+    ck("force-overrides-the-no-session-refusal",
+       _c._leave_plan("reboot", False, False, True) == "forced")
+    ck("force-overrides-a-known-session-too",
+       _c._leave_plan("reboot", False, True, True) == "forced")
+    # AND FORCE NEVER SKIPS A CAPTURE THAT WAS POSSIBLE: reachable always
+    # winds down, so --force cannot be used to avoid the thing it exists for.
+    ck("force-does-not-skip-a-capture-it-could-have-made",
+       _c._leave_plan("reboot", True, True, True) == "wind-down")
+    # logoff is the one verb with nothing to do when there is no session, so
+    # it needs no force and must NOT fall through to a power action.
+    ck("no-session-logoff-does-nothing-and-needs-no-force",
+       _c._leave_plan("logoff", False, False) == "nothing"
+       and _c._leave_plan("logoff", False, False, True) == "nothing")
     # NO COMPOSITOR NAME IN THE CODE of the leaving path: that is the whole
     # point, and a reappearing `killall <compositor>` is how it would come back.
     #
