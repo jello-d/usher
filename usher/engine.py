@@ -143,13 +143,18 @@ def is_transient(v):
     stored "New Tab" would drag every future new tab to one spot), never placed.
     Takes a view/window/entry dict. Two sources: a usher/exclude config rule
     (blank New Tab, profile picker, a pre-load "Google Chrome" title: config-
-    driven, grows without a code change) OR a plugin's transient() (a scratch
-    terminal). plugin_transient is only reached if no exclude rule matched."""
+    driven, grows without a code change).
+
+    POLICY ONLY, as of the Resolution rework. This used to also consult a
+    plugin `transient()` hook, which NO plugin implemented: the last one
+    (kitty's scratch-terminal test) was retired, and what it had been reduced
+    to ("I cannot read the cwd") is a READINESS question that Resolution now
+    owns. Keeping the two apart matters, because they are different facts with
+    the same consequence: "the user does not want this window remembered" is
+    not "usher cannot identify this window"."""
     v = pview(v)
     app, t = v["app"], v["title"].strip()
-    if any(ar.search(app) and tr.search(t) for ar, tr in EXCLUDE_RULES):
-        return True
-    return plugin_transient(v)
+    return any(ar.search(app) and tr.search(t) for ar, tr in EXCLUDE_RULES)
 
 
 def reload_exclude():
@@ -556,21 +561,89 @@ def pview(v):
             "id": v.get("id")}
 
 
+class Resolution:
+    """What a plugin knows about a window's identity RIGHT NOW. Three states,
+    and the whole framework is that the third one exists.
+
+        Ready(key)    this is definitively window <key>
+        Pending(why)  I will know soon; do not place it, do not remember it
+        Never(why)    I will never know; it is not mine to remember
+
+    WHY THIS REPLACED `identity() -> str | None` PLUS `transient() -> bool`:
+    four separate bugs, all the same shape, all of them a readiness state
+    reported wrongly because the contract could not express it.
+
+        chrome's session file lags      should say PENDING, said Ready(title)
+        kitty's cwd unreadable 0.25s    should say PENDING, said NEVER
+        mux's banner not painted yet    should say PENDING, said Ready(cwd)
+        chrome incognito, never saved   should say NEVER,   said PENDING
+
+    The third row is the 2026-10-03 shrink bug and it is the sharpest
+    argument: KittyPlugin returned a CONFIDENT WRONG KEY, which the old
+    contract allowed, so the placer resized a mux terminal onto a bare-kitty
+    slot and the capture loop learned that size back. "Ready with a key I am
+    not sure about" is now unrepresentable.
+
+    THE REASON IS CARRIED, not just the state, which is what makes this a
+    framework rather than a safer `identity`. `doctor` used to hardcode
+    chrome's "incognito and guest windows are never recorded" text, which is
+    the same drift PLUGIN_HOOKS was created to kill: the plugin that KNOWS
+    why supplies the sentence, and the report just prints it.
+
+    ONE PREDICATE, TWO CALL SITES stays the rule it always was. learn() and
+    the placer both gate on `.ready`, so a store can no longer be written
+    under a key the matcher will never look up."""
+
+    __slots__ = ("state", "key", "why")
+
+    READY = "ready"
+    PENDING = "pending"
+    NEVER = "never"
+
+    def __init__(self, state, key=None, why=None):
+        self.state, self.key, self.why = state, key, why
+
+    @classmethod
+    def ready(cls, key):
+        return cls(cls.READY, key=key)
+
+    @classmethod
+    def pending(cls, why):
+        return cls(cls.PENDING, why=why)
+
+    @classmethod
+    def never(cls, why):
+        return cls(cls.NEVER, why=why)
+
+    @property
+    def is_ready(self):
+        return self.state == Resolution.READY
+
+    def __repr__(self):
+        return (f"Resolution({self.state}"
+                + (f", key={self.key!r}" if self.key else "")
+                + (f", why={self.why!r}" if self.why else "") + ")")
+
+
 class WindowPlugin:
     """Base + interface. A plugin CLAIMS an app's windows (owns) and can add
-    stable identity, a transient test, a per-window id, and a way to respawn a
-    missing window. Every window hook takes a normalized view (v["app"],
-    v["title"], v["pid"]); the defaults make each opt-in."""
+    identity RESOLUTION, a way to respawn a missing window, and a clean stop.
+    Every window hook takes a normalized view (v["app"], v["title"], v["pid"]);
+    the defaults make each opt-in."""
     name = "base"
 
     def owns(self, v):
         return False
 
-    def identity(self, v):
-        return None       # a stable kb key, or None to defer to the raw title
+    def resolve(self, v):
+        """What this plugin knows about the window's identity. See Resolution.
 
-    def transient(self, v):
-        return False      # never capture/place (a New Tab, a scratch terminal)
+        THE DEFAULT IS Ready(title), NOT Pending, because a plugin may
+        legitimately claim an app only to provide a relaunch and have no
+        identity opinion at all. For such a window the raw title is the best
+        handle there is, exactly as it is for an app no plugin claims, and
+        defaulting to Pending would defer it forever."""
+        return Resolution.ready(v["title"])
 
     def relaunch_missing(self, saved, live):
         return 0          # respawn this app's saved-but-absent windows; count
@@ -601,7 +674,7 @@ class WindowPlugin:
 # The hooks a plugin may implement, named ONCE: `plugins` and `doctor` both
 # report which of them a plugin defines, and listing them separately is how
 # relaunch_command and wind_down came to be missing from both.
-PLUGIN_HOOKS = ("owns", "identity", "transient", "relaunch_command",
+PLUGIN_HOOKS = ("owns", "resolve", "relaunch_command",
                 "relaunch_missing", "wind_down")
 
 PLUGIN_DIR = config_path("plugins")
@@ -715,30 +788,44 @@ def identity(v):
     """The kb KEY-title for a window: the single chokepoint every keying site
     routes through (upsert, learn, match, place). An owning plugin's identity()
     wins (Chrome's URL, mux's session, kitty's cwd); otherwise the raw title."""
+    r = resolution(pview(v))
+    return r.key if r.key else pview(v)["title"]
+
+
+def resolution(v):
+    """What usher knows about this window's identity. See Resolution.
+
+    THE ONE PLACE A PLUGIN IS ASKED. identity(), unidentified() and
+    _single_id() each used to dispatch to the owner themselves, which is three
+    copies of the same question and exactly how two call sites come to
+    disagree about a window's key. They are all thin readers of this now.
+
+    An UNOWNED app resolves Ready(title), because the title is the only handle
+    there is and for those it is the right one. A plugin raising is treated as
+    Pending rather than Ready: a broken plugin must not be able to get a
+    window remembered under a guessed key."""
     v = pview(v)
     p = _owner(v)
-    if p is not None:
-        try:
-            k = p.identity(v)
-            if k:
-                return k
-        except Exception:
-            pass
-    return v["title"]
+    if p is None:
+        return Resolution.ready(v["title"])
+    try:
+        r = p.resolve(v)
+    except Exception as e:
+        return Resolution.pending(f"plugin {p.name} raised: {e}")
+    if not isinstance(r, Resolution):
+        return Resolution.pending(
+            f"plugin {p.name} returned {type(r).__name__}, not a Resolution")
+    return r
 
 
 def _single_id(v):
-    """An owning plugin's stable single-key identity for this window, or None to
-    fall through to the title-grouping path (non-owned apps). Drives the
-    keying branch in upsert()/learn()."""
+    """An owning plugin's stable single-key identity, or None to fall through
+    to the title-grouping path. Drives the keying branch in upsert()/learn()."""
     v = pview(v)
-    p = _owner(v)
-    if p is not None:
-        try:
-            return p.identity(v)
-        except Exception:
-            pass
-    return None
+    if _owner(v) is None:
+        return None       # unowned: the title-grouping path, as before
+    r = resolution(v)
+    return r.key if r.is_ready else None
 
 
 def unidentified(v):
@@ -759,22 +846,7 @@ def unidentified(v):
     under a key the matcher will never look up, or matched under a key the
     writer will never produce: is that same fault wearing a new hat."""
     v = pview(v)
-    return is_owned(v["app"]) and not _single_id(v)
-
-
-def plugin_transient(v):
-    """True if this window's OWNING plugin marks it transient (a scratch
-    terminal). Only the owner is consulted: a plugin's hooks apply to the
-    windows it claims, never another plugin's (kitty's unreadable-cwd test must
-    not fire on a mux window, whose identity comes from its command)."""
-    v = pview(v)
-    p = _owner(v)
-    if p is not None:
-        try:
-            return bool(p.transient(v))
-        except Exception:
-            pass
-    return False
+    return is_owned(v["app"]) and not resolution(v).is_ready
 
 
 def is_owned(app):
@@ -980,8 +1052,28 @@ class ChromePlugin(WindowPlugin):
     def owns(self, v):
         return is_chrome(v["app"])
 
-    def identity(self, v):
-        return window_slot(v.get("id"), v["title"])
+    def resolve(self, v):
+        """`chrome:win:<SessionID>`, or why not.
+
+        TWO DISTINCT NO-ANSWERS, which doctor used to hardcode. A window Chrome
+        has simply not written to its session file yet is PENDING and resolves
+        itself within seconds. An INCOGNITO or GUEST window is NEVER: Chrome
+        does not record those anywhere, by design, so no amount of waiting,
+        title normalising or tab-set widening will ever join it. Telling them
+        apart is the difference between "wait" and "stop asking"."""
+        slot = window_slot(v.get("id"), v["title"])
+        if slot:
+            return Resolution.ready(slot)
+        # PENDING, NOT NEVER, and the reason names both causes because usher
+        # genuinely CANNOT tell them apart from one observation: a window
+        # Chrome has not got round to writing looks identical to one it will
+        # never write. doctor decides which by watching how long it stays
+        # pending, because that is a judgement over TIME and belongs in the
+        # report, not in a per-window answer. The old code asserted incognito
+        # for every unresolved chrome window, which was an overclaim.
+        return Resolution.pending(
+            "Chrome has not written this window to its session file yet; an "
+            "incognito or guest window is never written at all")
 
     def wind_down(self, live):
         """SIGTERM the BROWSER process. Measured on Chrome 154: it exits in
@@ -1060,12 +1152,17 @@ class MuxPlugin(WindowPlugin):
     def owns(self, v):
         return is_mux_term(v["app"], v["title"])
 
-    def identity(self, v):
+    def resolve(self, v):
         """The SLOT, from the command this window runs. See TERM_KEY_RE.
+
+        ALWAYS READY, and that is not an oversight: ownership here already
+        requires the banner (is_mux_term) or a mux command in the tree, so by
+        the time this is asked the window HAS a command, and the absence of a
+        latch is itself the answer (a local mux, replayed as `mux resume`).
 
         A STORED entry (pid < 0) cannot be asked, but does not need to be: the
         slot was resolved at capture and recorded in the snapshot's `key`."""
-        return _mux_slot(_term_latch_target(v.get("pid", -1)))
+        return Resolution.ready(_mux_slot(_term_latch_target(v.get("pid", -1))))
 
     def relaunch_command(self, v):
         """A latch if one is running here, otherwise nothing, which the
@@ -1113,8 +1210,8 @@ class KittyPlugin(WindowPlugin):
     # landed if _recheck_all happened along. Measured on manifestor: mapped at
     # 19:28:48, placed at 19:29:12, by an unrelated Chrome session-file write.
 
-    def identity(self, v):
-        """`kitty:<cwd>`, or None while usher cannot yet say WHICH window
+    def resolve(self, v):
+        """`kitty:<cwd>`, or PENDING while usher cannot yet say WHICH window
         this is.
 
         NONE WHILE A MUX COMMAND IS IN FLIGHT, which is a PRODUCT bug fixed
@@ -1137,10 +1234,19 @@ class KittyPlugin(WindowPlugin):
         NOT a `transient` hook: "I cannot tell yet" and "never remember this
         window" are different questions, and conflating them is what broke
         non-mux terminals once already."""
+        if not v["pid"] or v["pid"] < 0:
+            return Resolution.never(
+                "a stored entry's pid is long dead, so its cwd can never be "
+                "read; replay uses the key recorded at capture instead")
         if _term_mux_pending(v["pid"]):
-            return None
+            return Resolution.pending(
+                "a mux command is still starting in this window, so its real "
+                "identity is a terminal slot, not this cwd")
         cwd = _term_cwd(v["pid"])
-        return f"kitty:{cwd}" if cwd else None
+        if cwd:
+            return Resolution.ready(f"kitty:{cwd}")
+        return Resolution.pending(
+            "the shell's cwd is not readable yet (a kitty needs ~0.25s)")
 
     def relaunch_missing(self, saved, live):
         return kitty_relaunch_missing(saved, live)
@@ -2832,8 +2938,9 @@ def _t_registry(ck):
     _real_cwd = _term_cwd
     try:
         globals()["_term_cwd"] = lambda _pid: _home
-        ck("kitty-home-has-an-identity", _kp.identity(_kv) == f"kitty:{_home}")
-        ck("kitty-home-is-not-transient", not _kp.transient(_kv))
+        ck("kitty-home-resolves-ready",
+           _kp.resolve(_kv).key == f"kitty:{_home}")
+        ck("kitty-home-is-ready", _kp.resolve(_kv).is_ready)
         # AN UNREADABLE CWD IS "ASK AGAIN", NOT "NEVER REMEMBER THIS", and
         # this check used to assert the opposite: a test pinning a mistaken
         # belief. transient means never remember; unidentified means cannot say
@@ -2843,9 +2950,13 @@ def _t_registry(ck):
         # returns there, dropping every non-mux terminal in the one 0.15s
         # window it gets.
         globals()["_term_cwd"] = lambda _pid: None
-        ck("kitty-unreadable-cwd-has-no-identity", _kp.identity(_kv) is None)
+        # PENDING, not NEVER: a kitty has no shell in /proc for its first
+        # ~0.25s, so this is "ask again", and reading it as "never remember"
+        # is what dropped every non-mux terminal once already.
+        ck("kitty-unreadable-cwd-is-pending",
+           _kp.resolve(_kv).state == Resolution.PENDING)
         ck("kitty-unreadable-cwd-is-unidentified", unidentified(_kv))
-        ck("kitty-unreadable-cwd-is-NOT-transient", not _kp.transient(_kv))
+        ck("kitty-unreadable-cwd-says-why", bool(_kp.resolve(_kv).why))
     finally:
         globals()["_term_cwd"] = _real_cwd
     # The 2026-10-03 shrink bug: a relaunched mux terminal maps BEFORE mux
@@ -2880,11 +2991,13 @@ def _t_registry(ck):
         globals()["_term_cwd"] = lambda _pid: "/home/jello/src/usher"
         globals()["_term_mux_pending"] = lambda _pid: False
         ck("kitty-keys-normally-when-no-mux-pending",
-           _kp.identity(_kv) == "kitty:/home/jello/src/usher")
+           _kp.resolve(_kv).key == "kitty:/home/jello/src/usher")
         globals()["_term_mux_pending"] = lambda _pid: True
-        ck("kitty-defers-while-mux-pending", _kp.identity(_kv) is None)
+        ck("kitty-defers-while-mux-pending",
+           _kp.resolve(_kv).state == Resolution.PENDING)
         ck("kitty-mux-pending-is-unidentified", unidentified(_kv))
-        ck("kitty-mux-pending-is-NOT-transient", not _kp.transient(_kv))
+        ck("kitty-mux-pending-says-why",
+           "mux" in (_kp.resolve(_kv).why or ""))
     finally:
         globals()["_term_cwd"] = _real_cwd
         globals()["_term_mux_pending"] = _real_pending
@@ -2910,9 +3023,13 @@ def _t_registry(ck):
     ck("verify-ignores-an-empty-label",
        _verify_find({"key": None, "label": ""}, _lk, _ll) == (None, None))
 
-    ck("kitty-stored-entry-is-not-transient",
-       not _kp.transient({"app": "kitty", "title": "kitty:/tmp", "pid": -1,
-                          "id": None}))
+    # A STORED ENTRY IS THE ONE GENUINE `NEVER`: its pid is long dead, so no
+    # amount of asking will ever make the cwd readable, and saying so beats
+    # retrying forever. Replay uses the key recorded at capture instead.
+    _stored = {"app": "kitty", "title": "kitty:/tmp", "pid": -1, "id": None}
+    ck("kitty-stored-entry-is-never",
+       _kp.resolve(_stored).state == Resolution.NEVER)
+    ck("kitty-stored-entry-says-why", bool(_kp.resolve(_stored).why))
     # a constant title is no longer special to anything
     ck("plain-title-is-not-a-mux-term", not is_mux_term("kitty", "terminal"))
     # XWayland reports `Google-chrome`; both forms exist in a real store, and
@@ -2959,6 +3076,117 @@ def _t_registry(ck):
        _latch_target_in(["/opt/mux/libexec/mux-latcher", "box"]) is None)
 
 
+def _t_resolution(ck):
+    """THE READINESS CONTRACT, as a table over every registered plugin.
+
+    READ THROUGH _st/_wh BELOW, never off the object directly. If the thing
+    under test stops returning a Resolution, `r.state` raises and the
+    AttributeError ABORTS the suite before the summary prints, so a correctly
+    caught regression reads as "nothing failed". Met for real while planting
+    these; it is the same false negative the greeter regression harness hit.
+
+    All four historical readiness bugs were ONE PLUGIN forgetting, so the
+    check that matters is not "does chrome behave" but "does every plugin,
+    including one a user drops in tomorrow, obey the same rule". A table is
+    what catches that; a per-plugin check is what missed it four times."""
+    def _st(v):
+        """resolution(v).state, or None if it is not even a Resolution."""
+        return getattr(resolution(v), "state", None)
+
+    def _wh(v):
+        return getattr(resolution(v), "why", None)
+
+    # 1. THE TYPE ITSELF. Three states, exactly one of them ready, and a
+    #    reason on both no-answers (doctor prints it; a silent Pending is the
+    #    hardcoded-explanation problem coming back).
+    ck("resolution-ready-is-ready", Resolution.ready("k").is_ready)
+    ck("resolution-ready-carries-the-key", Resolution.ready("k").key == "k")
+    ck("resolution-pending-is-not-ready", not Resolution.pending("w").is_ready)
+    ck("resolution-never-is-not-ready", not Resolution.never("w").is_ready)
+    ck("resolution-pending-has-no-key", Resolution.pending("w").key is None)
+    ck("resolution-never-has-no-key", Resolution.never("w").key is None)
+    ck("resolution-pending-carries-why", Resolution.pending("w").why == "w")
+    ck("resolution-never-carries-why", Resolution.never("w").why == "w")
+    ck("resolution-states-are-distinct",
+       len({Resolution.READY, Resolution.PENDING, Resolution.NEVER}) == 3)
+
+    # 2. EVERY PLUGIN, including the base and anything a user registered.
+    #    A plugin that answers at all must answer with a Resolution, must
+    #    carry a key when ready, and must carry a reason when it does not.
+    _vs = [_tv("kitty", "terminal"), _tv("kitty", "s:w\u2800[host]"),
+           _tv("google-chrome", "Inbox"), _tv("nosuchapp", "x")]
+    for _p in list(plugins()) + [WindowPlugin()]:
+        for _i, _v in enumerate(_vs):
+            _r = _p.resolve(pview(_v))
+            # The view index is IN THE NAME so a failure localises to the
+            # exact row; a looped check with one name cannot say which input
+            # broke it, which is the whole value of naming them.
+            _n = f"contract-{_p.name}-v{_i}"
+            ck(f"{_n}-returns-a-Resolution", isinstance(_r, Resolution))
+            if _r.is_ready:
+                ck(f"{_n}-ready-has-a-key", bool(_r.key))
+            else:
+                ck(f"{_n}-unready-says-why", bool(_r.why))
+
+    # 3. THE GATE. A window that is not ready must be refused by BOTH call
+    #    sites, which is the invariant every silent failure in this repo's
+    #    history broke: a store written under a key the matcher never looks up.
+    _real = globals()["_owner"]
+    try:
+        class _Pend(WindowPlugin):
+            name = "pendtest"
+
+            def owns(self, v):
+                return True
+
+            def resolve(self, v):
+                return Resolution.pending("by construction")
+
+        globals()["_owner"] = lambda _v: _Pend()
+        _v = _tv("kitty", "anything")
+        ck("gate-pending-is-unidentified", unidentified(_v))
+        ck("gate-pending-has-no-single-id", _single_id(_v) is None)
+        # identity() still ANSWERS, for logs and reports, and must not crash.
+        ck("gate-pending-identity-falls-back-to-title",
+           identity(_v) == "anything")
+
+        class _Never(_Pend):
+            name = "nevertest"
+
+            def resolve(self, v):
+                return Resolution.never("by construction")
+
+        globals()["_owner"] = lambda _v: _Never()
+        ck("gate-never-is-unidentified", unidentified(_v))
+        ck("gate-never-has-no-single-id", _single_id(_v) is None)
+
+        # A PLUGIN THAT RAISES, OR RETURNS RUBBISH, MUST NOT GET A WINDOW
+        # REMEMBERED. Both degrade to Pending, never to Ready: the fail-safe
+        # direction is to forget a window, not to key it on a guess.
+        class _Boom(_Pend):
+            name = "boomtest"
+
+            def resolve(self, v):
+                raise RuntimeError("boom")
+
+        globals()["_owner"] = lambda _v: _Boom()
+        ck("gate-raising-plugin-is-pending", _st(_v) == Resolution.PENDING)
+        ck("gate-raising-plugin-says-so", "boom" in (_wh(_v) or ""))
+
+        class _Junk(_Pend):
+            name = "junktest"
+
+            def resolve(self, v):
+                return "kitty:/tmp"        # the OLD contract's return type
+
+        globals()["_owner"] = lambda _v: _Junk()
+        ck("gate-old-contract-return-is-pending",
+           _st(_v) == Resolution.PENDING)
+        ck("gate-old-contract-is-not-silently-keyed", _single_id(_v) is None)
+    finally:
+        globals()["_owner"] = _real
+
+
 def _t_terminals(ck):
     """a terminal's SLOT, and which windows need respawning."""
     ps = {getattr(p, "name", "?"): p for p in plugins()}
@@ -2970,8 +3198,8 @@ def _t_terminals(ck):
     ck("slot-latch",
        _mux_slot("manifestor:tackup") == "term:latch manifestor:tackup")
     ck("slot-survives-session-switch",
-       ps["mux"].identity(_tv("kitty", "vigilance:1\u2800\u2800[manifold]"))
-       == ps["mux"].identity(_tv("kitty", "tackup:1\u2800\u2800[manifold]")))
+       ps["mux"].resolve(_tv("kitty", "vigilance:1\u2800\u2800[manifold]")).key
+       == ps["mux"].resolve(_tv("kitty", "tackup:1\u2800\u2800[manifold]")).key)
     ck("slot-latch-differs-from-local",
        _mux_slot("manifestor:tackup") != _mux_slot(None))
 
@@ -4117,19 +4345,41 @@ def selftest():
     Split by AREA rather than written as one list, so a failure names the area
     it came from and a new check has an obvious home."""
     fails = []
+    ran = []
 
     def ck(name, cond):
+        # COUNTED, because the failure mode of any refactor in here is DROPPING
+        # a check, and the suite passes just as cheerfully over a smaller set.
+        # These notes have used "88 before and after" as the verification for
+        # three separate splits; the number was counted by hand every time
+        # because nothing printed it.
+        ran.append(name)
         if not cond:
             fails.append(name)
 
-    for area in (_t_registry, _t_terminals, _t_cli_split,
+    # EACH AREA IS GUARDED, so one that raises is reported as a failure and
+    # the OTHER areas still run and still print a summary. Unguarded, the
+    # first exception aborts the suite before the summary line, and a
+    # regression harness grepping for `selftest FAIL:` then reads a crash as
+    # "nothing failed" and concludes the CHECK is weak. That false negative
+    # has now bitten this fleet twice (the greeter regression run, and
+    # planting the Resolution guard removal), so it is fixed here rather than
+    # in each caller.
+    for area in (_t_registry, _t_resolution, _t_terminals, _t_cli_split,
                  _t_launch_source,
                  _t_relaunch, _t_chrome, _t_learn,
                  _t_geometry, _t_placement, _t_snapshots, _t_profiles,
                  _t_migration, _t_watcher, _t_contracts):
-        area(ck)
+        try:
+            area(ck)
+        except Exception as e:
+            ck(f"{area.__name__}-RAISED-{type(e).__name__}", False)
+            print(f"selftest: {area.__name__} raised {type(e).__name__}: {e}",
+                  file=sys.stderr)
     if fails:
         print("selftest FAIL: " + ", ".join(fails), file=sys.stderr)
         return 1
-    print("selftest OK")
+    dupes = len(ran) - len(set(ran))
+    print(f"selftest OK ({len(ran)} checks"
+          + (f", {dupes} duplicate name(s)" if dupes else "") + ")")
     return 0
