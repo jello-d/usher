@@ -3422,6 +3422,44 @@ def _t_resolution(ck):
     ck("duck-rejection-names-the-fix",
        "2-tuple" in (_as_resolution("k", "t").why or ""))
 
+    # 2c. DOCTOR'S LABELS. Three states must print as three labels, which is
+    #     the reporting payoff of all this and was left unspent for a day:
+    #     the first cut said `unjoinable` for any window with a reason, so a
+    #     Chrome window that had merely not been written yet read as one that
+    #     never would. That is the same overclaim the old hardcoded text made.
+    from .doctor import _unmatched_why as _uw
+    _real_owner = globals()["_owner"]
+    try:
+        class _P(WindowPlugin):
+            name = "labeltest"
+            st = Resolution.READY
+
+            def owns(self, v):
+                return True
+
+            def resolve(self, v):
+                if _P.st == Resolution.READY:
+                    return Resolution.ready("k")
+                if _P.st == Resolution.PENDING:
+                    return Resolution.pending("not yet")
+                return Resolution.never("never will")
+
+        globals()["_owner"] = lambda _v: _P()
+        _lv = _trv("kitty", "x")
+        _P.st = Resolution.READY
+        ck("doctor-ready-is-unmatched", _uw(_lv)[0] == "unmatched")
+        _P.st = Resolution.PENDING
+        ck("doctor-pending-is-pending", _uw(_lv)[0] == "pending")
+        _P.st = Resolution.NEVER
+        ck("doctor-never-is-unjoinable", _uw(_lv)[0] == "unjoinable")
+        ck("doctor-labels-are-three-distinct", len({
+            _uw(_lv)[0] for _P.st in (Resolution.READY, Resolution.PENDING,
+                                      Resolution.NEVER)}) == 3)
+        _P.st = Resolution.PENDING
+        ck("doctor-prints-the-plugin-reason", "not yet" in _uw(_lv)[1])
+    finally:
+        globals()["_owner"] = _real_owner
+
     # 3. THE GATE. A window that is not ready must be refused by BOTH call
     #    sites, which is the invariant every silent failure in this repo's
     #    history broke: a store written under a key the matcher never looks up.

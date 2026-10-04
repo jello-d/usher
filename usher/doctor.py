@@ -36,7 +36,8 @@ from .engine import (KB_SCHEMA, LOCAL_HOST, PLUGIN_HOOKS, STATE, TERM_KEY_RE,
                      WayfireSocket, app_of, hwdp_id, is_mux_term, live_keys,
                      load_knowledge, load_snapshot, match, mux_candidates,
                      mux_host_of, mux_session_of, mux_session_set, plugins,
-                     lock_capability, profile_id, pview, resolution, saved_key,
+                     Resolution, lock_capability, profile_id, pview, resolution,
+                     saved_key,
                      schema_path)
 
 # Every failure this tool has had was SILENT: the store looked healthy, Chrome
@@ -219,13 +220,14 @@ def _doctor_placement(out, kb, live, outs):
             out(f"  UNPLACEABLE {app_of(lv)[:13]:13} {e['title'][:34]:34}"
                 f" -> {where} NOT ATTACHED")
     for lv in unlive:
-        why = _unmatched_why(lv)
-        out(f"  {'unjoinable' if why else 'unmatched':10} {app_of(lv)[:14]:14}"
+        tag, why = _unmatched_why(lv)
+        out(f"  {tag:10} {app_of(lv)[:14]:14}"
             f" {lv.get('title','')[:34]:34}{why}")
 
 
 def _unmatched_why(lv):
-    """Why a live window has no slot, in the words of the plugin that knows.
+    """(label, reason) for a live window with no slot, in the words of the
+    plugin that knows.
 
     THIS USED TO HARDCODE CHROME'S ANSWER, and got it wrong in a way worth
     recording: it returned "incognito and guest windows never are" for EVERY
@@ -242,9 +244,17 @@ def _unmatched_why(lv):
     it the window quietly is not in the report, which reads as a fault in
     usher and is not one."""
     r = resolution(lv)
+    why = f"  ({r.why})" if r.why else ""
+    # THREE STATES, THREE LABELS, which is the reporting payoff of the
+    # Resolution rework and was left unspent for a day: the first cut printed
+    # `unjoinable` for ANY window with a reason, so one Chrome had merely not
+    # written yet read as one it would NEVER write. That is the same overclaim
+    # the hardcoded text made, wearing the new mechanism's clothes.
     if r.is_ready:
-        return ""      # identified fine; it simply has no slot yet
-    return f"  ({r.why})" if r.why else ""
+        return "unmatched", ""      # identified fine; no slot yet
+    if r.state == Resolution.NEVER:
+        return "unjoinable", why    # no join is possible, ever
+    return "pending", why           # it will know shortly; ask again
 
 
 def _doctor_blind(out, what, *fix):
