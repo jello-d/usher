@@ -32,7 +32,7 @@
 #   <app-regex> :: <title-regex>
 #
 # BOTH fields are required. Each is a Python regex matched with re.search, so
-# it is UNANCHORED (a substring test) -- add ^...$ to pin it, exactly as the
+# it is UNANCHORED (a substring test); add ^...$ to pin it, exactly as the
 # work boundary's own ^\[WORK does. Use .* for "any" in either field:
 #
 #   .* :: ^New Tab$          any app, whose title is exactly "New Tab"
