@@ -3958,6 +3958,70 @@ def _t_desktop(ck):
         globals()["_announce"] = _ra
 
 
+def _t_slots(ck):
+    """ONE WINDOW PER SLOT, driven through the real Watcher.
+
+    THE WART THIS CLOSES: ten kitty windows in one directory were all seated
+    at the identical geometry, stacked perfectly, and with no taskbar you
+    would never find out. Not a new rule either: match() has been
+    consume-once since it was written, so `usher restore` could never
+    double-place; only the DAEMON's per-window path had never learned it."""
+    from .watch import Watcher, PLACE_GRACE
+    import time as _t
+    w = Watcher(launch=False)
+    now = _t.time()
+
+    # aggressive, and inside the grace, so placement is actually attempted
+    w.st["armed_at"] = now
+    w.st["last_map"] = now
+
+    seated = []
+
+    class _Sock:
+        def list_outputs(self):
+            return [{"name": "DP-1", "geometry": {"x": 0, "y": 0,
+                                                  "width": 100, "height": 100}}]
+
+    w.place_sock = _Sock()
+    w._seat_view = lambda v, e, o: (seated.append(v["id"]) or True)
+    w.kb = {kkey("signal", ""):
+            {"app_id": "signal", "title": "", "appid_only": True,
+             "label": "x", "output": "DP-1", "workspace": [1.0, 1.0],
+             "pos": [1.0, 1.0], "size": [10.0, 10.0], "last_seen": now,
+             "sticky": False, "inverted": False, "fullscreen": False}}
+
+    def V(vid):
+        return {"id": vid, "app-id": "signal", "title": "Signal",
+                "pid": -1, "parent": -1, "geometry": {"x": 0, "y": 0,
+                                                      "width": 1, "height": 1}}
+
+    try:
+        for vid in (1, 2, 3):
+            w.deadline[vid] = now + PLACE_GRACE
+            w.identified.add(vid)
+            w._try_place(V(vid))
+        # THE WHOLE POINT: the first window gets the slot, the others are left
+        # exactly where they opened rather than stacked on top of it.
+        ck("slot-first-window-is-placed", seated == [1])
+        ck("slot-second-window-is-not-stacked", 2 not in seated)
+        ck("slot-third-window-is-not-stacked", 3 not in seated)
+        ck("slot-ledger-records-the-holder",
+           w.slot_held.get(kkey("signal", "")) == 1)
+
+        # CLOSING THE HOLDER RELEASES THE SLOT, or its place would be
+        # permanently unusable and every later window of that app adrift.
+        w._on_event({"event": "view-unmapped", "view": {"id": 1}})
+        ck("slot-released-on-unmap",
+           kkey("signal", "") not in w.slot_held)
+        w.placed.discard(2)
+        w.deadline[2] = _t.time() + PLACE_GRACE
+        w.identified.add(2)
+        w._try_place(V(2))
+        ck("slot-reusable-after-the-holder-closes", 2 in seated)
+    finally:
+        pass
+
+
 def _t_lifecycle(ck):
     """A WINDOW'S LIFE, TICK BY TICK, driven through the real decision code.
 
@@ -5249,7 +5313,7 @@ def selftest():
     # planting the Resolution guard removal), so it is fixed here rather than
     # in each caller.
     for area in (_t_registry, _t_resolution, _t_lock,
-                 _t_lifecycle, _t_desktop,
+                 _t_lifecycle, _t_desktop, _t_slots,
                  _t_terminals, _t_cli_split,
                  _t_launch_source,
                  _t_relaunch, _t_chrome, _t_learn,

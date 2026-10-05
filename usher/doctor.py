@@ -37,7 +37,8 @@ from .engine import (KB_SCHEMA, LOCAL_HOST, PLUGIN_HOOKS, STATE, TERM_KEY_RE,
                      load_knowledge, load_snapshot, match, mux_candidates,
                      mux_host_of, mux_session_of, mux_session_set, plugins,
                      Resolution, lock_capability, profile_id, pview, resolution,
-                     desktop_entries, desktop_launch_for,
+                     desktop_entries, desktop_launch_for, identity,
+                     kkey,
                      saved_key,
                      schema_path)
 
@@ -153,6 +154,9 @@ def _doctor_relaunch(out, snap, live):
     if snap is None:
         return
     saved = snap.get("windows", [])
+    # The store, for the collision report below: whether a key is app_id-only
+    # is a property of the STORE, not of the window, so it has to be asked.
+    kb = load_knowledge()
     lk = live_keys(live)
     chrome_up = any(is_chrome(pview(v)["app"]) for v in live)
     chrome_note = ("Chrome restores its own" if chrome_up
@@ -204,17 +208,39 @@ def _doctor_relaunch(out, snap, live):
                     f"  ({' '.join(_argv)[:28]})")
             else:
                 out(f"  none       {app:14} {key[:36]:36}  ({_why[:30]})")
-    # Two kitty windows in one directory share a key, so only ONE slot is
-    # remembered and the other silently loses its place. Keying on the running
-    # program instead would be worse (the key would change every time a
-    # command started or exited), so the limitation stands, but it should at
-    # least be VISIBLE, with the escape hatch named.
-    dupes = Counter(saved_key(w) for w in saved
-                    if w.get("app_id") == "kitty")
-    for key, n in dupes.items():
-        if n > 1 and key.startswith("kitty:"):
-            out(f"  COLLISION  {key[:44]}  {n} windows share this key; one"
-                " slot is remembered (name one: settitle)")
+    # WINDOWS SHARING ONE KEY, which now has a VISIBLE consequence rather
+    # than a silent one: a slot holds one window at a time, so the first gets
+    # the remembered place and the rest are left where they opened. Before
+    # that they were all seated at the identical geometry, stacked perfectly,
+    # and with no taskbar nobody found out.
+    #
+    # REPORTED OVER LIVE WINDOWS, NOT THE SNAPSHOT, because that is where the
+    # consequence lands, and for EVERY app rather than kitty alone: an
+    # app_id-only key (Signal, slack, a single-window app) matches every
+    # window of that app whatever its title, which is the worse case of the
+    # two and was not reported at all.
+    live_dupes = Counter()
+    for lv in live:
+        _a = app_of(lv)
+        if not _a:
+            continue
+        _k = kkey(_a, "") if kb.get(kkey(_a, "")) else kkey(_a, identity(lv))
+        live_dupes[_k] += 1
+    for key, n in live_dupes.items():
+        if n < 2:
+            continue
+        _app, _ident = key.split("\0", 1)
+        _shown = _ident or f"{_app} (by app-id)"
+        # The escape hatch differs by app: a terminal can be NAMED, which
+        # makes it title-keyed and gives it a slot of its own. For anything
+        # else the answer is a plugin, which is what the README's tiers say.
+        _fix = ("name one: settitle" if _ident.startswith("kitty:")
+                else "a plugin can tell them apart; see README")
+        # "1 keep" read as a typo; phrase it so the count never needs a
+        # plural, which is the cheapest fix and reads better at every n.
+        out(f"  COLLISION  {_shown[:40]:40}  {n} live windows share this"
+            f" key; 1 gets the remembered place, {n - 1} stay where they"
+            f" opened ({_fix})")
 
 
 def _doctor_placement(out, kb, live, outs):

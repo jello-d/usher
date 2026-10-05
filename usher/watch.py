@@ -250,6 +250,17 @@ class Watcher:
                    "last_map": time.time()}  # last new toplevel map, which
         #                                      feeds IDLE_SETTLE
         self.placed = set()
+        # WHICH LIVE WINDOW HOLDS EACH SLOT: store key -> vid. A slot holds ONE
+        # window at a time, which is not a new rule: match() has been
+        # consume-once since it was written (it pops the entry it used), so
+        # `usher restore` could never double-place. The DAEMON's per-window
+        # path never learned it, and looked the entry up fresh for every
+        # window, so N windows sharing a key were all seated at the identical
+        # geometry. Ten kitty windows in one directory stacked perfectly, and
+        # with no taskbar you would never find out. Worse for an app_id-keyed
+        # app, where kkey(app, "") matches EVERY window of that app whatever
+        # its title.
+        self.slot_held = {}
         self.pending = {}      # vid -> {"v": latest view, "due": place-after
         #                        time}: the settle-debounce queue, drained by
         #                        _placer_loop
@@ -516,11 +527,27 @@ class Watcher:
             return   # steady state: only usher/include anchors are (re)placed
         if not e:
             return   # never seen this identity -> we don't know where it goes
+        # ONE WINDOW PER SLOT. Whoever got here first owns it until it
+        # unmaps; a second window with the same key is LEFT WHERE IT OPENED,
+        # which is the same answer aggressive-vs-steady already gives a window
+        # opened mid-session, and it refuses to invent geometry rather than
+        # guessing an offset. Stacking is never what anyone wanted.
+        skey = kkey(app, "") if self.kb.get(kkey(app, "")) else \
+            kkey(app, identity(v))
+        with self.lock:
+            holder = self.slot_held.get(skey)
+        if holder is not None and holder != vid:
+            logline(f"slot taken, left in place: {app} | {title[:34]}")
+            return
         outs = {o["name"]: o for o in self.place_sock.list_outputs()}
         o = outs.get(e["output"])
         if not o:
             return
-        return self._seat_view(v, e, o)
+        moved = self._seat_view(v, e, o)
+        if moved:
+            with self.lock:
+                self.slot_held[skey] = vid
+        return moved
 
     def _recognise(self, vid, app, title):
         """THE GRACE RUNS FROM RECOGNITION, NOT FROM THE MAP. A window can be
@@ -912,6 +939,13 @@ class Watcher:
             self.placed.discard(v["id"])
             self.identified.discard(v["id"])
             self.deadline.pop(v["id"], None)
+            # RELEASE THE SLOT, or closing a window would leave its place
+            # permanently unusable and the NEXT window of that app would be
+            # left adrift for the rest of the session.
+            with self.lock:
+                for _k in [k for k, _vid in self.slot_held.items()
+                           if _vid == v["id"]]:
+                    self.slot_held.pop(_k, None)
             # and the identity chrome resolved for it once and remembered. A
             # cache that only ever grows is a leak in a process that runs for
             # weeks, and this is the one moment we know the view is gone.
