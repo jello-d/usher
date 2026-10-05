@@ -87,6 +87,23 @@ though it were an app. A plugin claiming the app overrides it, and
 disables it. See
 .B doctor
 for the command it would run per saved window.
+.PP
+To have usher relaunch something it cannot work out, WRITE A DESKTOP ENTRY in
+.IR ~/.local/share/applications .
+An app started from a shell with no entry of its own, or whose entry is
+.I Terminal=true
+(Debian's
+.I vim.desktop
+is), is still remembered and still placed when you open it; it is simply not
+started for you.
+.I StartupWMClass
+is the key part, since the join is on the app-id.
+.I NoDisplay=true
+keeps such an entry out of the application menu and usher still honours it:
+NoDisplay means "do not show this in menus" and says nothing about launching,
+so it is read as a refusal only for an entry you did NOT author.
+.I Hidden=true
+is a deletion in the spec's own words and is honoured everywhere.
 .TP
 .B predict " [--out FILE]"
 Record what the NEXT restore should produce: every live window with the

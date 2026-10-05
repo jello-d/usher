@@ -81,6 +81,28 @@ overrides it; `USHER_NO_DEFAULT_RELAUNCH=1` turns it off entirely.
 `usher doctor` prints the command it would run for each saved window, so you
 can see the set before a reboot trusts it.
 
+**To make usher relaunch something it cannot work out, write a desktop entry.**
+An app launched from a shell with no entry of its own (or whose entry is
+`Terminal=true`, like Debian's `vim.desktop`) is still remembered and still
+placed when you open it; it just is not started for you. Drop a file in
+`~/.local/share/applications/` to close that:
+
+```ini
+[Desktop Entry]
+Type=Application
+Name=GVim
+Exec=gvim
+StartupWMClass=gvim
+NoDisplay=true
+```
+
+`StartupWMClass` is the part that matters: usher joins on the app-id, so it
+must be the window's app-id when the filename is not. `NoDisplay=true` keeps
+the entry out of your application menu and usher still honours it, because
+NoDisplay means "do not show this in menus" and says nothing about launching:
+it is read as a refusal only for an entry you did not author. `Hidden=true` is
+a deletion in the spec's own words, so that is honoured everywhere.
+
 `resolve` answers one question in three ways, and the third is the point:
 `("ready", key)` when the window is definitively that key, `("pending", why)`
 when it will be knowable shortly, `("never", why)` when it never will. usher

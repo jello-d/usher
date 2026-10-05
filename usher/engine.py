@@ -2068,6 +2068,7 @@ def desktop_entries(dirs=None):
     lacked."""
     import configparser
     out = {}
+    _user_dir = os.path.expanduser("~/.local/share/applications")
     for d in (dirs if dirs is not None else DESKTOP_DIRS):
         for path in sorted(glob.glob(os.path.join(os.path.expanduser(d),
                                                   "*.desktop"))):
@@ -2076,7 +2077,12 @@ def desktop_entries(dirs=None):
                 cp.read(path, encoding="utf8")
                 if not cp.has_section("Desktop Entry"):
                     continue
-                out[os.path.basename(path)[:-8]] = dict(cp["Desktop Entry"])
+                d = dict(cp["Desktop Entry"])
+                # WHO AUTHORED IT, which decides how NoDisplay is read below.
+                # The key is namespaced so it cannot collide with a real
+                # desktop key, present or future.
+                d["x-usher-user-authored"] = str(path.startswith(_user_dir))
+                out[os.path.basename(path)[:-8]] = d
             except Exception:
                 continue        # a malformed entry is skipped, never fatal
     return out
@@ -2131,11 +2137,28 @@ def desktop_launch_for(app, entries):
     name, e = hits[0]
     if e.get("type", "Application") != "Application":
         return None, f"{name}.desktop is Type={e.get('type')}, not Application"
-    # configparser lower-cases keys, so the SPELLING is carried separately:
-    # printing "Nodisplay" in a message about a spec'd key reads as a typo.
-    for flag, shown in (("nodisplay", "NoDisplay"), ("hidden", "Hidden")):
-        if (e.get(flag) or "false").lower() == "true":
-            return None, (f"{name}.desktop is {shown}=true: the registry "
+    # HIDDEN IS A TOMBSTONE AND IS ALWAYS HONOURED. The spec's words: it
+    # means the user DELETED (at their level) something that was present, so
+    # a launcher must behave as though the entry does not exist.
+    if (e.get("hidden") or "false").lower() == "true":
+        return None, f"{name}.desktop is Hidden=true (a deleted entry)"
+    # NODISPLAY IS ADVISORY, AND ONLY FOR SOMEBODY ELSE'S ENTRY. The spec says
+    # it means "this application exists, but don't display it in the menus",
+    # which says nothing about launching. Reading it as "do not start this" is
+    # a REPURPOSING, and it is a good one for a SYSTEM entry: there, hidden
+    # correlates almost perfectly with not-an-app (nm-applet is a tray applet
+    # already in autostart, xdg-desktop-portal-gtk is a D-Bus service whose
+    # window is a transient dialog), and those are exactly what must not be
+    # started at login.
+    #
+    # In the user's OWN applications dir that correlation does not hold: an
+    # entry there is the user's declaration, and the obvious reason to author
+    # one with NoDisplay is to let usher relaunch a CLI-launched app WITHOUT
+    # cluttering the app menu. Refusing it second-guesses the only person who
+    # knows. The DIRECTORY is the authorship signal, so it is what decides.
+    if (e.get("nodisplay") or "false").lower() == "true":
+        if e.get("x-usher-user-authored") != "True":
+            return None, (f"{name}.desktop is NoDisplay=true: the registry "
                           f"says it is not a user-facing app")
     if (e.get("terminal") or "false").lower() == "true":
         return None, f"{name}.desktop needs a terminal (Terminal=true)"
@@ -3820,6 +3843,13 @@ def _t_desktop(ck):
         "nm-applet": {"exec": "/bin/sh", "nodisplay": "true"},
         "portal": {"exec": "/bin/sh", "nodisplay": "TRUE"},
         "oldhidden": {"exec": "/bin/sh", "hidden": "true"},
+        # the user's OWN entry, authored to let usher relaunch a CLI app
+        # without putting it in the app menu
+        "mine": {"exec": "/bin/sh", "nodisplay": "true",
+                 "x-usher-user-authored": "True"},
+        # ...but Hidden is a TOMBSTONE and outranks authorship
+        "minedeleted": {"exec": "/bin/sh", "hidden": "true",
+                        "x-usher-user-authored": "True"},
         "alink": {"exec": "/bin/sh", "type": "Link"},
         "needsterm": {"exec": "/bin/sh", "terminal": "true"},
         "gone": {"exec": "/no/such/binary/anywhere"},
@@ -3849,6 +3879,23 @@ def _t_desktop(ck):
     # NoDisplay must be read case-insensitively: the spec says the value is a
     # boolean, and a real entry writing TRUE must not slip through.
     ck("desktop-nodisplay-is-case-insensitive", go("portal")[0] is None)
+
+    # AUTHORSHIP DECIDES HOW NoDisplay READS, and the asymmetry is the point.
+    # The spec says NoDisplay means "do not show in menus", not "do not
+    # launch", so reading it as a launch filter is a REPURPOSING. It is a good
+    # one for somebody else's entry (there, hidden correlates with
+    # not-an-app) and wrong for the user's own, where the obvious reason to
+    # author a NoDisplay entry is to let usher relaunch a CLI-launched app
+    # without cluttering the menu. Refusing that second-guesses the only
+    # person who knows.
+    ck("desktop-user-nodisplay-is-allowed", go("mine")[0] == ["/bin/sh"])
+    ck("desktop-system-nodisplay-is-refused", go("nm-applet")[0] is None)
+    # HIDDEN OUTRANKS AUTHORSHIP, because the spec calls it a deletion: the
+    # user removed the entry at their level, so a launcher must act as though
+    # it is not there. Treating it like NoDisplay would resurrect it.
+    ck("desktop-hidden-beats-authorship", go("minedeleted")[0] is None)
+    ck("desktop-hidden-says-deleted",
+       "deleted" in (go("minedeleted")[1] or ""))
 
     # THE OFF SWITCH must actually stop it, and must not need a restart to
     # read: it is checked per call, like the exclude rules.
