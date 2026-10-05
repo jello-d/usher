@@ -27,8 +27,31 @@
 # the daemon down. Watch ~/.local/state/usher/watch.log for the
 # "plugins reloaded" line.
 #
+# BEFORE YOU WRITE ONE, CHECK YOU NEED ONE. Two cheaper tiers come first and
+# a plugin is only worth it when both fall short:
+#
+#   nothing           the window comes back WHERE AND HOW BIG it was already.
+#                     Any window with a title is captured, keyed and placed,
+#                     and a single-window app is keyed by its app-id ALONE, so
+#                     the slot does not follow the document.
+#   a desktop entry   also gets the app STARTED for you at login, out of the
+#                     freedesktop registry. One file in
+#                     ~/.local/share/applications, no Python, and it benefits
+#                     your launcher and menus too. See the README.
+#
+# A PLUGIN IS FOR WHEN IDENTITY IS THE PROBLEM, not launching. Any one of:
+# several windows of one app that must be told apart (without a plugin they
+# fall back to per-TITLE keys, so the slot follows the document); an identity
+# that is not in the title at all; a relaunch command that differs per WINDOW
+# rather than per app; an identity that is not ready the moment the window
+# maps (only a plugin can say ("pending", why)); or an app that needs letting
+# go cleanly at shutdown.
+#
 # This example gives Spotify a stable identity, because its title drifts per
-# track and without this it would never match its saved slot.
+# track and without this it would never match its saved slot. Note that is the
+# FIRST reason above: one Spotify window needs no plugin at all, since a
+# single-window app is already app-id keyed. It earns its keep the moment you
+# open a second one.
 
 
 class SpotifyPlugin:

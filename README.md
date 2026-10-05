@@ -30,6 +30,82 @@ anything of it.
   kept, so `usher restore --from yesterday` (or `latest`, or a date) puts
   the desk back the way it was; `--from list` shows what is available.
 
+## What usher needs from an app
+
+Nothing, for the part most people want. Three tiers, and each is only worth
+reaching for when the one below it falls short.
+
+- **The window back where and how big it was** needs **nothing**. Any window
+  with a title is captured, keyed and placed.
+- **The app started for you** at login needs a **desktop entry**, because the
+  only command usher ever runs is an `Exec=` out of a desktop file it read.
+- **Windows told apart from each other**, a per-window relaunch, or a clean
+  shutdown needs a **plugin**. Nothing else can answer *which* window this is.
+
+### Tier 1: nothing
+
+Open the app yourself and it lands where you left it, at the size you left it.
+This needs no configuration and no entry: a single-window app is keyed by its
+**app-id alone**, so the slot does not move when the document does.
+
+What you give up is only the starting. If the app is already running when you
+log in, there is nothing to give up at all.
+
+### Tier 2: a desktop entry
+
+Write one when you want the app started for you and the registry cannot
+already answer. That is the case when the app ships no entry, when its entry
+is `Terminal=true` (Debian's `vim.desktop` is `Exec=vim %F, Terminal=true`, so
+it describes terminal vim and usher correctly refuses it for a gvim window), or
+when its app-id differs from the entry's filename.
+
+```ini
+# ~/.local/share/applications/gvim.desktop
+[Desktop Entry]
+Type=Application
+Name=GVim
+Exec=gvim
+StartupWMClass=gvim
+NoDisplay=true
+```
+
+`StartupWMClass` is the load-bearing line: the join is on the window's app-id,
+so it has to name that when the filename does not. Check with
+`usher doctor`, which prints the command it would run for every saved window.
+
+`NoDisplay=true` keeps the entry out of your application menu and usher still
+honours it. The spec says NoDisplay means "do not show this in menus" and says
+nothing about launching, so usher reads it as a refusal only for an entry you
+did **not** author. `Hidden=true` is a deletion in the spec's own words, so
+that is honoured everywhere, including your own entries.
+
+### Tier 3: a plugin
+
+Reach for one when identity is the problem, not launching. Any single answer
+of yes means the tiers above cannot serve you:
+
+- **Several windows of one app must be told apart.** Without a plugin, two or
+  more windows of the same app fall back to per-**title** keys, so the slot
+  follows the document rather than the window. One window is fine; several is
+  what needs a plugin. This is the whole reason the chrome plugin exists.
+- **The identity is not in the title.** chrome reads a SessionID out of the
+  browser's session file; kitty reads the shell's cwd out of `/proc`; mux reads
+  the command the window is running. A title that has to be right at the
+  instant you look is a bootstrap, not an identity.
+- **The relaunch differs per window.** The registry describes an *app*, so the
+  default starts one invocation per app. A terminal holding a specific remote
+  session needs its own command, which is what `relaunch_command` is for.
+- **Identity is not ready the moment the window maps.** A plugin can answer
+  `("pending", why)` and usher will neither place nor remember the window
+  until it is sure. Nothing else can express that, and guessing corrupts the
+  slot it was about to aim at.
+- **The app needs letting go cleanly.** `wind_down` is how chrome gets
+  `SessionEnded` instead of `Crashed` on reboot.
+
+If none of those is true, a desktop entry is the simpler and more portable
+answer: it needs no Python, benefits your launcher and menus too, and cannot
+break when usher's internals move.
+
 ## Plugins
 
 How to identify and respawn a given app's windows lives in a **plugin**. Three

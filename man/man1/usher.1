@@ -60,6 +60,67 @@ back: `loginctl lock-session` exits 0 whether or not anything is listening, so
 its status proves nothing. Non-zero if the session did not actually lock.
 usher does not lock anything itself; it asks logind, and whatever the session
 registered as its locker does the work.
+.SS What usher needs from an app
+Nothing, for the part most people want. Three tiers, and each is only worth
+reaching for when the one below falls short.
+.TP
+.B nothing
+gets the window back WHERE AND HOW BIG it was. Any window with a title is
+captured, keyed and placed, and a single-window app is keyed by its app-id
+ALONE, so the slot does not move when the document does. What you give up is
+only the starting.
+.TP
+.B a desktop entry
+gets the app STARTED FOR YOU at login. Write one when the app ships none, when
+its entry is
+.I Terminal=true
+(Debian's
+.I vim.desktop
+is
+.IR "Exec=vim %F, Terminal=true" ,
+so it describes terminal vim and usher correctly refuses it for a gvim
+window), or when its app-id differs from the entry's filename.
+.I StartupWMClass
+is then the load-bearing line, since the join is on the app-id.
+.TP
+.B a plugin
+is for when IDENTITY is the problem rather than launching. Any one of these
+means the tiers above cannot serve you:
+.RS
+.IP \(bu 2
+SEVERAL WINDOWS of one app must be told apart. Without a plugin, two or more
+windows of the same app fall back to per-TITLE keys, so the slot follows the
+document rather than the window. One window is fine; several is what needs a
+plugin, and it is the whole reason the chrome plugin exists.
+.IP \(bu 2
+THE IDENTITY IS NOT IN THE TITLE. chrome reads a SessionID from the browser's
+session file, kitty the shell's cwd from
+.IR /proc ,
+mux the command the window runs. A title that has to be right at the instant
+you look is a bootstrap, not an identity.
+.IP \(bu 2
+THE RELAUNCH DIFFERS PER WINDOW. A desktop entry describes an APP, so the
+default starts one invocation per app; a terminal holding a specific remote
+session needs its own command.
+.IP \(bu 2
+IDENTITY IS NOT READY WHEN THE WINDOW MAPS. A plugin can answer
+.RI ( "pending" ", " why )
+and usher will neither place nor remember the window until it is sure. Nothing
+else can express that, and guessing corrupts the slot it was about to aim at.
+.IP \(bu 2
+THE APP NEEDS LETTING GO CLEANLY.
+.I wind_down
+is how chrome gets
+.I SessionEnded
+instead of
+.I Crashed
+on a reboot.
+.RE
+.PP
+If none of those is true, a desktop entry is the simpler and more portable
+answer: no Python, it benefits your launcher and menus too, and it cannot
+break when usher's internals move.
+
 .SS The default relaunch
 A window whose app no plugin claims is still relaunched at session start, from
 the freedesktop registry: the app-id is joined to a
