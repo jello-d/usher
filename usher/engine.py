@@ -2655,6 +2655,17 @@ def session_locked_hint(sid):
     return v if v in ("yes", "no") else None
 
 
+def _seated_now():
+    """(session id, leader) for this user's seated session, or None. One
+    place, because lock_now, lock_capability and the summoned-lock marker all
+    ask the same question and a second spelling is how they come to differ."""
+    import getpass
+    rc, out = _loginctl("list-sessions", "--no-legend")
+    if rc is None:
+        return None
+    return seated_session(getpass.getuser(), out)
+
+
 def lock_capability():
     """(ok, plan, detail): can this box lock its seated session right now?
 
@@ -2752,8 +2763,29 @@ def lock_summoned_session():
     by construction, exactly like the arm and profile markers."""
     if os.environ.get("USHER_SUMMONED") != "1":
         return None
+    # ONCE PER SESSION, NOT PER BOOT, and the difference is not academic on
+    # this fleet: the login user LINGERS (so the ssh agent survives the last
+    # logout), which means XDG_RUNTIME_DIR SURVIVES A LOGOUT TOO. A marker
+    # that only asked "does the file exist" therefore suppressed the lock on
+    # every summoned login after the first, with no reboot in between:
+    #
+    #   boot -> cleanly login     locks, writes the marker
+    #   logout                    runtime dir survives, marker survives
+    #   cleanly login again       marker present -> NEVER LOCKS
+    #
+    # which is the exact shape of a test campaign, and leaves a console open
+    # for somebody who is not in front of it. So the marker CARRIES the
+    # session id and a different one means not-yet-locked. Still per boot by
+    # construction for the reload case, since a reload keeps the same session.
     marker = os.path.join(runtime_dir(), LOCKED_MARKER)
-    if os.path.exists(marker):
+    seated = _seated_now()
+    sid = seated[0] if seated else ""
+    try:
+        with open(marker) as f:
+            done_for = f.read().strip().split("\n")[-1]
+    except OSError:
+        done_for = None
+    if done_for is not None and done_for == f"session={sid}":
         return None
     locked, plan, detail = lock_now()
     # THE FAILURE IS LOUD AND THE SUCCESS IS NOT SILENT EITHER. An unlocked
@@ -2767,7 +2799,7 @@ def lock_summoned_session():
                 f"{detail}")
     try:
         with open(marker, "w") as f:
-            f.write(plan)
+            f.write(f"{plan}\nsession={sid}")
     except OSError:
         pass
     return locked
@@ -3730,6 +3762,7 @@ def _t_lock(ck):
     made that obvious, and the `None` hint row is the one that matters.
     """
     _S = ("13", "999")        # a resolved (session id, leader)
+    lock_now_real = lock_now
     rows = [
         # loginctl, seated, hint,   forced, expected plan
         (False, _S,   "no",  False, "no-loginctl"),
@@ -3815,6 +3848,55 @@ def _t_lock(ck):
     finally:
         globals()["_loginctl"] = _real_lc
         globals()["session_locked_hint"] = _real_hint
+
+    # THE SUMMONED-LOCK MARKER, which must be per SESSION and not per boot.
+    # On this fleet the login user LINGERS, so XDG_RUNTIME_DIR survives a
+    # logout and a boot-scoped marker suppressed the lock on every summoned
+    # login after the first. That leaves a console open for somebody who is
+    # not in front of it, and it is the exact shape of a test campaign.
+    _rl, _rs, _rln = _loginctl, _seated_now, logline
+    _rt = os.environ.get("USHER_SUMMONED")
+    import tempfile as _tf
+    _d = _tf.mkdtemp(prefix="usher-mark-")
+    _rrd = globals()["runtime_dir"]
+    try:
+        os.environ["USHER_SUMMONED"] = "1"
+        globals()["runtime_dir"] = lambda: _d
+        globals()["logline"] = lambda *a, **k: None
+        calls = []
+
+        def _lock_stub():
+            calls.append(1)
+            return True, "locked", "ok"
+
+        globals()["lock_now"] = _lock_stub
+        globals()["_seated_now"] = lambda: ("13", "999")
+        ck("marker-locks-the-first-time",
+           lock_summoned_session() is True and len(calls) == 1)
+        ck("marker-does-not-relock-the-same-session",
+           lock_summoned_session() is None and len(calls) == 1)
+        # A NEW LOGIN IS A NEW SESSION ID, and the surviving marker must not
+        # suppress it. This is the bug: with a boot-scoped marker this stayed
+        # at 1 and the second console was left unlocked.
+        globals()["_seated_now"] = lambda: ("14", "1000")
+        ck("marker-relocks-a-NEW-session",
+           lock_summoned_session() is True and len(calls) == 2)
+        # not summoned -> never, whatever the marker says
+        os.environ.pop("USHER_SUMMONED", None)
+        ck("marker-ignores-an-unsummoned-session",
+           lock_summoned_session() is None and len(calls) == 2)
+    finally:
+        globals()["_loginctl"] = _rl
+        globals()["_seated_now"] = _rs
+        globals()["logline"] = _rln
+        globals()["runtime_dir"] = _rrd
+        globals()["lock_now"] = lock_now_real
+        if _rt is None:
+            os.environ.pop("USHER_SUMMONED", None)
+        else:
+            os.environ["USHER_SUMMONED"] = _rt
+        import shutil as _sh
+        _sh.rmtree(_d, ignore_errors=True)
 
     # THE TWO INVARIANTS WORTH NAMING SEPARATELY, because a future edit that
     # breaks either is the one that costs the console rather than a lock.
