@@ -60,6 +60,33 @@ back: `loginctl lock-session` exits 0 whether or not anything is listening, so
 its status proves nothing. Non-zero if the session did not actually lock.
 usher does not lock anything itself; it asks logind, and whatever the session
 registered as its locker does the work.
+.SS The default relaunch
+A window whose app no plugin claims is still relaunched at session start, from
+the freedesktop registry: the app-id is joined to a
+.I .desktop
+entry by filename and then by
+.IR StartupWMClass ,
+its
+.I Exec=
+is taken, and the field codes are stripped so the app opens with no document.
+.B The only command usher ever runs is an Exec= out of a desktop file it read,
+never a stored string and never a
+.I /proc
+cmdline, which cannot be replayed safely: a browser rewrites its own argv, a
+terminal's cmdline carries flags usher itself injected, and a one-off file
+argument would reopen a file that is gone.
+.PP
+It refuses rather than guesses when several entries match, when none does, and
+when the registry marks the entry
+.IR NoDisplay ", " Hidden ", " Terminal=true
+or not an
+.IR Application ,
+which is what stops a tray applet or a D-Bus portal service being started as
+though it were an app. A plugin claiming the app overrides it, and
+.I USHER_NO_DEFAULT_RELAUNCH=1
+disables it. See
+.B doctor
+for the command it would run per saved window.
 .TP
 .B predict " [--out FILE]"
 Record what the NEXT restore should produce: every live window with the

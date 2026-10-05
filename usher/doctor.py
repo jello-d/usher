@@ -37,6 +37,7 @@ from .engine import (KB_SCHEMA, LOCAL_HOST, PLUGIN_HOOKS, STATE, TERM_KEY_RE,
                      load_knowledge, load_snapshot, match, mux_candidates,
                      mux_host_of, mux_session_of, mux_session_set, plugins,
                      Resolution, lock_capability, profile_id, pview, resolution,
+                     desktop_entries, desktop_launch_for,
                      saved_key,
                      schema_path)
 
@@ -160,6 +161,9 @@ def _doctor_relaunch(out, snap, live):
     # Terminals are reported per COMMAND, because that is how they are
     # relaunched: counted, not matched per session. Reporting them per session
     # would describe a mechanism usher no longer uses.
+    # Read the registry ONCE: 189 entries here, and re-parsing it per saved
+    # window turns a report into a measurable pause.
+    _dentries = desktop_entries()
     todo = Counter(c for c, _ in mux_candidates(saved, live))
     for c, n in todo.items():
         out(f"  RELAUNCH   {n} terminal(s)  {c}")
@@ -184,7 +188,22 @@ def _doctor_relaunch(out, snap, live):
             else:
                 out(f"  RELAUNCH   {key[:44]}  (kitty --directory {cwd})")
             continue
-        out(f"  none       {app:14} {key[:44]}  (no plugin respawns this)")
+        # THE DEFAULT RELAUNCH's VERDICT, which this line used to deny
+        # outright: "no plugin respawns this" was true until the freedesktop
+        # registry became the fallback, and a report that says a window is
+        # lost when it is not is the kind of stale sentence doctor exists to
+        # avoid. Showing the resolved COMMAND matters more than the verdict:
+        # it is the only way to see, before trusting a reboot, that usher
+        # would run `calibre` and not something surprising.
+        if app in {app_of(v) for v in live}:
+            out(f"  live       {app:14} {key[:44]}")
+        else:
+            _argv, _why = desktop_launch_for(app, _dentries)
+            if _argv:
+                out(f"  RELAUNCH   {app:14} {key[:36]:36}"
+                    f"  ({' '.join(_argv)[:28]})")
+            else:
+                out(f"  none       {app:14} {key[:36]:36}  ({_why[:30]})")
     # Two kitty windows in one directory share a key, so only ONE slot is
     # remembered and the other silently loses its place. Keying on the running
     # program instead would be worse (the key would change every time a

@@ -66,6 +66,21 @@ implement `resolve` / `relaunch_command` /
 stable for exactly one window's lifetime and `None` for a window replayed from
 the store, so it is what to cache a hard-won identity against.
 
+**Any app comes back, plugin or not.** A window whose app no plugin claims is
+still relaunched at session start, from the freedesktop registry: usher joins
+the app-id to a `.desktop` entry (by filename, then `StartupWMClass`), takes
+its `Exec=`, and strips the field codes so the app opens with no document.
+That is the same invariant the session-start seam holds, and it is why this is
+safe: **the only command usher ever runs is an `Exec=` out of a desktop file
+it read**, never a string it stored or a `/proc` cmdline it sniffed. It
+refuses rather than guesses when several entries match, when none does, and
+when the registry marks the entry `NoDisplay`, `Hidden`, `Terminal=true` or
+not an `Application`, which is what keeps tray applets and D-Bus portal
+services from being started as if they were apps. A plugin that claims the app
+overrides it; `USHER_NO_DEFAULT_RELAUNCH=1` turns it off entirely.
+`usher doctor` prints the command it would run for each saved window, so you
+can see the set before a reboot trusts it.
+
 `resolve` answers one question in three ways, and the third is the point:
 `("ready", key)` when the window is definitively that key, `("pending", why)`
 when it will be knowable shortly, `("never", why)` when it never will. usher

@@ -2018,6 +2018,178 @@ def kitty_relaunch_missing(saved, live):
     return n
 
 
+# --- the DEFAULT relaunch: any app, from the freedesktop registry ---------
+# THE GOAL IS EVERYTHING YOU LEFT OPEN COMING BACK, and until now an app no
+# plugin claimed came back only if you reopened it yourself. calibre was the
+# case that prompted this: usher remembers its slot perfectly and had no way
+# to start it.
+#
+# THE ONLY COMMAND usher EVER RUNS IS AN `Exec=` OUT OF A DESKTOP FILE IT
+# READ. That invariant comes from the session-start seam and it is what makes
+# a generic relaunch safe rather than reckless. The obvious alternative,
+# replaying /proc/<pid>/cmdline, was measured and is worse in four ways:
+#
+#   chrome REWRITES its own argv into one space-joined string
+#   kitty's cmdline carries the -o initial_window_* flags USHER injected
+#   all six chrome windows report ONE pid, so it is a per-APP fact anyway
+#   a one-off `loupe /tmp/x.png` would reopen a file that is gone
+#
+# A desktop entry has none of those problems, and its field codes (%U, %f) are
+# a FEATURE: stripping them is exactly the no-document launch we want.
+#
+# IT IS NOT A PLUGIN IN THE REGISTRY, and that distinction is load-bearing.
+# `owns()` gates identity as well as relaunch, and `is_unique()` reads
+# `is_owned()` to decide whether an app may key by app_id ALONE. A catch-all
+# plugin would therefore make is_owned true everywhere, flip every unowned app
+# off its app_id-only key, and silently invalidate those slots: Signal is
+# stored as `signal\0` today and would become title-keyed. So this is
+# plugin-SHAPED (same hooks, same contract) and consulted only for windows no
+# plugin claimed. A specific plugin overrides it by claiming the app, which is
+# what the registry already does.
+DESKTOP_DIRS = ("/usr/local/share/applications", "/usr/share/applications",
+                "~/.local/share/applications",
+                "/var/lib/flatpak/exports/share/applications",
+                "/var/lib/snapd/desktop/applications")
+
+# The field codes a launcher is required to substitute or drop. We launch with
+# NO document, so every one of them is dropped, which is the whole reason this
+# cannot reopen a file that has since been deleted.
+_FIELD_CODES = ("%f", "%F", "%u", "%U", "%d", "%D", "%n", "%N", "%i", "%c",
+                "%k", "%v", "%m")
+
+
+def desktop_entries(dirs=None):
+    """{entry name: parsed [Desktop Entry] dict} over the registry.
+
+    MAIN GROUP ONLY. An action group ([Desktop Action new-window]) carries its
+    own Name and Exec, and folding those in picks up a command the user did not
+    ask for. The greeter work met the same trap and its check for it passed
+    for the wrong reason until the fixture carried a key the main group
+    lacked."""
+    import configparser
+    out = {}
+    for d in (dirs if dirs is not None else DESKTOP_DIRS):
+        for path in sorted(glob.glob(os.path.join(os.path.expanduser(d),
+                                                  "*.desktop"))):
+            cp = configparser.RawConfigParser(strict=False)
+            try:
+                cp.read(path, encoding="utf8")
+                if not cp.has_section("Desktop Entry"):
+                    continue
+                out[os.path.basename(path)[:-8]] = dict(cp["Desktop Entry"])
+            except Exception:
+                continue        # a malformed entry is skipped, never fatal
+    return out
+
+
+def strip_field_codes(ex):
+    """An Exec= line as an argv, with the field codes dropped.
+
+    Minimal splitting on purpose: a desktop Exec may quote arguments, and
+    shlex handles that, but it must NOT be handed to a shell. We exec a list."""
+    try:
+        argv = shlex.split(ex)
+    except ValueError:
+        return []
+    return [a for a in argv if a not in _FIELD_CODES]
+
+
+def desktop_launch_for(app, entries):
+    """(argv, why-not) for an app-id: the command that starts it, or why not.
+
+    EVERY REFUSAL IS A CASE MEASURED ON A REAL STORE, not a hypothetical:
+
+      several entries match   never guess, the rule everywhere else here
+      no entry                gamescope, gnome-disks, lxqt-policykit-agent
+      NoDisplay / Hidden      nm-applet (a tray applet already in autostart)
+                              and xdg-desktop-portal-gtk, whose "window" is a
+                              transient file dialog a portal opens on demand.
+                              THIS FILTER IS THE POLICY: the registry already
+                              knows which entries are user-facing, and
+                              honouring its own visibility rules is what the
+                              greeter resolution does for the same reason.
+      Type != Application     a Link or Directory entry is not a program
+      Terminal=true           needs a terminal arranged around it, which is a
+                              different launch than this one
+      argv0 unresolvable      a stale entry pointing at something uninstalled
+    """
+    low = (app or "").lower()
+    if not low:
+        return None, "the window has no app-id"
+    hits = [(n, e) for n, e in entries.items() if n.lower() == low]
+    if not hits:
+        # StartupWMClass is the sanctioned reverse join and it is not
+        # cosmetic: Signal's app-id is `signal` and its entry is
+        # `signal-desktop`, so without this the clearest case fails.
+        hits = [(n, e) for n, e in entries.items()
+                if (e.get("startupwmclass") or "").lower() == low]
+    if not hits:
+        return None, "no desktop entry names this app"
+    if len(hits) > 1:
+        return None, (f"{len(hits)} desktop entries match "
+                      f"({', '.join(sorted(n for n, _ in hits))})")
+    name, e = hits[0]
+    if e.get("type", "Application") != "Application":
+        return None, f"{name}.desktop is Type={e.get('type')}, not Application"
+    # configparser lower-cases keys, so the SPELLING is carried separately:
+    # printing "Nodisplay" in a message about a spec'd key reads as a typo.
+    for flag, shown in (("nodisplay", "NoDisplay"), ("hidden", "Hidden")):
+        if (e.get(flag) or "false").lower() == "true":
+            return None, (f"{name}.desktop is {shown}=true: the registry "
+                          f"says it is not a user-facing app")
+    if (e.get("terminal") or "false").lower() == "true":
+        return None, f"{name}.desktop needs a terminal (Terminal=true)"
+    argv = strip_field_codes(e.get("exec") or "")
+    if not argv:
+        return None, f"{name}.desktop has no usable Exec"
+    if not (shutil.which(argv[0]) or os.path.exists(argv[0])):
+        return None, f"{name}.desktop Exec names {argv[0]}, which is not here"
+    return argv, None
+
+
+def desktop_relaunch_missing(saved, live, spawn=None):
+    """Start any saved app that no plugin claims and that is not running.
+
+    PER APP, NOT PER WINDOW, which falls out of the measurement rather than
+    being a simplification: all six chrome windows report one pid, and a
+    desktop entry describes an APP. One invocation per missing app, and the
+    app brings back whatever windows it brings back."""
+    # AN OFF SWITCH, because this STARTS PROGRAMS at session login, which is a
+    # bigger behaviour change than anything else usher does by default. Per-app
+    # opt-out already exists two ways (a plugin that claims the app overrides
+    # it, and usher/exclude drops the window end to end); this is the blunt
+    # one, for a box where the whole idea is unwanted.
+    if os.environ.get("USHER_NO_DEFAULT_RELAUNCH") == "1":
+        return 0
+    want = {}
+    for w in saved:
+        app = w.get("app_id") or ""
+        if not app or is_owned(app) or is_transient(w):
+            continue
+        want.setdefault(app, w)
+    if not want:
+        return 0
+    have = {app_of(v) for v in live}
+    entries = desktop_entries()
+    n = 0
+    for app, w in sorted(want.items()):
+        if app in have:
+            continue            # already running; its windows are its own
+        argv, why = desktop_launch_for(app, entries)
+        if argv is None:
+            logline(f"no relaunch for {app}: {why}")
+            continue
+        _announce(f"launch  {' '.join(argv)}")
+        if spawn is None:
+            subprocess.Popen(argv, start_new_session=True,
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        else:
+            spawn(argv)
+        n += 1
+    return n
+
+
 def launch_missing(snap=None):
     """Ask every plugin to respawn any of its saved-but-absent windows. Takes
     the last snapshot + the live views ONCE and hands both to each plugin's
@@ -2042,6 +2214,13 @@ def launch_missing(snap=None):
             n += p.relaunch_missing(saved, live)
         except Exception as e:
             logline(f"relaunch ({getattr(p, 'name', '?')}) error: {e}")
+    # THEN THE DEFAULT, for everything no plugin claimed. Last, so a specific
+    # plugin always wins: it has already handled its own app by here, and
+    # desktop_relaunch_missing skips every is_owned app anyway.
+    try:
+        n += desktop_relaunch_missing(saved, live)
+    except Exception as e:
+        logline(f"relaunch (desktop default) error: {e}")
     return n
 
 
@@ -3627,6 +3806,111 @@ def _t_lock(ck):
                                if p in ("lock", "already")})
 
 
+def _t_desktop(ck):
+    """The DEFAULT relaunch: any app, from the freedesktop registry.
+
+    Every refusal below is a case measured on a real store rather than an
+    invented one, which is why they are worth pinning individually: the two
+    NoDisplay rows are a tray applet already in autostart and a portal whose
+    window is a transient dialog, and relaunching either at session start is
+    the failure this filter exists to prevent."""
+    E = {
+        "calibre-gui": {"exec": "calibre %U", "type": "Application"},
+        "signal-desktop": {"exec": "/bin/sh %U", "startupwmclass": "signal"},
+        "nm-applet": {"exec": "/bin/sh", "nodisplay": "true"},
+        "portal": {"exec": "/bin/sh", "nodisplay": "TRUE"},
+        "oldhidden": {"exec": "/bin/sh", "hidden": "true"},
+        "alink": {"exec": "/bin/sh", "type": "Link"},
+        "needsterm": {"exec": "/bin/sh", "terminal": "true"},
+        "gone": {"exec": "/no/such/binary/anywhere"},
+        "noexec": {"type": "Application"},
+        "dup-a": {"exec": "/bin/sh", "startupwmclass": "twice"},
+        "dup-b": {"exec": "/bin/sh", "startupwmclass": "twice"},
+    }
+
+    def go(app):
+        return desktop_launch_for(app, E)
+
+    ck("desktop-strips-field-codes", go("calibre-gui")[0] == ["calibre"])
+    # the reverse join, and it is not cosmetic: Signal's app-id is `signal`
+    # while its entry is `signal-desktop`, so the clearest real case needs it
+    ck("desktop-joins-on-startupwmclass", go("signal")[0] == ["/bin/sh"])
+    ck("desktop-is-case-insensitive", go("CALIBRE-GUI")[0] == ["calibre"])
+    for app, want in (("nm-applet", "NoDisplay"), ("portal", "NoDisplay"),
+                      ("oldhidden", "Hidden"), ("alink", "Type=Link"),
+                      ("needsterm", "Terminal=true"),
+                      ("gone", "not here"), ("noexec", "no usable Exec"),
+                      ("twice", "2 desktop entries"),
+                      ("nosuchapp", "no desktop entry"),
+                      ("", "no app-id")):
+        argv, why = go(app)
+        ck(f"desktop-refuses-{app or 'empty'}", argv is None)
+        ck(f"desktop-says-why-{app or 'empty'}", want in (why or ""))
+    # NoDisplay must be read case-insensitively: the spec says the value is a
+    # boolean, and a real entry writing TRUE must not slip through.
+    ck("desktop-nodisplay-is-case-insensitive", go("portal")[0] is None)
+
+    # THE OFF SWITCH must actually stop it, and must not need a restart to
+    # read: it is checked per call, like the exclude rules.
+    _env = os.environ.get("USHER_NO_DEFAULT_RELAUNCH")
+    try:
+        os.environ["USHER_NO_DEFAULT_RELAUNCH"] = "1"
+        _got = []
+        ck("desktop-off-switch-stops-it",
+           desktop_relaunch_missing(
+               [{"id": 1, "app_id": "calibre-gui", "title": "t", "pid": -1}],
+               [], spawn=_got.append) == 0 and _got == [])
+    finally:
+        if _env is None:
+            os.environ.pop("USHER_NO_DEFAULT_RELAUNCH", None)
+        else:
+            os.environ["USHER_NO_DEFAULT_RELAUNCH"] = _env
+
+    # --- the pass itself, with the spawn stubbed --------------------------
+    def W(app, title="t"):
+        return {"id": 1, "app_id": app, "title": title, "pid": -1,
+                "output": "DP-1", "workspace": [1.0, 1.0],
+                "pos": [0.0, 0.0], "size": [10.0, 10.0]}
+
+    _re, _rl, _ra = desktop_entries, logline, _announce
+    try:
+        globals()["desktop_entries"] = lambda *a, **k: E
+        globals()["logline"] = lambda *a, **k: None
+        globals()["_announce"] = lambda *a, **k: None
+        got = []
+        n = desktop_relaunch_missing([W("calibre-gui")], [],
+                                     spawn=got.append)
+        ck("desktop-pass-launches-a-missing-app",
+           n == 1 and got == [["calibre"]])
+        # ALREADY RUNNING: its windows are its own business
+        got = []
+        n = desktop_relaunch_missing([W("calibre-gui")],
+                                     [_trv("calibre-gui", "t")],
+                                     spawn=got.append)
+        ck("desktop-pass-skips-a-live-app", n == 0 and got == [])
+        # AN OWNED APP IS NEVER TOUCHED HERE, which is what makes a specific
+        # plugin an override rather than a competitor.
+        got = []
+        n = desktop_relaunch_missing([W("kitty")], [], spawn=got.append)
+        ck("desktop-pass-skips-an-owned-app", n == 0 and got == [])
+        # ONE INVOCATION PER APP, not per window: all six chrome windows
+        # report one pid and a desktop entry describes an APP.
+        got = []
+        n = desktop_relaunch_missing([W("calibre-gui", "a"),
+                                      W("calibre-gui", "b")], [],
+                                     spawn=got.append)
+        ck("desktop-pass-is-per-app-not-per-window",
+           n == 1 and got == [["calibre"]])
+        # a refusal is silent-but-logged, never a crash, and never a spawn
+        got = []
+        n = desktop_relaunch_missing([W("nm-applet")], [], spawn=got.append)
+        ck("desktop-pass-honours-a-refusal", n == 0 and got == [])
+    finally:
+        globals()["desktop_entries"] = _re
+        globals()["logline"] = _rl
+        globals()["_announce"] = _ra
+
+
 def _t_lifecycle(ck):
     """A WINDOW'S LIFE, TICK BY TICK, driven through the real decision code.
 
@@ -4918,7 +5202,7 @@ def selftest():
     # planting the Resolution guard removal), so it is fixed here rather than
     # in each caller.
     for area in (_t_registry, _t_resolution, _t_lock,
-                 _t_lifecycle,
+                 _t_lifecycle, _t_desktop,
                  _t_terminals, _t_cli_split,
                  _t_launch_source,
                  _t_relaunch, _t_chrome, _t_learn,
