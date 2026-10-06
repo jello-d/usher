@@ -88,6 +88,17 @@ PLACE_SETTLE_FAST = 0.15  # everything else: the title is already stable at map
 PLACE_VERIFY = (0.6, 1.5, 3.0)
 
 
+# THE WORKER RESPAWN BOUNDS. Named because they govern how the daemon
+# recovers from a crash, which is a thing a reader needs to reason about and
+# nobody gets to choose: a worker dying in a loop is the case these decide,
+# and the cap is what keeps a persistently broken one from spinning.
+RESPAWN_BACKOFF_MIN = 2    # first retry, and what a healthy run resets to
+RESPAWN_BACKOFF_MAX = 30   # so a worker that cannot start is retried twice a
+#                            minute rather than as fast as it can fail
+WORKER_HEALTHY_S = 60      # ran at least this long -> it was working, so the
+#                            next crash starts the backoff over
+
+
 def is_browser(app):
     # Chrome/Chromium/Firefox: restore-heavy, title-churning clients that can
     # drop a window if it is moved mid-restore. ONLY these wait PLACE_SETTLE;
@@ -186,7 +197,7 @@ class Supervisor:
     def _respawn_forever(self):
         """Respawn the worker forever, with backoff."""
         base = [sys.executable, self.script, "_worker"]
-        backoff = 2
+        backoff = RESPAWN_BACKOFF_MIN
         while True:
             # Relaunch missing mux terminals on the first worker that actually
             # REACHES launch_missing (which drops LAUNCHED), NOT merely the
@@ -204,7 +215,7 @@ class Supervisor:
             except OSError as e:
                 logline(f"spawn failed: {e}; retry in {backoff}s")
                 time.sleep(backoff)
-                backoff = min(backoff * 2, 30)
+                backoff = min(backoff * 2, RESPAWN_BACKOFF_MAX)
                 continue
             started = time.time()
             try:
@@ -214,12 +225,12 @@ class Supervisor:
                 rc = -1
             self.proc = None
             ran = int(time.time() - started)
-            if ran >= 60:
-                backoff = 2            # a healthy run resets the backoff
+            if ran >= WORKER_HEALTHY_S:
+                backoff = RESPAWN_BACKOFF_MIN
             logline(f"worker exited (rc {rc}, ran {ran}s); "
                     f"respawn in {backoff}s")
             time.sleep(backoff)
-            backoff = min(backoff * 2, 30)
+            backoff = min(backoff * 2, RESPAWN_BACKOFF_MAX)
 
 
 def do_watch(launch=True):
