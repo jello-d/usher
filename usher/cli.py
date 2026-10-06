@@ -558,7 +558,12 @@ def _dispatch(verb, args):
     elif verb == "doctor":        # what is it doing, and what is it NOT doing
         sys.exit(doctor.do_doctor())
     elif verb == "selftest":      # offline unit checks (no compositor needed)
-        sys.exit(engine.selftest())
+        # Imported HERE rather than at module scope: the suite pulls in every
+        # other module to check them, so importing it up top would make every
+        # `usher` invocation pay for 2,300 lines nobody called. Same reason
+        # the daemon verbs defer their own imports.
+        from . import selftest as _selftest
+        sys.exit(_selftest.selftest())
     elif verb in ("aggressive", "settle", "toggle"):
         _do_arm(verb)
     elif verb == "status":        # current placement mode + seconds to steady
