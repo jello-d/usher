@@ -394,4 +394,4 @@ def do_doctor():
         _doctor_relaunch(out, snap, live)
         _doctor_placement(out, kb, live, outs)
     print("\n".join(lines))
-    return rc or (0 if ok else 2)
+    return rc or (engine.EXIT_OK if ok else engine.EXIT_CANNOT)

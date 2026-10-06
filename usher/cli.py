@@ -89,7 +89,7 @@ def _usage(audience):
     if audience == "cli":
         print("\nThe daemon itself is usher-mgr, started by the session.",
               file=sys.stderr)
-    sys.exit(2)
+    sys.exit(engine.EXIT_CANNOT)   # nothing was assessed: no such verb
 
 
 def session_start(action):

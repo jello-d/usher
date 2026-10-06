@@ -60,6 +60,25 @@ except ImportError:
 SKIP_TITLE = re.compile(os.environ.get("USHER_SKIP_TITLE", r"^\[WORK"))
 
 
+# THE EXIT CONTRACT, declared in one place because it is a contract: scripts
+# and the power menu branch on it. The whole set, so a reader does not have to
+# infer it from literals scattered over three modules, and so the check that
+# polices it can DERIVE the allowed codes from here rather than carry a
+# second hand-written copy that goes stale.
+#
+# THE SPLIT THAT MATTERS is between 1 and 2, and it is not "error" versus
+# "worse error": 1 means usher DID what you asked and the answer is bad, 2
+# means it could not do it at all. `doctor` exiting 2 (it cannot see the
+# session) must not read like `doctor` exiting 1 (it saw a contract breach),
+# because the first says nothing about the system and the second says
+# something specific. `verify` with no prediction file and an unknown verb are
+# the same shape: nothing was assessed.
+EXIT_OK = 0        # did what you asked, and it was fine
+EXIT_FAIL = 1      # did what you asked; the answer is bad
+EXIT_CANNOT = 2    # could not do it at all: no such verb, no prediction,
+#                    no visible session. Nothing was assessed.
+
+
 # This box's short hostname, matching tmux's #{host_short} (and `hostname -s`).
 # It is what tells a LOCAL mux session from one reached over ssh: mux stamps the
 # tmux SERVER's host into the terminal title, so the tag naming another box is
@@ -2875,7 +2894,7 @@ def do_verify(against=None, tol=2):
         print(f"usher: no prediction at {path}", file=sys.stderr)
         print("usher: run `usher predict` BEFORE the thing you want to "
               "test", file=sys.stderr)
-        return 2
+        return EXIT_CANNOT
     doc = json.load(open(path))
     rows = doc["windows"]
     live = snapshot(ipc())["windows"]

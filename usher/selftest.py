@@ -34,6 +34,7 @@ those are constants and functions that are never rebound.
 """
 import ast
 import contextlib
+import inspect
 import io
 import json
 import os
@@ -2087,6 +2088,35 @@ def _t_migration_body(ck):
 
 def _t_contracts(ck):
     """the cross-tool contracts and the SNSS reader."""
+    # THE EXIT CONTRACT, with the allowed set DERIVED from the declaration
+    # rather than written out again here. A second hand-written list is how a
+    # code silently leaves the contract: it would have to be edited in two
+    # places and only ever is in one.
+    _declared = {engine.EXIT_OK: "EXIT_OK", engine.EXIT_FAIL: "EXIT_FAIL",
+                 engine.EXIT_CANNOT: "EXIT_CANNOT"}
+    ck("exit-codes-are-distinct", len(_declared) == 3)
+    ck("exit-codes-are-0-1-2", set(_declared) == {0, 1, 2})
+    # Every INTEGER literal handed to sys.exit anywhere in the package must be
+    # one of them. Read off the AST, so a `sys.exit(3)` fails here naming the
+    # set instead of reaching a caller that branches on 0/1/2.
+    _sites, _lits = 0, []
+    for _nm in ("engine", "cli", "doctor", "watch", "chrome"):
+        _m = sys.modules[f"usher.{_nm}"]
+        for _node in ast.walk(ast.parse(inspect.getsource(_m))):
+            if (isinstance(_node, ast.Call)
+                    and isinstance(_node.func, ast.Attribute)
+                    and _node.func.attr == "exit" and _node.args):
+                _sites += 1
+                _a = _node.args[0]
+                if isinstance(_a, ast.Constant) and isinstance(_a.value, int):
+                    _lits.append(_a.value)
+    # VACUITY GUARD ON THE SCRAPE ITSELF, not on what it found. Counting only
+    # the integer literals would make this pass by finding NONE, which is the
+    # "a check passes for the wrong reason" shape; and naming the codes is
+    # what removes those literals, so the guard has to count every exit SITE.
+    ck("exit-scrape-is-not-vacuous", _sites >= 15)
+    ck("every-literal-exit-is-declared",
+       all(v in _declared for v in _lits))
     # CONTRACT with mux: `mux resume --list` must stay BARE NAMES, one per line.
     # This is the guard the old `mux ls` scrape lacked, because a cosmetic
     # change over
