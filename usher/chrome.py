@@ -334,13 +334,11 @@ def window_slot(vid, title):
     THE TITLE IS A BOOTSTRAP, NOT AN IDENTITY. Of everything wayfire reports
     about a view, the only field that distinguishes two Chrome windows AND
     that Chrome also knows about is the title (app-id and pid are shared,
-    geometry is ours to change). So the first join has to go through it. But
-    re-deriving on every lookup made identity as volatile as the string: a
+    geometry is ours to change), so the first join has to go through it.
+    RESOLVING ON EVERY LOOKUP WOULD MAKE IDENTITY AS VOLATILE AS THE STRING: a
     Gmail window is `Inbox (1)` in the session file and `Inbox (2)` on screen
-    the moment mail arrives, so it became an unidentified stranger until
-    Chrome next wrote, then a known window again, flickering for its whole
-    life. Measured on manifold: one window unresolvable for twenty minutes,
-    then resolving instantly on the next probe.
+    the moment mail arrives, which makes it flicker between known and stranger
+    for its whole life.
 
     A Chrome window's SessionID is fixed for as long as the browser runs, and
     a wayfire view is one Chrome window for its whole life, so the answer
@@ -448,20 +446,18 @@ def is_browser_cmdline(raw):
     same name is a renderer, a gpu process or a zygote (55 of them against 1
     browser, measured), and signalling those achieves nothing useful.
 
-    THERE ARE TWO FRAMINGS AND ONLY ONE IS THE DOCUMENTED ONE.
-    /proc/<pid>/cmdline is meant to be NUL-SEPARATED, and for most processes it
-    is. CHROME REWRITES ITS OWN ARGV AREA into a single space-joined string:
-    measured 2026-09-29, 41 of 45 chrome processes on manifestor and 83 of 86
-    on manifold carry ONE element, the browser among them. Splitting on NUL
-    alone therefore produced a single "argv[0]" holding the entire command
-    line, whose basename is never a browser name, so this said False for
-    every process on the box, browser_pids() returned [], and `wind-down`
-    SIGNALLED NOTHING. That is the one thing wind-down exists to do.
+    THERE ARE TWO FRAMINGS AND ONLY ONE IS DOCUMENTED. /proc/<pid>/cmdline is
+    meant to be NUL-SEPARATED and for most processes it is, but CHROME
+    REWRITES ITS OWN ARGV AREA into a single space-joined string: the large
+    majority of its processes carry ONE element, the browser among them.
+    Splitting on NUL alone yields one "argv[0]" holding the whole command
+    line, whose basename is never a browser name, so this answers False for
+    every process on the box and wind-down signals nothing.
 
-    Treating NUL as whitespace reads both framings. Only two things are read
-    here (the first token, and whether any token is `--type=`) so an
-    argument that itself contains a space (`--profile-directory=Profile 2`)
-    splitting into two tokens cannot affect the answer."""
+    TREAT NUL AS WHITESPACE, which reads both framings. Only the first token
+    and the presence of a `--type=` token are read, so an argument that itself
+    contains a space (`--profile-directory=Profile 2`) splitting into two
+    cannot affect the answer."""
     argv = raw.replace(b"\0", b" ").split()
     if not argv:
         return False

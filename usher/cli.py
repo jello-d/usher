@@ -118,11 +118,11 @@ def session_start(action):
 def do_cleanly(args):
     """Enter and leave the session in good order.
 
-    ONE SEQUENCE, WHICH USED TO BE COPIED FOUR TIMES: capture while the session
-    is still true, stop watching so nothing overwrites that capture, let the
-    apps go, and only then hand over power. It lives here because every step of
-    it is already usher's, and because the callers that each had their own copy
-    (a power menu, a script) could then disagree about it, and did.
+    ONE SEQUENCE, AND IT MUST NOT BE COPIED: capture while the session is
+    still true, stop watching so nothing overwrites that capture, let the apps
+    go, and only then hand over power. Callers that keep their own copy drift
+    apart, which is how the most-used power menu came to have neither the
+    socket check nor the capture verification.
     """
     dry = "--dry-run" in args or "-n" in args
     force = "--force" in args or "-f" in args
@@ -208,8 +208,8 @@ def session_tops(procs, leader, uid):
     Usually exactly one. If the leader is already ours (a manager that keeps no
     root worker) that boundary is the leader itself, and this returns it.
 
-    NAMES NO COMPOSITOR, which is the point. `killall wayfire` reached for the
-    right mechanism and hardcoded the wrong thing about it.
+    IT NAMES NO COMPOSITOR, which is what makes it generic: "what the display
+    manager exec'd as the user" is what a session is.
     """
     def ours(pid):
         ent = procs.get(pid)
@@ -327,8 +327,7 @@ def _leave_plan(verb, reachable, session_present, force=False):
     """What `cleanly <verb>` should DO, as a pure function of four facts.
 
     PURE ON PURPOSE, so the whole matrix is checkable without a compositor, a
-    logind or a reboot. The cell that was wrong could not have been caught
-    while this was two `if`s around a `connect()`.
+    logind or a reboot.
 
         reachable  session  verb    force  ->
         yes        -        any     -        wind-down  capture, then go
@@ -338,19 +337,15 @@ def _leave_plan(verb, reachable, session_present, force=False):
         no         no       reboot   YES     forced
         no         no       logoff   -       nothing    nothing to end
 
-    IT REFUSES WHEN IT CANNOT SEE A SESSION, rather than proceeding, and that
-    is a deliberate reversal of this function's first version. The first cut
-    read "logind reports no seated session" as permission to skip the capture
-    and reboot. But THE COSTS ARE NOT SYMMETRIC: refusing wrongly costs one
-    extra word typed, while proceeding wrongly loses the layout, which is the
-    single thing this program exists to preserve. `_no_session_here` is a
-    HEURISTIC over a text listing, and a heuristic may authorise an annoyance,
-    never an unrecoverable act.
+    IT REFUSES WHEN IT CANNOT SEE A SESSION rather than proceeding, because
+    THE COSTS ARE NOT SYMMETRIC: refusing wrongly costs one extra word typed,
+    while proceeding wrongly loses the layout, the single thing this program
+    exists to preserve. `_no_session_here` is a HEURISTIC over a text listing,
+    and A HEURISTIC MAY AUTHORISE AN ANNOYANCE, NEVER AN UNRECOVERABLE ACT.
 
     SO THE OVERRIDE IS EXPLICIT AND IT IS THE SAME COMMAND. `--force` keeps
     one verb for one intention instead of growing a second spelling, and makes
-    the risk the caller's stated choice rather than usher's guess. Same shape
-    as `pick_socket`, which refuses on two candidates rather than picking one.
+    the risk the caller's stated choice rather than usher's guess.
 
     `logoff` NEEDS NO FORCE, because with no session there is nothing to end:
     the desired state already holds, and nothing is lost by saying so.
@@ -384,10 +379,9 @@ def _cleanly_leave(verb, dry, force=False):
                                                       nothing and only blocks
                                                       the power action.
 
-    Met live 2026-10-02 on a box whose greeter had failed: no compositor, no
-    layout, and `usher cleanly reboot` refused to reboot it. From the power
-    menu the `;` fallback in wlogout's action covers that, which is why it had
-    never been seen; typed by hand there is no fallback.
+    The case that matters is a box whose greeter has failed: no compositor,
+    no layout, and nothing to lose. From a power menu the `;` fallback covers
+    a refusal; typed by hand there is no fallback.
 
     THE SAME SHAPE AS doctor's BLINDNESS BUG, fixed earlier the same day: a
     test that is a PROXY for the real question keeps answering after the thing

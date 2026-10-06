@@ -239,11 +239,8 @@ class Watcher:
     WHY A CLASS. Three threads share one pile of mutable placement state:
     what is already placed, what is pending a settle, each window's grace
     deadline, the aggressive-mode clock, the knowledge base. That sharing is
-    inherent to the design, and as nested closures it was expressed by nine
-    captured locals inside one 400-line function, which is why the function
-    could not be split: any extraction would have had to take them all as
-    arguments. The state is unchanged; calling it `self` is what lets each
-    phase be a method you can read on its own.
+    inherent to the design, so the state is `self` rather than a pile of
+    captured locals no method could be extracted from.
 
     If a `usher-mgr resume` armed the adopt flag, the FIRST worker to reach
     init consumes it and LEARNS the current hand-arranged layout as the
@@ -264,16 +261,12 @@ class Watcher:
                    "last_map": time.time()}  # last new toplevel map, which
         #                                      feeds IDLE_SETTLE
         self.placed = set()
-        # WHICH LIVE WINDOW HOLDS EACH SLOT: store key -> vid. A slot holds ONE
-        # window at a time, which is not a new rule: match() has been
-        # consume-once since it was written (it pops the entry it used), so
-        # `usher restore` could never double-place. The DAEMON's per-window
-        # path never learned it, and looked the entry up fresh for every
-        # window, so N windows sharing a key were all seated at the identical
-        # geometry. Ten kitty windows in one directory stacked perfectly, and
-        # with no taskbar you would never find out. Worse for an app_id-keyed
-        # app, where kkey(app, "") matches EVERY window of that app whatever
-        # its title.
+        # WHICH LIVE WINDOW HOLDS EACH SLOT: store key -> vid. A slot holds
+        # ONE window at a time, the same rule match() has always had (it POPS
+        # the entry it used). Without it, N windows sharing a key are all
+        # seated at the identical geometry and stack perfectly, which with no
+        # taskbar is invisible. Worst for an app_id-keyed app, where
+        # kkey(app, "") matches EVERY window of that app whatever its title.
         self.slot_held = {}
         # ISSUED PLACEMENTS AWAITING A READ-BACK: vid -> {"e", "o", "due"}.
         # `placed` on its own cannot tell a request that worked from one the
@@ -336,14 +329,10 @@ class Watcher:
         # below, eleven lines and a socket connect later. The capture loop
         # starting on the next line writes current.json within a second, and at
         # session start it writes ZERO WINDOWS, because none have mapped yet. So
-        # whether anything is relaunched came down to a race between two
-        # threads, and losing it means the login brings back nothing at all.
-        #
-        # Measured 2026-09-30 on a summoned login: the good 8-window capture
-        # from the logout was replaced by a 0-window one at 18:09:57, the
-        # relaunch read that and launched nothing, and the session came back
-        # with one window. The same startup on a faster run at 22:30 won the
-        # race and restored everything, which is exactly why this hid.
+        # whether anything is relaunched would otherwise come down to a race
+        # between two threads, and losing it means the login brings back
+        # nothing at all. A fast run wins that race and a slow one does not,
+        # which is exactly why it hid.
         self.saved = engine.load_snapshot()
         threading.Thread(target=self._capture_loop, daemon=True).start()
         # Consume the one-shot adopt flag (armed by `usher-mgr resume`): the
@@ -353,9 +342,9 @@ class Watcher:
         # LOCK FIRST, BEFORE ANY PLACEMENT, if this session was summoned. The
         # exposure is the gap between the console being logged in and being
         # locked, so nothing should widen it, and nothing is lost by closing
-        # it early: placement works under a lock (measured 2026-10-03, both a
-        # window move and a full relaunch chain landing while swaylock held
-        # the output). A no-op unless USHER_SUMMONED=1, and once per boot.
+        # it early: placement works under a lock, both a window move and a
+        # full relaunch chain having been measured landing while swaylock held
+        # the output. A no-op unless USHER_SUMMONED=1, and once per session.
         engine.lock_summoned_session()
         self._init_layout()
         watch = connect()
@@ -767,20 +756,13 @@ class Watcher:
         """Give every live window another chance at placement, because what
         usher KNOWS just changed rather than what the windows are doing.
 
-        Placement is event-driven: a window is considered when it maps or
-        renames. That is right while the store is fixed, and WRONG the moment
-        the store changes underneath it. A Chrome window that was
-        unidentifiable when its last event arrived becomes identifiable the
-        instant its session file catches up or its slot is re-keyed, and
-        nothing tells us so, because the window is not doing anything. One
-        whose title has settled emits no further events at all, so it is never
-        reconsidered and simply stays where Chrome put it.
-
-        MEASURED, twice, on the same window: an article page that finished
-        loading early sat at Chrome's default position through an entire
-        session start, while its five noisier siblings landed correctly. That
-        is the difference between "nearly always" and pixel perfect, and it is
-        a gap in the TRIGGER, not in any of the deciding.
+        AN EVENT-DRIVEN DECISION HAS TO BE RE-RUN WHEN ITS INPUTS CHANGE, not
+        only when its subject moves. A window is considered when it maps or
+        renames, which is right while the store is fixed and WRONG the moment
+        the store changes underneath it: a Chrome window becomes identifiable
+        when its session file catches up or its slot is re-keyed, and nothing
+        tells us, because the window is not doing anything. One whose title has
+        settled emits no further events at all.
 
         Cheap and bounded: `placed` already dedups, so anything that landed is
         a set lookup, and the grace still governs the rest. Runs on the placer
@@ -916,16 +898,9 @@ class Watcher:
 
         While placement is AGGRESSIVE, a window the placer has not reached is
         sitting wherever its app dropped it, and learning that OVERWRITES the
-        remembered slot the placer is about to aim at. The capture loop and the
-        placer were racing over the same fact, and capture won because it runs
-        every second.
-
-        MEASURED, and it is what stood between this and pixel perfect: a Chrome
-        window that resolved its identity a few seconds late had its slot
-        replaced by Chrome's cascade position on every single restart, so by
-        the time it became placeable the store had already been taught that the
-        cascade WAS its home. Two failures compounding: one late identity,
-        one eager capture, and only the second is fixable here.
+        remembered slot the placer is about to aim at. The capture loop runs
+        every second and would otherwise win that race, teaching the store
+        that the app's cascade position IS the window's home.
 
         A window is released the moment it is placed, or when its grace runs
         out and usher is no longer going to act on it. In steady state nothing
@@ -949,8 +924,7 @@ class Watcher:
         # something else happens to dirty the store. In a busy session that is
         # immediate and invisible; in a quiet one the window sits in the
         # snapshot with no learned slot indefinitely, so it comes back at the
-        # next login and has nowhere to be put. Measured by spawning one
-        # terminal and then doing nothing for two minutes.
+        # next login and has nowhere to be put.
         #
         # Only the "grace expired, never placed" release needs this. A window
         # that gets PLACED leaves the hold too, but placing it moves it, and a

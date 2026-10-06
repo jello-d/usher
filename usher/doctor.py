@@ -192,11 +192,10 @@ def _doctor_relaunch(out, snap, live):
             else:
                 out(f"  RELAUNCH   {key[:44]}  (kitty --directory {cwd})")
             continue
-        # THE DEFAULT RELAUNCH's VERDICT, which this line used to deny
-        # outright: "no plugin respawns this" was true until the freedesktop
-        # registry became the fallback, and a report that says a window is
-        # lost when it is not is the kind of stale sentence doctor exists to
-        # avoid. Showing the resolved COMMAND matters more than the verdict:
+        # THE DEFAULT RELAUNCH's VERDICT. "No plugin respawns this" stopped
+        # being true when the freedesktop registry became the fallback, and a
+        # report calling a window lost when it is not is the stale sentence
+        # doctor exists to avoid. The resolved COMMAND matters more:
         # it is the only way to see, before trusting a reboot, that usher
         # would run `calibre` and not something surprising.
         if app in {app_of(v) for v in live}:
@@ -274,27 +273,19 @@ def _unmatched_why(lv):
     """(label, reason) for a live window with no slot, in the words of the
     plugin that knows.
 
-    THIS USED TO HARDCODE CHROME'S ANSWER, and got it wrong in a way worth
-    recording: it returned "incognito and guest windows never are" for EVERY
-    unidentified chrome window, so a window Chrome had merely not written yet
-    was reported as one it would never write. Those are different facts and
-    only the plugin can tell them apart.
+    PRINT THE PLUGIN'S OWN REASON, never a per-app explanation held here. A
+    report that hardcodes another component's facts cannot keep them current:
+    this once answered "incognito and guest windows never are" for every
+    unidentified chrome window, including ones Chrome had merely not written
+    yet. Same drift PLUGIN_HOOKS exists to kill.
 
-    Resolution carries the reason now, so this prints what the plugin said and
-    the report stops owning per-app explanations it cannot keep current. Same
-    drift PLUGIN_HOOKS was created to kill: a list of other people's facts,
-    maintained somewhere else.
-
-    Saying something still matters, which is why this exists at all: without
-    it the window quietly is not in the report, which reads as a fault in
-    usher and is not one."""
+    Saying something at all is the point: a window silently missing from the
+    report reads as a fault in usher and is not one."""
     r = resolution(lv)
     why = f"  ({r.why})" if r.why else ""
-    # THREE STATES, THREE LABELS, which is the reporting payoff of the
-    # Resolution rework and was left unspent for a day: the first cut printed
-    # `unjoinable` for ANY window with a reason, so one Chrome had merely not
-    # written yet read as one it would NEVER write. That is the same overclaim
-    # the hardcoded text made, wearing the new mechanism's clothes.
+    # THREE STATES, THREE LABELS. Collapsing PENDING into NEVER is the same
+    # overclaim as the hardcoded text above, so the check that guards this
+    # asserts the three are PAIRWISE DISTINCT rather than each one correct.
     if r.is_ready:
         return "unmatched", ""      # identified fine; no slot yet
     if r.state == Resolution.NEVER:
@@ -334,12 +325,12 @@ def _doctor_compositor(out):
                       "Run this from the venv (~/.venvs/usher/bin/python),"
                       " not the system python3.")
         return [], {}, False
-    # NOT "is WAYFIRE_SOCKET set?", which is what this used to ask and is no
-    # longer the question. usher DISCOVERS the socket under XDG_RUNTIME_DIR, so
-    # an unset variable is the normal case from a shell and says nothing about
-    # reachability. Asking the old question here made doctor report itself
-    # blind, loudly and wrongly, from exactly the places the discovery was
-    # added to serve: a tmux pane, a plain terminal, an ssh with a runtime dir.
+    # NOT "is WAYFIRE_SOCKET set?". usher DISCOVERS the socket under
+    # XDG_RUNTIME_DIR, so an unset variable is the normal case from a shell
+    # and says nothing about reachability; asking it would make doctor report
+    # itself blind from exactly the places the discovery serves. WHEN A
+    # DIAGNOSTIC'S "I CANNOT SEE" TEST IS A PROXY, FIXING THE REAL CONDITION
+    # LEAVES THE PROXY LYING.
     try:
         _sock_path = engine.wayfire_socket()
     except RuntimeError as e:           # several candidates: ambiguous

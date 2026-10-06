@@ -141,13 +141,10 @@ def is_transient(v):
     (blank New Tab, profile picker, a pre-load "Google Chrome" title: config-
     driven, grows without a code change).
 
-    POLICY ONLY, as of the Resolution rework. This used to also consult a
-    plugin `transient()` hook, which NO plugin implemented: the last one
-    (kitty's scratch-terminal test) was retired, and what it had been reduced
-    to ("I cannot read the cwd") is a READINESS question that Resolution now
-    owns. Keeping the two apart matters, because they are different facts with
-    the same consequence: "the user does not want this window remembered" is
-    not "usher cannot identify this window"."""
+    POLICY ONLY. READINESS BELONGS TO Resolution, and conflating the two is a
+    bug this has had before: "the user does not want this window remembered"
+    is a different fact from "usher cannot identify this window", and they
+    produce the same boolean."""
     v = pview(v)
     app, t = v["app"], v["title"].strip()
     return any(ar.search(app) and tr.search(t) for ar, tr in EXCLUDE_RULES)
@@ -296,13 +293,11 @@ def schema_path(profile=None):
 def adopt_legacy_store():
     """Fold a pre-profile knowledge.json into the CURRENT profile, once.
 
-    MERGES, and that is the whole point. The first version only adopted when
-    the profile store did not exist yet, so if anything created one first: a
-    seed from a snapshot, a run before the displays came up: adoption was
-    skipped FOREVER and the legacy store was orphaned in silence. Measured on
-    manifold: 1019 learned placements sat in a file nothing read while the live
-    store knew 24, so almost nothing was ever placed and it looked like usher
-    had stopped working.
+    IT MERGES RATHER THAN ADOPTING ONLY INTO AN EMPTY PROFILE, which is the
+    whole point: if anything creates a profile store first (a seed from a
+    snapshot, a run before the displays came up) an adopt-if-absent rule skips
+    FOREVER and orphans the legacy store in silence. The symptom is windows
+    simply staying where they open, which reads as usher having stopped.
 
     Entries already in the profile WIN: they were learned on these monitors,
     the legacy ones were learned across whatever was attached at the time. So
@@ -574,17 +569,14 @@ class Resolution:
         mux's banner not painted yet    should say PENDING, said Ready(cwd)
         chrome incognito, never saved   should say NEVER,   said PENDING
 
-    The third row is the 2026-10-03 shrink bug and it is the sharpest
-    argument: KittyPlugin returned a CONFIDENT WRONG KEY, which the old
-    contract allowed, so the placer resized a mux terminal onto a bare-kitty
-    slot and the capture loop learned that size back. "Ready with a key I am
-    not sure about" is now unrepresentable.
+    The third row is the sharpest argument: a plugin returning a CONFIDENT
+    WRONG KEY is what the old contract allowed, and it cost a mux terminal its
+    size. "Ready with a key I am not sure about" is now unrepresentable.
 
     THE REASON IS CARRIED, not just the state, which is what makes this a
-    framework rather than a safer `identity`. `doctor` used to hardcode
-    chrome's "incognito and guest windows are never recorded" text, which is
-    the same drift PLUGIN_HOOKS was created to kill: the plugin that KNOWS
-    why supplies the sentence, and the report just prints it.
+    framework rather than a safer `identity`: the plugin that KNOWS why
+    supplies the sentence and the report just prints it, instead of the
+    report holding another component's facts.
 
     ONE PREDICATE, TWO CALL SITES stays the rule it always was. learn() and
     the placer both gate on `.ready`, so a store can no longer be written
@@ -711,12 +703,10 @@ def plugins_sig():
     each was last written. Changes on an add, a remove and an edit alike, which
     the same shape as chrome.session_sig.
 
-    NOT THE DIRECTORY'S OWN MTIME, which was the first attempt and was wrong in
-    an instructive way: importing a plugin writes a `__pycache__` directory
-    beside it, that bumps the directory's mtime, and the watch therefore fired
-    a second time on a change its own reload had caused. Measured: two
-    "plugins reloaded" lines a second apart. A trigger must not include
-    anything the action it triggers modifies."""
+    NOT THE DIRECTORY'S OWN MTIME: importing a plugin writes a `__pycache__`
+    beside it, which bumps that mtime and fires the watch again on a change
+    its own reload caused. A TRIGGER MUST NOT INCLUDE ANYTHING THE ACTION IT
+    TRIGGERS MODIFIES."""
     try:
         return tuple(sorted(
             (f, os.path.getmtime(f))
@@ -791,10 +781,9 @@ def identity(v):
 def resolution(v):
     """What usher knows about this window's identity. See Resolution.
 
-    THE ONE PLACE A PLUGIN IS ASKED. identity(), unidentified() and
-    _single_id() each used to dispatch to the owner themselves, which is three
-    copies of the same question and exactly how two call sites come to
-    disagree about a window's key. They are all thin readers of this now.
+    THE ONE PLACE A PLUGIN IS ASKED, and the only one. identity(),
+    unidentified() and _single_id() are thin readers of it, so no two call
+    sites can come to disagree about a window's key.
 
     An UNOWNED app resolves Ready(title), because the title is the only handle
     there is and for those it is the right one. A plugin raising is treated as
@@ -854,18 +843,15 @@ def unidentified(v):
     identify it, so usher does not know WHICH window this is, and must
     neither remember it nor match it against anything remembered.
 
-    identity() always answers, falling back to the raw title, and for an app no
-    plugin claims that is right: the title is the only handle there is. This is
-    the stricter question, and the one both LEARNING and PLACING have to ask,
-    because for an owned app a title the plugin declined to resolve is known to
-    be the wrong key. Chrome hits it whenever its session file has not caught up
-    with a window.
+    ASK THIS, NOT identity(), which always answers and falls back to the raw
+    title. That fallback is right for an app no plugin claims (the title is
+    the only handle there is) and wrong for an owned one, where a title the
+    plugin declined to resolve is a key known to be false. Chrome hits it
+    whenever its session file has not caught up with a window.
 
-    ONE PREDICATE, TWO CALL SITES, deliberately. Every silent failure in this
-    file's history came from two places disagreeing about what a window's key
-    is (see the RAW TITLE vs IDENTITY notes), and a store that can be written
-    under a key the matcher will never look up, or matched under a key the
-    writer will never produce: is that same fault wearing a new hat."""
+    BOTH LEARNING AND PLACING MUST ASK THE SAME PREDICATE. A store written
+    under a key the matcher never looks up, or matched under a key the writer
+    never produces, is the fault this exists to prevent."""
     v = pview(v)
     return is_owned(v["app"]) and not resolution(v).is_ready
 
@@ -949,9 +935,8 @@ def _latch_target_in(argv):
 def _mux_pending_in(argv):
     """True if this process IS a mux command, or a shell wrapping one.
 
-    PURE, so it is testable without a process tree, for the same reason
-    _latch_target_in is: this decides whether a terminal is allowed to be
-    keyed yet, and getting it wrong COSTS the window its remembered size.
+    PURE, so it is testable without a process tree. Getting it wrong COSTS
+    the window its remembered size.
 
     TWO SHAPES, because spawn_term wraps the command in `ksh -c "<cmd>; exec
     ksh -i"`, so the mux invocation is INSIDE one argv element rather than
@@ -1023,18 +1008,13 @@ def mux_host_of(title):
     stamps into the terminal title (its set-titles-string ends in the tmux
     format `[#{host_short}]`). That tag names the tmux SERVER's host, so a
     session reached over ssh reads as the REMOTE box and a local one as this
-    box.
-
-    mux added the tag for exactly this consumer: its own comment says a local
-    session and an ssh'd one sharing a name "would otherwise snap the two
-    windows onto each other", so reading it is the whole local/remote story;
-    no /proc sniffing is needed, and unlike /proc it still works for a STORED
-    entry, whose pid is long dead.
+    box. It is the SERVER's host, never the route taken, and it survives into
+    a STORED entry, whose pid is long dead by the time anything replays it.
 
     None when there is no trailing tag (an older mux, or a title that merely
-    looks like a banner). Callers treat that as local, which is what it was
-    before mux stamped the host. Anchored at the END so the LEADING [LABEL]
-    context prefix (a work banner) is never mistaken for it."""
+    looks like a banner); callers treat that as local. ANCHORED AT THE END so
+    the LEADING [LABEL] context prefix (a work banner) is never mistaken for
+    it."""
     m = re.search(r"\[([^\[\]]+)\]\s*$", title.strip())
     if not m:
         return None
@@ -1085,13 +1065,10 @@ class ChromePlugin(WindowPlugin):
         slot = window_slot(v.get("id"), v["title"])
         if slot:
             return Resolution.ready(slot)
-        # PENDING, NOT NEVER, and the reason names both causes because usher
-        # genuinely CANNOT tell them apart from one observation: a window
-        # Chrome has not got round to writing looks identical to one it will
-        # never write. doctor decides which by watching how long it stays
-        # pending, because that is a judgement over TIME and belongs in the
-        # report, not in a per-window answer. The old code asserted incognito
-        # for every unresolved chrome window, which was an overclaim.
+        # PENDING, NOT NEVER, and the reason names BOTH causes because usher
+        # cannot tell them apart from one observation: a window Chrome has not
+        # got round to writing looks identical to one it will never write.
+        # Asserting incognito here would be an overclaim.
         return Resolution.pending(
             "Chrome has not written this window to its session file yet; an "
             "incognito or guest window is never written at all")
@@ -1235,26 +1212,23 @@ class KittyPlugin(WindowPlugin):
         """`kitty:<cwd>`, or PENDING while usher cannot yet say WHICH window
         this is.
 
-        NONE WHILE A MUX COMMAND IS IN FLIGHT, which is a PRODUCT bug fixed
-        2026-10-03 after it cost manifold both terminal sizes on a real
-        reboot. A relaunched mux terminal MAPS BEFORE mux attaches (a latch
-        has to ssh first), so its title is `ksh` with no colon, `is_mux_term`
-        is False, and this plugin claimed it and answered CONFIDENTLY with a
-        cwd key. The placer then matched the bare-kitty slot and RESIZED the
-        window down to it, and the capture loop learned that size back into
-        `term:latch <host>`. Self-worsening: once the slot says 1085x672 the
-        next relaunch ASKS for 1085x672, so it never recovers.
+        PENDING WHILE A MUX COMMAND IS IN FLIGHT, and answering a cwd key
+        there is how a terminal loses its size. A relaunched mux terminal MAPS
+        BEFORE mux attaches (a latch has to ssh first), so its title is `ksh`
+        with no colon and `is_mux_term` is False: claim it and the placer
+        matches the bare-kitty slot, RESIZES the window to it, and the capture
+        loop learns that size back into `term:latch <host>`. Self-worsening,
+        because the next relaunch then ASKS for the shrunken size.
 
-        Declining is the whole fix and it is the conservative direction: it
-        only ever DEFERS. `unidentified` then keeps both learning and placing
-        off the window, grace-from-recognition re-graces it the instant mux
-        paints its banner, and MuxPlugin claims it with the right key. The
-        alternative (widening MuxPlugin's claim to the process tree) could
-        STEAL a genuine bare-kitty window, which is worse than waiting.
+        Declining only ever DEFERS, which is the conservative direction:
+        `unidentified` keeps learning and placing off the window,
+        grace-from-recognition re-graces it the instant mux paints its banner,
+        and MuxPlugin claims it with the right key. Widening MuxPlugin's claim
+        to the process tree was the alternative and is worse, since it could
+        STEAL a genuine bare-kitty window.
 
         NOT a `transient` hook: "I cannot tell yet" and "never remember this
-        window" are different questions, and conflating them is what broke
-        non-mux terminals once already."""
+        window" are different questions with the same boolean."""
         if not v["pid"] or v["pid"] < 0:
             return Resolution.never(
                 "a stored entry's pid is long dead, so its cwd can never be "
@@ -1639,37 +1613,23 @@ def _learn_stamp(kb, groups, windows, counts, when, hold=()):
 def _learn_purge_terminals(kb, windows, seen):
     """Drop the terminal entries whose window we WATCHED GO.
 
-    ABSENCE FROM ONE SNAPSHOT IS NOT EVIDENCE OF A CLOSED WINDOW, and reading
-    it as such cost every terminal its slot at every login. The daemon captures
-    as soon as it is watching, which is BEFORE the terminals it just launched
-    have mapped: manifestor's 22:30:35 snapshot held zero windows, six seconds
-    ahead of the two kitty windows arriving. This purge then concluded both were
-    gone and deleted the slots, so the placer had nothing to aim at, the windows
-    stayed where kitty dropped them, and once the hold expired the capture loop
-    learned the cascade position AS the slot. Chrome was untouched and placed
-    perfectly, because chrome entries age out on the TTL instead of being purged
-    on absence, which is once again why this read as "restore works, mostly".
+    NOT "is it here?" BUT "did we see it go?". Absence from one snapshot is
+    not evidence of a closed window: the daemon captures as soon as it is
+    watching, which is before the terminals it just launched have mapped, and
+    purging on absence there deletes the slot the placer is about to aim at.
+    `seen` is this generation's set of terminal identities observed ALIVE, and
+    only what is in it may be dropped. An entry never seen cannot be told
+    apart from one whose window has not mapped yet, so it is left alone and
+    prune_kb's TTL is the backstop. A reload starts a fresh generation, so the
+    purge is briefly quiet until each terminal is seen once; that is the
+    fail-safe direction.
 
-    So the question is not "is it here?" but "did we see it go?", which needs a
-    memory of what was ever here: `seen` is this daemon generation's set of
-    terminal identities actually observed alive. An entry we have never seen
-    cannot be distinguished from one whose window has not mapped yet, so it is
-    left alone and `prune_kb`'s TTL remains the backstop for a genuinely stale
-    one. A reload starts a fresh generation with an empty memory, so the purge
-    goes briefly quiet until each terminal is observed once; that is the
-    conservative direction and it costs nothing.
-
-    The real job is unchanged: a window that is closed during a session is seen
-    and then missing, so it is dropped. Switching what a window DISPLAYS never
-    needed this, since schema 5 keys a terminal by its COMMAND.
-
-    BOTH sides must be IDENTITIES. A kb entry's "title" field is the KEY-title
+    BOTH SIDES MUST BE IDENTITIES. A kb entry's "title" field is the KEY-title
     (kb_entry stamps identity(), not the window title), so comparing it to raw
-    window titles never matched and this block deleted every terminal entry it
-    had just written, on every pass, so terminals were never placed at all. And
-    the entry is selected by its KEY SHAPE, not by is_mux_term on that key:
-    is_mux_term only asks "kitty, with a colon?", which a kitty:<cwd> key also
-    satisfies, so the mux purge was sweeping plain kitty windows out too."""
+    window titles matches nothing and silently deletes every terminal entry.
+    And the entry is selected by its KEY SHAPE, never by is_mux_term on that
+    key: is_mux_term only asks "kitty, with a colon?", which a kitty:<cwd> key
+    also satisfies, so that sweeps plain kitty windows out as collateral."""
     live_terms = {identity(w) for w in windows
                   if is_mux_term(w["app_id"], w["title"])}
     seen.update(live_terms)
@@ -1861,18 +1821,14 @@ def mux_session_set():
     """The session names mux would rebuild on this box: `mux resume --list`,
     one bare NAME per line.
 
-    This is mux's durable session SET (recorded per socket under $MUX_CACHE,
-    additive as sessions are built or attached, subtractive on `mux kill`), NOT
-    the live tmux server, which is the whole point, because the case that
-    matters is a COLD BOOT, where no session is live but `mux go` rebuilds from
-    exactly this set. Reading the live server instead meant there was never
-    anything to relaunch after a reboot.
+    THE DURABLE SET, NOT THE LIVE SERVER, which is the point: the case that
+    matters is a COLD BOOT, where no session is live but `mux go` rebuilds
+    from exactly this set.
 
-    Deliberately not scraped out of `mux ls`, which is a HUMAN listing: it leads
-    each line with an agent-state glyph, so the scrape that used to read it
-    matched nothing and left this entire path dead with no symptom. selftest
-    asserts the bare-name shape against the real binary, so a future change to
-    mux's output fails LOUD here instead of silently going inert again.
+    NEVER SCRAPE `mux ls` FOR THIS. It is a HUMAN listing and leads each line
+    with an agent-state glyph, so a scrape of it matches nothing and leaves
+    this whole path dead with no symptom. selftest asserts the bare-name shape
+    against the real binary, so a change to mux's output fails LOUD here.
 
     Empty when mux is absent or errors: the soft-dep no-op."""
     try:
@@ -2373,33 +2329,24 @@ PLACE_TOL = 8
 def placement_landed(v, e, o, tol=PLACE_TOL):
     """Did view v actually END UP on the slot e asks for, on output o?
 
-    A placement is a REQUEST, and the compositor is free to ignore it. usher
-    used to log `placed` the instant it issued one and never look again, so a
-    request that lost a race was indistinguishable from one that worked.
-    Measured on manifold 2026-10-05: wayfire's own `place` plugin (mode =
-    cascade here) assigns a position to every newly-mapped view, it ran after
-    usher on a relaunched calibre, and the window sat at the cascade position
-    on ws(0,0) for five minutes while the log claimed ws(0,1) twice. Replaying
-    the identical configure-view by hand minutes later applied exactly, so
-    nothing was wrong with the request, the arithmetic or the client.
+    A placement is a REQUEST and the compositor may ignore it. wayfire's own
+    `place` plugin assigns a position to every newly-mapped view, so one that
+    runs after usher simply overwrites the slot.
 
-    "DID MY OWN REQUEST LAND" IS A MUCH EASIER QUESTION than the one this
-    repo's notes had given up on ("usher moved it or the human did"), and it
-    is worth keeping the two apart: a read-back a moment after issuing cannot
-    be confounded by a person, because nobody drags a window in 600ms.
+    "DID MY OWN REQUEST LAND" IS A DIFFERENT QUESTION from "did usher move it
+    or the human", and a far easier one: a read-back a moment after issuing
+    cannot be confounded by a person, because nobody drags a window in 600ms.
 
     THE SIZE IS DELIBERATELY NOT COMPARED. A client may legitimately refuse a
-    size (kitty rounds to whole cells and adds padding, so a 2132x1690 request
-    comes back 2176x1761), and that is not evidence the placement failed. The
-    workspace and the position are what a placement is for, and what a lost
-    race destroys.
+    size (kitty rounds to whole cells and adds padding), and that is not
+    evidence the placement failed. The workspace and the position are what a
+    placement is for, and what a lost race destroys.
     """
     if v is None or not e or not o:
         return False
     # Ask the output question BEFORE place_of, whose no-such-output fallback
-    # answers ws[0, 0] with the raw geometry as the position. That fallback
-    # reads exactly like a real answer, and mistaking it for one is how an
-    # afternoon went into a workspace-arithmetic bug that did not exist.
+    # answers ws[0, 0] with the raw geometry as the position, which reads
+    # exactly like a real answer.
     if v.get("output-name") != e["output"] or o.get("name") != e["output"]:
         return False
     got = place_of(v, {o["name"]: o})
@@ -2789,34 +2736,22 @@ def lock_summoned_session():
     returns before any session exists, so it cannot lock what has not started.
     The daemon runs INSIDE the session and is the first usher code to do so.
 
-    WHY EARLY IS FREE, which was the open question the code comment on
-    USHER_SUMMONED left unanswered for days: placement works perfectly well
-    under a lock. Measured twice on 2026-10-03, a window MOVE landing while
-    swaylock held the output, and then the whole relaunch chain (two kitty
-    windows spawned, mapped and placed) running 26 minutes into an active
-    lock. So there is no reason to wait for the layout to settle, and every
-    reason not to: the gap before the lock is the whole exposure.
+    LOCK BEFORE PLACING, because the gap before the lock is the whole
+    exposure and placement works perfectly well under one: both a window MOVE
+    and the entire relaunch chain have been measured landing against an active
+    swaylock.
 
-    ONCE PER BOOT via a runtime marker, because a reload re-execs the
-    supervisor and would otherwise lock the user out mid-session every time
-    code is deployed. The marker lives in the runtime dir, so it is per-boot
-    by construction, exactly like the arm and profile markers."""
+    ONCE PER SESSION via a runtime marker, because a reload re-execs the
+    supervisor and would otherwise lock the user out mid-session on every
+    deploy."""
     if os.environ.get("USHER_SUMMONED") != "1":
         return None
-    # ONCE PER SESSION, NOT PER BOOT, and the difference is not academic on
-    # this fleet: the login user LINGERS (so the ssh agent survives the last
-    # logout), which means XDG_RUNTIME_DIR SURVIVES A LOGOUT TOO. A marker
-    # that only asked "does the file exist" therefore suppressed the lock on
-    # every summoned login after the first, with no reboot in between:
-    #
-    #   boot -> cleanly login     locks, writes the marker
-    #   logout                    runtime dir survives, marker survives
-    #   cleanly login again       marker present -> NEVER LOCKS
-    #
-    # which is the exact shape of a test campaign, and leaves a console open
-    # for somebody who is not in front of it. So the marker CARRIES the
-    # session id and a different one means not-yet-locked. Still per boot by
-    # construction for the reload case, since a reload keeps the same session.
+    # THE MARKER CARRIES THE SESSION ID, and must: the login user LINGERS on
+    # this fleet (so the ssh agent survives the last logout), so
+    # XDG_RUNTIME_DIR SURVIVES A LOGOUT and a marker that only asked "does the
+    # file exist" would suppress the lock on every summoned login after the
+    # first, with no reboot in between, leaving a console open for somebody
+    # who is not in front of it. A different session id means not-yet-locked.
     marker = os.path.join(runtime_dir(), LOCKED_MARKER)
     seated = _seated_now()
     sid = seated[0] if seated else ""
@@ -3170,17 +3105,13 @@ def wayfire_socket():
     `allow_manual_search` searches /tmp ONLY, and this compositor puts its
     socket in XDG_RUNTIME_DIR, so that option cannot help here either.
 
-    WHY IT MATTERS AWAY FROM THE DAEMON: the compositor exports WAYFIRE_SOCKET
-    to what IT starts, and a shell often does not have it, which is exactly
-    where a person types `usher cleanly logoff` and was told the compositor
-    could not be reached. Measured: with the variable unset the verb failed
-    from a tmux pane and worked the moment it was named.
+    WHY IT MATTERS AWAY FROM THE DAEMON: the compositor exports
+    WAYFIRE_SOCKET only to what IT starts, so a shell often does not have it,
+    and that is exactly where a person types `usher cleanly logoff`.
 
-    DO NOT GUESS AT THE CAUSE IN THE MESSAGE, which the first version did: it
-    blamed a stale shell and advised restarting one. On this fleet nothing
-    propagates the variable at all (mux's environment feature manages four
-    others), so that advice sent a reader after a restart that could not have
-    helped. State the fact and the remedies; the cause is not ours to assert.
+    DO NOT ASSERT A CAUSE IN THE WARNING. Report what was observed and what
+    the reader can do; an inferred cause sends them after a remedy that
+    cannot help.
 
     XDG_RUNTIME_DIR with a /run/user/<uid> default, since that is the standard
     name for the directory and a shell that has lost one may have lost both.
