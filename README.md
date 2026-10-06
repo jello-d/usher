@@ -296,6 +296,51 @@ and no live greeter, so the installed copy can be checked in place:
 Example defaults ship in [`share/config/`](share/config/). The
 daemon soft-degrades when any are absent.
 
+### Environment
+
+Every knob usher reads, with its default. All are read **once at import**, so
+a running daemon keeps the values it started with: change one and restart it
+with `usher reload`.
+
+- **`USHER_SKIP_TITLE`** (`^\[WORK`): titles matching this regex are ignored
+  end to end, never captured, placed or relaunched. This is the work/personal
+  boundary rather than a convenience, so widen it with care.
+- **`USHER_START_FLOOR`** (`300`): seconds after login, or an `aggressive`
+  kick, during which every mapped window is placed back. A floor, not a race.
+- **`USHER_IDLE_SETTLE`** (`25`): seconds with no new window before aggressive
+  placement gives way to steady, where only `include` anchors are moved.
+- **`USHER_AGGR_CAP`** (`900`): hard cap on the aggressive window, whatever
+  the other two say.
+- **`USHER_CHROME_FLAGS`**
+  (`--restore-last-session --hide-crash-restore-bubble`): flags added to each
+  Chrome launch, space separated. Empty passes none.
+- **`USHER_CHROME_STAGGER`** (`4`): seconds between per-profile Chrome
+  launches. Chrome is one process per user-data-dir, so launching two
+  profiles in the same second loses one of them.
+- **`USHER_WIND_DOWN_TIMEOUT`** (`8`): seconds `wind-down` waits for every app
+  it asked to quit, as one bounded deadline for all of them.
+- **`USHER_EXCLUDE_FILE`** (`~/.config/usher/exclude`) and
+  **`USHER_INCLUDE_FILE`** (`~/.config/usher/include`): override the rule
+  files. Losing them is silent, since no rules parses fine and means "place
+  everything".
+- **`USHER_PROFILE`** (derived): force the display-profile id instead of
+  deriving it from the connected monitors.
+- **`USHER_NO_DEFAULT_RELAUNCH`** (unset): set to `1` to stop usher starting
+  saved windows from the freedesktop registry. Plugins and `exclude` still
+  apply.
+- **`USHER_SUMMONED`** (unset): set to `1` by `usher cleanly login` in the
+  session it starts, so the daemon locks the console once. Not for a human to
+  set.
+
+### Exit status
+
+- **`0`**: did what you asked, and it was fine.
+- **`1`**: did what you asked; the answer is bad (a contract breach, a failed
+  `verify`).
+- **`2`**: could not do it at all: no such verb, no prediction to check
+  against, or no visible session. Nothing was assessed, which is a different
+  statement from `1`.
+
 ## License
 
 Apache-2.0.

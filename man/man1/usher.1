@@ -326,6 +326,80 @@ user window plugins.
 .TP
 .I ~/.local/state/usher/
 the layout store (current snapshot, history, knowledge base).
+.SH ENVIRONMENT
+Every knob usher reads, with its default. All are read ONCE at import, so a
+running daemon keeps the values it started with: change one and restart it
+with
+.BR "usher reload" .
+.TP
+.BI USHER_SKIP_TITLE " ^\e[WORK"
+Window titles matching this regex are ignored end to end: never captured,
+never placed, never relaunched. This is the work/personal boundary, so widen
+it with care and narrow it only if you know nothing sensitive wears the
+banner.
+.TP
+.BI USHER_START_FLOOR " 300"
+Seconds after login (or an
+.B aggressive
+kick) during which every mapped window is placed back. A floor, not a race:
+it is not shortened by the session going quiet.
+.TP
+.BI USHER_IDLE_SETTLE " 25"
+Seconds with no new window before aggressive placement gives way to steady,
+where only
+.I include
+anchors are moved.
+.TP
+.BI USHER_AGGR_CAP " 900"
+Hard cap on the aggressive window, whatever the other two say.
+.TP
+.BI USHER_CHROME_FLAGS " --restore-last-session --hide-crash-restore-bubble"
+Flags added to each Chrome launch, space separated. Empty passes none, which
+leaves Chrome to its own startup preference.
+.TP
+.BI USHER_CHROME_STAGGER " 4"
+Seconds between per-profile Chrome launches. Chrome is one process per
+user-data-dir, so launching two profiles in the same second loses one of
+them.
+.TP
+.BI USHER_WIND_DOWN_TIMEOUT " 8"
+Seconds
+.B wind-down
+waits for every app it asked to quit. One bounded deadline for all of them,
+so no plugin can be the reason a machine will not reboot.
+.TP
+.BI USHER_EXCLUDE_FILE " ~/.config/usher/exclude"
+.TQ
+.BI USHER_INCLUDE_FILE " ~/.config/usher/include"
+Override the rule files. Losing them is SILENT, since no rules parses fine
+and means "place everything".
+.TP
+.BI USHER_PROFILE " (derived)"
+Force the display-profile id instead of deriving it from the connected
+monitors. See DISPLAY PROFILES.
+.TP
+.BI USHER_NO_DEFAULT_RELAUNCH " unset"
+Set to 1 to stop usher starting saved windows from the freedesktop registry.
+Plugins and
+.I exclude
+still apply.
+.TP
+.BI USHER_SUMMONED " unset"
+Set to 1 by
+.B usher cleanly login
+in the session it starts, and read by the daemon to lock the console once.
+Not for a human to set.
+.SH EXIT STATUS
+.TP
+.B 0
+did what you asked, and it was fine.
+.TP
+.B 1
+did what you asked; the answer is bad (a contract breach, a failed verify).
+.TP
+.B 2
+could not do it at all: no such verb, no prediction to check against, or no
+visible session. Nothing was assessed, which is a different statement from 1.
 .SH SEE ALSO
 .BR mux (1)
 .SH LICENSE

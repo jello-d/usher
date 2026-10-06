@@ -89,10 +89,68 @@ r = _as_resolution(p.resolve(v), "example")
 assert r.is_ready, f"resolve() is not ready: {r!r}"
 assert r.key, "resolve() is ready with no key"
 PYEOF
+# EVERY TUNABLE IS DOCUMENTED, IN BOTH PLACES, and the list is DERIVED from
+# the code rather than written out here. A second hand-written inventory is
+# what goes stale: nine of the twelve knobs were documented nowhere at all
+# until this check was written, including USHER_SKIP_TITLE, which is the
+# work/personal boundary. BOTH DIRECTIONS are checked, because a knob that is
+# removed from the code leaves its documentation behind, and prose describing
+# a variable nothing reads is worse than no prose.
+#
+# A HUMAN-ONLY knob is still a knob: USHER_SUMMONED is set by usher itself and
+# is documented saying exactly that, which is the honest answer rather than an
+# exemption.
+_knobs=$(grep -rho 'USHER_[A-Z_]*' "$HERE"/usher/*.py | sort -u)
+_nk=$(printf '%s\n' "$_knobs" | grep -c .)
+# VACUITY GUARD ON THE SCRAPE: if the grep stops matching, every assertion
+# below passes over the empty set and this reports success while checking
+# nothing.
+[ "$_nk" -ge 10 ] || fail "only $_nk tunables found: the scrape is broken"
+for _k in $_knobs; do
+  grep -q "$_k" "$HERE/man/man1/usher.1" \
+    || fail "$_k is read by the code and absent from the man page"
+  grep -q "$_k" "$HERE/README.md" \
+    || fail "$_k is read by the code and absent from README.md"
+done
+# ...and nothing documented that the code does not read.
+for _d in $(grep -rho 'USHER_[A-Z_]*' "$HERE/man/man1/usher.1" \
+            "$HERE/README.md" | sort -u); do
+  printf '%s\n' "$_knobs" | grep -qx "$_d" \
+    || fail "$_d is documented but no code reads it"
+done
+
+# ...AND THE STATED DEFAULTS ARE HELD AGAINST THE CODE. Naming a knob is the
+# cheap half; the number beside it is what a reader acts on, and changing
+# START_FLOOR from 300 to 240 would otherwise leave two files quietly lying.
+# Read from the IMPORTED module, so the check cannot be satisfied by a second
+# copy of the number.
+PYTHONPATH="$HERE" python3 - "$HERE" <<'PYEOF' || fail "a documented default
+ disagrees with the code"
+import sys
+root = sys.argv[1]
+sys.path.insert(0, root)
+from usher import chrome, engine
+man = open(root + "/man/man1/usher.1").read()
+rdm = open(root + "/README.md").read()
+KNOBS = (("USHER_START_FLOOR", engine.START_FLOOR),
+         ("USHER_IDLE_SETTLE", engine.IDLE_SETTLE),
+         ("USHER_AGGR_CAP", engine.AGGR_CAP),
+         ("USHER_CHROME_STAGGER", chrome.CHROME_STAGGER),
+         ("USHER_WIND_DOWN_TIMEOUT", engine.WIND_DOWN_TIMEOUT))
+bad = []
+for name, val in KNOBS:
+    want = str(int(val))
+    for label, doc, span in (("man", man, 60), ("README", rdm, 80)):
+        after = doc.split(name, 1)[1][:span]
+        if want not in after:
+            bad.append(f"{name}: code says {want}, {label} does not")
+assert not bad, "; ".join(bad)
+PYEOF
+
 # A FLOOR, so an empty set cannot pass. Every selector above is a glob, and a
 # glob that matches nothing checks nothing while still reporting success, which
 # is how a renamed package went uncompiled behind a green test. The numbers only
 # have to be low enough never to need touching and high enough to catch a
 # collapse; they are not an inventory.
 [ "$_sh" -ge 5 ] || fail "only $_sh shell file(s): a selector is gone"
-pass "$_py python, $_sh shell"
+pass "$_py python, $_sh shell, $_nk tunables documented both ways"
