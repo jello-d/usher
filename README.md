@@ -328,9 +328,12 @@ with `usher reload`.
 - **`USHER_NO_DEFAULT_RELAUNCH`** (unset): set to `1` to stop usher starting
   saved windows from the freedesktop registry. Plugins and `exclude` still
   apply.
-- **`USHER_SUMMONED`** (unset): set to `1` by `usher cleanly login` in the
-  session it starts, so the daemon locks the console once. Not for a human to
-  set.
+- **`USHER_SUMMONED`** (unset): internal, and never set explicitly. `usher
+  cleanly login` exports it into the session it starts, which is how the
+  daemon can tell a session begun remotely from one begun at the keyboard. On
+  that signal it locks the console once, before placing anything, because a
+  summoned session would otherwise come up logged in and unlocked in front of
+  nobody.
 
 ### Exit status
 

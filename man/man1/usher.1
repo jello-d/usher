@@ -385,10 +385,13 @@ Plugins and
 still apply.
 .TP
 .BI USHER_SUMMONED " unset"
-Set to 1 by
+Internal, and never set explicitly.
 .B usher cleanly login
-in the session it starts, and read by the daemon to lock the console once.
-Not for a human to set.
+exports it into the session it starts, which is how the daemon can tell a
+session begun REMOTELY from one begun at the keyboard. On that signal it locks
+the console once, before placing anything, because a summoned session would
+otherwise come up logged in and unlocked in front of nobody. Setting it by
+hand only makes a console session lock itself at login for no reason.
 .SH EXIT STATUS
 .TP
 .B 0
