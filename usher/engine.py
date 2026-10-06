@@ -4171,6 +4171,22 @@ def _t_verify(ck):
     # wrong reason" shape this suite keeps meeting. Looking for the marker
     # rather than for a size change also survives the live daemon writing a
     # real line in the same instant.
+    # A NONCE, so the check asks "did THIS run leak" rather than "has
+    # anything ever leaked". Met immediately: a planted-regression run that
+    # deliberately broke the patching wrote one probe line into the real log,
+    # and a fixed marker then failed every subsequent run over a leak that
+    # had already been fixed. A check that cannot be cleared by fixing the
+    # fault is a check that gets switched off.
+    _probe = f"selftest probe, never for watch.log: {os.getpid()}-{time.time()}"
+    _w.logline(_probe)
+    logline(_probe)
+    _tail = ""
+    _lf = os.path.join(STATE, "watch.log")
+    if os.path.exists(_lf):
+        with open(_lf, errors="replace") as _fh:
+            _tail = _fh.read()[-4000:]
+    ck("quiet-log-keeps-fixtures-out-of-watch-log", _probe not in _tail)
+
     _o = {"name": "DP-1", "id": 1,
           "geometry": {"x": 0, "y": 0, "width": 100, "height": 100},
           "workspace": {"x": 0, "y": 0, "grid_width": 3, "grid_height": 3}}
@@ -5554,6 +5570,40 @@ def _t_watcher(ck):
     ck("recognise-is-once-only", 21 in w.identified)
 
 
+@contextlib.contextmanager
+def _quiet_log():
+    """Keep everything the suite drives out of the REAL watch.log.
+
+    A FIXTURE LINE IS INDISTINGUISHABLE FROM A REAL ONE, and watch.log is the
+    forensic record this repo leans on to settle "usher or the human". Found
+    for the second time on 2026-10-05, while reading that log to diagnose a
+    genuine placement failure: every `./test/run` had been appending rows like
+
+        slot taken, left in place: signal | Signal
+        recognised late, re-graced: kitty | late window
+
+    from _t_slots and _t_lifecycle, which drive the real Watcher. The first
+    instance (the relaunch announcements) was fixed per-area by stubbing at
+    the seam the test already stubbed; a second instance says the AREA is the
+    wrong place to fix it, because every future area that touches daemon code
+    has to remember, and the suite passes just as cheerfully when one forgets.
+
+    BOTH SPELLINGS ARE PATCHED. watch.py imports `logline` BY NAME, so it
+    holds its own reference and patching engine's global alone leaves the
+    daemon's copy live: the exact stale-copy hazard the package split is
+    careful about. An area that wants to ASSERT what was logged still stubs
+    for itself, and restoring to whatever it found keeps that working."""
+    from . import watch as _wmod
+    me = sys.modules[__name__]
+    sink = []
+    saved = (me.logline, _wmod.logline)
+    me.logline = _wmod.logline = sink.append
+    try:
+        yield sink
+    finally:
+        me.logline, _wmod.logline = saved
+
+
 def selftest():
     """Offline unit checks for the plugin framework and the store: no
     compositor, deterministic. Run with `usher selftest`.
@@ -5589,7 +5639,8 @@ def selftest():
                  _t_geometry, _t_placement, _t_snapshots, _t_profiles,
                  _t_migration, _t_watcher, _t_contracts):
         try:
-            area(ck)
+            with _quiet_log():
+                area(ck)
         except Exception as e:
             ck(f"{area.__name__}-RAISED-{type(e).__name__}", False)
             print(f"selftest: {area.__name__} raised {type(e).__name__}: {e}",
