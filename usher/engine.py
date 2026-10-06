@@ -23,6 +23,7 @@ WindowPlugin, plugins(), identity() and learn().
 import contextlib
 import glob
 import hashlib
+import io
 import json
 import os
 import re
@@ -2369,6 +2370,51 @@ def place(sock, view_id, e, o):
     return geom
 
 
+# How close counts as landed. wayfire reports geometry as floats and a client
+# may shave a pixel, so an exact-match test would read a successful placement
+# as a failure and re-issue it forever.
+PLACE_TOL = 8
+
+
+def placement_landed(v, e, o, tol=PLACE_TOL):
+    """Did view v actually END UP on the slot e asks for, on output o?
+
+    A placement is a REQUEST, and the compositor is free to ignore it. usher
+    used to log `placed` the instant it issued one and never look again, so a
+    request that lost a race was indistinguishable from one that worked.
+    Measured on manifold 2026-10-05: wayfire's own `place` plugin (mode =
+    cascade here) assigns a position to every newly-mapped view, it ran after
+    usher on a relaunched calibre, and the window sat at the cascade position
+    on ws(0,0) for five minutes while the log claimed ws(0,1) twice. Replaying
+    the identical configure-view by hand minutes later applied exactly, so
+    nothing was wrong with the request, the arithmetic or the client.
+
+    "DID MY OWN REQUEST LAND" IS A MUCH EASIER QUESTION than the one this
+    repo's notes had given up on ("usher moved it or the human did"), and it
+    is worth keeping the two apart: a read-back a moment after issuing cannot
+    be confounded by a person, because nobody drags a window in 600ms.
+
+    THE SIZE IS DELIBERATELY NOT COMPARED. A client may legitimately refuse a
+    size (kitty rounds to whole cells and adds padding, so a 2132x1690 request
+    comes back 2176x1761), and that is not evidence the placement failed. The
+    workspace and the position are what a placement is for, and what a lost
+    race destroys.
+    """
+    if v is None or not e or not o:
+        return False
+    # Ask the output question BEFORE place_of, whose no-such-output fallback
+    # answers ws[0, 0] with the raw geometry as the position. That fallback
+    # reads exactly like a real answer, and mistaking it for one is how an
+    # afternoon went into a workspace-arithmetic bug that did not exist.
+    if v.get("output-name") != e["output"] or o.get("name") != e["output"]:
+        return False
+    got = place_of(v, {o["name"]: o})
+    if [int(n) for n in got["workspace"]] != [int(n) for n in e["workspace"]]:
+        return False
+    return (abs(got["pos"][0] - e["pos"][0]) <= tol and
+            abs(got["pos"][1] - e["pos"][1]) <= tol)
+
+
 def apply_fullscreen(sock, view_id):
     """Put a just-restored window back into fullscreen.
 
@@ -4104,6 +4150,147 @@ def _t_slots(ck):
         pass
 
 
+def _t_verify(ck):
+    """A PLACEMENT IS A REQUEST, and nothing used to read the result back.
+
+    THE MEASURED BUG (manifold, 2026-10-05): wayfire's own `place` plugin
+    (cascade) assigned a relaunched calibre window its position AFTER usher
+    had asked for the remembered slot, usher logged `placed ws(0,1)` twice,
+    and the window sat on ws(0,0) for five minutes until a human moved it.
+    Replaying the identical configure-view by hand applied exactly, so the
+    request, the arithmetic and the client were all fine; only the knowing
+    was missing. `placed` dedups, so the lost race was locked in for the life
+    of the window."""
+    from . import watch as _w
+    from .watch import Watcher, PLACE_VERIFY
+
+    # THE SUITE'S OWN FIXTURE LINES MUST NOT REACH watch.log. Asserted
+    # BEHAVIOURALLY rather than by checking that _quiet_log patched something:
+    # comparing the two module attributes for identity would pass just as
+    # happily if NEITHER had been patched, which is the "check passes for the
+    # wrong reason" shape this suite keeps meeting. Looking for the marker
+    # rather than for a size change also survives the live daemon writing a
+    # real line in the same instant.
+    _o = {"name": "DP-1", "id": 1,
+          "geometry": {"x": 0, "y": 0, "width": 100, "height": 100},
+          "workspace": {"x": 0, "y": 0, "grid_width": 3, "grid_height": 3}}
+    _e = {"output": "DP-1", "workspace": [1, 1], "pos": [10, 20],
+          "size": [30, 40]}
+
+    def _v(x, y, w=30, h=40, out="DP-1"):
+        return {"id": 7, "app-id": "calibre-gui", "title": "calibre",
+                "output-name": out,
+                "geometry": {"x": x, "y": y, "width": w, "height": h}}
+
+    # ws(1,1) with the viewport at (0,0) puts the slot at 100+10, 100+20
+    ck("verify-landed-exactly", placement_landed(_v(110, 120), _e, _o))
+    ck("verify-landed-within-tolerance",
+       placement_landed(_v(110 + PLACE_TOL, 120 - PLACE_TOL), _e, _o))
+    ck("verify-rejects-just-outside-tolerance",
+       not placement_landed(_v(110 + PLACE_TOL + 1, 120), _e, _o))
+    # THE ONE THAT MATTERS: the cascade position, a whole workspace off.
+    ck("verify-catches-the-cascade-position",
+       not placement_landed(_v(10, 20), _e, _o))
+    # A SIZE THE CLIENT REFUSED IS NOT A FAILED PLACEMENT. kitty rounds to
+    # whole cells and adds padding, so comparing the size would report every
+    # terminal placement as lost and re-place it until the budget ran out.
+    ck("verify-ignores-a-refused-size",
+       placement_landed(_v(110, 120, w=44, h=51), _e, _o))
+    ck("verify-rejects-the-wrong-output",
+       not placement_landed(_v(110, 120, out="DP-2"), _e, _o))
+    ck("verify-rejects-a-gone-window", not placement_landed(None, _e, _o))
+
+    logged = []
+    _real_log = _w.logline
+    _w.logline = lambda m: logged.append(m)
+    try:
+        def _wat(fresh, tries=1):
+            w = Watcher(launch=False)
+            w.placed.add(7)
+            w.place_tries[7] = tries
+            w._fresh_view = lambda vid: fresh
+            return w
+
+        w = _wat(_v(10, 20))
+        w._verify_one(7, {"e": _e, "o": _o})
+        # CLEARING `placed` IS THE FIX: it is the dedup that locked the
+        # original failure in, so a miss has to reopen the window.
+        ck("verify-miss-reopens-the-window", 7 not in w.placed)
+        ck("verify-miss-requeues-for-another-go", 7 in w.pending)
+        ck("verify-miss-is-logged", any("did not take" in m for m in logged))
+
+        # A HIT IS SILENT AND CHANGES NOTHING, which is the common case.
+        logged[:] = []
+        w = _wat(_v(110, 120))
+        w._verify_one(7, {"e": _e, "o": _o})
+        ck("verify-hit-leaves-it-placed", 7 in w.placed)
+        ck("verify-hit-is-silent", logged == [])
+
+        # BOUNDED: at the end of the budget the window is left where it is
+        # rather than fought over for the whole 120s grace.
+        logged[:] = []
+        w = _wat(_v(10, 20), tries=len(PLACE_VERIFY))
+        w._verify_one(7, {"e": _e, "o": _o})
+        ck("verify-gives-up-after-the-budget",
+           7 in w.placed and 7 not in w.pending)
+        ck("verify-gives-up-out-loud", any("after" in m for m in logged))
+
+        # A WINDOW THAT CLOSED IS NOT A FAILED PLACEMENT.
+        logged[:] = []
+        w = _wat(None)
+        w._verify_one(7, {"e": _e, "o": _o})
+        ck("verify-ignores-a-closed-window", 7 in w.placed and logged == [])
+
+        # THE VERIFY RUNS UNDER THE PLACER'S ERROR POLICY. It is driven
+        # straight from _placer_loop, which has no guard of its own, so a
+        # raise here would kill the placer thread and placement would stop
+        # for the rest of the session with nothing in the log saying why.
+        logged[:] = []
+        w = _wat(_v(10, 20))
+        def _boom(*a):
+            raise RuntimeError("probe")
+        ck("verify-raise-does-not-escape-the-placer",
+           w._guarded("verify", _boom) is None)
+        ck("verify-raise-is-logged", any("verify error" in m for m in logged))
+
+        # AND THE ARMING IS WIRED, DRIVEN THROUGH THE REAL _seat_view rather
+        # than by calling _verify_later directly. Testing the arming function
+        # on its own would pass just as happily with the CALL removed from
+        # _seat_view, which is the whole feature dead and nothing saying so:
+        # the same "a check that passes for the wrong reason" shape this
+        # suite has now been bitten by four times.
+        _real_place = _w.place
+        _w.place = lambda sock, vid, e, o: {}
+        try:
+            def _seated(tries=0):
+                """One real _seat_view, with its per-window announcement kept
+                out of the suite's own output: it prints the placement to
+                stdout as well as logging it, and a fixture line is
+                indistinguishable from a real one to anybody reading
+                either."""
+                w = Watcher(launch=False)
+                w._restate = lambda vid, e: None
+                w.place_sock = object()
+                if tries:
+                    w.place_tries[7] = tries
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    moved = w._seat_view(_v(10, 20), _e, _o)
+                return w, moved
+
+            w, moved = _seated()
+            ck("verify-is-armed-by-a-real-place", moved and 7 in w.verify)
+            ck("verify-counts-the-attempt", w.place_tries.get(7) == 1)
+            # AND NOT ARMED PAST THE BUDGET, or a window could be dragged
+            # around for the whole 120s grace.
+            w, _ = _seated(tries=len(PLACE_VERIFY))
+            ck("verify-arms-nothing-past-the-budget", 7 not in w.verify)
+        finally:
+            _w.place = _real_place
+    finally:
+        _w.logline = _real_log
+
+
 def _t_lifecycle(ck):
     """A WINDOW'S LIFE, TICK BY TICK, driven through the real decision code.
 
@@ -5395,7 +5582,7 @@ def selftest():
     # planting the Resolution guard removal), so it is fixed here rather than
     # in each caller.
     for area in (_t_registry, _t_resolution, _t_lock,
-                 _t_lifecycle, _t_desktop, _t_slots,
+                 _t_lifecycle, _t_desktop, _t_slots, _t_verify,
                  _t_terminals, _t_cli_split,
                  _t_launch_source,
                  _t_relaunch, _t_chrome, _t_learn,

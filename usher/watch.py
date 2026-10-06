@@ -34,7 +34,8 @@ from .engine import (AGGR_CAP, ARM_FILE, EXCLUDE_FILE, IDLE_SETTLE,
                      apply_invert, connect, do_capture, identity, is_anchored,
                      is_desync_error,
                      is_transient, kkey, launch_missing, learn,
-                     load_knowledge, logline, persist, place, plugins_sig,
+                     load_knowledge, logline, persist, place, placement_landed,
+                     plugins_sig,
                      reload_anchor, reload_exclude, reload_plugins,
                      rekey_chrome, save_knowledge, snapshot,
                      store_mtime, take_mode, target_geometry, unidentified)
@@ -72,6 +73,19 @@ PLACE_SETTLE_FAST = 0.15  # everything else: the title is already stable at map
 #                           and nothing restores tabs, so place almost at once
 #                           (one placer tick). No reason to make normal apps sit
 #                           out the browser settle, which is the common case.
+
+# WHEN TO READ A PLACEMENT BACK, one delay per attempt, so the length of this
+# tuple is how many times a window may be re-placed per map.
+#
+# A BACKOFF RATHER THAN A FIXED INTERVAL, because the thing being raced is an
+# app finishing its own startup, and that takes as long as it takes: wayfire's
+# cascade placer assigns the losing position when the client's first real
+# commit arrives, which on a relaunched calibre was about four seconds after
+# the map. Three tries spanning 5.1s cover that without a window being dragged
+# around for the whole 120s grace. The first delay must also be long enough
+# for the compositor to have APPLIED the request we are checking, or every
+# placement reads as failed; 0.6s against a measured sub-second apply.
+PLACE_VERIFY = (0.6, 1.5, 3.0)
 
 
 def is_browser(app):
@@ -261,6 +275,14 @@ class Watcher:
         # app, where kkey(app, "") matches EVERY window of that app whatever
         # its title.
         self.slot_held = {}
+        # ISSUED PLACEMENTS AWAITING A READ-BACK: vid -> {"e", "o", "due"}.
+        # `placed` on its own cannot tell a request that worked from one the
+        # compositor overwrote, and it DEDUPS, so a lost race was locked in
+        # for the life of the window. See placement_landed().
+        self.verify = {}
+        self.place_tries = {}  # vid -> placements ISSUED for it this map, so
+        #                        the retry budget survives the re-place that
+        #                        clears it from `placed`
         self.pending = {}      # vid -> {"v": latest view, "due": place-after
         #                        time}: the settle-debounce queue, drained by
         #                        _placer_loop
@@ -452,17 +474,29 @@ class Watcher:
     # --- placement -----------------------------------------------------------
 
     def _try_place(self, v):
-        """_place_view with the IPC error policy wrapped round it. A desync-
+        """_place_view under the placer thread's IPC error policy."""
+        return self._guarded("place", self._place_view, v)
+
+    def _guarded(self, what, fn, *a):
+        """Run one placer-thread step under the IPC error policy. A desync-
         class error (timeout / off-by-one) poisons place_sock the same way it
         poisons the capture socket, and would then silently fail EVERY
         placement for the rest of the session, so rebuild it on one. A benign
         server error-response (e.g. "view is not toplevel" for a popup) leaves
-        the socket in sync: log it and move on, never reconnect."""
+        the socket in sync: log it and move on, never reconnect.
+
+        SHARED RATHER THAN COPIED, because _placer_loop now drives two kinds
+        of step. The verify read-back was added calling _verify_one DIRECTLY
+        from the loop, which has no guard of its own, so one raise would have
+        killed the placer thread and placement would stop for the session with
+        nothing in the log. Two copies of this policy is also how they drift."""
         try:
-            return self._place_view(v)
+            return fn(*a)
         except Exception as e:
             if is_desync_error(e):
-                logline(f"place desync: {e}; reconnecting place socket")
+                # `what` is "place" for the placement path, so those three
+                # lines come out exactly as they always have.
+                logline(f"{what} desync: {e}; reconnecting place socket")
                 try:
                     self.place_sock.close()
                 except Exception:
@@ -470,9 +504,9 @@ class Watcher:
                 try:
                     self.place_sock = connect()
                 except Exception as e2:
-                    logline(f"place reconnect failed: {e2}")
+                    logline(f"{what} reconnect failed: {e2}")
             else:
-                logline(f"place error: {e}")
+                logline(f"{what} error: {e}")
             return None
 
     def _place_view(self, v):
@@ -610,7 +644,59 @@ class Watcher:
         # samples on capture and cannot say whether usher acted or the human
         # did. This is the line that answers that next time.
         logline(msg)
+        # ...and `placed` still only means ASKED, which is why the read-back
+        # below exists. The word is deliberately NOT reworded: this repo's
+        # notes quote it verbatim in a dozen places, and the failure gets its
+        # own lines rather than making every existing quotation false.
+        with self.lock:
+            n = self.place_tries.get(vid, 0)
+            self.place_tries[vid] = n + 1
+        self._verify_later(vid, e, o, n)
         return True
+
+    def _verify_later(self, vid, e, o, n):
+        """Arm a read-back of the placement just issued for vid, n having been
+        issued before it. Past the retry budget, nothing is armed and the last
+        attempt simply stands."""
+        if vid is None or n >= len(PLACE_VERIFY):
+            return
+        with self.lock:
+            self.verify[vid] = {"e": e, "o": o,
+                                "due": time.time() + PLACE_VERIFY[n]}
+
+    def _verify_one(self, vid, item):
+        """Read one issued placement back, and re-place it if it did not land.
+
+        Runs on the placer thread, so the re-read uses place_sock's one
+        writer, and it RE-READS rather than trusting the view dict it was
+        handed, for the same reason the identity retry does: the payload
+        describes the instant it fired and the whole question here is what
+        happened AFTERWARDS."""
+        v = self._fresh_view(vid)
+        if v is None:
+            return             # the window is gone: nothing left to verify
+        e, o = item["e"], item["o"]
+        if placement_landed(v, e, o):
+            return             # it stuck, which is the overwhelmingly common
+            #                    case and says nothing worth logging
+        app, title = app_of(v), v.get("title", "")
+        with self.lock:
+            n = self.place_tries.get(vid, 0)
+        if n >= len(PLACE_VERIFY):
+            # GIVING UP IS SAID OUT LOUD. The window is left where it is
+            # rather than fought over, and the one thing that must not happen
+            # is this passing for success, which is the whole bug.
+            logline(f"place did not take after {n} tries, left where it is: "
+                    f"{app[:18]} | {title[:28]}")
+            return
+        logline(f"place did not take (try {n}), re-placing: "
+                f"{app[:18]} | {title[:34]}")
+        with self.lock:
+            # Clearing `placed` is what lets _place_view consider it again;
+            # it re-runs every gate (grace, aggressive, the slot ledger), so
+            # a retry can never place something a first attempt may not.
+            self.placed.discard(vid)
+            self.pending[vid] = {"v": v, "refetch": True, "due": time.time()}
 
     def _restate(self, vid, e):
         """Re-apply the window STATE a geometry move does not carry: the
@@ -646,6 +732,16 @@ class Watcher:
                 if item.get("refetch"):
                     v = self._fresh_view(v.get("id")) or v
                 self._try_place(v)
+            # Read back placements already issued. AFTER the places above, so
+            # one issued on this very tick is never verified before the
+            # compositor has had its delay to apply it.
+            checks = []
+            with self.lock:
+                for vid in list(self.verify):
+                    if now >= self.verify[vid]["due"]:
+                        checks.append((vid, self.verify.pop(vid)))
+            for vid, item in checks:
+                self._guarded("verify", self._verify_one, vid, item)
             with self.lock:
                 again = self.st.pop("recheck", False)
             if again:
@@ -952,6 +1048,9 @@ class Watcher:
             chrome.forget_window(v["id"])
             with self.lock:
                 self.pending.pop(v["id"], None)
+                # The retry budget is PER MAP, so it goes with the window.
+                self.verify.pop(v["id"], None)
+                self.place_tries.pop(v["id"], None)
         if ev in KNOWLEDGE_TRIGGERS:
             with self.lock:
                 self.st["dirty"] = True
