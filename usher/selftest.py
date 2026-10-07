@@ -1213,8 +1213,9 @@ def _t_launch_source(ck):
     """
     import contextlib
     import io
-    real = (engine.load_snapshot, engine.plugins)
-    seen = []
+    real = (engine.load_snapshot, engine.plugins,
+            engine.desktop_relaunch_missing)
+    seen, desk = [], []
 
     class _P:
         def relaunch_missing(self, saved, live):
@@ -1225,6 +1226,17 @@ def _t_launch_source(ck):
         engine.load_snapshot = lambda *a: {
             "windows": [{"app_id": "kitty", "cmd": "FROM THE FILE"}]}
         engine.plugins = lambda: [_P()]
+        # THE DEFAULT REGISTRY RELAUNCH NEEDS STUBBING TOO, and forgetting it
+        # OPENED TWO REAL TERMINALS on the developer's desktop per run, which
+        # the capture loop then learned as `kitty:<cwd>` slots the terminal
+        # purge does not cover. launch_missing calls BOTH the plugin hooks and
+        # desktop_relaunch_missing, and the latter is not a plugin, so
+        # stubbing `plugins` does not reach it. Worse: stubbing `plugins`
+        # HIDES the real kitty plugin, so is_owned("kitty") goes False and the
+        # registry claims this fixture's kitty window, which it would never do
+        # in production.
+        engine.desktop_relaunch_missing = \
+            lambda *a, **k: desk.append(a) or 0
         given = {"windows": [{"app_id": "kitty", "cmd": "FROM THE CALLER"}]}
         with contextlib.redirect_stdout(io.StringIO()):
             launch_missing(given)
@@ -1241,8 +1253,13 @@ def _t_launch_source(ck):
         with contextlib.redirect_stdout(io.StringIO()):
             launch_missing({"windows": []})
         ck("launch-passes-an-empty-snapshot-through", seen[-1] == [])
+        # ASSERT THE STUB WAS REACHED, or a future launch_missing that stops
+        # calling the registry default would make this silently vacuous and
+        # the spawn could come back unnoticed.
+        ck("launch-reaches-the-registry-default", len(desk) == 3)
     finally:
-        engine.load_snapshot, engine.plugins = real
+        (engine.load_snapshot, engine.plugins,
+         engine.desktop_relaunch_missing) = real
 
 def _t_cli_split(ck):
     """The two front ends: one table, and each refuses the other's verbs.
