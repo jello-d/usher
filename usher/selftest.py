@@ -2134,6 +2134,32 @@ def _t_contracts(ck):
     # places and only ever is in one.
     _declared = {engine.EXIT_OK: "EXIT_OK", engine.EXIT_FAIL: "EXIT_FAIL",
                  engine.EXIT_CANNOT: "EXIT_CANNOT"}
+    # INSTALLED IS NOT RUNNING: all four verdicts, with no install needed.
+    # THE WORKER AND NOT THE SUPERVISOR is the fact under test, so our own pid
+    # stands in and `pkg_dir` supplies the other side.
+    _rwp2 = engine.watcher_pid
+    _tmpd = tempfile.mkdtemp(prefix="usher-age-")
+    try:
+        engine.watcher_pid = lambda: None
+        ck("code-age-no-daemon", engine.daemon_code_age()[0] == "none")
+        engine.watcher_pid = lambda: os.getpid()
+        # a package OLDER than this process: it is running current code
+        open(os.path.join(_tmpd, "x.py"), "w").close()
+        os.utime(os.path.join(_tmpd, "x.py"), (1, 1))
+        ck("code-age-current", engine.daemon_code_age(_tmpd)[0] == "current")
+        # ...and one written just now: a reload is owed
+        os.utime(os.path.join(_tmpd, "x.py"), None)
+        _v, _d = engine.daemon_code_age(_tmpd)
+        ck("code-age-stale", _v == "stale")
+        ck("code-age-stale-says-reload", "reload" in _d)
+        ck("code-age-unknown-on-an-unreadable-dir",
+           engine.daemon_code_age(os.path.join(_tmpd, "nope"))[0] == "unknown")
+        ck("code-age-verdicts-are-distinct",
+           len({"none", "current", "stale", "unknown"}) == 4)
+    finally:
+        engine.watcher_pid = _rwp2
+        shutil.rmtree(_tmpd, ignore_errors=True)
+
     # THE AGENT QUESTION IS ABOUT THE DAEMON'S ENVIRONMENT, not the caller's.
     # Our own pid stands in for the daemon, which gives a REAL
     # /proc/<pid>/environ to read. That file is the EXEC-TIME environment, so
@@ -2223,7 +2249,6 @@ def _t_contracts(ck):
        "== store ==" in _rep and "== contracts ==" in _rep)
 
     # parse_snss recovers the active-tab url from a synthetic session file
-    import tempfile
     fd, path = tempfile.mkstemp()
     try:
         os.write(fd, snss_build([(11, 22, "https://example.com/x",
@@ -2277,6 +2302,28 @@ def _t_watcher(ck):
     # ...but never past the CAP, which is what bounds a login storm
     w.st["armed_at"] = now - AGGR_CAP - 1
     ck("clock-capped", not w._aggressive_now())
+
+    # A QUIET START (a code reload) MUST LAND STEADY. A fresh worker stamps
+    # armed_at with NOW, so without this every reload re-armed aggressive for
+    # START_FLOOR and any window mapping in those five minutes was snapped to
+    # its remembered slot: a deploy changing placement behaviour. This is the
+    # property `setup.sh install` relies on to reload unconditionally, so it
+    # is checked rather than assumed.
+    _q = Watcher(launch=False)
+    _q.mode = "quiet"
+    _q.st["armed_at"] = _q.st["last_map"] = _time.time()
+    ck("quiet-start-is-aggressive-before-init", _q._aggressive_now())
+    _q._init_layout()
+    ck("quiet-start-lands-steady", not _q._aggressive_now())
+    # ...and a later kick still works, or quiet would have broken the knob.
+    _q.st["armed_at"] = _time.time()
+    ck("quiet-start-does-not-break-the-kick", _q._aggressive_now())
+    # RESTORE mode must NOT be quietened: it is the login path and has to
+    # place, so asserting quiet alone would pass with the clock always dead.
+    _r = Watcher(launch=False)
+    _r.mode = None
+    _r.st["armed_at"] = _r.st["last_map"] = _time.time()
+    ck("restore-start-stays-aggressive", _r._aggressive_now())
 
     # THE HOLD: while aggressive, a window the placer has not reached is
     # sitting where its app dropped it, and learning that overwrites the slot

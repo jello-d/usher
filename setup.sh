@@ -239,6 +239,42 @@ do_install() {
   echo "$PKG: payload $_pay; $APPS -> $_bin (venv $VENV)"
   [ -d "$(_hook_dir)" ] && do_hooks || :
   _retire_old_venv
+  _reload_daemon
+}
+
+# INSTALLED IS NOT RUNNING, and nothing used to close that gap: a pkg install
+# replaces the venv while the LIVE daemon keeps the code it started with until
+# the next login. Measured 2026-10-07 on both boxes at once, one of them 41
+# hours stale, which quietly invalidated two verifications that day.
+#
+# SAFE TO DO UNCONDITIONALLY ONLY BECAUSE A QUIET START IS NOW STEADY. reload
+# places nothing, re-baselines nothing, suppresses the relaunch and leaves the
+# aggressive clock expired, so a deploy cannot move a window or change
+# placement behaviour. Before that it re-armed aggressive for five minutes.
+_reload_daemon() {
+  # ONLY IF ONE IS RUNNING. `usher reload` with nothing to signal ACQUIRES THE
+  # LOCK AND BECOMES THE DAEMON, in the foreground, which would hang an
+  # install and read exactly like a wedge. The pid comes from the lock file
+  # via the code that owns that path, so this is not a second copy of it.
+  # FROM `/`, because cwd is prepended to sys.path: run the venv's python
+  # from a directory that happens to contain a `usher/` package and it
+  # imports THAT one. Bit three times in one day, once in this very check.
+  _wpid=$(cd / && "$VENV/bin/python3" -c \
+    'from usher.engine import watcher_pid; print(watcher_pid() or "")' \
+    2>/dev/null) || _wpid=
+  if [ -z "$_wpid" ]; then
+    echo "$PKG: no daemon running; the session will start the new code"
+    return 0
+  fi
+  # NEVER FATAL. A failed reload leaves the OLD daemon running, which is the
+  # state we were already in, so it must not fail an install that otherwise
+  # succeeded. Say so loudly instead and name the remedy.
+  if "$_bin/usher" reload >/dev/null 2>&1; then
+    echo "$PKG: reloaded the running daemon (pid $_wpid) onto this payload"
+  else
+    echo "$PKG: WARNING could not reload the daemon (pid $_wpid); it is" \
+      "still running the OLD code. Run 'usher reload' by hand." >&2
+  fi
 }
 
 do_uninstall() {
@@ -284,6 +320,29 @@ do_check() {
   done
   if [ -z "$_out" ]; then ok "links resolve inside the payload"
   else bad "resolves outside $_pay:$_out"; fi
+  # IS THE RUNNING DAEMON ON THIS PAYLOAD? A step an install can make must be
+  # a step a check can see, and "installed" was not "running": compare the
+  # daemon's START TIME against the payload's mtime, which is the only reading
+  # that settles it. The clone's HEAD does not, and neither does the venv.
+  # NOT a hard failure: no daemon at all is a legitimate state (a box with no
+  # session), and install already reloads, so this is the backstop for a
+  # reload that was skipped or failed.
+  # THE VERDICT COMES FROM THE ENGINE, not from a comparison written again
+  # here: `engine.daemon_code_age()` knows that the WORKER's start time is the
+  # one that moves (a reload re-execs the supervisor in place) and that the
+  # *.py files are what to date, never the directory, whose mtime the import
+  # itself bumps. Two readings of that got written wrong here before it was
+  # one function with checks behind it.
+  _age=$(cd / && "$VENV/bin/python3" -c \
+    'from usher.engine import daemon_code_age
+v, d = daemon_code_age()
+print(v, d)' 2>/dev/null) || _age="unknown could not ask"
+  case $_age in
+  none*)    ok "no daemon running (nothing to be stale)" ;;
+  current*) ok "the running daemon is on this payload" ;;
+  stale*)   warn "the daemon is running OLDER code: ${_age#stale }" ;;
+  *)        warn "cannot tell whether the daemon is current: ${_age#unknown }";;
+  esac
   if [ -d "$OLD_VENV" ]; then
     bad "the pre-payload venv is still there ($OLD_VENV); run: install"
   fi

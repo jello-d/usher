@@ -128,6 +128,17 @@ def _doctor_contracts(out):
     # a missing agent in every session usher respawns, and a remote one then
     # cannot authenticate. mux latch copes (it polls for a credential rather
     # than failing), but only if it can see an agent socket at all.
+    # A STALE DAEMON IS THE FIRST THING TO KNOW, because every line below
+    # describes the code on DISK while the session is being run by whatever
+    # was loaded at startup. Reported here rather than left to setup.sh check,
+    # since doctor is what this repo tells you to run first.
+    _age, _why = engine.daemon_code_age()
+    if _age == "stale":
+        out(f"  [WARN] the DAEMON is running OLDER code than this: {_why}")
+    elif _age == "none":
+        out("  [OK]   no daemon running (this reports the store only)")
+    elif _age == "current":
+        out("  [OK]   the daemon is running this code")
     sock, whose = engine.session_agent_sock()
     if not sock:
         out(f"  [WARN] no SSH_AUTH_SOCK in {whose}: a respawned REMOTE"

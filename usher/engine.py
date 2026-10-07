@@ -3313,6 +3313,58 @@ def watcher_pid():
     return pid if os.path.isdir(f"/proc/{pid}") else None
 
 
+def daemon_code_age(pkg_dir=None):
+    """(verdict, detail): is the RUNNING daemon on the code THIS process
+    loaded? One of "none", "current", "stale", "unknown".
+
+    INSTALLED IS NOT RUNNING, and nothing used to be able to see the gap. A
+    pkg install replaces the venv while the live daemon keeps the code it
+    started with, so a fix can sit deployed and inert: measured 2026-10-07 on
+    both boxes at once, one of them 41 hours behind, which quietly invalidated
+    two verifications that day.
+
+    THE WORKER, NOT THE SUPERVISOR, and getting this backwards is the easy
+    mistake: a reload RE-EXECS the supervisor IN PLACE, so its pid and start
+    time never change, and comparing those would report stale forever after
+    the first reload. The worker is respawned, so its start time is the only
+    one that moves.
+
+    `/proc/<pid>` is stat'ed for the start time rather than parsed out of
+    `stat`, since its mtime IS that moment, and the children come from
+    `/proc/<pid>/task/<pid>/children` rather than a scan of the process table,
+    which in this tree has produced a self-match five times.
+
+    `pkg_dir` exists so the three verdicts are checkable without installing
+    anything, the same injectable-seam habit pick_session and greeter_choice
+    use. It defaults to the package THIS process loaded, which is the honest
+    question: is the daemon running the code I am?"""
+    pid = watcher_pid()
+    if pid is None:
+        return "none", "no daemon is running"
+    try:
+        started = os.stat(f"/proc/{pid}").st_mtime
+        kids = open(f"/proc/{pid}/task/{pid}/children").read().split()
+        for k in kids:
+            try:
+                started = max(started, os.stat(f"/proc/{int(k)}").st_mtime)
+            except (OSError, ValueError):
+                pass
+        # THE *.py FILES, NOT THE DIRECTORY, which is the same trap
+        # plugins_sig records: IMPORTING this package writes a __pycache__
+        # inside it, which bumps the directory's mtime to NOW, so the
+        # directory reading called every daemon stale the instant it was
+        # asked. A measurement must not be moved by the act of taking it.
+        here = pkg_dir or os.path.dirname(os.path.abspath(__file__))
+        built = max(os.stat(f).st_mtime
+                    for f in glob.glob(os.path.join(here, "*.py")))
+    except (OSError, ValueError) as e:
+        return "unknown", f"could not read the times ({e})"
+    if started >= built:
+        return "current", f"worker started {int(started - built)}s after it"
+    return "stale", (f"the worker predates this code by "
+                     f"{int(built - started)}s, so a reload is owed")
+
+
 def session_agent_sock():
     """(agent socket or None, where we looked) for the agent a RESPAWNED
     terminal would inherit.

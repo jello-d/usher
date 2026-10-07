@@ -379,7 +379,20 @@ class Watcher:
             # their positions AND the store keeps its memory of where they
             # belong, so a reload can never be the reason the two silently
             # converge on the wrong answer.
+            #
+            # AND IT STARTS STEADY, which is the other half of "touch
+            # nothing" and was missing: a fresh worker stamps armed_at with
+            # NOW, so every reload re-armed AGGRESSIVE for START_FLOOR and any
+            # window mapping in those five minutes was snapped to its
+            # remembered slot. A deploy must not change placement behaviour,
+            # and this is what lets `setup.sh install` reload unconditionally.
+            # Expiring the CAP is what settles it whatever last_map holds,
+            # since _steady_at takes min(armed + AGGR_CAP, ...). A later
+            # `usher aggressive` kick re-stamps armed_at and works normally.
+            with self.lock:
+                self.st["armed_at"] = time.time() - AGGR_CAP
             logline("reload: neither restoring nor re-baselining")
+            logline("reload: starting STEADY, so a deploy places nothing")
         elif self.mode == "adopt":
             # Capture-and-resume: adopt the CURRENT layout as the baseline and
             # do NOT restore. No init-place and no grace deadlines for open
