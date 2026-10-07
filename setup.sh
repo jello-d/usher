@@ -252,29 +252,29 @@ do_install() {
 # aggressive clock expired, so a deploy cannot move a window or change
 # placement behaviour. Before that it re-armed aggressive for five minutes.
 _reload_daemon() {
-  # ONLY IF ONE IS RUNNING. `usher reload` with nothing to signal ACQUIRES THE
-  # LOCK AND BECOMES THE DAEMON, in the foreground, which would hang an
-  # install and read exactly like a wedge. The pid comes from the lock file
-  # via the code that owns that path, so this is not a second copy of it.
-  # FROM `/`, because cwd is prepended to sys.path: run the venv's python
-  # from a directory that happens to contain a `usher/` package and it
-  # imports THAT one. Bit three times in one day, once in this very check.
-  _wpid=$(cd / && "$VENV/bin/python3" -c \
-    'from usher.engine import watcher_pid; print(watcher_pid() or "")' \
-    2>/dev/null) || _wpid=
-  if [ -z "$_wpid" ]; then
-    echo "$PKG: no daemon running; the session will start the new code"
-    return 0
-  fi
+  # NO PID PROBE: `usher reload` REFUSES when there is nothing running and
+  # exits EXIT_CANNOT (2), so the exit code answers the question and this does
+  # not need to know where the lock file lives. It used to ask through the
+  # venv's python, which was one of three places cwd-shadowing had to be
+  # fixed; one fewer now.
+  #
   # NEVER FATAL. A failed reload leaves the OLD daemon running, which is the
   # state we were already in, so it must not fail an install that otherwise
-  # succeeded. Say so loudly instead and name the remedy.
-  if "$_bin/usher" reload >/dev/null 2>&1; then
-    echo "$PKG: reloaded the running daemon (pid $_wpid) onto this payload"
-  else
-    echo "$PKG: WARNING could not reload the daemon (pid $_wpid); it is" \
-      "still running the OLD code. Run 'usher reload' by hand." >&2
-  fi
+  # succeeded.
+  # `|| _rc=$?` RATHER THAN A BARE ASSIGNMENT, because under `set -e` a
+  # command substitution that FAILS aborts the script: an install with a
+  # broken venv died here instead of reporting it, which the setup test's dud
+  # venv caught. It is also the rc-after-the-wrong-thing family this tree
+  # keeps recording.
+  _rc=0
+  _out=$("$_bin/usher" reload 2>&1) || _rc=$?
+  case $_rc in
+  0) echo "$PKG: reloaded the running daemon onto this payload" ;;
+  2) echo "$PKG: no daemon running; the session will start the new code" ;;
+  *) echo "$PKG: WARNING could not reload the daemon, so it is still" \
+       "running the OLD code. Run 'usher reload' by hand." >&2
+     echo "$_out" | sed 's/^/  /' >&2 ;;
+  esac
 }
 
 do_uninstall() {
