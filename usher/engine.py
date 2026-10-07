@@ -807,10 +807,20 @@ def resolution(v):
     An UNOWNED app resolves Ready(title), because the title is the only handle
     there is and for those it is the right one. A plugin raising is treated as
     Pending rather than Ready: a broken plugin must not be able to get a
-    window remembered under a guessed key."""
+    window remembered under a guessed key.
+
+    NO APP-ID AND NO TITLE IS NO HANDLE AT ALL, and that is NEVER rather than
+    Ready(""): the key it would produce carries no information, so it matches
+    every other handle-less window and would drag the next one onto whatever
+    geometry the last one had. The same rule as a plugin declining, one level
+    down, where there is not even an app to ask about."""
     v = pview(v)
     p = _owner(v)
     if p is None:
+        if not v["app"] and not v["title"].strip():
+            return Resolution.never(
+                "the compositor reports neither an app-id nor a title, so "
+                "there is nothing to key this window on")
         return Resolution.ready(v["title"])
     try:
         r = p.resolve(v)
@@ -858,9 +868,8 @@ def _single_id(v):
 
 
 def unidentified(v):
-    """True if this window's app HAS a plugin and that plugin declined to
-    identify it, so usher does not know WHICH window this is, and must
-    neither remember it nor match it against anything remembered.
+    """True if usher cannot say WHICH window this is, so it must neither
+    remember it nor match it against anything remembered.
 
     ASK THIS, NOT identity(), which always answers and falls back to the raw
     title. That fallback is right for an app no plugin claims (the title is
@@ -868,11 +877,16 @@ def unidentified(v):
     plugin declined to resolve is a key known to be false. Chrome hits it
     whenever its session file has not caught up with a window.
 
+    IT ASKS resolution() AND NOTHING ELSE. It used to require is_owned first,
+    which scoped it to "a plugin declined" and left the case where there is no
+    plugin AND no handle answering Ready(""). Dropping that gate changes no
+    owned answer (the plugin is still the authority) and lets the handle-less
+    case be refused by the one predicate both sides already consult.
+
     BOTH LEARNING AND PLACING MUST ASK THE SAME PREDICATE. A store written
     under a key the matcher never looks up, or matched under a key the writer
     never produces, is the fault this exists to prevent."""
-    v = pview(v)
-    return is_owned(v["app"]) and not resolution(v).is_ready
+    return not resolution(v).is_ready
 
 
 def is_owned(app):
@@ -1490,8 +1504,13 @@ def load_knowledge():
 def is_unique(app, counts):
     """True if this app_id identifies exactly one window (so it can key by
     app_id alone, title-independent). A plugin-owned app is never unique, even
-    when momentarily alone: its windows share an app_id (see is_owned)."""
-    return counts[app] == 1 and not is_owned(app)
+    when momentarily alone: its windows share an app_id (see is_owned).
+
+    AN EMPTY APP-ID IS NOT AN IDENTIFIER, it is the absence of one, and
+    treating it as a unique app is how a window with no app-id came to be
+    stored under `kkey("", "")`, a key EVERY app-id-less toplevel matches. It
+    also DISCARDED the title, which was the only handle such a window had."""
+    return bool(app) and counts[app] == 1 and not is_owned(app)
 
 
 def kb_entry(w, title, appid_only, when):

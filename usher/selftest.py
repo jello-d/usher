@@ -44,6 +44,7 @@ import shutil
 import sys
 import tempfile
 import time
+from collections import Counter
 from datetime import date
 
 from . import engine
@@ -69,7 +70,8 @@ from .engine import (
     mux_host_of, mux_relaunch_missing, mux_session_of, mux_session_set,
     pick_socket, place_of, placement_landed, profile_id, pview,
     rekey_chrome, resolution, save_knowledge, saved_sizes, schema_path,
-    seated_session, target_geometry, unidentified, wayfire_socket)
+    is_unique, seated_session, target_geometry, unidentified,
+    wayfire_socket)
 
 
 @contextlib.contextmanager
@@ -368,6 +370,27 @@ def _t_resolution(ck):
     ck("resolution-never-carries-why", Resolution.never("w").why == "w")
     ck("resolution-states-are-distinct",
        len({Resolution.READY, Resolution.PENDING, Resolution.NEVER}) == 3)
+
+    # 1b. NO APP-ID AND NO TITLE IS NO HANDLE, so it is NEVER rather than
+    #     Ready(""). An empty key matches every other handle-less window, so
+    #     remembering one would drag the next onto the last one's geometry.
+    #     A real `kkey("", "")` entry was found in the live store, 354x31 at
+    #     ws(2,0), aged ten days and matchable by anything.
+    _none = _trv("", "")
+    ck("resolution-no-handle-is-never", _st(_none) == Resolution.NEVER)
+    ck("resolution-no-handle-says-why", bool(_wh(_none)))
+    ck("no-handle-is-unidentified", unidentified(_none))
+    #     A TITLE IS STILL A HANDLE for an unowned app, and must not be
+    #     discarded just because the app-id is missing: is_unique() used to
+    #     call the empty app-id unique, which keyed by app_id ALONE and threw
+    #     the title away.
+    _titled = _trv("", "Volume Control")
+    ck("blank-app-with-a-title-is-ready", _st(_titled) == Resolution.READY)
+    ck("blank-app-keeps-its-title", not unidentified(_titled))
+    ck("blank-app-is-never-appid-keyed",
+       not is_unique("", Counter({"": 1})))
+    ck("a-real-app-alone-is-still-appid-keyed",
+       is_unique("signal", Counter({"signal": 1})))
 
     # 2. EVERY PLUGIN, including the base and anything a user registered.
     #    A plugin that answers at all must answer with a Resolution, must
