@@ -3301,6 +3301,51 @@ def take_mode():
     return mode if mode in MODES else "adopt"
 
 
+def watcher_pid():
+    """The running supervisor's pid, or None. Reads the same lock file
+    _signal_watcher does, but to ASK ABOUT the daemon rather than act on it,
+    so it answers None instead of exiting."""
+    d = os.environ.get("XDG_RUNTIME_DIR") or STATE
+    try:
+        pid = int(open(os.path.join(d, "session-watch.lock")).read().strip())
+    except (OSError, ValueError):
+        return None
+    return pid if os.path.isdir(f"/proc/{pid}") else None
+
+
+def session_agent_sock():
+    """(agent socket or None, where we looked) for the agent a RESPAWNED
+    terminal would inherit.
+
+    THE CALLER'S ENVIRONMENT IS THE WRONG ONE TO ASK, and asking it made
+    `usher doctor` over ssh report a missing agent on a box whose session had
+    one: an ssh shell has no SSH_AUTH_SOCK, and over ssh is exactly where this
+    report gets run. The question is whether a window the DAEMON spawns can
+    authenticate, and spawn_term inherits the DAEMON's environment, so that is
+    the environment to read. Same fault as doctor calling itself blind from an
+    unset WAYFIRE_SOCKET, and as the greeter resolution reading the caller's
+    XDG_DATA_DIRS: THE ANSWER MUST NOT DEPEND ON WHO ASKS.
+
+    /proc/<pid>/environ is the EXEC-TIME environment, which is the right
+    reading here rather than the trap it is elsewhere: it is precisely what
+    the daemon's children inherit.
+
+    Falls back to our own environment with no daemon running, and SAYS which
+    it used, because the two answers mean different things."""
+    pid = watcher_pid()
+    if pid is not None:
+        try:
+            with open(f"/proc/{pid}/environ", "rb") as f:
+                for kv in f.read().split(b"\0"):
+                    if kv.startswith(b"SSH_AUTH_SOCK="):
+                        return (kv.split(b"=", 1)[1].decode("utf-8", "replace"),
+                                f"the daemon (pid {pid})")
+            return None, f"the daemon (pid {pid})"
+        except OSError:
+            pass
+    return os.environ.get("SSH_AUTH_SOCK"), "this shell; no daemon is running"
+
+
 def _signal_watcher(sig, action, done):
     """Signal the running supervisor, whose pid is in the lock file (the single
     place that path lives). Exit if none is running or the signal fails."""

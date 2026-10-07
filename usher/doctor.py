@@ -128,14 +128,14 @@ def _doctor_contracts(out):
     # a missing agent in every session usher respawns, and a remote one then
     # cannot authenticate. mux latch copes (it polls for a credential rather
     # than failing), but only if it can see an agent socket at all.
-    sock = os.environ.get("SSH_AUTH_SOCK")
+    sock, whose = engine.session_agent_sock()
     if not sock:
-        out("  [WARN] no SSH_AUTH_SOCK: a respawned REMOTE session has no way"
-            " to authenticate")
+        out(f"  [WARN] no SSH_AUTH_SOCK in {whose}: a respawned REMOTE"
+            " session has no way to authenticate")
     elif not os.path.exists(sock):
         out(f"  [WARN] SSH_AUTH_SOCK points at a missing socket ({sock})")
     else:
-        out("  [OK]   ssh agent socket present")
+        out(f"  [OK]   ssh agent socket present  (read from {whose})")
     names = mux_session_set()
     bad = [s for s in names if not re.fullmatch(r"[^\s:]+", s)]
     if bad:

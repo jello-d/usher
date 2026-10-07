@@ -2134,6 +2134,38 @@ def _t_contracts(ck):
     # places and only ever is in one.
     _declared = {engine.EXIT_OK: "EXIT_OK", engine.EXIT_FAIL: "EXIT_FAIL",
                  engine.EXIT_CANNOT: "EXIT_CANNOT"}
+    # THE AGENT QUESTION IS ABOUT THE DAEMON'S ENVIRONMENT, not the caller's.
+    # Our own pid stands in for the daemon, which gives a REAL
+    # /proc/<pid>/environ to read. That file is the EXEC-TIME environment, so
+    # a value poked into os.environ now does NOT appear in it: asserting the
+    # poked sentinel is NOT returned is what proves /proc was read and the
+    # caller's live environment was not.
+    _rwp = engine.watcher_pid
+    _renv = os.environ.get("SSH_AUTH_SOCK")
+    try:
+        os.environ["SSH_AUTH_SOCK"] = "/nonexistent/from-the-caller"
+        engine.watcher_pid = lambda: os.getpid()
+        _dsock, _dwhose = engine.session_agent_sock()
+        ck("agent-sock-names-the-daemon", str(os.getpid()) in _dwhose)
+        ck("agent-sock-ignores-the-callers-env",
+           _dsock != "/nonexistent/from-the-caller")
+        # ...and with no daemon it falls back to our own and SAYS so, because
+        # the two answers mean different things.
+        engine.watcher_pid = lambda: None
+        _ssock, _swhose = engine.session_agent_sock()
+        ck("agent-sock-falls-back-to-the-shell",
+           _ssock == "/nonexistent/from-the-caller" and "shell" in _swhose)
+        # DISTINCT RATHER THAN each individually right: conflating the two is
+        # the whole bug, and a substring probe is what got this check wrong
+        # the first time ("no daemon is running" contains "daemon").
+        ck("agent-sock-sources-are-distinguishable", _dwhose != _swhose)
+    finally:
+        engine.watcher_pid = _rwp
+        if _renv is None:
+            os.environ.pop("SSH_AUTH_SOCK", None)
+        else:
+            os.environ["SSH_AUTH_SOCK"] = _renv
+
     ck("exit-codes-are-distinct", len(_declared) == 3)
     ck("exit-codes-are-0-1-2", set(_declared) == {0, 1, 2})
     # Every INTEGER literal handed to sys.exit anywhere in the package must be
