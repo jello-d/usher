@@ -2134,6 +2134,27 @@ def _t_contracts(ck):
     # places and only ever is in one.
     _declared = {engine.EXIT_OK: "EXIT_OK", engine.EXIT_FAIL: "EXIT_FAIL",
                  engine.EXIT_CANNOT: "EXIT_CANNOT"}
+    # AN ARMED MODE MUST NOT OUTLIVE THE DAEMON IT WAS ARMED FOR. `reload`
+    # arms quiet; a stop before the worker consumed it used to leave the
+    # marker in the runtime dir for the next LOGIN to eat, which then started
+    # quiet and restored NOTHING, with no visible cause. Found live, as a
+    # `quiet` marker sitting armed with no daemon running.
+    _rsw = engine._signal_watcher
+    try:
+        engine._signal_watcher = lambda *a, **k: None   # do not signal anyone
+        engine.arm_mode("quiet")
+        ck("mode-arms", engine.take_mode() == "quiet")
+        engine.arm_mode("quiet")
+        engine.do_stop()
+        # "restore" is what take_mode answers with nothing armed, i.e. the
+        # DEFAULT start, which is the property that matters: after a stop the
+        # next start restores the layout rather than inheriting a quiet that
+        # was meant for a daemon no longer running.
+        ck("stop-disarms-the-mode", engine.take_mode() == "restore")
+    finally:
+        engine._signal_watcher = _rsw
+        engine.arm_mode("restore")
+
     # INSTALLED IS NOT RUNNING: all four verdicts, with no install needed.
     # THE WORKER AND NOT THE SUPERVISOR is the fact under test, so our own pid
     # stands in and `pkg_dir` supplies the other side.

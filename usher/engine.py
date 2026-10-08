@@ -3418,7 +3418,55 @@ def do_stop():
     """Stop the watcher cleanly: SIGTERM the supervisor, whose stop handler
     terminates the worker and exits (releasing the lock). Replaces the
     `pkill -f 'usher-mgr watch'` dance, which races the respawn and can
-    match the wrong process: including the shell running the pkill."""
+    match the wrong process: including the shell running the pkill.
+
+    AND IT DISARMS THE MODE, because an armed mode is an instruction to the
+    NEXT GENERATION OF THE DAEMON BEING STOPPED, and stopping it voids that
+    instruction. Without this, `usher reload` (which arms quiet) followed by a
+    stop before the worker consumed it left a LANDMINE: the marker survives in
+    the runtime dir, so the next LOGIN started quiet and restored nothing,
+    with the session coming up unplaced for no visible reason. Found live
+    while testing the reload paths: a `quiet` marker sitting armed with no
+    daemon running.
+
+    A later start is a FRESH intent, and a login means restore."""
     _signal_watcher(signal.SIGTERM, "stop", "stopped")
+    arm_mode("restore")          # "restore" is the disarm: it removes the flag
+
+
+def do_reload():
+    """Reload the running watcher: arm quiet, then SIGHUP the supervisor,
+    which re-execs and picks up new code.
+
+    A CLIENT ACTION, the sibling of do_stop, and it SIGNALS rather than runs
+    anything. `usher` is the command interface; it must never become the
+    thing it talks to. This used to call `watch.do_watch()`, the SERVICE's
+    entry point, which acquires the singleton and BECOMES the supervisor when
+    none is running, in the FOREGROUND: a client silently turning into a
+    daemon, and indistinguishable from a hang to whoever typed it.
+
+    THE SERVICE KEEPS THAT DUAL NATURE AND SHOULD. `usher-mgr watch` run
+    against a live instance signals it instead of starting a second one,
+    which is the idempotence the autostart relies on. The mistake was the
+    CLIENT borrowing that path, not the path existing.
+
+    IT REFUSES rather than starting one, because a daemon started from a
+    command shell inherits THAT shell's environment, and an ssh with no
+    WAYLAND_DISPLAY is the recorded cause of a respawned terminal dying
+    instantly with nothing but `[kitty] <defunct>` to show for it. The session
+    starts the daemon because the session is what has the environment.
+
+    ARMED ONLY ONCE THE SIGNAL IS GOING TO BE SENT. arm_mode writes a marker
+    the next worker generation CONSUMES, so arming and then not reloading
+    leaves it for the next LOGIN to eat, which would start quiet and restore
+    nothing."""
+    if watcher_pid() is None:
+        print("usher: no daemon is running, so there is nothing to reload.",
+              file=sys.stderr)
+        print("usher: the session starts it (usher-mgr watch), and a login "
+              "picks up new code by itself.", file=sys.stderr)
+        sys.exit(EXIT_CANNOT)
+    arm_mode("quiet")
+    _signal_watcher(signal.SIGHUP, "reload", "reloaded")
 
 

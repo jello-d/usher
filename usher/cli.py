@@ -507,34 +507,11 @@ def _dispatch(verb, args):
         watch.do_watch(launch="--no-launch" not in args)
     elif verb == "reload":        # pick up new code, touch NOTHING else
         # What a deploy wants. `resume` looks right for this and is not: it
-        # captures, so it rewrites every remembered slot to wherever the window
-        # currently sits. Never relaunches either.
-        #
-        # NOTHING TO RELOAD IS NOT A REASON TO START ONE. This used to fall
-        # through to Supervisor.run, which finds the lock free and BECOMES the
-        # daemon in the foreground: indistinguishable from a hang to whoever
-        # typed it, and a trap `setup.sh` had to work around.
-        #
-        # AND BACKGROUNDING IT WOULD BE WORSE, which is worth saying because
-        # it is the obvious alternative. A daemon started here inherits THIS
-        # shell's environment, and a provision run is usually an ssh with no
-        # WAYLAND_DISPLAY, which is the measured cause of spawn_term's kitty
-        # dying instantly with nothing but `[kitty] <defunct>` to show for it.
-        # That trades a visible hang for an invisible broken daemon. The
-        # session starts the daemon, because the session is what has the
-        # environment it needs.
-        if engine.watcher_pid() is None:
-            print(f"{PROG}: no daemon is running, so there is nothing to "
-                  f"reload.", file=sys.stderr)
-            print(f"{PROG}: the session starts it (usher-mgr watch), and a "
-                  f"login picks up new code by itself.", file=sys.stderr)
-            sys.exit(engine.EXIT_CANNOT)
-        # ARMED ONLY ONCE THE RELOAD IS GOING TO HAPPEN. arm_mode writes a
-        # marker the next worker generation CONSUMES, so arming and then not
-        # reloading leaves it for the next LOGIN to eat, which would start
-        # quiet and restore nothing.
-        engine.arm_mode("quiet")
-        watch.do_watch(launch=False)
+        # captures, so it rewrites every remembered slot to wherever the
+        # window currently sits. Never relaunches either. A CLIENT ACTION
+        # that signals, like `stop`: see engine.do_reload for why this must
+        # not reach into the service's entry point.
+        engine.do_reload()
     elif verb == "_super":        # internal: must NOT re-arm the mode
         watch.do_watch(launch="--no-launch" not in args)
     elif verb == "_worker":       # internal: the supervised worker

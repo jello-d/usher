@@ -137,7 +137,15 @@ class Supervisor:
     def run(self):
         self.lock = acquire_singleton()
         if self.lock is None:
-            # already running -> reload it (picks up code + the armed mode).
+            # ALREADY RUNNING -> signal it instead of starting a second one.
+            # This is the SERVICE being idempotent, which the autostart relies
+            # on: a second login must not produce two supervisors.
+            #
+            # IT IS NOT THE CLIENT'S RELOAD PATH, and `usher reload` borrowing
+            # it was a real confusion: this function DAEMONISES when the lock
+            # is free, so a command-line reload on a box with no daemon became
+            # one, in the foreground, with the command shell's environment.
+            # `engine.do_reload` signals and never runs anything.
             _signal_watcher(signal.SIGHUP, "reload", "reloaded")
             return
         if self.lock == "unlocked":
