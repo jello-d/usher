@@ -1825,6 +1825,87 @@ def _t_chrome(ck):
        and not is_browser_cmdline(
            b"/opt/google/chrome/chrome_crashpad_handler\0--monitor-self\0"))
 
+    # A PROFILE CHROME HAS NOT OPENED THIS RUN MUST CONTRIBUTE NO WINDOWS.
+    # Its newest session file is still on disk, so the live id set gained
+    # windows that do not exist, and elimination then had two free ids for one
+    # unresolved view and refused. Measured on manifestor 2026-10-09: Profile
+    # 4's month-old file, one dead Gmail window, one real window unplaceable.
+    _rbp, _rsh = chrome.browser_pids, chrome.session_history
+    _sdir = tempfile.mkdtemp(prefix="usher-sess-", dir="/var/tmp")
+    try:
+        chrome.browser_pids = lambda: []
+        ck("browser-started-none-without-a-browser",
+           chrome.browser_started() is None)
+        chrome.browser_pids = lambda: [os.getpid()]
+        _mine = chrome.browser_started()
+        ck("browser-started-reads-the-process",
+           _mine is not None and _mine <= time.time())
+        # THE EARLIEST OF SEVERAL. pid 1 began at boot, so including it must
+        # move the answer BACK, which is the conservative direction given the
+        # answer is used to discard files.
+        chrome.browser_pids = lambda: [os.getpid(), 1]
+        ck("browser-started-takes-the-earliest",
+           chrome.browser_started() < _mine)
+
+        _fresh = os.path.join(_sdir, "Session_fresh")
+        _stale = os.path.join(_sdir, "Session_stale")
+        open(_fresh, "w").close()
+        open(_stale, "w").close()
+        os.utime(_stale, (1, 1))
+        chrome.session_history = lambda: {"loaded": [_fresh],
+                                          "dormant": [_stale]}
+        chrome.browser_pids = lambda: [os.getpid()]
+        ck("session-files-drops-a-profile-older-than-the-browser",
+           chrome.session_files() == [_fresh])
+        # ...and with NO browser running every file is the record of the last
+        # run, which is exactly what the login path reads.
+        chrome.browser_pids = lambda: []
+        ck("session-files-unfiltered-without-a-browser",
+           sorted(chrome.session_files()) == sorted([_fresh, _stale]))
+    finally:
+        chrome.browser_pids, chrome.session_history = _rbp, _rsh
+        shutil.rmtree(_sdir, ignore_errors=True)
+
+    # END TO END, through the title map and elimination, which is where the
+    # live fault actually showed: a dormant profile's window is one the file
+    # records and nothing can be, so leaving it in the set is what forced the
+    # refusal. Two REAL session files, since both halves read bytes.
+    with _tsnss([(41, 1, "https://live/", "Live Window")]) as _lf, \
+            _tsnss([(42, 2, "https://dead/", "Dead Window")]) as _df:
+        _rbp, _rsh = chrome.browser_pids, chrome.session_history
+        _rsig = dict(chrome._snss_cache)
+        try:
+            os.utime(_df, (1, 1))
+            chrome.session_history = lambda: {"live": [_lf], "dormant": [_df]}
+            chrome.browser_pids = lambda: [os.getpid()]
+            chrome._snss_cache["sig"] = None
+            _tm = chrome.chrome_session_titles()
+            ck("titles-exclude-a-dormant-profile",
+               "Live Window" in _tm and "Dead Window" not in _tm)
+            # the view whose title the file cannot match is now FORCED, where
+            # the phantom id made this refuse
+            chrome._slot_cache.clear()
+            ck("elim-claims-once-the-phantom-id-is-gone",
+               chrome.claim_by_elimination(
+                   [(1, "something the file never recorded - Google Chrome")])
+               == 1)
+            ck("elim-claimed-the-live-window",
+               chrome._slot_cache.get(1) == "chrome:win:41")
+            # and WITH the dormant profile back in, it refuses: the fixture
+            # proves the exclusion is what decides, not the fixture's shape
+            chrome.browser_pids = lambda: []
+            chrome._snss_cache["sig"] = None
+            chrome._slot_cache.clear()
+            ck("elim-refuses-while-the-phantom-id-remains",
+               chrome.claim_by_elimination(
+                   [(1, "something the file never recorded - Google Chrome")])
+               is None)
+        finally:
+            chrome.browser_pids, chrome.session_history = _rbp, _rsh
+            chrome._snss_cache.update(_rsig)
+            chrome._snss_cache["sig"] = None
+            chrome._slot_cache.clear()
+
 def _t_learn(ck):
     """what a learn pass keeps, replaces and purges."""
     # learn() must KEEP the entry it just wrote for a live terminal. Its mux

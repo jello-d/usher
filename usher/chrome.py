@@ -269,9 +269,66 @@ def session_history():
             for p, v in byprof.items()}
 
 
+def browser_started():
+    """When the running browser began, as a unix time, or None if none is
+    running or /proc cannot be read.
+
+    THE EARLIEST of several, which is the conservative direction: the answer
+    is used to DISCARD session files, so an earlier one discards fewer."""
+    try:
+        hz = os.sysconf("SC_CLK_TCK")
+        btime = 0
+        with open("/proc/stat") as f:
+            for line in f:
+                if line.startswith("btime "):
+                    btime = int(line.split()[1])
+                    break
+    except (OSError, ValueError):
+        return None
+    if not btime:
+        return None
+    out = []
+    for p in browser_pids():
+        try:
+            with open(f"/proc/{p}/stat") as f:
+                st = f.read()
+            # comm can hold spaces and parens, so the fields start after the
+            # LAST ')'. starttime is field 22, i.e. index 19 from there.
+            out.append(btime + int(st[st.rindex(")") + 2:].split()[19]) / hz)
+        except (OSError, ValueError, IndexError):
+            continue
+    return min(out) if out else None
+
+
 def session_files():
-    """The CURRENT session file per Chrome profile: what the windows are now."""
-    return [v[0] for v in session_history().values()]
+    """The CURRENT session file per Chrome profile: what the windows are now.
+
+    A FILE UNTOUCHED SINCE BEFORE THE BROWSER STARTED IS DROPPED, and the
+    argument is a certainty rather than a heuristic: if this browser run has
+    not written the file, nothing in it was written by this run, so its window
+    ids belong to a previous one whether or not the profile is loaded.
+
+    WHY IT MATTERS: a profile Chrome has not opened this run still has a
+    newest session file, so it contributed phantom windows to the live id set.
+    Measured on manifestor 2026-10-09, where Profile 4's month-old file put a
+    dead Gmail window in the set, which left claim_by_elimination with two
+    free ids for one unresolved view and made it (correctly) refuse. One real
+    window went unplaceable for want of excluding a window that did not exist.
+
+    UNFILTERED WHEN NO BROWSER IS RUNNING, which is not a special case so much
+    as the same rule with nothing to compare against: every file is then the
+    record of the last run, and that is exactly what the login path wants."""
+    started = browser_started()
+    out = []
+    for files in session_history().values():
+        if started is not None:
+            try:
+                if os.path.getmtime(files[0]) < started:
+                    continue
+            except OSError:
+                pass                    # unreadable: keep the old behaviour
+        out.append(files[0])
+    return out
 
 
 def session_sig():
