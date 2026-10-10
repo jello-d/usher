@@ -47,7 +47,7 @@ import time
 from collections import Counter
 from datetime import date
 
-from . import engine
+from . import chrome, engine
 # FROM chrome ITSELF, not through the engine, which merely re-exports them.
 # Importing a name through whoever happened to use it first is how a module's
 # real dependency stops being visible in its own header.
@@ -870,6 +870,7 @@ def _t_slots(ck):
         w.identified.add(2)
         w._try_place(V(2))
         ck("slot-reusable-after-the-holder-closes", 2 in seated)
+
     finally:
         pass
 
@@ -2180,6 +2181,54 @@ def _t_contracts(ck):
     finally:
         engine.watcher_pid = _rwp2
         shutil.rmtree(_tmpd, ignore_errors=True)
+
+    # ELIMINATION OVER THE RECORDED IDS, which never compares title content.
+    # The titles below are DELIBERATELY unrelated to each other: if the claim
+    # depended on the strings at all, no fixture here would resolve.
+    _rst = chrome.chrome_session_titles
+    try:
+        def _titles(m):
+            chrome.chrome_session_titles = lambda: m
+        T = {"Alpha": (11, "u1"), "Beta": (22, "u2"), "Gamma": (33, "u3")}
+        _titles(T)
+        # two views match exactly, the third's title matches NOTHING -> forced
+        chrome._slot_cache.clear()
+        got = chrome.claim_by_elimination(
+            [(1, "Alpha - Google Chrome"), (2, "Beta - Google Chrome"),
+             (3, "something the file has never heard of - Google Chrome")])
+        ck("elim-claims-the-forced-view", got == 3)
+        ck("elim-writes-the-slot-cache",
+           chrome._slot_cache.get(3) == "chrome:win:33")
+        # TWO unmatched views could pair either way: refuse.
+        chrome._slot_cache.clear()
+        ck("elim-refuses-two-unmatched",
+           chrome.claim_by_elimination(
+               [(1, "Alpha - Google Chrome"), (2, "nope - Google Chrome"),
+                (3, "also nope - Google Chrome")]) is None)
+        ck("elim-refuses-leave-cache-alone", not chrome._slot_cache)
+        # ONE unmatched view but TWO free ids: equally unforced.
+        chrome._slot_cache.clear()
+        ck("elim-refuses-two-free-ids",
+           chrome.claim_by_elimination(
+               [(1, "Alpha - Google Chrome"),
+                (2, "nope - Google Chrome")]) is None)
+        # AN INCOGNITO WINDOW is a view Chrome never recorded, so it shows up
+        # as one more view than id and must decline rather than steal the id.
+        chrome._slot_cache.clear()
+        ck("elim-refuses-with-an-unrecorded-window",
+           chrome.claim_by_elimination(
+               [(1, "Alpha - Google Chrome"), (2, "Beta - Google Chrome"),
+                (3, "Gamma - Google Chrome"),
+                (4, "incognito - Google Chrome")]) is None)
+        # NOTHING LEFT OVER is not a claim either.
+        chrome._slot_cache.clear()
+        ck("elim-nothing-to-do-when-all-match",
+           chrome.claim_by_elimination(
+               [(1, "Alpha - Google Chrome"), (2, "Beta - Google Chrome"),
+                (3, "Gamma - Google Chrome")]) is None)
+    finally:
+        chrome.chrome_session_titles = _rst
+        chrome._slot_cache.clear()
 
     # THE AGENT QUESTION IS ABOUT THE DAEMON'S ENVIRONMENT, not the caller's.
     # Our own pid stands in for the daemon, which gives a REAL

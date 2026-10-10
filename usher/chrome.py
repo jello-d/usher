@@ -358,6 +358,51 @@ def window_slot(vid, title):
     return hit
 
 
+def claim_by_elimination(views):
+    """Resolve the ONE view an exact title match cannot, when the id SET
+    forces the answer. `views` is [(vid, raw_title)] for every live Chrome
+    view. Returns the vid it claimed, or None.
+
+    THE TITLE'S CONTENT IS NOT RELIABLE, which is why this exists. Chrome
+    records a tab's title at NAVIGATION time, so a web app that rewrites
+    document.title without navigating leaves the session file holding the old
+    one indefinitely: measured on manifold, a window read "Google Messages for
+    web: Conversations" on screen and "Google Messages for web" in a session
+    file rewritten SECONDS earlier, and the two disagreed for two and a half
+    hours across many rewrites. Reading the file more often cannot fix that,
+    because it is stale by design rather than by lag.
+
+    SO DECIDE BY THE ID SET. Every window Chrome recorded has an id and every
+    live view is one of them, so match what the titles DO resolve and look at
+    what is left: if exactly one view and exactly one id remain, the pairing
+    is FORCED. There is nothing else either could be, which makes this exact
+    rather than a guess, and it never compares title content.
+
+    IT REFUSES ON ANY OTHER COUNT, and that is the whole safety argument. Two
+    unmatched views against two free ids could pair either way. An INCOGNITO
+    window is a live view Chrome never records at all, so it leaves one more
+    view than id and this declines, which is the same answer usher gives
+    today. Declining costs a placement; pairing wrongly moves someone else's
+    window.
+
+    Writes the SAME cache window_slot reads, so the claim is remembered for
+    the view's life and dropped by forget_window on unmap."""
+    t = chrome_session_titles()
+    claimed, unmatched = set(), []
+    for vid, raw in views:
+        hit = t.get(_chrome_page_title(raw))
+        if hit:
+            claimed.add(str(hit[0]))
+        elif vid is not None and vid not in _slot_cache:
+            unmatched.append(vid)
+    free = sorted({str(w) for _ti, (w, _u) in t.items()
+                   if str(w) not in claimed})
+    if len(unmatched) == 1 and len(free) == 1:
+        _slot_cache[unmatched[0]] = chrome_slot(free[0])
+        return unmatched[0]
+    return None
+
+
 def forget_window(vid):
     """Drop a closed view's cached slot. Wayfire ids are not reused quickly,
     but a cache that only ever grows is a leak in a process that runs for

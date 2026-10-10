@@ -804,6 +804,16 @@ class Watcher:
         except Exception as e:
             logline(f"recheck: {e}")
             return
+        # ELIMINATION NEEDS THE WHOLE SET, which is why it runs here and not
+        # in the plugin: a plugin is handed ONE view and cannot see what the
+        # other titles already account for. Done before the placement loop so
+        # a view it claims is placeable on this very pass.
+        _claimed = chrome.claim_by_elimination(
+            [(v.get("id"), v.get("title") or "") for v in views
+             if chrome.is_chrome(app_of(v))])
+        if _claimed is not None:
+            logline("chrome: the one unmatched window is settled by "
+                    "elimination over the recorded ids")
         n = 0
         for v in views:
             try:
