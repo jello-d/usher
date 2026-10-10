@@ -291,6 +291,12 @@ class Watcher:
         # `placed` on its own cannot tell a request that worked from one the
         # compositor overwrote, and it DEDUPS, so a lost race was locked in
         # for the life of the window. See placement_landed().
+        # WINDOWS ENTITLED TO ONE LATE PLACEMENT: vids that MAPPED while
+        # aggressive was in force. Such a window was part of the session being
+        # restored, and if usher could not identify it in time that is usher's
+        # problem, not a reason to leave it adrift. Distinct from a window
+        # OPENED mid-session, which steady deliberately leaves where it opens.
+        self.late_ok = set()
         self.verify = {}
         self.place_tries = {}  # vid -> placements ISSUED for it this map, so
         #                        the retry budget survives the re-place that
@@ -574,12 +580,36 @@ class Watcher:
         with self.lock:
             e = (self.kb.get(kkey(app, ""))
                  or self.kb.get(kkey(app, identity(v))))
-        if e is not None and vid not in self.identified:
+        # CAPTURED BEFORE _recognise, which is what records the identification:
+        # read it afterwards and this is always False.
+        first_look = e is not None and vid not in self.identified
+        if first_look:
             self._recognise(vid, app, title)
         if time.time() > self.deadline.get(vid, 0):
             return   # past the grace window: the window is settled, hands off
-        if not self._aggressive_now() and not is_anchored(app, title):
+        # ONE LATE CHANCE FOR A WINDOW THAT WAS ALWAYS HERE. _recognise
+        # re-graces a window the instant it becomes identifiable and says it
+        # is "still bounded, since the aggressive check still governs", and
+        # that check is what defeated it: _steady_at takes
+        # min(armed + AGGR_CAP, ...), so once the cap has passed NOTHING can
+        # re-enter aggressive, and feeding last_map cannot help. Measured on
+        # manifold: a Chrome window became identifiable 2.5 hours after login,
+        # logged `recognised late, re-graced`, and was then refused here, so
+        # the re-grace was spent on nothing.
+        #
+        # STEADY WAS CONFLATING TWO WINDOWS. One you OPENED mid-session should
+        # stay where it opens; one that was PRESENT at login and merely
+        # unidentifiable until now should go to its remembered slot. `late_ok`
+        # is the ones that mapped while aggressive was in force, i.e. the
+        # session being restored, and this is their single chance: `placed`
+        # dedups, and first_look is true exactly once per view.
+        late_chance = first_look and vid in self.late_ok
+        if (not self._aggressive_now() and not is_anchored(app, title)
+                and not late_chance):
             return   # steady state: only usher/include anchors are (re)placed
+        if late_chance and not self._aggressive_now():
+            logline(f"late chance (present at login, identifiable only now): "
+                    f"{app[:18]} | {title[:30]}")
         if not e:
             return   # never seen this identity -> we don't know where it goes
         # ONE WINDOW PER SLOT. Whoever got here first owns it until it
@@ -1034,6 +1064,8 @@ class Watcher:
         v = msg.get("view", {}) or {}
         if ev == "view-mapped" and v.get("id") is not None:
             self.deadline[v["id"]] = time.time() + PLACE_GRACE  # start grace
+            if self._aggressive_now():
+                self.late_ok.add(v["id"])   # see Watcher.late_ok
             with self.lock:
                 self.st["last_map"] = time.time()  # feed the IDLE_SETTLE clock
         if ev in PLACE_EVENTS:
@@ -1067,6 +1099,7 @@ class Watcher:
                 # The retry budget is PER MAP, so it goes with the window.
                 self.verify.pop(v["id"], None)
                 self.place_tries.pop(v["id"], None)
+                self.late_ok.discard(v["id"])
         if ev in KNOWLEDGE_TRIGGERS:
             with self.lock:
                 self.st["dirty"] = True

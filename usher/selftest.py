@@ -871,6 +871,44 @@ def _t_slots(ck):
         w._try_place(V(2))
         ck("slot-reusable-after-the-holder-closes", 2 in seated)
 
+        # ONE LATE CHANCE, and the distinction it encodes. In STEADY, past the
+        # AGGR_CAP (so nothing can re-enter aggressive), a window that MAPPED
+        # while aggressive was in force is still placed the first time it
+        # becomes identifiable; one opened mid-session is not. Conflating
+        # those cost a Chrome window its slot for 2.5 hours on manifold: it
+        # logged `recognised late, re-graced` and was then refused.
+        from .engine import AGGR_CAP as _CAP
+        def _steady_watcher():
+            x = Watcher(launch=False)
+            x.st["armed_at"] = _t.time() - _CAP - 1    # steady, past the cap
+            x.st["last_map"] = _t.time()               # cannot rescue it
+            x.place_sock = _Sock()
+            x.kb = w.kb
+            return x
+        ck("cap-really-defeats-the-regrace",
+           not _steady_watcher()._aggressive_now())
+        s1 = []
+        x = _steady_watcher()
+        x._seat_view = lambda v, e, o: (s1.append(v["id"]) or True)
+        x.deadline[7] = _t.time() + PLACE_GRACE
+        x.late_ok.add(7)                               # mapped at login
+        x._try_place(V(7))
+        ck("late-chance-places-a-login-window", s1 == [7])
+        s2 = []
+        y = _steady_watcher()
+        y._seat_view = lambda v, e, o: (s2.append(v["id"]) or True)
+        y.deadline[8] = _t.time() + PLACE_GRACE        # NOT in late_ok
+        y._try_place(V(8))
+        ck("steady-still-leaves-a-new-window-alone", s2 == [])
+        # ...and the chance is spent: identified, so not a first look again.
+        s3 = []
+        z = _steady_watcher()
+        z._seat_view = lambda v, e, o: (s3.append(v["id"]) or True)
+        z.deadline[9] = _t.time() + PLACE_GRACE
+        z.late_ok.add(9)
+        z.identified.add(9)                            # already had its look
+        z._try_place(V(9))
+        ck("late-chance-is-only-the-first-look", s3 == [])
     finally:
         pass
 
