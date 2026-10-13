@@ -560,7 +560,7 @@ def _dispatch(verb, args):
         from . import selftest as _selftest
         sys.exit(_selftest.selftest())
     elif verb in ("aggressive", "settle", "toggle"):
-        _do_arm(verb)
+        sys.exit(_do_arm(verb))
     elif verb == "status":        # current placement mode + seconds to steady
         try:
             s = json.load(open(engine.STATUS_FILE))
@@ -570,29 +570,58 @@ def _dispatch(verb, args):
             sys.exit(f"{PROG}: no status (watcher not running?)")
 
 
-def _do_arm(act):
-    """Placement-mode controls (tray + CLI). All three drive the ONE armed_at
-    seam the watcher adopts from ARM_FILE: aggressive arms NOW (aggressive for
-    START_FLOOR); settle arms in the PAST (steady at once, past the CAP); toggle
-    flips from the live STATUS_FILE mode (the tray left-click)."""
+def arm_plan(act, running, mode):
+    """(action, message) for a placement-mode request: which of aggressive or
+    settle to perform, or "none" and why not. Pure, so the whole table is
+    checkable with no daemon, no runtime dir and no compositor.
+
+    THERE IS NOTHING TO ARM WITH NO DAEMON, and saying so is the point. The
+    clock lives in the WORKER, which stamps its own `armed_at` at startup and
+    BASELINES the arm file's mtime, so a timestamp written before it starts is
+    read once as the baseline and never adopted. The write would succeed and
+    the old code printed `re-armed aggressive placement` over it: a false
+    success of exactly the shape that made a blind `reload` worth refusing.
+
+    TOGGLE RESOLVES FROM THE LIVE MODE, and keeps defaulting to aggressive
+    when that cannot be read. With the daemon up a stale or unreadable status
+    file is the only way to get here, and arming is the recoverable answer:
+    one `settle` undoes it, where declining leaves the tray click dead."""
+    if not running:
+        return "none", ("no daemon is running, so there is no placement clock"
+                        f" to {act}: start one with `usher-mgr watch`")
     if act == "toggle":
-        try:
-            act = ("settle"
-                   if json.load(open(engine.STATUS_FILE)).get("mode")
-                   == "aggressive" else "aggressive")
-        except (OSError, ValueError):
-            act = "aggressive"
+        act = "settle" if mode == "aggressive" else "aggressive"
+    return act, ("re-armed aggressive placement" if act == "aggressive"
+                 else "settled to steady")
+
+
+def _live_mode():
+    """The mode the running daemon last published, or None if unreadable."""
+    try:
+        with open(engine.STATUS_FILE) as f:
+            return json.load(f).get("mode")
+    except (OSError, ValueError):
+        return None
+
+
+def _do_arm(act):
+    """Placement-mode controls (tray + CLI). Both ends drive the ONE armed_at
+    seam the watcher adopts from ARM_FILE: aggressive arms NOW (aggressive for
+    START_FLOOR) and settle arms in the PAST (steady at once, past the CAP)."""
+    act, msg = arm_plan(act, engine.watcher_pid(), _live_mode())
+    if act == "none":
+        print(f"{PROG}: {msg}", file=sys.stderr)
+        return engine.EXIT_CANNOT
     ts = (time.time() if act == "aggressive"
           else time.time() - engine.AGGR_CAP - 1)
-    msg = ("re-armed aggressive placement" if act == "aggressive"
-           else "settled to steady")
     try:
         os.makedirs(os.path.dirname(engine.ARM_FILE), exist_ok=True)
         with open(engine.ARM_FILE, "w") as f:
             f.write(f"{ts}\n")
-        print(f"{PROG}: {msg}")
     except OSError as e:
         sys.exit(f"{PROG}: cannot {act}: {e}")
+    print(f"{PROG}: {msg}")
+    return engine.EXIT_OK
 
 
 def _run(prog, audience):

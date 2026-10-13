@@ -1368,6 +1368,34 @@ def _t_cli_split(ck):
     ck("a-both-verb-passes-either-front-end",
        not cli.gate_blocks("both", "mgr")
        and not cli.gate_blocks("both", "cli"))
+
+    # THE PLACEMENT-MODE REQUESTS, as a table, because the cell that was wrong
+    # is the one nobody looks at: with NO daemon the arm file is written, the
+    # worker baselines its mtime and never adopts it, and the old code printed
+    # `re-armed aggressive placement` over that. Pure, so no daemon, no
+    # runtime dir and no compositor are needed.
+    for _act in ("aggressive", "settle", "toggle"):
+        _a, _m = cli.arm_plan(_act, None, None)
+        ck(f"arm-{_act}-is-refused-with-no-daemon", _a == "none")
+        ck(f"arm-{_act}-says-why", "no daemon" in _m)
+    # with a daemon, each means itself and toggle reads the LIVE mode
+    ck("arm-aggressive-arms", cli.arm_plan("aggressive", 99, "steady")[0]
+       == "aggressive")
+    ck("arm-settle-settles", cli.arm_plan("settle", 99, "aggressive")[0]
+       == "settle")
+    ck("arm-toggle-from-aggressive-settles",
+       cli.arm_plan("toggle", 99, "aggressive")[0] == "settle")
+    ck("arm-toggle-from-steady-arms",
+       cli.arm_plan("toggle", 99, "steady")[0] == "aggressive")
+    # AN UNREADABLE MODE WITH THE DAEMON UP still arms, deliberately: one
+    # `settle` undoes it, where declining would leave the tray click dead.
+    ck("arm-toggle-with-no-status-arms",
+       cli.arm_plan("toggle", 99, None)[0] == "aggressive")
+    # the two messages are distinct, or a reader cannot tell which happened
+    ck("arm-messages-are-distinct",
+       len({cli.arm_plan("aggressive", 99, "steady")[1],
+            cli.arm_plan("settle", 99, "steady")[1],
+            cli.arm_plan("settle", None, None)[1]}) == 3)
     # THE SEAM: usher must not hardcode how a session starts. It reads one
     # path, and the path is beside the other user config rather than in a
     # second config dir.
