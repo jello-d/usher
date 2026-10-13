@@ -234,7 +234,9 @@ usher predict                # record what the next restore SHOULD produce
 usher verify                 # diff the live layout against that prediction
 usher doctor                 # what it is doing, and what it is NOT
 usher status                 # placement mode and seconds until steady
-usher toggle                 # flip aggressive/steady (the tray click)
+usher aggressive             # place every window that maps, for a while
+usher settle                 # go steady now: leave new windows where they open
+usher toggle                 # flip between those two (what the tray click does)
 usher cleanly reboot         # wind down, keeping the layout, then reboot
 usher cleanly login          # start the console session from a remote shell
 ```

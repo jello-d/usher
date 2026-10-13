@@ -119,6 +119,62 @@ for _d in $(grep -rho 'USHER_[A-Z_]*' "$HERE/man/man1/usher.1" \
     || fail "$_d is documented but no code reads it"
 done
 
+# EVERY PUBLIC VERB HAS A MAN ENTRY, and nothing in that section is not a
+# verb. Same argument as the tunables above and found the same way: the user
+# asked for "command line equivalents of the tray toggle" when `aggressive`
+# and `settle` had existed all along. They were documented, and UNFINDABLE,
+# because two .SS subsections sat in the MIDDLE of the verb list and thirteen
+# verbs had drifted under a heading about relaunching apps.
+#
+# THE MAN PAGE IS THE EXHAUSTIVE REFERENCE and is checked as one. The README
+# is a CURATED tour and deliberately is not: requiring every verb there would
+# bloat the one document whose job is orientation. What IS checked there is
+# the reverse direction, so a verb removed from the code cannot linger in the
+# showcase.
+#
+# ANCHORED ON `.TP` + `.B`, which is the section's own convention. A bare
+# grep for `.B` picks up emphasis inside descriptions (`.B --from`,
+# `.B Exec=`) and reports 29 things that are not verbs.
+_nv=$(PYTHONPATH="$HERE" python3 - "$HERE" <<'PYEOF'
+import re
+import sys
+root = sys.argv[1]
+sys.path.insert(0, root)
+from usher.cli import VERBS
+
+pub = sorted(v for v, (aud, desc) in VERBS.items() if desc)
+assert len(pub) >= 15, f"only {len(pub)} public verbs: the scrape is broken"
+
+man = open(root + "/man/man1/usher.1").read()
+assert ".SH VERBS" in man, "no .SH VERBS section"
+sec = man.split(".SH VERBS", 1)[1].split("\n.SH ", 1)[0]
+lines = sec.splitlines()
+entries = []
+for i, ln in enumerate(lines):
+    nxt = lines[i + 1] if i + 1 < len(lines) else ""
+    if ln.strip() == ".TP" and nxt.startswith(".B "):
+        head = nxt[3:].split('"')[0].strip()
+        entries += [t.strip() for t in head.split("|") if t.strip()]
+assert len(entries) >= 15, f"only {len(entries)} man entries: the scrape broke"
+
+missing = [v for v in pub if v not in entries]
+assert not missing, f"public verb(s) with no man entry: {missing}"
+alien = [e for e in entries if e not in VERBS]
+assert not alien, f"documented as a verb but is not one: {alien}"
+# A .SS inside VERBS is what split the list and hid thirteen verbs.
+split = [l for l in lines if l.startswith(".SS")]
+assert not split, f"a subsection splits the verb list: {split}"
+
+# The README's tour may be selective, but every verb it SHOWS must be real.
+rd = open(root + "/README.md").read()
+shown = sorted(set(re.findall(r"^usher(?:-mgr)? ([a-z-]+)", rd, re.M)))
+assert len(shown) >= 8, f"only {len(shown)} README verbs: the scrape broke"
+ghost = [s for s in shown if s not in VERBS]
+assert not ghost, f"README shows a verb that does not exist: {ghost}"
+print(len(pub))
+PYEOF
+) || fail "a verb is undocumented, or documented and gone"
+
 # ...AND THE STATED DEFAULTS ARE HELD AGAINST THE CODE. Naming a knob is the
 # cheap half; the number beside it is what a reader acts on, and changing
 # START_FLOOR from 300 to 240 would otherwise leave two files quietly lying.
@@ -153,4 +209,4 @@ PYEOF
 # have to be low enough never to need touching and high enough to catch a
 # collapse; they are not an inventory.
 [ "$_sh" -ge 5 ] || fail "only $_sh shell file(s): a selector is gone"
-pass "$_py python, $_sh shell, $_nk tunables documented both ways"
+pass "$_py python, $_sh shell, $_nk tunables, $_nv verbs"

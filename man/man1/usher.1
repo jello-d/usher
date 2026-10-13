@@ -34,7 +34,7 @@ sub-package).
 The daemon (started at login): record continuously, place on map. Re-running it
 reloads a running instance.
 .TP
-.B capture
+.B save | capture
 Snapshot the current layout into the store now.
 .TP
 .B restore " [--dry-run] [--only S] [--from SPEC]"
@@ -60,7 +60,88 @@ back: `loginctl lock-session` exits 0 whether or not anything is listening, so
 its status proves nothing. Non-zero if the session did not actually lock.
 usher does not lock anything itself; it asks logind, and whatever the session
 registered as its locker does the work.
-.SS What usher needs from an app
+.TP
+.B predict " [--out FILE]"
+Record what the NEXT restore should produce: every live window with the
+workspace, position and size its remembered slot would give it. Writes
+.I $XDG_STATE_HOME/usher/prediction.json
+unless told otherwise. Always exits 0; this records, it does not judge.
+.TP
+.B verify " [--against FILE]"
+Diff the live layout against a prediction and exit non-zero on any window
+that is missing or in the wrong place. This is the only end-to-end check that
+is not circular:
+.B restore --dry-run
+compares the store against the screen, so when something teaches the store a
+wrong answer the two agree and it reports everything fine. A prediction
+written BEFORE the event cannot have been corrupted by it. Record one, reboot,
+then verify.
+.TP
+.B resume
+Start/reload in ADOPT mode (adopt the current layout as baseline; do not
+restore).
+.TP
+.B status
+The daemon's mode + seconds until it settles.
+.TP
+.B plugins
+List the loaded window plugins (built-in + user).
+.TP
+.B launch
+Respawn saved-but-absent windows now, without starting the daemon.
+.TP
+.B reload
+Pick up new code in a running daemon and change NOTHING else: no restore, no
+re-baselining of the remembered layout, no relaunch. This is what a deploy
+wants;
+.B resume
+looks right for it and is not, because it captures.
+.TP
+.B wind-down
+Bring the session to a clean stop, for a power menu to call before it reboots:
+capture while the layout is still true, stop the watcher so nothing overwrites
+that capture, then ask each app to exit cleanly under a bounded deadline. Does
+not reboot or log out. Always exits 0.
+.TP
+.B cleanly " login | logoff | reboot | shutdown [--force]"
+Wind the session down and then take the action, so a reboot cannot lose
+the layout. REFUSES when it cannot reach the compositor while a session is
+running, since winding down without a capture would lose the thing this
+exists to keep;
+.B --force
+overrides and says what is being given up.
+.B login
+starts the console session from a remote shell, through the provider at
+.IR ~/.config/usher/session-start .
+.TP
+.B display-changed
+For a display-change hook. Re-places against the profile for the new monitor
+set, and does nothing at all when the set has not actually changed.
+.TP
+.B aggressive | settle | toggle
+Re-arm aggressive placement, force steady now, or flip between them.
+.TP
+.B stop
+Stop the running daemon cleanly.
+.TP
+.B exclude | include
+Show the never-place and anchor rules as loaded, with any parse errors.
+.TP
+.B doctor
+Report what usher is and is not doing: the store (entries per app, the display
+profile, schema), the plugin registry, the cross-tool contracts, and per window
+what would be relaunched or placed and WHY not. Exit 1 on a contract breach;
+exit 2 when it could not see the live session at all (no
+.BR WAYFIRE_SOCKET ,
+no pywayfire, or no compositor answering), in which case the window sections
+are SKIPPED rather than answered from nothing and the report says so loudly.
+A non-interactive
+.BR ssh (1)
+carries none of the session environment, which is the usual way to meet it.
+.TP
+.B selftest
+Offline unit checks (no compositor).
+.SH SUPPORTING AN APP
 Nothing, for the part most people want. Three tiers, and each is only worth
 reaching for when the one below falls short.
 .TP
@@ -165,76 +246,6 @@ NoDisplay means "do not show this in menus" and says nothing about launching,
 so it is read as a refusal only for an entry you did NOT author.
 .I Hidden=true
 is a deletion in the spec's own words and is honoured everywhere.
-.TP
-.B predict " [--out FILE]"
-Record what the NEXT restore should produce: every live window with the
-workspace, position and size its remembered slot would give it. Writes
-.I $XDG_STATE_HOME/usher/prediction.json
-unless told otherwise. Always exits 0; this records, it does not judge.
-.TP
-.B verify " [--against FILE]"
-Diff the live layout against a prediction and exit non-zero on any window
-that is missing or in the wrong place. This is the only end-to-end check that
-is not circular:
-.B restore --dry-run
-compares the store against the screen, so when something teaches the store a
-wrong answer the two agree and it reports everything fine. A prediction
-written BEFORE the event cannot have been corrupted by it. Record one, reboot,
-then verify.
-.TP
-.B resume
-Start/reload in ADOPT mode (adopt the current layout as baseline; do not
-restore).
-.TP
-.B status
-The daemon's mode + seconds until it settles.
-.TP
-.B plugins
-List the loaded window plugins (built-in + user).
-.TP
-.B launch
-Respawn saved-but-absent windows now, without starting the daemon.
-.TP
-.B reload
-Pick up new code in a running daemon and change NOTHING else: no restore, no
-re-baselining of the remembered layout, no relaunch. This is what a deploy
-wants;
-.B resume
-looks right for it and is not, because it captures.
-.TP
-.B wind-down
-Bring the session to a clean stop, for a power menu to call before it reboots:
-capture while the layout is still true, stop the watcher so nothing overwrites
-that capture, then ask each app to exit cleanly under a bounded deadline. Does
-not reboot or log out. Always exits 0.
-.TP
-.B display-changed
-For a display-change hook. Re-places against the profile for the new monitor
-set, and does nothing at all when the set has not actually changed.
-.TP
-.B aggressive | settle | toggle
-Re-arm aggressive placement, force steady now, or flip between them.
-.TP
-.B stop
-Stop the running daemon cleanly.
-.TP
-.B exclude | include
-Show the never-place and anchor rules as loaded, with any parse errors.
-.TP
-.B doctor
-Report what usher is and is not doing: the store (entries per app, the display
-profile, schema), the plugin registry, the cross-tool contracts, and per window
-what would be relaunched or placed and WHY not. Exit 1 on a contract breach;
-exit 2 when it could not see the live session at all (no
-.BR WAYFIRE_SOCKET ,
-no pywayfire, or no compositor answering), in which case the window sections
-are SKIPPED rather than answered from nothing and the report says so loudly.
-A non-interactive
-.BR ssh (1)
-carries none of the session environment, which is the usual way to meet it.
-.TP
-.B selftest
-Offline unit checks (no compositor).
 .SH DISPLAY PROFILES
 A placement only means anything on the monitors it was learned on, so the
 knowledge base is keyed by the CONNECTED DISPLAY SET: docked and undocked
