@@ -467,6 +467,25 @@ def _t_resolution(ck):
     finally:
         engine._owner = _real_owner
 
+    # THE COLLISION REMEDY, three cases that must stay distinct. A chrome
+    # slot duplicate is usher mis-resolving (a SessionID names ONE window),
+    # NOT a missing plugin, and Chrome already has one: that advice would
+    # send the reader nowhere. Asserted PAIRWISE, since collapsing two is
+    # exactly how the wrong remedy gets printed.
+    from .doctor import collision_fix as _cfix
+    ck("collision-chrome-blames-usher",
+       "mis-resolved" in _cfix("chrome:win:123"))
+    ck("collision-chrome-does-not-say-plugin",
+       "plugin" not in _cfix("chrome:win:123"))
+    ck("collision-kitty-names-settitle", "settitle" in _cfix("kitty:/w"))
+    ck("collision-other-says-plugin", "plugin" in _cfix("some window title"))
+    ck("collision-remedies-are-three-distinct",
+       len({_cfix("chrome:win:123"), _cfix("kitty:/w"),
+            _cfix("some window title")}) == 3)
+    # an app_id-only key is the empty identity, and must not fall into either
+    # named branch
+    ck("collision-appid-only-says-plugin", "plugin" in _cfix(""))
+
     # 3. THE GATE. A window that is not ready must be refused by BOTH call
     #    sites, which is the invariant every silent failure in this repo's
     #    history broke: a store written under a key the matcher never looks up.
@@ -2345,6 +2364,33 @@ def _t_contracts(ck):
            chrome.claim_by_elimination(
                [(1, "Alpha - Google Chrome"), (2, "Beta - Google Chrome"),
                 (3, "Gamma - Google Chrome")]) is None)
+
+        # AN ID A LIVE VIEW ALREADY HOLDS IS NOT FREE. The manifold incident
+        # of 2026-10-13: view 1 was resolved and cached, then its title went
+        # stale, so it was neither matched nor unmatched and its OWN id read
+        # as free. View 2, a window Chrome never recorded, was handed it.
+        # ONE recorded id here, so the cache is the only thing standing
+        # between the stranger and the owner's slot.
+        _titles({"Alpha": (11, "u1")})
+        chrome._slot_cache.clear()
+        chrome._slot_cache[1] = "chrome:win:11"
+        ck("elim-an-id-a-live-view-holds-is-not-free",
+           chrome.claim_by_elimination(
+               [(1, "a title the file no longer carries - Google Chrome"),
+                (2, "never recorded at all - Google Chrome")]) is None)
+        ck("elim-leaves-the-cached-owner-alone",
+           chrome._slot_cache == {1: "chrome:win:11"})
+        # ...and it still claims a genuinely free id with a cached sibling
+        # present, or the guard above would have made the whole thing inert.
+        _titles({"Alpha": (11, "u1"), "Beta": (22, "u2")})
+        chrome._slot_cache.clear()
+        chrome._slot_cache[1] = "chrome:win:11"
+        ck("elim-still-claims-beside-a-cached-view",
+           chrome.claim_by_elimination(
+               [(1, "stale - Google Chrome"),
+                (2, "also stale - Google Chrome")]) == 2)
+        ck("elim-claimed-the-unheld-id",
+           chrome._slot_cache.get(2) == "chrome:win:22")
     finally:
         chrome.chrome_session_titles = _rst
         chrome._slot_cache.clear()

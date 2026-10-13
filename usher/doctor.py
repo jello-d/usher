@@ -28,7 +28,7 @@ from collections import Counter
 # (EXCLUDE_RULES/ERRORS, ANCHOR_RULES/ERRORS, _PLUGINS), so importing by value
 # cannot go stale here; the registry is reached through plugins(), which is a
 # function.
-from .chrome import is_chrome
+from .chrome import is_chrome, is_chrome_slot
 # CONFIG_DIR is reached through the MODULE rather than imported by value, the
 # same hazard the daemon documents for anything that can be rebound.
 from . import engine
@@ -159,6 +159,28 @@ def _doctor_contracts(out):
     return rc
 
 
+def collision_fix(ident):
+    """What to tell a reader whose windows share one store key. THREE cases,
+    and they must stay distinct: handing the wrong one out sends somebody to
+    fix the wrong thing.
+
+    A TERMINAL CAN BE NAMED, which makes it title-keyed and gives it a slot
+    of its own. For an ordinary app a plugin is the answer, which is what the
+    README's tiers describe.
+
+    A CHROME SLOT IS NEITHER, and must NOT say "write a plugin": a SessionID
+    names exactly ONE window, so two live views holding one is usher having
+    mis-resolved rather than a gap in the user's config, and Chrome already
+    HAS a plugin. The resolution cache is per view, so it clears on a reload
+    or when either window closes. Measured on manifold 2026-10-13, where this
+    state sat live for two days and the advice would have been useless."""
+    if is_chrome_slot(ident):
+        return "usher mis-resolved these; usher reload clears it"
+    if ident.startswith("kitty:"):
+        return "name one: settitle"
+    return "a plugin can tell them apart; see README"
+
+
 def _doctor_relaunch(out, snap, live):
     """Per saved window: would it come back, and if not, why not."""
     out("== saved windows -> relaunch ==")
@@ -241,16 +263,11 @@ def _doctor_relaunch(out, snap, live):
             continue
         _app, _ident = key.split("\0", 1)
         _shown = _ident or f"{_app} (by app-id)"
-        # The escape hatch differs by app: a terminal can be NAMED, which
-        # makes it title-keyed and gives it a slot of its own. For anything
-        # else the answer is a plugin, which is what the README's tiers say.
-        _fix = ("name one: settitle" if _ident.startswith("kitty:")
-                else "a plugin can tell them apart; see README")
         # "1 keep" read as a typo; phrase it so the count never needs a
         # plural, which is the cheapest fix and reads better at every n.
         out(f"  COLLISION  {_shown[:40]:40}  {n} live windows share this"
             f" key; 1 gets the remembered place, {n - 1} stay where they"
-            f" opened ({_fix})")
+            f" opened ({collision_fix(_ident)})")
 
 
 def _doctor_placement(out, kb, live, outs):

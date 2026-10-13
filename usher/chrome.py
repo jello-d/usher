@@ -442,15 +442,29 @@ def claim_by_elimination(views):
     today. Declining costs a placement; pairing wrongly moves someone else's
     window.
 
+    AN ID A LIVE VIEW ALREADY HOLDS IS NOT FREE, and the cache is the only
+    honest record of that. A view resolved earlier keeps its slot for life
+    while its TITLE goes on changing, so asking the titles alone which ids are
+    taken misses exactly the windows this function exists to work around.
+    Measured on manifold 2026-10-13: a cached window whose title had gone
+    stale was neither matched nor unmatched, its own id read as free, and the
+    one genuinely unrecorded window was handed it. Both sides then cached, so
+    one slot described two windows until a browser restart carried the wrong
+    geometry onto the real one.
+
     Writes the SAME cache window_slot reads, so the claim is remembered for
     the view's life and dropped by forget_window on unmap."""
     t = chrome_session_titles()
     claimed, unmatched = set(), []
     for vid, raw in views:
+        held = _slot_cache.get(vid)
+        if held:
+            claimed.add(held[len(_CHROME_SLOT):])
+            continue
         hit = t.get(_chrome_page_title(raw))
         if hit:
             claimed.add(str(hit[0]))
-        elif vid is not None and vid not in _slot_cache:
+        elif vid is not None:
             unmatched.append(vid)
     free = sorted({str(w) for _ti, (w, _u) in t.items()
                    if str(w) not in claimed})
