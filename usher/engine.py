@@ -20,6 +20,7 @@ or `term:latch <host>:<session>`, which is also how it is brought back), kitty
 by the shell's CWD from /proc (`kitty:<cwd>`, respawned as a shell there). See
 WindowPlugin, plugins(), identity() and learn().
 """
+import fnmatch
 import glob
 import hashlib
 import json
@@ -1717,6 +1718,54 @@ def save_knowledge(kb):
     write_json(kb_path(), json.dumps(kb, indent=2))
 
 
+def forget_matches(kb, selectors):
+    """The store keys `selectors` select, as a sorted list.
+
+    A SELECTOR IS A GLOB OVER THE IDENTITY, which is the half a reader has
+    actually seen: `chrome:win:327645084`, `kitty:/src/x`, `term:resume` are
+    what doctor and `restore --dry-run` print. An APP-ID-ONLY entry has no
+    identity, so there the glob is matched against the app-id instead, which
+    is what makes `usher forget signal` mean the obvious thing.
+
+    A STORE KEY IS `app_id` NUL `identity` AND `term:` IS NOT A PREFIX OF IT.
+    That exact confusion cost an investigation here: `startswith('term:')`
+    over the keys answers [] whether or not any terminal slot exists. Doing
+    the split in ONE place is most of why this verb is worth having over a
+    hand-edit."""
+    out = []
+    for k in kb:
+        app, _, ident = k.partition("\x00")
+        subject = ident or app
+        if any(fnmatch.fnmatchcase(subject, s) for s in selectors):
+            out.append(k)
+    return sorted(out)
+
+
+def backup_knowledge():
+    """Copy the store aside before an edit, and return the path. Cheap, and
+    the only reason a mistake here is recoverable."""
+    src = kb_path()
+    dst = f"{src}.pre-forget-{time.strftime('%Y%m%d%H%M%S')}"
+    shutil.copy2(src, dst)
+    return dst
+
+
+def forget_apply(kb, selectors):
+    """Drop what `selectors` select from `kb` IN PLACE, back the store up,
+    save, and return the dropped keys. Each drop is logged, because the store
+    is learned data and watch.log is what says who removed it."""
+    gone = forget_matches(kb, selectors)
+    if not gone:
+        return []
+    backup_knowledge()
+    for k in gone:
+        del kb[k]
+        app, _, ident = k.partition("\x00")
+        logline(f"forget: dropped {app} | {ident or '(by app-id)'}")
+    save_knowledge(kb)
+    return gone
+
+
 def persist(snap, roll=True):
     """Write the snapshot to current.json always. Roll the history ring and the
     daily milestone only for layout-significant changes (roll=True); tab-switch
@@ -3086,6 +3135,12 @@ ARM_FILE = os.path.join(RUNTIME_DIR, "usher.arm")
 # state under XDG_RUNTIME_DIR, recreated each boot, so renaming it needed no
 # migration: an old file simply stops being written and goes at reboot.
 STATUS_FILE = os.path.join(RUNTIME_DIR, "usher.status")
+# A REQUEST, not a store: `usher forget` writes selectors here and the WORKER
+# applies them. The daemon is the only writer of the knowledge base while it
+# runs, so asking it to make the edit is the one way to do this with no race;
+# editing the file under it loses the edit to the next capture, which rewrites
+# the whole store from memory. Consumed and removed, like ADOPT_FLAG.
+FORGET_FILE = os.path.join(RUNTIME_DIR, "usher.forget")
 
 
 LOG_CAP = 256 * 1024   # rotate watch.log past this; bounds it to ~2x LOG_CAP
@@ -3303,6 +3358,55 @@ ADOPT_FLAG = "session-adopt"   # armed by resume/reload, consumed at init.
 # had failed to restore, and then reported everything as correct, because by
 # then it WAS self-consistent.
 MODES = ("restore", "adopt", "quiet")
+
+
+def do_forget(selectors, apply=False):
+    """Drop remembered slots the selectors name. Previews unless `apply`.
+
+    WHY A VERB AND NOT A HAND EDIT. Five separate repair recipes in this
+    project's notes begin "stop the daemon, edit the store, restart", and
+    every one of them risks the same two traps: the capture loop rewrites the
+    whole store from memory, so an edit under a running daemon is lost, and a
+    restart cannot be quiet (the `watch` verb arms RESTORE itself), so it ends
+    in a placement pass that moves windows nobody asked to move.
+
+    SO THE RACE IS AVOIDED TWO WAYS, one per state, and it says which:
+      daemon UP   write a request; the WORKER applies it, so the only writer
+                  of the store is still the only writer. No stop, no restart,
+                  no placement pass.
+      daemon DOWN apply it here, because nothing else is writing.
+
+    PREVIEWS BY DEFAULT, since this deletes learned data: a slot can be
+    relearned only by putting that window back by hand. `--apply` is the
+    explicit act, and the store is copied aside first either way."""
+    if not selectors:
+        print("usher: forget needs a selector, e.g."
+              " 'chrome:win:*' or 'kitty:/src/*'", file=sys.stderr)
+        return EXIT_FAIL
+    kb = load_knowledge()
+    hits = forget_matches(kb, selectors)
+    if not hits:
+        print(f"nothing matches {' '.join(selectors)} in {len(kb)} entries")
+        return EXIT_OK
+    for k in hits:
+        app, _, ident = k.partition("\x00")
+        e = kb[k]
+        print(f"  {app[:20]:20} | {(ident or '(by app-id)')[:40]:40}"
+              f" ws{[int(x) for x in e['workspace']]}")
+    if not apply:
+        print(f"{len(hits)} of {len(kb)} entries would be dropped."
+              " Re-run with --apply to do it.")
+        return EXIT_OK
+    if watcher_pid():
+        os.makedirs(RUNTIME_DIR, exist_ok=True)
+        with open(FORGET_FILE, "w") as f:
+            f.write("\n".join(selectors) + "\n")
+        print(f"asked the running daemon to drop {len(hits)}; it owns the"
+              " store while it runs, so it makes the edit")
+        return EXIT_OK
+    gone = forget_apply(kb, selectors)
+    print(f"dropped {len(gone)} (no daemon running, so applied here)")
+    return EXIT_OK
 
 
 def arm_mode(mode):

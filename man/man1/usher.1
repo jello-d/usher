@@ -90,6 +90,27 @@ List the loaded window plugins (built-in + user).
 .B launch
 Respawn saved-but-absent windows now, without starting the daemon.
 .TP
+.B forget " SELECTOR... [--apply]"
+Drop remembered slots. A SELECTOR is a glob over the identity a window is
+remembered by, which is what
+.B doctor
+and
+.B restore --dry-run
+print:
+.I "forget 'chrome:win:*'"
+or
+.IR "forget 'kitty:/src/*'" .
+An entry keyed by its app-id alone has no identity, so there the glob matches
+the app-id, which is what
+.I "forget signal"
+means. PREVIEWS by default and needs
+.B --apply
+to act, since this deletes learned data; the store is copied aside first
+either way. With the daemon running the edit is handed to IT rather than made
+here, because it owns the store while it runs: editing the file underneath it
+would lose the change to the next capture, which rewrites the whole store from
+memory.
+.TP
 .B reload
 Pick up new code in a running daemon and change NOTHING else: no restore, no
 re-baselining of the remembered layout, no relaunch. This is what a deploy

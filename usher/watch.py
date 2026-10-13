@@ -27,7 +27,8 @@ import time
 # (engine.EXCLUDE_ERRORS). Everything imported by name below is a constant or a
 # function, which a rebind never touches.
 from . import chrome, engine
-from .engine import (AGGR_CAP, ARM_FILE, EXCLUDE_FILE, IDLE_SETTLE,
+from .engine import (AGGR_CAP, ARM_FILE, EXCLUDE_FILE, FORGET_FILE,
+                     IDLE_SETTLE,
                      INCLUDE_FILE, INVERT_STORE, LAUNCHED, SKIP_TITLE,
                      START_FLOOR, STATE, STATUS_FILE, _signal_watcher,
                      acquire_singleton, app_of, apply_fullscreen,
@@ -864,6 +865,7 @@ class Watcher:
                 "exc": store_mtime(EXCLUDE_FILE),
                 "inc": store_mtime(INCLUDE_FILE),
                 "arm": store_mtime(ARM_FILE),
+                "forget": store_mtime(FORGET_FILE),
                 "plugins": plugins_sig(),
                 "chrome": chrome.session_sig()}
         errstreak = 0
@@ -931,6 +933,9 @@ class Watcher:
             with self.lock:
                 self.st["dirty"] = True
                 self.st["last"] = time.time()
+        if store_mtime(FORGET_FILE) != seen["forget"]:
+            self._take_forget()
+            seen["forget"] = store_mtime(FORGET_FILE)
         # A BROWSER RESTART IS VISIBLE RIGHT HERE and nowhere else. Chrome
         # mints fresh SessionIDs for every restored window, so the store's
         # chrome slots go dead the instant it rotates its session file, and
@@ -948,6 +953,32 @@ class Watcher:
             self._rekey_chrome()
             with self.lock:
                 self.st["recheck"] = True
+
+    def _take_forget(self):
+        """Apply a `usher forget --apply` request and remove it.
+
+        WE MAKE THE EDIT BECAUSE WE OWN THE STORE while we run: the capture
+        loop rewrites the whole thing from memory, so a client editing the
+        file would simply lose it at the next capture. Handing us the
+        selectors is what makes the whole operation race-free without
+        stopping anything.
+
+        CONSUMED LIKE ADOPT_FLAG, and removed even when it holds nothing
+        usable, or an unparsable request would be retried on every poll."""
+        try:
+            with open(FORGET_FILE) as f:
+                sel = [ln.strip() for ln in f if ln.strip()]
+        except OSError:
+            sel = []
+        if sel:
+            with self.lock:
+                gone = engine.forget_apply(self.kb, sel)
+            logline(f"forget: dropped {len(gone)} on request")
+        try:
+            os.remove(FORGET_FILE)
+        except OSError:
+            pass
+        return sel
 
     def _rekey_chrome(self):
         """Move the chrome slots onto the current session's window ids, and

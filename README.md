@@ -233,6 +233,7 @@ usher lock                   # lock the seated session, and verify it took
 usher predict                # record what the next restore SHOULD produce
 usher verify                 # diff the live layout against that prediction
 usher doctor                 # what it is doing, and what it is NOT
+usher forget 'chrome:win:*'  # drop remembered slots (previews; --apply acts)
 usher status                 # placement mode and seconds until steady
 usher aggressive             # place every window that maps, for a while
 usher settle                 # go steady now: leave new windows where they open

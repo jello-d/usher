@@ -53,6 +53,7 @@ VERBS = {
     "reload":          ("both", "pick up new code, touch nothing else"),
     "stop":            ("both", "stop the daemon (SIGTERM, not pkill)"),
     "launch":          ("both", "respawn saved-but-absent windows"),
+    "forget":          ("both", "drop remembered slots [SEL...] [--apply]"),
     "wind-down":       ("both", "last capture, then let the apps go"),
     "doctor":          ("both", "what it is doing, and what it is NOT"),
     "status":          ("both", "placement mode and seconds to steady"),
@@ -497,6 +498,9 @@ def _dispatch(verb, args):
             source = engine.resolve_snapshot(args[k + 1] if k + 1 < len(args)
                                              else "list")
         engine.do_restore(dry="--dry-run" in args, only=only, source=source)
+    elif verb == "forget":
+        sys.exit(engine.do_forget([a for a in args[1:] if a != "--apply"],
+                                  apply="--apply" in args))
     elif verb == "cleanly":
         sys.exit(do_cleanly(args[1:]) or 0)
     elif verb == "watch":         # start, or reload if running: RESTORE mode

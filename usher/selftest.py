@@ -2173,6 +2173,101 @@ def _t_geometry(ck):
        chrome_profiles_for([{"app_id": "kitty", "key": "kitty:/tmp"}])
        == [None])
 
+    # FORGET: the selector, and the NUL-key trap that is most of its reason
+    # for existing. A store key is `app_id` NUL `identity`, so `term:` is NOT
+    # a prefix of it and `startswith('term:')` answers [] whether or not a
+    # terminal slot exists. That cost an investigation here, and doing the
+    # split in ONE place is what the verb buys over a hand edit.
+    _fe = {"workspace": [1, 0], "pos": [0, 0], "size": [10, 10]}
+    _fkb = {engine.kkey("google-chrome", "chrome:win:111"): dict(_fe),
+            engine.kkey("google-chrome", "chrome:win:222"): dict(_fe),
+            engine.kkey("kitty", "term:resume"): dict(_fe),
+            engine.kkey("kitty", "kitty:/src/usher"): dict(_fe),
+            engine.kkey("signal", ""): dict(_fe)}
+    _fm = engine.forget_matches
+    ck("forget-globs-the-identity",
+       _fm(_fkb, ["chrome:win:*"])
+       == sorted([engine.kkey("google-chrome", "chrome:win:111"),
+                  engine.kkey("google-chrome", "chrome:win:222")]))
+    ck("forget-matches-an-exact-identity",
+       _fm(_fkb, ["term:resume"]) == [engine.kkey("kitty", "term:resume")])
+    # THE TRAP ITSELF: a prefix selector must find the terminal slot, which a
+    # naive startswith over the KEYS never does.
+    ck("forget-finds-a-term-slot-the-naive-filter-misses",
+       _fm(_fkb, ["term:*"]) == [engine.kkey("kitty", "term:resume")]
+       and [k for k in _fkb if k.startswith("term:")] == [])
+    # AN APP-ID-ONLY KEY has no identity, so the glob falls to the app-id.
+    ck("forget-matches-an-appid-only-entry",
+       _fm(_fkb, ["signal"]) == [engine.kkey("signal", "")])
+    ck("forget-does-not-match-an-app-with-an-identity",
+       _fm(_fkb, ["kitty"]) == [])
+    ck("forget-no-match-is-empty", _fm(_fkb, ["nothing-like-this"]) == [])
+    ck("forget-several-selectors-union",
+       len(_fm(_fkb, ["chrome:win:111", "signal"])) == 2)
+    # CASE IS NOT FOLDED: chrome has two app-id spellings and a store holds
+    # both, so a selector must mean exactly what it says.
+    ck("forget-is-case-sensitive", _fm(_fkb, ["CHROME:WIN:*"]) == [])
+    # ...and a preview must not mutate anything, which is the whole default.
+    _snap = dict(_fkb)
+    _fm(_fkb, ["*"])
+    ck("forget-matching-mutates-nothing", _fkb == _snap)
+    ck("forget-star-selects-everything", len(_fm(_fkb, ["*"])) == len(_fkb))
+
+    # PREVIEW BY DEFAULT IS THE WHOLE SAFETY STORY, so it is asserted rather
+    # than trusted: a planted regression that made the preview APPLY passed
+    # the entire suite until these existed. Three outcomes, and which one
+    # happens depends on the daemon, because only it may write the store while
+    # it runs.
+    _rlk, _rwp = engine.load_knowledge, engine.watcher_pid
+    _rfa, _rff = engine.forget_apply, engine.FORGET_FILE
+    _fdir = tempfile.mkdtemp(prefix="usher-dofg-", dir="/var/tmp")
+    try:
+        engine.load_knowledge = lambda: dict(_fkb)
+        engine.FORGET_FILE = os.path.join(_fdir, "usher.forget")
+        _applied = []
+        engine.forget_apply = lambda kb, sel: _applied.append(sel) or sel
+        # 1. a preview must touch NOTHING, with or without a daemon
+        for _who, _pid in (("no-daemon", None), ("daemon-up", 99)):
+            _applied.clear()
+            engine.watcher_pid = lambda: _pid
+            with contextlib.redirect_stdout(io.StringIO()):
+                _rc = engine.do_forget(["chrome:win:*"], apply=False)
+            ck(f"forget-preview-{_who}-applies-nothing", _applied == [])
+            ck(f"forget-preview-{_who}-writes-no-request",
+               not os.path.exists(engine.FORGET_FILE))
+            ck(f"forget-preview-{_who}-succeeds", _rc == engine.EXIT_OK)
+        # 2. --apply with NO daemon edits here, because nothing else writes
+        _applied.clear()
+        engine.watcher_pid = lambda: None
+        with contextlib.redirect_stdout(io.StringIO()):
+            engine.do_forget(["chrome:win:*"], apply=True)
+        ck("forget-apply-without-a-daemon-edits-here",
+           _applied == [["chrome:win:*"]])
+        ck("forget-apply-without-a-daemon-writes-no-request",
+           not os.path.exists(engine.FORGET_FILE))
+        # 3. --apply WITH a daemon hands it over instead of editing
+        _applied.clear()
+        engine.watcher_pid = lambda: 99
+        with contextlib.redirect_stdout(io.StringIO()):
+            engine.do_forget(["chrome:win:*"], apply=True)
+        ck("forget-apply-with-a-daemon-does-not-edit-here", _applied == [])
+        ck("forget-apply-with-a-daemon-writes-the-request",
+           open(engine.FORGET_FILE).read().split() == ["chrome:win:*"])
+        # 4. and the degenerate inputs
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            ck("forget-no-selector-fails",
+               engine.do_forget([], apply=True) == engine.EXIT_FAIL)
+            _applied.clear()
+            ck("forget-no-match-succeeds",
+               engine.do_forget(["nothing-like-this"], apply=True)
+               == engine.EXIT_OK)
+            ck("forget-no-match-applies-nothing", _applied == [])
+    finally:
+        engine.load_knowledge, engine.watcher_pid = _rlk, _rwp
+        engine.forget_apply, engine.FORGET_FILE = _rfa, _rff
+        shutil.rmtree(_fdir, ignore_errors=True)
+
     # THE DRY RUN COLLAPSES ONLY WHAT CANNOT MATCH. 185 UNMATCHED-LAYOUT rows
     # against 12 of signal (manifold, 2026-10-13) buries the one row that
     # means something. What must NOT be collapsed is the whole point, so most
@@ -2594,6 +2689,50 @@ def _t_watcher(ck):
     import time as _time
     w = Watcher(launch=False)      # reads the store, opens no socket
     now = _time.time()
+
+    # THE FORGET REQUEST, driven on the real Watcher. The DAEMON makes the
+    # edit because it owns the store while it runs, so the one thing that must
+    # hold is that a request is applied and then CONSUMED: left behind, it
+    # would be re-applied on every poll.
+    _rfk, _rsave = engine.FORGET_FILE, engine.save_knowledge
+    _rlog, _rbk = engine.logline, engine.backup_knowledge
+    _fd = tempfile.mkdtemp(prefix="usher-forget-", dir="/var/tmp")
+    try:
+        engine.FORGET_FILE = os.path.join(_fd, "usher.forget")
+        _wmod = sys.modules[Watcher.__module__]
+        _rwfk = _wmod.FORGET_FILE
+        _wmod.FORGET_FILE = engine.FORGET_FILE
+        _saved = []
+        engine.save_knowledge = lambda kb: _saved.append(dict(kb))
+        engine.backup_knowledge = lambda: "/dev/null"
+        engine.logline = lambda *a, **k: None
+        w.kb = {engine.kkey("google-chrome", "chrome:win:9"): {},
+                engine.kkey("kitty", "term:resume"): {}}
+        with open(engine.FORGET_FILE, "w") as f:
+            f.write("chrome:win:*\n")
+        _sel = w._take_forget()
+        ck("forget-request-is-read", _sel == ["chrome:win:*"])
+        ck("forget-request-drops-from-the-live-kb",
+           list(w.kb) == [engine.kkey("kitty", "term:resume")])
+        ck("forget-request-saves-the-store", len(_saved) == 1)
+        ck("forget-request-is-consumed",
+           not os.path.exists(engine.FORGET_FILE))
+        # A SECOND POLL MUST DO NOTHING, which is what consuming it buys.
+        _sel2 = w._take_forget()
+        ck("forget-absent-request-is-a-no-op",
+           _sel2 == [] and len(_saved) == 1)
+        # ...and an unparsable request is removed too, or it is retried for
+        # the life of the daemon.
+        with open(engine.FORGET_FILE, "w") as f:
+            f.write("\n   \n")
+        w._take_forget()
+        ck("forget-an-empty-request-is-still-consumed",
+           not os.path.exists(engine.FORGET_FILE) and len(_saved) == 1)
+    finally:
+        engine.FORGET_FILE, engine.save_knowledge = _rfk, _rsave
+        engine.logline, engine.backup_knowledge = _rlog, _rbk
+        _wmod.FORGET_FILE = _rwfk
+        shutil.rmtree(_fd, ignore_errors=True)
 
     # THE AGGRESSIVE/STEADY CLOCK. steady when the FLOOR has passed and it has
     # been quiet for IDLE_SETTLE, but never past the CAP.
