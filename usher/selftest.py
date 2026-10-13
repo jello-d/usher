@@ -1885,6 +1885,24 @@ def _t_chrome(ck):
         chrome.browser_pids, chrome.session_history = _rbp, _rsh
         shutil.rmtree(_sdir, ignore_errors=True)
 
+    # recorded_window_ids MUST READ THE RETAINED OLDER FILES TOO, not just
+    # the current one. Those ids are precisely what rekey_chrome can bind
+    # across a restart, so a set built from the newest file alone would call
+    # them unreachable and the dry run would hide the slots that matter most
+    # during exactly the event they exist for.
+    _rsh2 = chrome.session_history
+    try:
+        with _tsnss([(11, 1, "https://a/", "A")]) as _curf, \
+                _tsnss([(22, 2, "https://b/", "B")]) as _prevf:
+            chrome.session_history = lambda: {"P": [_curf, _prevf]}
+            _rids = chrome.recorded_window_ids()
+            ck("recorded-ids-have-the-current-file", 11 in _rids)
+            ck("recorded-ids-have-a-retained-older-file", 22 in _rids)
+            ck("recorded-ids-are-only-what-a-file-names",
+               _rids == {11, 22})
+    finally:
+        chrome.session_history = _rsh2
+
     # END TO END, through the title map and elimination, which is where the
     # live fault actually showed: a dormant profile's window is one the file
     # records and nothing can be, so leaving it in the set is what forced the
@@ -2126,6 +2144,32 @@ def _t_geometry(ck):
     ck("chrome-profiles-ignores-others",
        chrome_profiles_for([{"app_id": "kitty", "key": "kitty:/tmp"}])
        == [None])
+
+    # THE DRY RUN COLLAPSES ONLY WHAT CANNOT MATCH. 185 UNMATCHED-LAYOUT rows
+    # against 12 of signal (manifold, 2026-10-13) buries the one row that
+    # means something. What must NOT be collapsed is the whole point, so most
+    # of these assert something STAYS.
+    def _ue(app, ident):
+        return {"app_id": app, "title": ident}
+    _dead = _ue("google-chrome", "chrome:win:111")       # no file names it
+    _alive = _ue("google-chrome", "chrome:win:222")      # a file still does
+    _title = _ue("loupe", "holiday.png")                 # opens again anytime
+    _kit = _ue("kitty", "kitty:/src/x")                  # likewise
+    _appid = _ue("signal", "")                           # app-id only
+    _all = [_dead, _alive, _title, _kit, _appid]
+    _keep, _gone = engine._unlayout_split(_all, recorded={222})
+    ck("unlayout-collapses-an-unreachable-chrome-slot", _gone == [_dead])
+    ck("unlayout-keeps-a-chrome-id-a-file-still-names", _alive in _keep)
+    ck("unlayout-keeps-a-title-key", _title in _keep)
+    ck("unlayout-keeps-a-kitty-cwd", _kit in _keep)
+    ck("unlayout-keeps-an-appid-only-key", _appid in _keep)
+    ck("unlayout-loses-nothing", len(_keep) + len(_gone) == len(_all))
+    # NO EVIDENCE COLLAPSES NOTHING: an unparsed session file must not read as
+    # "every slot is dead", which would hide the slots a browser about to
+    # start is going to claim.
+    _keep2, _gone2 = engine._unlayout_split(_all, recorded=set())
+    ck("unlayout-no-evidence-collapses-nothing",
+       _gone2 == [] and len(_keep2) == len(_all))
 
 def _t_snapshots(ck):
     """restoring from a stored milestone."""

@@ -43,7 +43,7 @@ from datetime import date
 from .chrome import (CHROME_FLAGS, CHROME_STAGGER, browser_pids,
                      chrome_bind_windows, chrome_profile_map, chrome_slot,
                      chrome_window_tabs, is_chrome, is_chrome_slot,
-                     session_history, window_slot)
+                     recorded_window_ids, session_history, window_slot)
 
 # pywayfire is needed only to talk to the live compositor, and is guarded so the
 # module still imports (and `usher selftest` runs) without it.
@@ -2431,6 +2431,38 @@ def apply_invert(sock, view_id):
         logline(f"invert store write error: {e}")
 
 
+def _unlayout_split(unlayout, recorded=None):
+    """(still listed, unreachable) over the remembered-but-not-live entries.
+
+    A dry run on a browsing box is 185 UNMATCHED-LAYOUT lines against 12 of
+    signal (manifold, 2026-10-13), so the one UNMATCHED-LIVE row that means
+    something is buried. Collapsing is presentational only: the header count
+    stays the true total.
+
+    COLLAPSE ONLY WHAT CANNOT MATCH, WHICH IS A PROOF AND NOT A HEURISTIC.
+    A chrome slot whose SessionID no session file on disk names can never be
+    matched again (see recorded_window_ids). Everything else is listed:
+    a title, an app-id or a kitty cwd matches again the moment such a window
+    opens, and a chrome id a file still names is one rekey_chrome may bind,
+    so neither is ours to hide.
+
+    NO EVIDENCE COLLAPSES NOTHING. An empty `recorded` means no session file
+    was parsed, not that every slot is dead, and reading it the other way
+    would hide exactly the slots a browser about to start is going to claim."""
+    recorded = recorded_window_ids() if recorded is None else recorded
+    if not recorded:
+        return list(unlayout), []
+    listed, gone = [], []
+    for e in unlayout:
+        key = e.get("title") or ""
+        if (is_chrome_slot(key)
+                and int(key.rsplit(":", 1)[1]) not in recorded):
+            gone.append(e)
+        else:
+            listed.append(e)
+    return listed, gone
+
+
 def _restore_report(pairs, live, unlive, unlayout, unplaceable, outs, dry,
                     acted):
     """The summary a restore prints. Lifted out because a restore that places
@@ -2443,8 +2475,12 @@ def _restore_report(pairs, live, unlive, unlayout, unplaceable, outs, dry,
     for lv in unlive:
         print(f"  UNMATCHED-LIVE   {app_of(lv)[:20]:20} | "
               f"{lv.get('title','')[:42]}")
-    for e in unlayout:
+    listed, gone = _unlayout_split(unlayout)
+    for e in listed:
         print(f"  UNMATCHED-LAYOUT {e['app_id'][:20]:20} | {e['title'][:42]}")
+    if gone:
+        print(f"  UNREACHABLE      {'google-chrome':20} | {len(gone)} slot(s)"
+              f" from previous browser runs, ageing out on the TTL")
     have = ", ".join(sorted(outs)) or "none"
     for lv, e in unplaceable:
         print(f"  UNPLACEABLE      {app_of(lv)[:20]:20} | saved on "

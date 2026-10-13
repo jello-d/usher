@@ -300,6 +300,30 @@ def browser_started():
     return min(out) if out else None
 
 
+def recorded_window_ids():
+    """Every Chrome window id that ANY session file on disk still names.
+
+    THAT IS EXACTLY THE SET A STORED SLOT CAN STILL MATCH, which is what
+    makes it worth naming. A chrome slot is keyed on a SessionID, and there
+    are only two ways one is ever matched again: the id belongs to a window of
+    the CURRENT session, or rekey_chrome binds it across a browser restart,
+    which it can only do for an id a RETAINED older file still names. An id
+    no file on disk names is unreachable, because a SessionID is a monotonic
+    counter and no run ever re-mints one (measured four times, 2026-09-29 and
+    2026-10-13: every restart hands out a fresh higher block).
+
+    AN EMPTY ANSWER MEANS NO EVIDENCE, NOT "NOTHING IS REACHABLE", and a
+    caller must read it that way: with no file parsed, every slot keeps the
+    benefit of the doubt. Being wrong the other way would hide a slot that
+    was about to be re-keyed, so the empty case costs a report line where the
+    alternative costs a placement."""
+    ids = set()
+    for files in session_history().values():
+        for f in files:
+            ids |= set(chrome_window_tabs(f))
+    return ids
+
+
 def session_files():
     """The CURRENT session file per Chrome profile: what the windows are now.
 
