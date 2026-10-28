@@ -185,14 +185,15 @@ PYTHONPATH="$HERE" python3 - "$HERE" <<'PYEOF' || fail "a documented default
 import sys
 root = sys.argv[1]
 sys.path.insert(0, root)
-from usher import chrome, engine
+from usher import chrome, engine, watch
 man = open(root + "/man/man1/usher.1").read()
 rdm = open(root + "/README.md").read()
 KNOBS = (("USHER_START_FLOOR", engine.START_FLOOR),
          ("USHER_IDLE_SETTLE", engine.IDLE_SETTLE),
          ("USHER_AGGR_CAP", engine.AGGR_CAP),
          ("USHER_CHROME_STAGGER", chrome.CHROME_STAGGER),
-         ("USHER_WIND_DOWN_TIMEOUT", engine.WIND_DOWN_TIMEOUT))
+         ("USHER_WIND_DOWN_TIMEOUT", engine.WIND_DOWN_TIMEOUT),
+         ("USHER_DOCK_HOLD", watch.DOCK_HOLD))
 bad = []
 for name, val in KNOBS:
     want = str(int(val))

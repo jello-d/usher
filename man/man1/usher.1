@@ -385,6 +385,13 @@ anchors are moved.
 .BI USHER_AGGR_CAP " 900"
 Hard cap on the aggressive window, whatever the other two say.
 .TP
+.BI USHER_DOCK_HOLD " 20"
+Seconds that a monitor arriving or leaving suppresses capture for. A dock
+coming out makes the compositor move every window on the vanished output, and
+learning that would overwrite the slots it just destroyed. Ended early by
+hwdp's display-change hook, so this bound only matters on a box without hwdp,
+or when the hook is slower than it.
+.TP
 .BI USHER_CHROME_FLAGS " --restore-last-session --hide-crash-restore-bubble"
 Flags added to each Chrome launch, space separated. Empty passes none, which
 leaves Chrome to its own startup preference.

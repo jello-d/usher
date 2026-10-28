@@ -29,12 +29,13 @@ import time
 from . import chrome, engine
 from .engine import (AGGR_CAP, ARM_FILE, EXCLUDE_FILE, FORGET_FILE,
                      IDLE_SETTLE,
-                     INCLUDE_FILE, INVERT_STORE, LAUNCHED, SKIP_TITLE,
+                     INCLUDE_FILE, INVERT_STORE, LAUNCHED, REDISPLAY_FILE,
+                     SKIP_TITLE,
                      START_FLOOR, STATE, STATUS_FILE, _signal_watcher,
                      acquire_singleton, app_of, apply_fullscreen,
                      apply_invert, connect, do_capture, identity, is_anchored,
                      is_desync_error,
-                     is_transient, kkey, launch_missing, learn,
+                     is_transient, kb_for_profile, kkey, launch_missing, learn,
                      load_knowledge, logline, persist, place, placement_landed,
                      plugins_sig,
                      reload_anchor, reload_exclude, reload_plugins,
@@ -49,6 +50,11 @@ LAYOUT_TRIGGERS = {
     "view-fullscreen", "view-sticky", "output-added", "output-removed",
     "wset-workspace-changed",
 }
+
+# A MONITOR ARRIVING OR LEAVING, which is a different kind of event from
+# anything a view does: every slot on the affected output is about to become
+# unanswerable and every window on it is about to be moved by somebody else.
+OUTPUT_EVENTS = {"output-added", "output-removed"}
 # A title/app-id change (a tab switch) also feeds the knowledge base (it adds
 # a title to the window's group) but must NOT roll history, or the ring
 # floods with tab-flips. So the knowledge trigger set is broader than layout.
@@ -87,6 +93,33 @@ PLACE_SETTLE_FAST = 0.15  # everything else: the title is already stable at map
 # for the compositor to have APPLIED the request we are checking, or every
 # placement reads as failed; 0.6s against a measured sub-second apply.
 PLACE_VERIFY = (0.6, 1.5, 3.0)
+
+
+# HOW LONG AN OUTPUT CHANGE SUPPRESSES LEARNING.
+#
+# A dock coming out makes the compositor move every window that was on the
+# vanished monitor, and the capture loop runs every SECOND, so with no hold
+# the collapse is simply what gets learned. Measured in a nested rehearsal:
+# wayfire remaps each position proportionally into the surviving output
+# (140/1080 becomes 248.9/1920) and keeps the absolute workspace, so the
+# result is plausible, wrong, and indistinguishable from the human having
+# rearranged everything.
+#
+# TWO SIGNALS, EACH FOR WHAT IT KNOWS. The compositor's own output-added /
+# output-removed events are instant and say THAT the displays changed; hwdp's
+# hook says WHAT the new profile is, and arrives later because it runs after
+# kanshi has applied the new arrangement. So the compositor event starts this
+# hold and the hook does the placement, which is the same reason usher's hook
+# is numbered 40 and runs last.
+#
+# BOUNDED, because what ENDS a transition properly is that hook arriving, and
+# a hook that never comes (a box with no hwdp) must not suppress learning for
+# the rest of the session. It cannot be tiny either: a re-place issued at the
+# end of a transition still needs its PLACE_VERIFY read-backs to land before
+# anything it did is believed. A tunable because the honest value depends on
+# one real dock's kanshi-plus-hook latency, which no amount of rehearsal here
+# can tell us.
+DOCK_HOLD = float(os.environ.get("USHER_DOCK_HOLD", 20))
 
 
 # THE WORKER RESPAWN BOUNDS. Named because they govern how the daemon
@@ -272,7 +305,14 @@ class Watcher:
         os.makedirs(STATE, exist_ok=True)
         self.launch = launch
         self.mode = None
-        self.kb = load_knowledge()
+        # THE STORE AND THE PROFILE IT CAME FROM, as one pair. save_knowledge
+        # takes the profile because resolving it per write bound the in-memory
+        # store to one desk and the file it landed in to another, so a single
+        # capture after a display change overwrote the other desk's store.
+        self.kb, self.kb_profile = kb_for_profile()
+        # WHEN THE DISPLAY TRANSITION ENDS. Nothing is learned before then:
+        # see DOCK_HOLD.
+        self.transition_until = 0.0
         self.lock = threading.Lock()
         # dirty: knowledge needs a capture. layout: roll history too (not on a
         # tab-flip).
@@ -866,6 +906,7 @@ class Watcher:
                 "inc": store_mtime(INCLUDE_FILE),
                 "arm": store_mtime(ARM_FILE),
                 "forget": store_mtime(FORGET_FILE),
+                "redisplay": store_mtime(REDISPLAY_FILE),
                 "plugins": plugins_sig(),
                 "chrome": chrome.session_sig()}
         errstreak = 0
@@ -936,6 +977,9 @@ class Watcher:
         if store_mtime(FORGET_FILE) != seen["forget"]:
             self._take_forget()
             seen["forget"] = store_mtime(FORGET_FILE)
+        if store_mtime(REDISPLAY_FILE) != seen["redisplay"]:
+            self._take_redisplay()
+            seen["redisplay"] = store_mtime(REDISPLAY_FILE)
         # A BROWSER RESTART IS VISIBLE RIGHT HERE and nowhere else. Chrome
         # mints fresh SessionIDs for every restored window, so the store's
         # chrome slots go dead the instant it rotates its session file, and
@@ -972,7 +1016,7 @@ class Watcher:
             sel = []
         if sel:
             with self.lock:
-                gone = engine.forget_apply(self.kb, sel)
+                gone = engine.forget_apply(self.kb, sel, self.kb_profile)
             logline(f"forget: dropped {len(gone)} on request")
         try:
             os.remove(FORGET_FILE)
@@ -988,7 +1032,7 @@ class Watcher:
             with self.lock:
                 moved = rekey_chrome(self.kb)
                 if moved:
-                    save_knowledge(self.kb)
+                    save_knowledge(self.kb, self.kb_profile)
         except Exception as e:
             logline(f"chrome re-key error: {e}")
             return
@@ -1016,10 +1060,82 @@ class Watcher:
                          and w["id"] not in self.placed
                          and now <= self.deadline.get(w["id"], 0))
 
+    def _in_transition(self):
+        return time.time() < self.transition_until
+
+    def _begin_transition(self, why):
+        """The displays are changing: believe nothing about where windows are.
+
+        Started by the compositor's own output-added / output-removed, which is
+        the instant signal, and ended by hwdp's hook arriving with the new
+        profile (or by DOCK_HOLD expiring, so a box with no hwdp recovers).
+
+        IT SUPPRESSES THE WHOLE CAPTURE, not just the learn. The snapshot is
+        the relaunch's input and the seed for a profile's first store, so a
+        `current.json` written mid-collapse would teach a brand-new desk the
+        collapse as its starting layout, which is the one state that cannot be
+        relearned by waiting."""
+        if self._in_transition():
+            self.transition_until = time.time() + DOCK_HOLD
+            return
+        self.transition_until = time.time() + DOCK_HOLD
+        logline(f"displays changing ({why}): holding capture for "
+                f"{DOCK_HOLD:.0f}s")
+
+    def _take_redisplay(self):
+        """Adopt a new display profile on hwdp's request, and re-place.
+
+        THE STORE IS RELOADED, NOT MIGRATED. A slot is pixels on a named
+        output, so the entries learned at the other desk describe geometry
+        that is not attached; the new profile's own store is the only thing
+        that can answer here, even when it is empty.
+
+        EVERY PLACEMENT LEDGER IS VOID, which is the part that is easy to
+        miss: `placed` would dedup a window out of being re-placed, and
+        `slot_held` records which window owns a slot on outputs that may no
+        longer exist. Clearing them is what makes the sweep a real one.
+
+        Consumed and removed like the forget request, so an unparsable one is
+        not retried on every poll."""
+        try:
+            with open(REDISPLAY_FILE) as f:
+                prof = f.read().strip()
+        except OSError:
+            prof = ""
+        try:
+            os.remove(REDISPLAY_FILE)
+        except OSError:
+            pass
+        if not prof:
+            return ""
+        with self.lock:
+            was, self.kb_profile = self.kb_profile, prof
+            self.kb = load_knowledge(prof)
+            self.placed.clear()
+            self.slot_held.clear()
+            self.verify.clear()
+            self.place_tries.clear()
+            self.late_ok.clear()
+            # The sweep runs on the PLACER thread, which is place_sock's one
+            # writer, so it is requested here rather than done here: the same
+            # seam a store change already uses.
+            self.st["recheck"] = True
+            self.st["dirty"] = True
+            self.st["layout"] = True
+            # END THE HOLD, but not before the re-place has had its verify
+            # budget: learning the instant we issue placements would record
+            # the positions we are still correcting.
+            self.transition_until = time.time() + sum(PLACE_VERIFY) + 1.0
+        logline(f"display profile {was} -> {prof}: {len(self.kb)} known "
+                "window(s) here; re-placing")
+        return prof
+
     def _capture_once(self, cap):
         """One snapshot: learn from it, save the knowledge, roll the history if
         this was a layout change rather than a tab flip. The SNAPSHOT is always
         whole: only what we LEARN from it is held back."""
+        if self._in_transition():
+            return        # st["dirty"] stays set, so the next tick retries
         snap = snapshot(cap)
         hold = self._held(snap["windows"])
         # WHEN THE HOLD LIFTS, COME BACK. Capture is event-driven, so a window
@@ -1037,10 +1153,10 @@ class Watcher:
         with self.lock:
             roll = self.st["layout"]
             learn(self.kb, self.groups, snap["windows"], snap["time"], hold,
-                  seen=self.seen_terms)
+                  seen=self.seen_terms, outputs=snap["outputs"])
             self.st["dirty"] = False
             self.st["layout"] = False
-            save_knowledge(self.kb)
+            save_knowledge(self.kb, self.kb_profile)
         persist(snap, roll=roll)
 
     def _capture_failed(self, e, cap, errstreak):
@@ -1093,6 +1209,11 @@ class Watcher:
     def _on_event(self, msg):
         ev = msg.get("event", "")
         v = msg.get("view", {}) or {}
+        if ev in OUTPUT_EVENTS:
+            # THE COMPOSITOR IS THE FIRST TO KNOW, and it is the only signal
+            # that arrives before the windows move. hwdp's hook follows with
+            # the new profile; this just stops us believing anything meanwhile.
+            self._begin_transition(ev)
         if ev == "view-mapped" and v.get("id") is not None:
             self.deadline[v["id"]] = time.time() + PLACE_GRACE  # start grace
             if self._aggressive_now():

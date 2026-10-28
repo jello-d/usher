@@ -314,6 +314,9 @@ with `usher reload`.
   placement gives way to steady, where only `include` anchors are moved.
 - **`USHER_AGGR_CAP`** (`900`): hard cap on the aggressive window, whatever
   the other two say.
+- **`USHER_DOCK_HOLD`** (`20`): seconds that a monitor arriving or leaving
+  suppresses capture for, so an undock's collapse is not learned as the new
+  truth. Ended early by hwdp's display-change hook.
 - **`USHER_CHROME_FLAGS`**
   (`--restore-last-session --hide-crash-restore-bubble`): flags added to each
   Chrome launch, space separated. Empty passes none.

@@ -2225,7 +2225,8 @@ def _t_geometry(ck):
         engine.load_knowledge = lambda: dict(_fkb)
         engine.FORGET_FILE = os.path.join(_fdir, "usher.forget")
         _applied = []
-        engine.forget_apply = lambda kb, sel: _applied.append(sel) or sel
+        engine.forget_apply = (lambda kb, sel, prof=None:
+                               _applied.append(sel) or sel)
         # 1. a preview must touch NOTHING, with or without a daemon
         for _who, _pid in (("no-daemon", None), ("daemon-up", 99)):
             _applied.clear()
@@ -2368,7 +2369,7 @@ def _t_migration_body(ck):
         _kb = {kkey("google-chrome", "example.com"): {
             "app_id": "google-chrome", "title": "example.com",
             "appid_only": False, "last_seen": 1_800_000_000}}
-        save_knowledge(_kb)
+        save_knowledge(_kb, engine.profile_id())
         ck("new-profile-survives-reload", len(load_knowledge()) == 1)
 
         # A legacy store must be MERGED even when a profile store already
@@ -2431,6 +2432,213 @@ def _t_migration_body(ck):
     finally:
         engine.STATE = _st
         shutil.rmtree(_tmp, ignore_errors=True)
+
+def _t_displays(ck):
+    """DOCKING: the store must not follow the daemon across a display change,
+    and a collapse must not be learned as the new truth.
+
+    The whole area exists because of one measured fault: the daemon loads the
+    store ONCE at worker init while save_knowledge resolved the profile FRESH
+    on every write, so a single capture after an undock wrote the docked
+    layout into the laptop store. A docked laptop does that twice a day and
+    the two stores then converge until per-profile stores have stopped
+    existing."""
+    from .watch import Watcher
+    import time as _time
+
+    # ---- save_knowledge writes where the data CAME FROM -------------------
+    _st = engine.STATE
+    _tmp = tempfile.mkdtemp(prefix="usher-dock-", dir="/var/tmp")
+    _rprof = os.environ.get("USHER_PROFILE")
+    try:
+        engine.STATE = _tmp
+        os.environ["USHER_PROFILE"] = "DOCKED"
+        _docked = {engine.kkey("signal", ""): {
+            "app_id": "signal", "title": "", "appid_only": True,
+            "output": "DP-3", "workspace": [2, 0], "pos": [10, 10],
+            "size": [800, 600], "last_seen": _time.time()}}
+        _kb, _prof = engine.kb_for_profile()
+        ck("kb-for-profile-pairs-the-two", _prof == "DOCKED" and _kb == {})
+        engine.save_knowledge(_docked, "DOCKED")
+
+        # The monitors change under a daemon that is still holding the docked
+        # store. This is the exact sequence that was destructive.
+        os.environ["USHER_PROFILE"] = "LAPTOP"
+        engine._PROFILE.update({"id": None, "at": 0.0})
+        ck("profile-follows-the-monitors", engine.profile_id() == "LAPTOP")
+        engine.save_knowledge(_docked, "DOCKED")   # as the capture loop does
+        ck("a-save-cannot-land-in-another-profile",
+           engine.load_knowledge("LAPTOP") == {})
+        ck("the-other-desk-keeps-its-layout",
+           list(engine.load_knowledge("DOCKED")) == [engine.kkey("signal",
+                                                                "")])
+        # And the pair is honoured in the other direction: asking for a
+        # profile by name must not be overridden by the current one.
+        ck("load-knowledge-takes-a-profile",
+           len(engine.load_knowledge("DOCKED")) == 1)
+    finally:
+        engine.STATE = _st
+        if _rprof is None:
+            os.environ.pop("USHER_PROFILE", None)
+        else:
+            os.environ["USHER_PROFILE"] = _rprof
+        engine._PROFILE.update({"id": None, "at": 0.0})
+        shutil.rmtree(_tmp, ignore_errors=True)
+
+    # ---- a placement on an output nobody has is not readable --------------
+    _outs = [{"name": "eDP-1"}, {"name": "DP-3"}]
+    ck("attached-output-is-readable",
+       not engine.unreadable_placement({"output": "DP-3"}, _outs))
+    ck("vanished-output-is-not-readable",
+       engine.unreadable_placement({"output": "DP-9"}, _outs))
+    # preserve-output parks the views of an unplugged monitor here, so this is
+    # the normal state of every external window while the dock is out.
+    ck("a-parked-view-is-not-readable",
+       engine.unreadable_placement({"output": "null"}, _outs))
+    # NO OUTPUT LIST CONCLUDES NOTHING: the fail-safe direction, and the same
+    # guard recorded_window_ids and seen_terms take.
+    ck("no-output-list-concludes-nothing",
+       not engine.unreadable_placement({"output": "DP-9"}, [])
+       and not engine.unreadable_placement({"output": "DP-9"}, None))
+
+    # ---- learn() holds such a window back, WITHOUT purging it ------------
+    _w = lambda vid, app, title, out: {
+        "id": vid, "app_id": app, "title": title, "key": title,
+        "output": out, "workspace": [0, 0], "pos": [5, 5], "size": [9, 9],
+        "pid": -1, "cmd": None}
+    _kb = {}
+    engine.learn(_kb, {}, [_w(1, "signal", "Signal", "null")], 1_800_000_000,
+                 outputs=_outs)
+    ck("learn-skips-an-unreadable-placement", _kb == {})
+    _kb = {}
+    engine.learn(_kb, {}, [_w(1, "signal", "Signal", "eDP-1")],
+                 1_800_000_000, outputs=_outs)
+    ck("learn-still-takes-a-readable-one", len(_kb) == 1)
+    # THE SUBTLE HALF. A terminal parked on a dead output is still HERE, so
+    # the purge must not read it as gone and drop the slot. `hold` is the
+    # right mechanism precisely because it does not reach the purge.
+    _tk = engine.kkey("kitty", "term:resume")
+    _kb = {_tk: {"app_id": "kitty", "title": "term:resume",
+                 "output": "DP-3", "workspace": [1, 1], "pos": [1, 1],
+                 "size": [9, 9], "last_seen": 1_800_000_000}}
+    engine.learn(_kb, {}, [_w(2, "kitty", "term:resume", "null")],
+                 1_800_000_000, seen={"term:resume"}, outputs=_outs)
+    ck("a-parked-terminal-keeps-its-slot", _tk in _kb)
+    ck("a-parked-terminal-slot-is-not-overwritten",
+       _kb[_tk]["output"] == "DP-3" and _kb[_tk]["workspace"] == [1, 1])
+
+    # ---- what a display event calls for ----------------------------------
+    ck("redisplay-same-monitors-does-nothing",
+       engine.redisplay_plan("abc", "abc", 123) == "none")
+    ck("redisplay-asks-the-daemon-when-there-is-one",
+       engine.redisplay_plan("abc", "xyz", 123) == "ask")
+    ck("redisplay-acts-here-with-no-daemon",
+       engine.redisplay_plan("abc", "xyz", None) == "here")
+    # The first event after login has nothing to compare against and IS a
+    # change, which is what you want at login.
+    ck("redisplay-first-event-is-a-change",
+       engine.redisplay_plan("", "xyz", 123) == "ask")
+    # A degenerate input: no resolvable profile concludes nothing.
+    ck("redisplay-no-profile-does-nothing",
+       engine.redisplay_plan("abc", "", 123) == "none")
+
+    # ---- the daemon's side of it, on a real Watcher -----------------------
+    w = Watcher(launch=False)
+    _wmod = sys.modules[Watcher.__module__]
+    _rrf, _rwrf = engine.REDISPLAY_FILE, _wmod.REDISPLAY_FILE
+    _rlog, _rload = engine.logline, engine.load_knowledge
+    _rwload = _wmod.load_knowledge
+    _rd = tempfile.mkdtemp(prefix="usher-redisp-", dir="/var/tmp")
+    try:
+        engine.REDISPLAY_FILE = os.path.join(_rd, "usher.redisplay")
+        _wmod.REDISPLAY_FILE = engine.REDISPLAY_FILE
+        engine.logline = lambda *a, **k: None
+        _asked = []
+        _wmod.load_knowledge = lambda p=None: (_asked.append(p)
+                                               or {"newdesk\x00": {}})
+        w.kb, w.kb_profile = {"olddesk\x00": {}}, "DOCKED"
+        w.placed.add(7)
+        w.slot_held["olddesk\x00"] = 7
+        w.verify[7] = {"due": 0}
+        w.place_tries[7] = 3
+        w.late_ok.add(7)
+        w.st["recheck"] = False
+        with open(engine.REDISPLAY_FILE, "w") as f:
+            f.write("LAPTOP\n")
+        _got = w._take_redisplay()
+        ck("redisplay-request-is-read", _got == "LAPTOP")
+        ck("redisplay-adopts-the-new-profile", w.kb_profile == "LAPTOP")
+        ck("redisplay-reloads-that-profiles-store",
+           _asked == ["LAPTOP"] and list(w.kb) == ["newdesk\x00"])
+        # EVERY LEDGER IS VOID: `placed` would dedup a window out of being
+        # re-placed, and slot_held names outputs that may be gone.
+        ck("redisplay-voids-the-placement-ledgers",
+           not w.placed and not w.slot_held and not w.verify
+           and not w.place_tries and not w.late_ok)
+        ck("redisplay-requests-a-placement-sweep", w.st["recheck"] is True)
+        ck("redisplay-is-consumed",
+           not os.path.exists(engine.REDISPLAY_FILE))
+        # It ends the hold, but not before the re-place can be read back.
+        ck("redisplay-holds-for-the-verify-budget",
+           w._in_transition()
+           and w.transition_until <= _time.time() + sum(_wmod.PLACE_VERIFY)
+           + 1.5)
+        _n = len(_asked)
+        ck("redisplay-absent-request-is-a-no-op",
+           w._take_redisplay() == "" and len(_asked) == _n)
+
+        # ---- the transition suppresses the whole capture ------------------
+        w.transition_until = 0.0
+        ck("not-in-transition-by-default", not w._in_transition())
+        w._begin_transition("output-removed")
+        ck("an-output-event-begins-a-transition", w._in_transition())
+        # A SECOND EVENT EXTENDS IT rather than being ignored: a dock emits a
+        # burst, and the last one is the one worth timing from.
+        _was = w.transition_until
+        w._begin_transition("output-added")
+        ck("a-later-output-event-extends-the-hold",
+           w.transition_until >= _was)
+        # _capture_once must not even SNAPSHOT: current.json is the relaunch's
+        # input and the seed for a new profile's first store, so one written
+        # mid-collapse teaches a fresh desk the collapse as its baseline.
+        _touched = []
+        _rsnap = _wmod.snapshot
+
+        class _Stop(Exception):
+            pass
+
+        def _spy(*a):
+            """Record the call and STOP, so a missing guard cannot carry on
+            into learn/save/persist and write the real store. The suite does
+            not sandbox XDG_STATE_HOME (STATE is read at import, so a hand-run
+            `usher selftest` would be writing for real), which is why this
+            refuses to proceed rather than returning a usable snapshot."""
+            _touched.append(1)
+            raise _Stop()
+
+        try:
+            _wmod.snapshot = _spy
+            try:
+                w._capture_once(None)
+            except _Stop:
+                pass
+            ck("a-transition-suppresses-the-capture", _touched == [])
+            # AND THE OTHER DIRECTION, which is what stops the check above
+            # passing vacuously: the spy must be reachable at all.
+            w.transition_until = 0.0
+            try:
+                w._capture_once(None)
+            except _Stop:
+                pass
+            ck("capture-resumes-when-the-transition-ends", _touched == [1])
+        finally:
+            _wmod.snapshot = _rsnap
+    finally:
+        engine.REDISPLAY_FILE, _wmod.REDISPLAY_FILE = _rrf, _rwrf
+        engine.logline, engine.load_knowledge = _rlog, _rload
+        _wmod.load_knowledge = _rwload
+        shutil.rmtree(_rd, ignore_errors=True)
+
 
 def _t_contracts(ck):
     """the cross-tool contracts and the SNSS reader."""
@@ -2703,7 +2911,7 @@ def _t_watcher(ck):
         _rwfk = _wmod.FORGET_FILE
         _wmod.FORGET_FILE = engine.FORGET_FILE
         _saved = []
-        engine.save_knowledge = lambda kb: _saved.append(dict(kb))
+        engine.save_knowledge = lambda kb, prof: _saved.append(dict(kb))
         engine.backup_knowledge = lambda: "/dev/null"
         engine.logline = lambda *a, **k: None
         w.kb = {engine.kkey("google-chrome", "chrome:win:9"): {},
@@ -2915,7 +3123,7 @@ def selftest():
                  _t_launch_source,
                  _t_relaunch, _t_chrome, _t_learn,
                  _t_geometry, _t_placement, _t_snapshots, _t_profiles,
-                 _t_migration, _t_watcher, _t_contracts):
+                 _t_migration, _t_watcher, _t_displays, _t_contracts):
         try:
             with _quiet_log():
                 area(ck)

@@ -1474,14 +1474,20 @@ def migrate_stores():
                 f" dropped {n} entry(s) it invalidated, {len(kb)} left")
 
 
-def load_knowledge():
-    """The knowledge base for the CURRENT display profile. A monitor set with
-    nothing learned yet starts empty (and seeds from the last snapshot), which
-    is right: the placements from another desk would not fit here anyway."""
+def load_knowledge(profile=None):
+    """The knowledge base for a display profile, the current one by default. A
+    monitor set with nothing learned yet starts empty (and seeds from the last
+    snapshot), which is right: the placements from another desk would not fit
+    here anyway.
+
+    TAKE THE PROFILE AS AN ARGUMENT when you intend to HOLD the result, and
+    save it back under the same one: see save_knowledge, and kb_for_profile,
+    which pairs the two so they cannot be resolved separately."""
+    profile = profile or profile_id()
     adopt_legacy_store()
     migrate_stores()      # every profile's store, not just the one we are on
     try:
-        kb = json.load(open(kb_path()))
+        kb = json.load(open(kb_path(profile)))
     except (FileNotFoundError, ValueError):
         # A store that does not exist yet is CURRENT by construction, so stamp
         # it NOW. Without this, the first monitor set to be seen writes an
@@ -1490,7 +1496,7 @@ def load_knowledge():
         # desk silently losing its browser and terminal placements once.
         try:
             os.makedirs(STATE, exist_ok=True)
-            write_json(schema_path(), KB_SCHEMA)
+            write_json(schema_path(profile), KB_SCHEMA)
         except OSError:
             pass
         snap = load_snapshot()    # seed from the latest snapshot if present
@@ -1679,7 +1685,31 @@ def _learn_purge_terminals(kb, windows, seen):
         del kb[k]
 
 
-def learn(kb, groups, windows, when, hold=(), seen=None):
+def unreadable_placement(w, outputs):
+    """True when window w's recorded placement cannot be believed, because the
+    output it names is not among those attached.
+
+    place_of's no-such-output branch answers ws[0, 0] with the RAW geometry as
+    the position, and that reads exactly like a real answer: a plausible slot
+    that is wrong in both coordinates. So a window whose output has gone needs
+    holding back from what we LEARN, the same rule as a window whose identity
+    the plugin cannot resolve.
+
+    THIS IS THE NORMAL STATE BETWEEN AN UNDOCK AND A REDOCK, not an edge case.
+    wayfire's preserve-output plugin parks the views of an unplugged monitor on
+    a `null` output and keeps their real geometry itself, so every
+    external-monitor window reports an output nobody has while the dock is
+    out. Learning those would write a store full of slots naming `null`, which
+    nothing can ever place.
+
+    NO OUTPUT LIST CONCLUDES NOTHING, which is the fail-safe direction and the
+    same guard recorded_window_ids and seen_terms take: an empty list means we
+    were not told what is attached, not that nothing is."""
+    names = {o.get("name") for o in (outputs or [])}
+    return bool(names) and w.get("output") not in names
+
+
+def learn(kb, groups, windows, when, hold=(), seen=None, outputs=None):
     """Watch-time knowledge update with view-id tab-grouping.
 
     Each live view: keyed by its wayfire id, stable for the window's whole
@@ -1698,6 +1728,13 @@ def learn(kb, groups, windows, when, hold=(), seen=None):
     tcount = Counter((w["app_id"], w["title"]) for w in windows if w["title"])
     ambiguous = {k for k, c in tcount.items() if c >= 2}
     live = {w["id"] for w in windows if w.get("id") is not None}
+    # A WINDOW ON AN OUTPUT NOBODY HAS JOINS THE HOLD, which is the right
+    # mechanism rather than a second one: `hold` deliberately does not reach
+    # the degroup or the terminal purge, and those ask "is this window still
+    # HERE", which a parked window plainly is. A purge on absence would
+    # otherwise drop the slot of every terminal on the unplugged monitor.
+    hold = set(hold) | {w["id"] for w in windows if w.get("id") is not None
+                        and unreadable_placement(w, outputs)}
     _learn_degroup(kb, groups, ambiguous, live)
     _learn_fold(groups, windows, ambiguous)
     _learn_stamp(kb, groups, windows, counts, when, hold)
@@ -1714,8 +1751,37 @@ def learn(kb, groups, windows, when, hold=(), seen=None):
     prune_kb(kb, when)
 
 
-def save_knowledge(kb):
-    write_json(kb_path(), json.dumps(kb, indent=2))
+def kb_for_profile(profile=None):
+    """The store AND the profile it belongs to, as one pair.
+
+    Anything holding a store for longer than one verb needs both, and asking
+    for them separately is what let them disagree: see save_knowledge."""
+    profile = profile or profile_id()
+    return load_knowledge(profile), profile
+
+
+def save_knowledge(kb, profile):
+    """Write the store back to the profile it CAME FROM.
+
+    THE PROFILE IS AN ARGUMENT, with no default, because resolving it HERE was
+    a bug rather than a convenience. The daemon loads `self.kb` once at worker
+    init and the capture loop saves it every second; kb_path() resolved
+    profile_id() fresh on every write, so the in-memory store was bound to the
+    profile it was loaded under and the file it landed in was not.
+
+    Measured on a seeded sandbox: one capture after a display change wrote the
+    OLD profile's whole store into the NEW profile's file, so the new
+    profile's own learned entries were gone and every surviving slot named an
+    output that was not attached. A docked laptop does that twice a day, and
+    the two stores then converge until per-profile stores have stopped
+    existing.
+
+    Writing where the data came from is the fail-safe direction. If nothing
+    tells us the monitors changed, we go on maintaining the store for the desk
+    we loaded, which is wrong but costs only staleness; the other desk's
+    layout is untouched either way.
+    """
+    write_json(kb_path(profile), json.dumps(kb, indent=2))
 
 
 def forget_matches(kb, selectors):
@@ -1750,10 +1816,15 @@ def backup_knowledge():
     return dst
 
 
-def forget_apply(kb, selectors):
+def forget_apply(kb, selectors, profile=None):
     """Drop what `selectors` select from `kb` IN PLACE, back the store up,
     save, and return the dropped keys. Each drop is logged, because the store
-    is learned data and watch.log is what says who removed it."""
+    is learned data and watch.log is what says who removed it.
+
+    `profile` is the one `kb` was loaded under, for the daemon, which holds a
+    store across display changes. None means resolve it now, which is right
+    for the client path: it loads and saves within the same breath."""
+    profile = profile or profile_id()
     gone = forget_matches(kb, selectors)
     if not gone:
         return []
@@ -1762,7 +1833,7 @@ def forget_apply(kb, selectors):
         del kb[k]
         app, _, ident = k.partition("\x00")
         logline(f"forget: dropped {app} | {ident or '(by app-id)'}")
-    save_knowledge(kb)
+    save_knowledge(kb, profile)
     return gone
 
 
@@ -1791,9 +1862,9 @@ def do_capture():
     snap = snapshot(ipc())
     os.makedirs(STATE, exist_ok=True)
     persist(snap)
-    kb = load_knowledge()
+    kb, prof = kb_for_profile()
     upsert(kb, snap["windows"], snap["time"])
-    save_knowledge(kb)
+    save_knowledge(kb, prof)
     print(f"usher: captured {len(snap['windows'])} window(s); "
           f"{len(kb)} known -> {STATE}")
 
@@ -2539,6 +2610,24 @@ def _restore_report(pairs, live, unlive, unlayout, unplaceable, outs, dry,
 PROFILE_MARK = "usher.profile"   # last profile we acted on, per boot
 
 
+def redisplay_plan(was, now, running):
+    """What a display event calls for: "none", "ask" or "here".
+
+    Pure, so the whole table is checkable with no compositor and no hwdp. The
+    cell that matters is the first: this hook fires on EVERY output burst (a
+    screen blanking and waking, a kanshi reapply, a re-detect), and acting on
+    those was a measured mistake, so only a real profile change does anything.
+
+    THE DAEMON DOES THE WORK WHEN THERE IS ONE, because it owns the store and
+    the placer; the hook placing windows itself is a second placer with no
+    verification. With no daemon there is no service to ask and a one-shot
+    restore here is all that can happen, which is the same two-branch shape
+    `forget` takes."""
+    if not now or was == now:
+        return "none"
+    return "ask" if running else "here"
+
+
 def do_display_changed():
     """The display-change entry point, for hwdp's `changed` hook.
 
@@ -2562,21 +2651,26 @@ def do_display_changed():
             was = f.read().strip()
     except OSError:
         was = ""
-    if was == now:
+    act = redisplay_plan(was, now, watcher_pid())
+    if act == "none":
         return 0                     # same monitors; nothing to do, silently
     try:
         with open(mark, "w") as f:
             f.write(now + "\n")
     except OSError as e:
         logline(f"display-changed: cannot record the profile: {e}")
+    if act == "ask":
+        try:
+            os.makedirs(os.path.dirname(REDISPLAY_FILE), exist_ok=True)
+            with open(REDISPLAY_FILE, "w") as f:
+                f.write(now + "\n")
+            logline(f"display changed: profile {was or '(none)'} -> {now}; "
+                    "asked the daemon to re-place")
+            return 0
+        except OSError as e:
+            logline(f"display-changed: cannot ask the daemon: {e}")
     logline(f"display changed: profile {was or '(none)'} -> {now}; "
-            "re-arming placement")
-    try:
-        os.makedirs(os.path.dirname(ARM_FILE), exist_ok=True)
-        with open(ARM_FILE, "w") as f:
-            f.write(f"{time.time()}\n")
-    except OSError as e:
-        logline(f"display-changed: cannot re-arm: {e}")
+            "no daemon, restoring here")
     try:
         do_restore(dry=False)
     except Exception as e:
@@ -3141,6 +3235,14 @@ STATUS_FILE = os.path.join(RUNTIME_DIR, "usher.status")
 # editing the file under it loses the edit to the next capture, which rewrites
 # the whole store from memory. Consumed and removed, like ADOPT_FLAG.
 FORGET_FILE = os.path.join(RUNTIME_DIR, "usher.forget")
+# THE SAME SHAPE, for the display-change edge: hwdp's hook writes the new
+# profile here and the WORKER does the work. It used to place windows from the
+# hook process itself, which is a second placer racing the daemon's, and the
+# only placement path that never went through _place_view and so never had its
+# read-back verified: that is precisely the condition that lost a placement to
+# wayfire's own cascade (see PLACE_VERIFY), running at the one moment the
+# compositor is re-laying-out every window it has.
+REDISPLAY_FILE = os.path.join(RUNTIME_DIR, "usher.redisplay")
 
 
 LOG_CAP = 256 * 1024   # rotate watch.log past this; bounds it to ~2x LOG_CAP
