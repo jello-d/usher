@@ -314,6 +314,12 @@ class Watcher:
         # WHEN THE DISPLAY TRANSITION ENDS. Nothing is learned before then:
         # see DOCK_HOLD.
         self.transition_until = 0.0
+        # WINDOWS OWED ONE PLACEMENT BECAUSE THE DISPLAYS CHANGED under them.
+        # Distinct from late_ok: see _adopt_profile.
+        self.redisplay_ok = set()
+        # When the live profile started disagreeing with the loaded store, or
+        # 0.0 when they agree. See _profile_drift.
+        self.profile_drift_at = 0.0
         self.lock = threading.Lock()
         # dirty: knowledge needs a capture. layout: roll history too (not on a
         # tab-flip).
@@ -627,6 +633,20 @@ class Watcher:
         first_look = e is not None and vid not in self.identified
         if first_look:
             self._recognise(vid, app, title)
+        # ONE CHANCE BECAUSE THE DISPLAYS MOVED, consumed on sight whether or
+        # not we go on to place: the entitlement is for this dock, not a
+        # standing licence.
+        #
+        # NOT TESTED AGAINST THE GRACE BELOW, deliberately. _adopt_profile
+        # re-graces every window it entitles, in the same locked block, so a
+        # `not dock_chance` guard there could never change the outcome: a
+        # planted regression removing it was uncatchable, which is how a dead
+        # condition announces itself. The re-grace owns the grace gate and the
+        # entitlement owns the steady gate, one mechanism each.
+        dock_chance = vid in self.redisplay_ok
+        if dock_chance:
+            with self.lock:
+                self.redisplay_ok.discard(vid)
         if time.time() > self.deadline.get(vid, 0):
             return   # past the grace window: the window is settled, hands off
         # ONE LATE CHANCE FOR A WINDOW THAT WAS ALWAYS HERE. _recognise
@@ -647,8 +667,11 @@ class Watcher:
         # dedups, and first_look is true exactly once per view.
         late_chance = first_look and vid in self.late_ok
         if (not self._aggressive_now() and not is_anchored(app, title)
-                and not late_chance):
+                and not late_chance and not dock_chance):
             return   # steady state: only usher/include anchors are (re)placed
+        if dock_chance and not self._aggressive_now():
+            logline(f"display changed, re-placing: {app[:18]} | "
+                    f"{title[:30]}")
         if late_chance and not self._aggressive_now():
             logline(f"late chance (present at login, identifiable only now): "
                     f"{app[:18]} | {title[:30]}")
@@ -1109,10 +1132,40 @@ class Watcher:
             pass
         if not prof:
             return ""
+        self._adopt_profile(prof, "on request")
+        return prof
+
+    def _adopt_profile(self, prof, why):
+        """Switch to a display profile's store and re-place everything once.
+
+        Shared by the hook's request and by the drift detector below, because
+        two copies of this is how they drift.
+
+        EVERY LIVE WINDOW IS RE-GRACED AND ENTITLED TO ONE PLACEMENT, which
+        the first version of this got wrong: it voided `placed` and asked for
+        a sweep, and the sweep placed NOTHING. A window that mapped hours ago
+        is long past its PLACE_GRACE deadline, and `late_ok`'s one-late-chance
+        needs `first_look`, which is false for a window already identified. So
+        both gates refused every window the dock was meant to move, and the log
+        said "re-placing" over a sweep that could not act.
+
+        A DISPLAY CHANGE IS THE THIRD KIND OF ENTITLEMENT, named rather than
+        folded into `late_ok`: that set means "mapped while aggressive, owed a
+        placement at first identification", where this means "the display
+        changed under a window that was already settled, so its slot is new
+        information". Overloading the first would have made its own meaning
+        unreadable."""
         # THE PANEL MAP IS CERTAINLY STALE NOW, and it is cached, so re-ask
         # before anything resolves a slot against it. This is the one moment a
         # connector can have changed what monitor it names.
         engine.panel_map(fresh=True)
+        try:
+            vids = [v.get("id") for v in
+                    self.place_sock.list_views(filter_mapped_toplevel=True)]
+        except Exception as e:
+            logline(f"redisplay: cannot list views: {e}")
+            vids = []
+        now = time.time()
         with self.lock:
             was, self.kb_profile = self.kb_profile, prof
             self.kb = load_knowledge(prof)
@@ -1121,6 +1174,10 @@ class Watcher:
             self.verify.clear()
             self.place_tries.clear()
             self.late_ok.clear()
+            self.redisplay_ok = {i for i in vids if i is not None}
+            for i in self.redisplay_ok:
+                self.deadline[i] = now + PLACE_GRACE
+            self.profile_drift_at = 0.0
             # The sweep runs on the PLACER thread, which is place_sock's one
             # writer, so it is requested here rather than done here: the same
             # seam a store change already uses.
@@ -1130,16 +1187,47 @@ class Watcher:
             # END THE HOLD, but not before the re-place has had its verify
             # budget: learning the instant we issue placements would record
             # the positions we are still correcting.
-            self.transition_until = time.time() + sum(PLACE_VERIFY) + 1.0
-        logline(f"display profile {was} -> {prof}: {len(self.kb)} known "
-                "window(s) here; re-placing")
-        return prof
+            self.transition_until = now + sum(PLACE_VERIFY) + 1.0
+        logline(f"display profile {was} -> {prof} ({why}): {len(self.kb)} "
+                f"known window(s) here; re-placing {len(self.redisplay_ok)}")
+
+    def _profile_drift(self):
+        """Notice a display profile that changed with nobody telling us.
+
+        The hook is the PROMPT and correctly-ordered path, not the only one. A
+        box with no hwdp has no hook at all, and a hook slower than DOCK_HOLD
+        would let the hold expire and a capture write the collapsed layout into
+        the store of the desk we are leaving: the binding fix stops that
+        reaching the OTHER desk's store, and nothing stopped it corrupting
+        this one.
+
+        So while the current profile disagrees with the loaded one, capture is
+        suppressed; and once it has disagreed for longer than DOCK_HOLD we
+        ADOPT it ourselves rather than refusing forever, which is what makes
+        the hook an optimisation rather than a dependency."""
+        try:
+            cur = engine.profile_id()
+        except Exception:
+            return False
+        if cur == self.kb_profile:
+            self.profile_drift_at = 0.0
+            return False
+        now = time.time()
+        if not self.profile_drift_at:
+            self.profile_drift_at = now
+            logline(f"display profile is now {cur}, store is {self.kb_profile}"
+                    f": holding capture for up to {DOCK_HOLD:.0f}s")
+            return True
+        if now - self.profile_drift_at < DOCK_HOLD:
+            return True
+        self._adopt_profile(cur, "noticed, no hook")
+        return False
 
     def _capture_once(self, cap):
         """One snapshot: learn from it, save the knowledge, roll the history if
         this was a layout change rather than a tab flip. The SNAPSHOT is always
         whole: only what we LEARN from it is held back."""
-        if self._in_transition():
+        if self._in_transition() or self._profile_drift():
             return        # st["dirty"] stays set, so the next tick retries
         snap = snapshot(cap)
         hold = self._held(snap["windows"])

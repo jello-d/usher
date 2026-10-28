@@ -2684,6 +2684,103 @@ def _t_displays(ck):
         ck("redisplay-absent-request-is-a-no-op",
            w._take_redisplay() == "" and len(_asked) == _n)
 
+        # ---- A SETTLED WINDOW MUST BE PLACEABLE AFTER A DOCK --------------
+        # The bug this pins shipped in the first version of _take_redisplay:
+        # it voided `placed` and asked for a sweep, and the sweep placed
+        # NOTHING, because a window that mapped hours ago is long past its
+        # PLACE_GRACE deadline and late_ok's one-late-chance needs first_look,
+        # false for a window already identified. Both gates refused every
+        # window the dock existed to move, while the log said "re-placing".
+        class _Sock:
+            """Just enough place_sock for _adopt_profile and _place_view."""
+
+            def __init__(self, views, outs):
+                self._v, self._o = views, outs
+
+            def list_views(self, **kw):
+                return self._v
+
+            def list_outputs(self):
+                return self._o
+
+        _app = "settledapp"          # owned by no plugin, so app_id-only keyed
+        _lv = [{"id": 42, "app-id": _app, "title": "Settled", "parent": -1,
+                "geometry": {"x": 9, "y": 9, "width": 10, "height": 10},
+                "output-name": "eDP-1", "pid": -1}]
+        _lo = [{"name": "eDP-1", "id": 1,
+                "geometry": {"x": 0, "y": 0, "width": 800, "height": 600},
+                "workspace": {"x": 0, "y": 0}}]
+        _slot = {"app_id": _app, "title": "", "appid_only": True,
+                 "label": "Settled", "output": "eDP-1", "panel": "",
+                 "workspace": [0, 0], "pos": [100, 120], "size": [10, 10],
+                 "sticky": False, "inverted": False, "fullscreen": False,
+                 "last_seen": _time.time()}
+        _seated = []
+        _rseat = Watcher._seat_view
+        try:
+            Watcher._seat_view = lambda self, v, e, o: (_seated.append(v["id"])
+                                                        or True)
+            w.place_sock = _Sock(_lv, _lo)
+            w.kb, w.kb_profile = {engine.kkey(_app, ""): _slot}, "DESK"
+            w.identified.add(42)         # identified long ago
+            w.deadline[42] = _time.time() - 10_000   # and settled long ago
+            w.st["armed_at"] = _time.time() - 10 * _wmod.AGGR_CAP  # steady
+            w.placed.clear()
+            w.redisplay_ok.clear()
+            w._place_view(_lv[0])
+            ck("a-settled-window-is-left-alone-in-steady-state",
+               _seated == [])
+            # Now the displays change. _adopt_profile must make it placeable.
+            _rload = _wmod.load_knowledge
+            try:
+                _wmod.load_knowledge = lambda p=None: {engine.kkey(_app, ""):
+                                                       _slot}
+                w._adopt_profile("DESK2", "test")
+            finally:
+                _wmod.load_knowledge = _rload
+            ck("a-dock-entitles-every-live-window", w.redisplay_ok == {42})
+            ck("a-dock-re-graces-them",
+               w.deadline[42] > _time.time())
+            w._place_view(_lv[0])
+            ck("a-settled-window-is-placed-after-a-dock", _seated == [42])
+            # ONE chance, not a standing licence: the entitlement is consumed,
+            # so a later stray title change does not yank the window again.
+            ck("the-dock-entitlement-is-consumed", 42 not in w.redisplay_ok)
+        finally:
+            Watcher._seat_view = _rseat
+            w.place_sock = None
+            w.identified.discard(42)
+            w.deadline.pop(42, None)
+            w.placed.clear()
+            w.kb, w.kb_profile = {}, "DESK"
+
+        # ---- the drift detector, for a hook that never comes --------------
+        _rpid2 = engine.profile_id
+        try:
+            w.kb_profile = "HERE"
+            w.profile_drift_at = 0.0
+            engine.profile_id = lambda fresh=False: "HERE"
+            ck("no-drift-when-the-profile-agrees", not w._profile_drift())
+            engine.profile_id = lambda fresh=False: "ELSEWHERE"
+            ck("drift-suppresses-capture", w._profile_drift())
+            ck("drift-is-dated", w.profile_drift_at > 0)
+            # Still within the hold: keep refusing rather than adopting.
+            ck("drift-keeps-holding-inside-the-window", w._profile_drift())
+            ck("drift-has-not-adopted-yet", w.kb_profile == "HERE")
+            # Past DOCK_HOLD it ADOPTS, so a box with no hwdp hook recovers by
+            # itself rather than never learning again.
+            w.profile_drift_at = _time.time() - _wmod.DOCK_HOLD - 1
+            _rload2 = _wmod.load_knowledge
+            try:
+                _wmod.load_knowledge = lambda p=None: {}
+                ck("drift-adopts-after-the-hold", not w._profile_drift())
+            finally:
+                _wmod.load_knowledge = _rload2
+            ck("drift-adopted-the-live-profile", w.kb_profile == "ELSEWHERE")
+        finally:
+            engine.profile_id = _rpid2
+            w.kb_profile, w.profile_drift_at = "HERE", 0.0
+
         # ---- the transition suppresses the whole capture ------------------
         w.transition_until = 0.0
         ck("not-in-transition-by-default", not w._in_transition())
@@ -2713,8 +2810,14 @@ def _t_displays(ck):
             _touched.append(1)
             raise _Stop()
 
+        _rpid = engine.profile_id
         try:
             _wmod.snapshot = _spy
+            # THE LOADED STORE AND THE LIVE PROFILE MUST AGREE, or the drift
+            # detector suppresses the capture and this measures that instead.
+            # Stubbed rather than assigned, so the check does not depend on
+            # what hwdp says about the host.
+            engine.profile_id = lambda fresh=False: w.kb_profile
             try:
                 w._capture_once(None)
             except _Stop:
@@ -2728,8 +2831,19 @@ def _t_displays(ck):
             except _Stop:
                 pass
             ck("capture-resumes-when-the-transition-ends", _touched == [1])
+            # AND THE DRIFT DETECTOR IS WIRED INTO THE SAME GATE. Without
+            # this, removing it from _capture_once passes every check above,
+            # since those call _profile_drift directly.
+            engine.profile_id = lambda fresh=False: "SOMEWHERE-ELSE"
+            w.profile_drift_at = 0.0
+            try:
+                w._capture_once(None)
+            except _Stop:
+                pass
+            ck("a-drifted-profile-suppresses-the-capture", _touched == [1])
         finally:
             _wmod.snapshot = _rsnap
+            engine.profile_id = _rpid
     finally:
         engine.REDISPLAY_FILE, _wmod.REDISPLAY_FILE = _rrf, _rwrf
         engine.logline, engine.load_knowledge = _rlog, _rload
