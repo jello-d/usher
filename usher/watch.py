@@ -35,7 +35,8 @@ from .engine import (AGGR_CAP, ARM_FILE, EXCLUDE_FILE, FORGET_FILE,
                      acquire_singleton, app_of, apply_fullscreen,
                      apply_invert, connect, do_capture, identity, is_anchored,
                      is_desync_error,
-                     is_transient, kb_for_profile, kkey, launch_missing, learn,
+                     entry_output, is_transient, kb_for_profile, kkey,
+                     launch_missing, learn,
                      load_knowledge, logline, persist, place, placement_landed,
                      plugins_sig,
                      reload_anchor, reload_exclude, reload_plugins,
@@ -666,7 +667,7 @@ class Watcher:
             logline(f"slot taken, left in place: {app} | {title[:34]}")
             return
         outs = {o["name"]: o for o in self.place_sock.list_outputs()}
-        o = outs.get(e["output"])
+        o = entry_output(e, outs)
         if not o:
             return
         moved = self._seat_view(v, e, o)
@@ -713,7 +714,7 @@ class Watcher:
             if (g.get("x") == t["x"] and g.get("y") == t["y"] and
                     g.get("width") == t["width"] and
                     g.get("height") == t["height"] and
-                    v.get("output-name") == e["output"]):
+                    v.get("output-name") == o["name"]):
                 self.placed.add(vid)
                 # Invert and fullscreen follow the WINDOW, not the move, so
                 # they are re-applied even when nothing needed moving. placed
@@ -1108,6 +1109,10 @@ class Watcher:
             pass
         if not prof:
             return ""
+        # THE PANEL MAP IS CERTAINLY STALE NOW, and it is cached, so re-ask
+        # before anything resolves a slot against it. This is the one moment a
+        # connector can have changed what monitor it names.
+        engine.panel_map(fresh=True)
         with self.lock:
             was, self.kb_profile = self.kb_profile, prof
             self.kb = load_knowledge(prof)

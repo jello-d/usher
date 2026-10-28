@@ -261,6 +261,79 @@ def hwdp_id():
     return out.stdout.strip() or None
 
 
+# The connector -> panel map, cached like the profile for the same reason: it
+# is consulted on every placement and costs a subprocess. Invalidated outright
+# on a display change, which is the one moment it is certainly wrong.
+PANEL_TTL = 5.0
+_PANELS = {"map": None, "at": 0.0}
+
+
+def panel_map(fresh=False):
+    """{connector: panel-id} from `hwdp id --panels`, empty when it cannot be
+    asked.
+
+    A SLOT NAMES A MONITOR, NOT A CABLE. usher stores the output a window was
+    learned on, and in a docking setup the connector name is the least stable
+    thing there is: which port, which MST hub, what order the hub enumerated.
+    Measured in a nested compositor, a re-created output came back as WL-3
+    having been WL-2, so every slot stored for the old name was unreachable
+    while the monitor was sitting right there.
+
+    SOFT, exactly like hwdp_id: with no hwdp the map is empty and every slot
+    falls back to matching on the connector name, which is the behaviour this
+    had before. An empty map must therefore never be read as "no panel
+    matches", only as "we cannot tell", which is what entry_output does."""
+    now = time.time()
+    if not fresh and _PANELS["map"] is not None \
+            and now - _PANELS["at"] < PANEL_TTL:
+        return _PANELS["map"]
+    out = {}
+    exe = shutil.which("hwdp")
+    if exe:
+        try:
+            r = subprocess.run([exe, "id", "--panels"], capture_output=True,
+                               text=True, timeout=3)
+            for ln in r.stdout.splitlines():
+                parts = ln.split()
+                if len(parts) == 2:
+                    out[parts[0]] = parts[1]
+        except Exception:
+            out = {}
+    _PANELS["map"], _PANELS["at"] = out, now
+    return out
+
+
+def entry_output(e, outputs, panels=None):
+    """The live output entry `e` should be placed on, or None.
+
+    THE PANEL WINS OVER THE NAME, because the panel is what the slot means.
+    An entry learned on the monitor now called DP-3 is still that monitor's
+    entry, and placing it by name would put it on whatever happens to be
+    plugged into DP-2 instead.
+
+    FALLS BACK TO THE NAME in every uncertain case, which is the behaviour
+    before panels were known and is the fail-safe direction: an entry with no
+    panel recorded (learned before this existed), no hwdp to ask, or a panel
+    that is genuinely not attached all end up asking the question usher used
+    to ask. None means "not attached", which callers report rather than
+    guessing around.
+
+    TWO IDENTICAL PANELS SHARE A PANEL ID, so the first match wins and which
+    one that is comes down to probe order. Nothing here can do better: a model
+    with no serial number is anonymous in its EDID, so the two monitors are
+    indistinguishable to every layer below this one.
+    """
+    if not e:
+        return None
+    pan = e.get("panel")
+    if pan:
+        pmap = panel_map() if panels is None else panels
+        for name, pid in pmap.items():
+            if pid == pan and name in outputs:
+                return outputs[name]
+    return outputs.get(e.get("output"))
+
+
 def _derived_id(snap):
     """A stable id for the monitor set the last snapshot saw. Hashed rather
     than spelled out because it becomes a filename and an output list is
@@ -1528,6 +1601,11 @@ def kb_entry(w, title, appid_only, when):
         "app_id": w["app_id"], "title": title, "appid_only": appid_only,
         "label": w.get("title", ""),
         "output": w["output"], "workspace": w["workspace"],
+        # WHICH MONITOR, as opposed to which cable. The connector name is kept
+        # as well, and is still what an entry falls back to: a box with no
+        # hwdp records no panel, and an entry learned before this existed has
+        # none, so both must keep working. See entry_output.
+        "panel": panel_map().get(w["output"], ""),
         "pos": w["pos"], "size": w["size"],
         "sticky": bool(w.get("sticky", False)),
         "inverted": bool(w.get("inverted", False)),
@@ -2505,7 +2583,13 @@ def placement_landed(v, e, o, tol=PLACE_TOL):
     # Ask the output question BEFORE place_of, whose no-such-output fallback
     # answers ws[0, 0] with the raw geometry as the position, which reads
     # exactly like a real answer.
-    if v.get("output-name") != e["output"] or o.get("name") != e["output"]:
+    #
+    # AGAINST THE OUTPUT WE AIMED AT, not against the name in the entry. Those
+    # differ exactly when a slot resolved through its PANEL onto a connector
+    # that has been renamed, which is the case entry_output exists for;
+    # comparing the stored name there would read a correct placement as failed
+    # and burn the whole retry budget re-issuing it.
+    if o is None or v.get("output-name") != o.get("name"):
         return False
     got = place_of(v, {o["name"]: o})
     if [int(n) for n in got["workspace"]] != [int(n) for n in e["workspace"]]:
@@ -3022,13 +3106,20 @@ def _prediction_rows():
     restarts where its banner title is not. Verify tries key first, then
     label, and says which one hit."""
     kb = load_knowledge()
+    sock = ipc()
+    outs = {o["name"]: o for o in sock.list_outputs()}
+    panels = panel_map()
     rows = []
-    for w in snapshot(ipc())["windows"]:
+    for w in snapshot(sock)["windows"]:
         app = w.get("app_id") or ""
         # An app_id-ONLY key ends in NUL (see kkey / appid_only), which is how
         # a uniquely-identified app like Signal is stored, so both shapes have
         # to be tried or those windows read as having no slot.
         e = kb.get(kkey(app, w.get("key") or "")) or kb.get(kkey(app, ""))
+        # THE RESOLVED output, not the stored name. Those differ exactly when
+        # a panel has moved connector, and a prediction quoting the stale name
+        # would report every such window as WRONG on the next verify.
+        eo = entry_output(e, outs, panels) if e else None
         rows.append({
             "key": w.get("key"),
             "app_id": w.get("app_id"),
@@ -3037,7 +3128,7 @@ def _prediction_rows():
             "expect_workspace": e.get("workspace") if e else None,
             "expect_pos": e.get("pos") if e else None,
             "expect_size": e.get("size") if e else None,
-            "expect_output": e.get("output") if e else None,
+            "expect_output": eo["name"] if eo else None,
         })
     return rows
 
@@ -3157,6 +3248,9 @@ def do_restore(dry, only=None, source=None):
         print(f"from milestone {label} ({len(entries)} remembered window(s))")
     live = sock.list_views(filter_mapped_toplevel=True)
     outs = {o["name"]: o for o in sock.list_outputs()}
+    # Read ONCE for the whole report, so every line is resolved against the
+    # same answer rather than re-asking per entry.
+    panels = panel_map()
 
     pairs, unlive, unlayout = match(live, entries)
     acted = 0
@@ -3165,7 +3259,7 @@ def do_restore(dry, only=None, source=None):
         if only and (only not in (lv.get("title") or "")) \
                 and (only not in app_of(lv)):
             continue
-        o = outs.get(e["output"])
+        o = entry_output(e, outs, panels)
         if not o:
             # The window matched a remembered slot on an output that is NOT
             # attached right now (undocked, a monitor off, a different desk).
@@ -3177,8 +3271,8 @@ def do_restore(dry, only=None, source=None):
         geom = target_geometry(e, o)
         g = lv.get("geometry", {}) or {}
         same = (g.get("x") == geom["x"] and g.get("y") == geom["y"] and
-                lv.get("output-name") == e["output"])
-        label = f"{app_of(lv)[:18]:18} -> {e['output']} " \
+                lv.get("output-name") == o["name"])
+        label = f"{app_of(lv)[:18]:18} -> {o['name']} " \
             f"ws{tuple(e['workspace'])} pos{tuple(e['pos'])}" \
             + (" [inv]" if e.get("inverted") else "")
         if dry:

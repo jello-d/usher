@@ -285,7 +285,7 @@ def _doctor_placement(out, kb, live, outs):
         if is_mux_term(app_of(lv), t):
             sess, host = mux_session_of(t), mux_host_of(t)
             shows = f"  [showing {sess}@{host or LOCAL_HOST}]" if sess else ""
-        if e["output"] in outs:
+        if engine.entry_output(e, outs) is not None:
             out(f"  placeable  {app_of(lv)[:14]:14} {e['title'][:34]:34}"
                 f" -> {where}{shows}")
         else:

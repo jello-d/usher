@@ -2527,6 +2527,103 @@ def _t_displays(ck):
     ck("a-parked-terminal-slot-is-not-overwritten",
        _kb[_tk]["output"] == "DP-3" and _kb[_tk]["workspace"] == [1, 1])
 
+    # ---- a slot names a MONITOR, not a cable -----------------------------
+    _o = {"eDP-1": {"name": "eDP-1", "id": 1},
+          "DP-3": {"name": "DP-3", "id": 2}}
+    # DP-9 IS IN THE PANEL MAP AND NOT IN THE OUTPUTS, which is a real state
+    # rather than a contrived one: hwdp reports what is ATTACHED (it reads DRM)
+    # while the compositor reports what is ENABLED, so a panel switched off in
+    # the kanshi profile ("ignore the built-in when docked") appears in one and
+    # not the other. Without it the `name in outputs` guard is never exercised,
+    # and a planted regression removing that guard passed the whole suite.
+    _pm = {"eDP-1": "aaaaaaaaaaaa", "DP-3": "bbbbbbbbbbbb",
+           "DP-9": "dddddddddddd"}
+
+    # THE CASE THAT PLACES A WINDOW ON THE WRONG MONITOR. The entry was
+    # learned when this panel was DP-2; the panel is now DP-3, and something
+    # else may be on DP-2. Resolving by name is not merely a miss, it puts the
+    # window on a different physical screen.
+    _e = {"output": "DP-2", "panel": "bbbbbbbbbbbb"}
+    ck("a-slot-follows-its-panel-to-a-new-connector",
+       engine.entry_output(_e, _o, _pm) is _o["DP-3"])
+    _e2 = {"output": "eDP-1", "panel": "bbbbbbbbbbbb"}
+    ck("the-panel-beats-a-stale-name-that-is-still-attached",
+       engine.entry_output(_e2, _o, _pm) is _o["DP-3"])
+
+    # EVERY UNCERTAIN CASE FALLS BACK TO THE NAME, which is what usher did
+    # before panels were known and is the fail-safe direction.
+    ck("no-panel-recorded-falls-back-to-the-name",
+       engine.entry_output({"output": "eDP-1"}, _o, _pm) is _o["eDP-1"])
+    ck("no-panel-map-falls-back-to-the-name",
+       engine.entry_output(_e2, _o, {}) is _o["eDP-1"])
+    # A panel the map KNOWS but the compositor is not showing: attached and
+    # disabled. The guard this exercises is `name in outputs`.
+    ck("an-attached-but-disabled-panel-falls-back-to-the-name",
+       engine.entry_output({"output": "eDP-1", "panel": "dddddddddddd"},
+                           _o, _pm) is _o["eDP-1"])
+    ck("a-panel-the-map-never-heard-of-falls-back-to-the-name",
+       engine.entry_output({"output": "eDP-1", "panel": "cccccccccccc"},
+                           _o, _pm) is _o["eDP-1"])
+    ck("neither-panel-nor-name-attached-is-None",
+       engine.entry_output({"output": "HDMI-9", "panel": "cccccccccccc"},
+                           _o, _pm) is None)
+    ck("a-disabled-panel-with-no-attached-name-is-None",
+       engine.entry_output({"output": "DP-9", "panel": "dddddddddddd"},
+                           _o, _pm) is None)
+    ck("no-entry-at-all-is-None", engine.entry_output(None, _o, _pm) is None)
+
+    # A PLACEMENT ONTO A RENAMED CONNECTOR MUST READ AS LANDED. Comparing the
+    # view against the entry's stored NAME would call a correct placement
+    # failed and burn the whole retry budget re-issuing it.
+    _ro = {"name": "DP-3", "id": 2, "geometry": {"width": 100, "height": 100,
+                                                 "x": 0, "y": 0},
+           "workspace": {"x": 0, "y": 0}}
+    _slot = {"output": "DP-2", "panel": "bbbbbbbbbbbb", "workspace": [0, 0],
+             "pos": [10, 10], "size": [50, 50]}
+    _view = {"output-name": "DP-3",
+             "geometry": {"x": 10, "y": 10, "width": 50, "height": 50}}
+    ck("a-placement-on-the-renamed-connector-reads-as-landed",
+       engine.placement_landed(_view, _slot, _ro))
+    ck("a-placement-on-the-wrong-output-still-reads-as-missed",
+       not engine.placement_landed({**_view, "output-name": "eDP-1"},
+                                   _slot, _ro))
+
+    # AND THE PANEL IS RECORDED when a window is learned, or none of the above
+    # ever engages on a real store.
+    _rpm = engine.panel_map
+    try:
+        engine.panel_map = lambda fresh=False: {"DP-3": "bbbbbbbbbbbb"}
+        _ke = engine.kb_entry({"app_id": "signal", "title": "Signal",
+                               "output": "DP-3", "workspace": [0, 0],
+                               "pos": [1, 2], "size": [3, 4]},
+                              "Signal", True, 1_800_000_000)
+        ck("kb-entry-records-the-panel", _ke["panel"] == "bbbbbbbbbbbb")
+        ck("kb-entry-keeps-the-connector-too", _ke["output"] == "DP-3")
+        _ke2 = engine.kb_entry({"app_id": "signal", "title": "Signal",
+                                "output": "HDMI-1", "workspace": [0, 0],
+                                "pos": [1, 2], "size": [3, 4]},
+                               "Signal", True, 1_800_000_000)
+        ck("an-unknown-output-records-an-empty-panel", _ke2["panel"] == "")
+    finally:
+        engine.panel_map = _rpm
+
+    # ---- and EVERY placement path goes through the resolver ---------------
+    # The checks above prove the resolver; they say nothing about whether the
+    # placers call it, and a bug living in the code AROUND the tested part is
+    # this project's most repeated shape. The old form is a precise code
+    # pattern rather than a name in prose, so matching it is sharp rather than
+    # noisy: `outs.get(e["output"])` is what every site used to be.
+    _srcs = {}
+    for _m in ("engine", "watch", "doctor"):
+        with open(os.path.join(os.path.dirname(__file__), _m + ".py")) as _f:
+            _srcs[_m] = _f.read()
+    _old = [m for m, s in _srcs.items() if '.get(e["output"])' in s]
+    ck("no-placement-path-resolves-by-name-alone", _old == [])
+    _uses = sum(s.count("entry_output(") for s in _srcs.values())
+    # VACUITY GUARD: the check above passes trivially over a package that has
+    # stopped calling the resolver at all, which is the same bug.
+    ck("the-resolver-is-actually-wired", _uses >= 5)
+
     # ---- what a display event calls for ----------------------------------
     ck("redisplay-same-monitors-does-nothing",
        engine.redisplay_plan("abc", "abc", 123) == "none")
