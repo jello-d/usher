@@ -3,16 +3,30 @@ drawn in the same owned-glyph language as mux-indicator / comms-indicator (a
 near-black rounded tile, frame colour = state) so the tray reads as one system.
 
 It is a thin PRESENTER: the state machine lives in the usher daemon, which
-publishes {mode, seconds_left, arc} to STATUS_FILE each tick. This reads that to
-draw, and a left-click shells `usher toggle` (settled <-> place). Nothing
-here duplicates the placement logic.
+publishes {mode, seconds_left, arc, transposed_at, recording} each tick. This
+reads that to draw. A left-click shells `usher toggle` (settled <-> place), a
+middle-click `usher transpose`. Nothing here duplicates the placement logic.
 
-Three states by FRAME colour, one identity glyph (a 2x2 window grid, top-left
-window focused):
-  settled      green: windows stay where they are
-  place  amber: placing windows back; a depleting ring counts the
-                         seconds until it settles (arc drains clockwise)
-  down        grey: usher not running (STATUS_FILE absent or stale)
+TWO INDEPENDENT CHANNELS, because they carry two independent facts and either
+may be true while the other is:
+
+  the FRAME (and its ring)   the MODE, a standing disposition
+    settled   green: a window that maps stays where it opens
+    place     red: a window that maps goes to its slot; a depleting ring
+              counts the seconds until it settles (arc drains clockwise)
+    down      grey: usher not running (STATUS_FILE absent or stale)
+
+  the SCREEN                 a TRANSPOSE just happened
+    near-black   nothing recent
+    royal blue   a sweep landed within DWELL seconds
+
+Keeping them apart is the whole design: a transpose arriving inside a place
+window must not disturb the countdown, and dropping the ring to show the
+transpose would destroy a live fact to report one that is already over.
+
+THE DWELL IS OURS, NOT THE DAEMON'S. A sweep is a blip, so the daemon
+publishes the INSTANT it happened and this decides how long to look back. A
+state field could be missed entirely between two polls; a timestamp cannot.
 
 Deps: dbus-next (pure-Python D-Bus) + Pillow. Drawn per size, ARGB32 in network
 byte order per the StatusNotifierItem spec. `usher-indicator render-test
@@ -42,6 +56,29 @@ FRAME = {
 }
 _DULL = FRAME["down"]                   # the receded (elapsed) border grey
 
+# TRANSPOSE: the SCREEN goes royal blue for a few seconds after a sweep.
+#
+# A SEPARATE CHANNEL FROM THE RING, deliberately. The ring is the place
+# countdown, so a transpose landing inside a place window must not disturb it:
+# two independent facts get two independent channels and neither costs the
+# other any information. (Dropping the ring during a dwell was considered and
+# is worse: it destroys a live countdown to show an event that has passed.)
+#
+# DARK royal blue rather than the pure hue, because the window glyphs are
+# LIFTED off the screen colour. A bright screen would make them darker than
+# their own background and the icon would read inverted.
+_BLUE = (0x1B, 0x22, 0x55)
+
+# HOW LONG THE TRAY DWELLS on a transpose. The daemon publishes the INSTANT
+# and nothing else: a sweep is a blip, so a state field could be missed
+# entirely by a one-second poll, where a timestamp cannot. How long to look
+# back is presentation, so it lives here, and the status file never claims a
+# transpose is happening when one is not.
+#
+# NO COUNTDOWN AND NO FADE. This is a flash saying "that just happened"; a
+# timer on it would make it look load-bearing, and the sweep is already over.
+DWELL = 10.0
+
 
 def _lift(base, f):
     # A colour lifted toward white by fraction f (0 = base, 1 = white).
@@ -51,18 +88,29 @@ def _lift(base, f):
 # The window glyph is STATE-INDEPENDENT (identity mark): the frame carries the
 # state, per the design. Windows are lifted off a neutral near-black, so they
 # read identically on every state's (faintly tinted) screen.
-_WIN = _lift(_BASE, 0.34)               # the three quiet windows
-_WIN_HI = _lift(_BASE, 0.64)            # the focused (top-left) window
+# (the window fills are computed per-screen in _grid, since the base moves)
 
 
-def _screen(state):
+def _screen(state, base=_BASE):
+    # THE STATE TINT IS SKIPPED ON THE BLUE SCREEN. Bleeding 14% of the frame
+    # colour into it turned royal blue muddy purple under `place`, so the one
+    # signal the screen carries read differently in each mode for no reason.
+    # The FRAME still says place-or-settled, so nothing is lost by letting the
+    # screen say only the one thing it is there to say.
+    if base is _BLUE:
+        return base + (0xFF,)
     col = FRAME.get(state, FRAME["down"])
-    mix = tuple(int(_BASE[i] * (1 - _TINT) + col[i] * _TINT) for i in range(3))
+    mix = tuple(int(base[i] * (1 - _TINT) + col[i] * _TINT) for i in range(3))
     return mix + (0xFF,)
 
 
-def _grid(d, s):
+def _grid(d, s, base=_BASE):
     # A 2x2 grid of window-rects; the top-left one is focused (brighter).
+    # LIFTED OFF THE SCREEN'S OWN BASE, not off a constant, so the glyphs keep
+    # the same contrast on the blue screen as on the near-black one. That is
+    # the invariant the module docstring claims and it would quietly break the
+    # moment the base stopped being near-black.
+    win, win_hi = _lift(base, 0.34), _lift(base, 0.64)
     g0, g1 = s * 0.28, s * 0.72         # glyph bounding box, inset from frame
     gap = s * 0.08
     cw = (g1 - g0 - gap) / 2
@@ -70,7 +118,7 @@ def _grid(d, s):
     for cx, cy in ((0, 0), (1, 0), (0, 1), (1, 1)):
         x0 = g0 + cx * (cw + gap)
         y0 = g0 + cy * (cw + gap)
-        fill = _WIN_HI if (cx, cy) == (0, 0) else _WIN
+        fill = win_hi if (cx, cy) == (0, 0) else win
         d.rounded_rectangle([x0, y0, x0 + cw, y0 + cw], rad, fill=fill)
 
 
@@ -132,20 +180,23 @@ def _border(img, s, arc_frac):
                joint="curve")
 
 
-def _tile(state, arc, size):
+def _tile(state, arc, size, transposing=False):
     s = size
+    base = _BLUE if transposing else _BASE
     img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     r = max(2, s // 7)
     fw = max(1, s // 11)
     if state == "place":
-        d.rounded_rectangle([0, 0, s - 1, s - 1], r, fill=_screen(state))
+        d.rounded_rectangle([0, 0, s - 1, s - 1], r,
+                            fill=_screen(state, base))
         _border(img, s, arc)            # the border draws the cooldown itself
     else:
         frame = FRAME.get(state, FRAME["down"]) + (0xFF,)
         d.rounded_rectangle([0, 0, s - 1, s - 1], r,
-                            fill=_screen(state), outline=frame, width=fw)
-    _grid(d, s)                         # glyph on top
+                            fill=_screen(state, base), outline=frame,
+                            width=fw)
+    _grid(d, s, base)                   # glyph on top
     return img
 
 
@@ -160,10 +211,10 @@ def _to_argb(img):
     return bytes(out)
 
 
-def icon_pixmap(state, arc, sizes=(22, 32, 48)):
+def icon_pixmap(state, arc, sizes=(22, 32, 48), transposing=False):
     out = []
     for s in sizes:
-        t = _tile(state, arc, s)
+        t = _tile(state, arc, s, transposing)
         # Match the sibling gadgets' bounding box so the tray places us level:
         # mux's badge reaches the top edge, so stamp one invisible (alpha=1)
         # pixel at the top-right corner (see comms-indicator for the rationale).
@@ -186,33 +237,52 @@ _STALE = 5.0   # the daemon writes every 1s; older than this => not running
 
 
 def read_status():
-    """(state, arc, seconds_left). 'down' when the file is absent or stale."""
+    """(state, arc, seconds_left, transposing). 'down' when the file is absent
+    or stale.
+
+    `transposing` is computed HERE from the daemon's `transposed_at` instant,
+    because the dwell is ours: the daemon says WHEN a sweep happened and this
+    decides how long to show it. An older daemon simply has no such field and
+    the answer is False, which is why it was added as a field rather than as a
+    third `mode` value: a value outside the whitelist below reads as `down`,
+    so a new mode value would have blanked the tray."""
     try:
         age = time.time() - os.stat(STATUS_FILE).st_mtime
         s = json.load(open(STATUS_FILE))
     except (OSError, ValueError):
-        return ("down", 0.0, None)
+        return ("down", 0.0, None, False)
     mode = s.get("mode")
     if age > _STALE or mode not in ("place", "settled"):
-        return ("down", 0.0, None)
-    return (mode, float(s.get("arc", 0.0)), s.get("seconds_left"))
+        return ("down", 0.0, None, False)
+    try:
+        since = time.time() - float(s.get("transposed_at") or 0)
+    except (TypeError, ValueError):
+        since = DWELL + 1
+    return (mode, float(s.get("arc", 0.0)), s.get("seconds_left"),
+            0 <= since < DWELL)
 
 
 def _render_test(outdir):
     os.makedirs(outdir, exist_ok=True)
-    rows = [("settled", 0.0), ("place", 1.0), ("place", 0.66),
-            ("place", 0.33), ("down", 0.0)]
+    # The transposing variants are here so the BLUE screen is checkable by
+    # eye: it has to read as blue at 22px and still leave the window glyphs
+    # lighter than their own background, which is the whole reason the base
+    # is a dark royal blue rather than the pure hue.
+    rows = [("settled", 0.0, False), ("settled", 0.0, True),
+            ("place", 1.0, False), ("place", 1.0, True),
+            ("place", 0.33, False), ("place", 0.33, True),
+            ("down", 0.0, False)]
     sizes = (22, 32, 48, 96)
     gap = 8
     w = sum(sizes) + gap * (len(sizes) + 1)
     h = len(rows) * (96 + gap) + gap
     sheet = Image.new("RGBA", (w, h), (30, 30, 34, 255))
-    for r, (st, arc) in enumerate(rows):
+    for r, (st, arc, tp) in enumerate(rows):
         x = gap
         y = gap + r * (96 + gap)
         for z in sizes:
             off = (96 - z) // 2
-            sheet.paste(_tile(st, arc, z), (x + off, y + off))
+            sheet.paste(_tile(st, arc, z, tp), (x + off, y + off))
             x += z + gap
     p = os.path.join(outdir, "usher-indicator.png")
     sheet.save(p)
@@ -237,33 +307,44 @@ def _run():
     WATCHER_PATH = "/StatusNotifierWatcher"
     ITEM_PATH = "/StatusNotifierItem"
 
-    def _tip(state, sec):
+    def _tip(state, sec, transposing=False):
+        # The middle-click is invisible otherwise, so the tooltip is the only
+        # place it can be discovered.
+        kick = "; middle-click to transpose"
+        if transposing:
+            kick = " (just transposed)" + kick
         if state == "place":
             return (f"Window placement: PLACE ({sec}s to settled)"
-                    ", click to settle now")
+                    f", click to settle now{kick}")
         if state == "settled":
-            return "Window placement: SETTLED, click to kick place"
+            return f"Window placement: SETTLED, click to kick place{kick}"
         return "usher not running"
 
-    def _sig(state, arc):
+    def _sig(state, arc, transposing=False):
         # Redraw signature: state + a coarse arc bucket, so the depleting ring
         # advances (~24 steps over the window) without a redraw every second.
-        return (state, round(arc * 24))
+        # The dwell is in it so the blue screen arrives and leaves on its own
+        # edges rather than waiting for the ring to move, which in `settled`
+        # never does.
+        return (state, round(arc * 24), transposing)
 
     class Indicator(ServiceInterface):
         def __init__(self):
             super().__init__("org.kde.StatusNotifierItem")
-            self._state, self._arc, self._sec = read_status()
-            self._key = _sig(self._state, self._arc)
-            self._pixmap = icon_pixmap(self._state, self._arc)
+            (self._state, self._arc, self._sec,
+             self._tp) = read_status()
+            self._key = _sig(self._state, self._arc, self._tp)
+            self._pixmap = icon_pixmap(self._state, self._arc,
+                                       transposing=self._tp)
 
         def refresh(self):
-            state, arc, sec = read_status()
+            state, arc, sec, tp = read_status()
             self._sec = sec
-            key = _sig(state, arc)
+            key = _sig(state, arc, tp)
             if key != self._key:
                 self._state, self._arc, self._key = state, arc, key
-                self._pixmap = icon_pixmap(state, arc)
+                self._tp = tp
+                self._pixmap = icon_pixmap(state, arc, transposing=tp)
                 self.NewIcon()
 
         @dbus_property(access=PropertyAccess.READ)
@@ -304,7 +385,8 @@ def _run():
 
         @dbus_property(access=PropertyAccess.READ)
         def ToolTip(self) -> "(sa(iiay)ss)":
-            return ["", [], "window placement", _tip(self._state, self._sec)]
+            return ["", [], "window placement",
+                    _tip(self._state, self._sec, self._tp)]
 
         @dbus_property(access=PropertyAccess.READ)
         def ItemIsMenu(self) -> "b":
@@ -316,11 +398,34 @@ def _run():
 
         @method()
         def SecondaryActivate(self, x: "i", y: "i"):
-            pass                        # middle-click reserved for future use
+            # MIDDLE-CLICK: ask for a transpose. Deliberately NOT the left
+            # click, which flips a MODE: a transpose is an action on the
+            # windows that exist and is not a place to be, so cycling through
+            # it to get back would be wrong.
+            #
+            # AND IT PAINTS NOTHING OPTIMISTICALLY. The blue screen comes from
+            # the daemon's own `transposed_at`, so a kick nothing heard shows
+            # nothing: usher's mode verbs once printed success with no daemon
+            # listening, and latching on our own click would reinvent exactly
+            # that. With no daemon the status goes stale and this reads `down`.
+            asyncio.get_event_loop().create_task(self._kick())
 
         @method()
         def Scroll(self, delta: "i", orientation: "s"):
             pass
+
+        async def _kick(self):
+            try:
+                p = await asyncio.create_subprocess_exec(
+                    USHER, "transpose",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE)
+                _, err = await p.communicate()
+                if p.returncode:
+                    print("usher-indicator: transpose refused: "
+                          + err.decode().strip(), flush=True)
+            except Exception as e:
+                print(f"usher-indicator: transpose failed: {e}", flush=True)
 
         async def _toggle(self):
             try:
