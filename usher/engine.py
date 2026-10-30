@@ -2940,6 +2940,31 @@ def redisplay_plan(was, now, running):
     return "ask" if running else "here"
 
 
+def do_transpose():
+    """Ask the daemon to TRANSPOSE: sweep the existing windows onto where they
+    belong now. The client never sweeps itself, for the reason `reload` does
+    not start a daemon: placement is the service's job and the service is the
+    one holding the store and the placer's socket.
+
+    REFUSES WITH NO DAEMON rather than reporting success, which is the lesson
+    the mode verbs taught: `usher settle` used to write the arm file and print
+    `settled to steady` having done nothing, because the clock lives in the
+    worker. Nothing was assessed here either, so it is EXIT_CANNOT."""
+    if not watcher_pid():
+        print("usher: no daemon is running, so there are no windows to "
+              "transpose: start one with `usher-mgr watch`", file=sys.stderr)
+        return EXIT_CANNOT
+    try:
+        os.makedirs(os.path.dirname(SWEEP_FILE), exist_ok=True)
+        with open(SWEEP_FILE, "w") as f:
+            f.write(f"{time.time()}\n")
+    except OSError as e:
+        print(f"usher: cannot ask for a transpose: {e}", file=sys.stderr)
+        return EXIT_FAIL
+    print("usher: asked the daemon to transpose (sweep the open windows)")
+    return EXIT_OK
+
+
 def do_display_changed():
     """The display-change entry point, for hwdp's `changed` hook.
 
@@ -3565,6 +3590,13 @@ FORGET_FILE = os.path.join(RUNTIME_DIR, "usher.forget")
 # wayfire's own cascade (see PLACE_VERIFY), running at the one moment the
 # compositor is re-laying-out every window it has.
 REDISPLAY_FILE = os.path.join(RUNTIME_DIR, "usher.redisplay")
+# AND ONE FOR A SWEEP ASKED FOR BY HAND. Separate from the redisplay request
+# rather than reusing it with the current profile, because the two mean
+# different things: a redisplay RELOADS the store and HOLDS learning while the
+# displays settle, where a hand-asked transpose does neither. A request that
+# had to claim the profile changed in order to ask for a sweep would be
+# lying to the thing it asks.
+SWEEP_FILE = os.path.join(RUNTIME_DIR, "usher.sweep")
 
 
 LOG_CAP = 256 * 1024   # rotate watch.log past this; bounds it to ~2x LOG_CAP

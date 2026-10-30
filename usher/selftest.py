@@ -2981,6 +2981,38 @@ def _t_displays(ck):
             w.placed.clear()
             w.kb, w.kb_profile = {}, "DESK"
 
+        # ---- TRANSPOSE is a sweep, and a sweep is a BLIP ------------------
+        # The sweep used to be welded into _adopt_profile, which made "how
+        # long does a transpose last" unanswerable: it inherited the hold.
+        _rseat3 = Watcher._seat_view
+        try:
+            Watcher._seat_view = lambda self, v, e, o: True
+            w.place_sock = _Sock(_lv, _lo)
+            w.kb, w.kb_profile = {engine.kkey(_app, ""): _slot}, "DESK"
+            w.transition_until = 0.0
+            w.st["transposed_at"] = 0
+            w.placed.add(42)                 # already placed: a sweep voids it
+            w.slot_held["x"] = 42
+            _n = w._sweep()
+            ck("a-sweep-entitles-every-live-window", _n == 1
+               and w.redisplay_ok == {42})
+            ck("a-sweep-voids-the-placement-ledgers",
+               not w.placed and not w.slot_held)
+            ck("a-sweep-asks-the-placer-thread-for-the-work",
+               w.st["recheck"] is True)
+            ck("a-sweep-stamps-the-event", w.st["transposed_at"] > 0)
+            # THE POINT: no hold. A hand-asked transpose happens when nothing
+            # is in flux, so suppressing learning would be wrong, and it is
+            # what made the old welded version impossible to describe.
+            ck("a-sweep-carries-no-hold", not w._in_transition())
+        finally:
+            Watcher._seat_view = _rseat3
+            w.place_sock = None
+            w.placed.clear()
+            w.slot_held.clear()
+            w.redisplay_ok = set()
+            w.kb, w.kb_profile = {}, "DESK"
+
         # ---- the drift detector, for a hook that never comes --------------
         _rpid2 = engine.profile_id
         try:

@@ -60,6 +60,7 @@ VERBS = {
     "aggressive":      ("both", "re-arm aggressive placement"),
     "settle":          ("both", "go steady now"),
     "toggle":          ("both", "flip aggressive/steady (the tray click)"),
+    "transpose":       ("both", "sweep open windows onto where they now go"),
     "exclude":         ("both", "show the never-place rules as loaded"),
     "include":         ("both", "show the anchor rules as loaded"),
     "plugins":         ("both", "list loaded plugins"),
@@ -563,6 +564,8 @@ def _dispatch(verb, args):
         # the daemon verbs defer their own imports.
         from . import selftest as _selftest
         sys.exit(_selftest.selftest())
+    elif verb == "transpose":     # sweep the open windows, via the daemon
+        sys.exit(engine.do_transpose())
     elif verb in ("aggressive", "settle", "toggle"):
         sys.exit(_do_arm(verb))
     elif verb == "status":        # current placement mode + seconds to steady

@@ -140,7 +140,27 @@ For a display-change hook. Re-places against the profile for the new monitor
 set, and does nothing at all when the set has not actually changed.
 .TP
 .B aggressive | settle | toggle
-Re-arm aggressive placement, force steady now, or flip between them.
+Re-arm aggressive placement, force steady now, or flip between them. These
+govern what happens to a window as it MAPS; they say nothing about windows
+already open.
+.TP
+.B transpose
+Sweep the windows that are ALREADY OPEN onto where they belong now. This is
+what a display change triggers by itself, and the verb asks for another pass
+by hand when one did not quite land.
+.IP
+It is a BLIP: it issues placements and returns, holding nothing and waiting
+for nothing, so there is no mode to leave and nothing to turn off afterwards.
+Every open window is re-graced and owed one placement, since a window that
+mapped hours ago is otherwise past its grace and would be refused. The
+read-backs that follow are the ordinary placement verification, not part of
+this.
+.IP
+Distinct from
+.B aggressive
+on purpose: that decides what happens to NEW windows and stays in force,
+where this acts once on the windows there are. Exit 2 with no daemon running,
+since placement is the service's job and nothing was assessed.
 .TP
 .B stop
 Stop the running daemon cleanly.

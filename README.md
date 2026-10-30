@@ -237,6 +237,7 @@ usher forget 'chrome:win:*'  # drop remembered slots (previews; --apply acts)
 usher status                 # placement mode and seconds until steady
 usher aggressive             # place every window that maps, for a while
 usher settle                 # go steady now: leave new windows where they open
+usher transpose              # sweep OPEN windows onto where they now belong
 usher toggle                 # flip between those two (what the tray click does)
 usher cleanly reboot         # wind down, keeping the layout, then reboot
 usher cleanly login          # start the console session from a remote shell

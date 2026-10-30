@@ -30,6 +30,7 @@ from . import chrome, engine
 from .engine import (AGGR_CAP, ARM_FILE, EXCLUDE_FILE, FORGET_FILE,
                      IDLE_SETTLE,
                      INCLUDE_FILE, INVERT_STORE, LAUNCHED, REDISPLAY_FILE,
+                     SWEEP_FILE,
                      SKIP_TITLE,
                      START_FLOOR, STATE, STATUS_FILE, _signal_watcher,
                      acquire_singleton, app_of, apply_fullscreen,
@@ -541,7 +542,24 @@ class Watcher:
                 json.dump(
                     {"mode": "aggressive" if now < steady_at else "steady",
                      "seconds_left": max(0, round(steady_at - now)),
-                     "arc": round(arc, 3)}, f)
+                     "arc": round(arc, 3),
+                     # TWO MORE FACTS, each on its own axis, so a reader never
+                     # has to infer one from the other.
+                     #
+                     # `transposed_at` IS AN INSTANT, NOT A STATE. A sweep is
+                     # a blip, so a state field could be missed entirely by a
+                     # one-second poller; a timestamp cannot. How long to
+                     # DWELL on it is presentation and belongs to the tray,
+                     # which also keeps this file honest for every other
+                     # reader: at no point does it claim a transpose is
+                     # happening when one is not.
+                     "transposed_at": round(self.st.get("transposed_at", 0), 3),
+                     # RECORDING IS THE CONSTANT, with exactly one exception:
+                     # a display change in flux, where believing the geometry
+                     # would teach the store a collapse. Published because the
+                     # exception is worth seeing, not because it is a mode.
+                     "recording": not (self._in_transition()
+                                       or bool(self.profile_drift_at))}, f)
             os.replace(tmp, STATUS_FILE)
         except OSError:
             pass
@@ -974,6 +992,7 @@ class Watcher:
                 "arm": store_mtime(ARM_FILE),
                 "forget": store_mtime(FORGET_FILE),
                 "redisplay": store_mtime(REDISPLAY_FILE),
+                "sweep": store_mtime(SWEEP_FILE),
                 "plugins": plugins_sig(),
                 "chrome": chrome.session_sig()}
         errstreak = 0
@@ -1047,6 +1066,9 @@ class Watcher:
         if store_mtime(REDISPLAY_FILE) != seen["redisplay"]:
             self._take_redisplay()
             seen["redisplay"] = store_mtime(REDISPLAY_FILE)
+        if store_mtime(SWEEP_FILE) != seen["sweep"]:
+            self._take_sweep()
+            seen["sweep"] = store_mtime(SWEEP_FILE)
         # A BROWSER RESTART IS VISIBLE RIGHT HERE and nowhere else. Chrome
         # mints fresh SessionIDs for every restored window, so the store's
         # chrome slots go dead the instant it rotates its session file, and
@@ -1212,6 +1234,53 @@ class Watcher:
         with self.lock:
             was, self.kb_profile = self.kb_profile, prof
             self.kb = load_knowledge(prof)
+            self.profile_drift_at = 0.0
+            self.st["dirty"] = True
+            self.st["layout"] = True
+            # END THE HOLD, but not before the re-place has had its verify
+            # budget: learning the instant we issue placements would record
+            # the positions we are still correcting. THE HOLD IS NOT THE
+            # SWEEP: see _sweep, which is a blip and carries no hold at all.
+            self.transition_until = now + sum(PLACE_VERIFY) + 1.0
+        n = self._sweep(vids)
+        logline(f"display profile {was} -> {prof} ({why}): {len(self.kb)} "
+                f"known window(s) here; re-placing {n}")
+
+    def _sweep(self, vids=None):
+        """TRANSPOSE: put the windows that ALREADY EXIST where they belong
+        NOW. Returns how many were entitled.
+
+        A BLIP, AND THAT IS THE WHOLE POINT. It issues placements and returns;
+        it holds nothing, waits for nothing and has no duration of its own.
+        The read-backs that follow are PLACE_VERIFY, which is the placer's
+        standing behaviour for ANY placement and is not charged to this.
+
+        SEPARATE FROM THE HOLD it used to be welded to. The hold suppresses
+        LEARNING while the displays are in flux and has to outlive the sweep,
+        because it spans the interval in which we do not yet know which store
+        to write. A sweep asked for by hand needs no hold at all: nothing is
+        in flux.
+
+        EVERY PLACEMENT LEDGER IS VOID, which is the part that is easy to
+        miss: `placed` would dedup a window out of being re-placed, and
+        `slot_held` records which window owns a slot on outputs that may no
+        longer exist. Clearing them is what makes the sweep a real one.
+
+        AND EVERY LIVE WINDOW IS RE-GRACED AND ENTITLED TO ONE PLACEMENT. A
+        window that mapped hours ago is long past its PLACE_GRACE deadline,
+        and `late_ok`'s one-late-chance needs `first_look`, false for a window
+        already identified, so without this both gates refuse every window the
+        sweep exists to move. Measured when it shipped that way: the log said
+        "re-placing" over a sweep that could not act."""
+        if vids is None:
+            try:
+                vids = [v.get("id") for v in
+                        self.place_sock.list_views(filter_mapped_toplevel=True)]
+            except Exception as e:
+                logline(f"sweep: cannot list views: {e}")
+                return 0
+        now = time.time()
+        with self.lock:
             self.placed.clear()
             self.slot_held.clear()
             self.verify.clear()
@@ -1220,19 +1289,28 @@ class Watcher:
             self.redisplay_ok = {i for i in vids if i is not None}
             for i in self.redisplay_ok:
                 self.deadline[i] = now + PLACE_GRACE
-            self.profile_drift_at = 0.0
-            # The sweep runs on the PLACER thread, which is place_sock's one
-            # writer, so it is requested here rather than done here: the same
-            # seam a store change already uses.
+            # Runs on the PLACER thread, which is place_sock's one writer, so
+            # it is REQUESTED here rather than done here: the same seam a
+            # store change already uses.
             self.st["recheck"] = True
-            self.st["dirty"] = True
-            self.st["layout"] = True
-            # END THE HOLD, but not before the re-place has had its verify
-            # budget: learning the instant we issue placements would record
-            # the positions we are still correcting.
-            self.transition_until = now + sum(PLACE_VERIFY) + 1.0
-        logline(f"display profile {was} -> {prof} ({why}): {len(self.kb)} "
-                f"known window(s) here; re-placing {len(self.redisplay_ok)}")
+            # THE EVENT, published as a FACT rather than as a state. A tray
+            # dwelling on it for a few seconds is presentation and belongs in
+            # the tray; a timestamp cannot be missed by a one-second poller,
+            # where a sub-second state can.
+            self.st["transposed_at"] = now
+        return len(self.redisplay_ok)
+
+    def _take_sweep(self):
+        """Apply a `usher transpose` request and remove it. A sweep ONLY: no
+        store reload and no hold, because a hand-asked transpose happens when
+        nothing is in flux."""
+        try:
+            os.remove(SWEEP_FILE)
+        except OSError:
+            pass
+        n = self._sweep()
+        logline(f"transpose on request: re-placing {n} window(s)")
+        return n
 
     def _profile_drift(self):
         """Notice a display profile that changed with nobody telling us.
