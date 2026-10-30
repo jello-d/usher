@@ -11,10 +11,10 @@ exist out of twenty-five, missing `save`, `lock`, `predict`, `verify`,
 `cleanly` and `doctor` entirely. One table, read by `usher help`, by the
 usage text and by the checks that assert each verb is reachable.
 
-Placement is AGGRESSIVE then STEADY. For START_FLOOR seconds after login (or
-an `aggressive` kick) every mapped window is placed back: what lets Chrome
+Placement is PLACE then SETTLED. For START_FLOOR seconds after login (or
+an `place` kick) every mapped window is placed back: what lets Chrome
 launch and its windows land. Once IDLE_SETTLE seconds pass with no new window
-(capped at AGGR_CAP) it goes STEADY: a reopened window just appears where you
+(capped at PLACE_CAP) it goes SETTLED: a reopened window just appears where you
 are and stays. usher/include lists the few windows to keep snapping back
 even then (opt-in; empty = follow-me). usher/exclude always wins.
 

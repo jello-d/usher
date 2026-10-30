@@ -121,7 +121,7 @@ done
 
 # EVERY PUBLIC VERB HAS A MAN ENTRY, and nothing in that section is not a
 # verb. Same argument as the tunables above and found the same way: the user
-# asked for "command line equivalents of the tray toggle" when `aggressive`
+# asked for "command line equivalents of the tray toggle" when `place`
 # and `settle` had existed all along. They were documented, and UNFINDABLE,
 # because two .SS subsections sat in the MIDDLE of the verb list and thirteen
 # verbs had drifted under a heading about relaunching apps.
@@ -190,7 +190,7 @@ man = open(root + "/man/man1/usher.1").read()
 rdm = open(root + "/README.md").read()
 KNOBS = (("USHER_START_FLOOR", engine.START_FLOOR),
          ("USHER_IDLE_SETTLE", engine.IDLE_SETTLE),
-         ("USHER_AGGR_CAP", engine.AGGR_CAP),
+         ("USHER_PLACE_CAP", engine.PLACE_CAP),
          ("USHER_CHROME_STAGGER", chrome.CHROME_STAGGER),
          ("USHER_WIND_DOWN_TIMEOUT", engine.WIND_DOWN_TIMEOUT),
          ("USHER_DOCK_HOLD", watch.DOCK_HOLD))

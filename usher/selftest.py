@@ -57,7 +57,7 @@ from .chrome import (
     forget_window, is_browser_cmdline, is_chrome, parse_snss, session_files,
     snss_build, window_slot)
 from .engine import (
-    AGGR_CAP, CONFIG_DIR, EXCLUDE_FILE, IDLE_SETTLE, INCLUDE_FILE,
+    PLACE_CAP, CONFIG_DIR, EXCLUDE_FILE, IDLE_SETTLE, INCLUDE_FILE,
     KB_SCHEMA, MUX_BIN, MUX_RESUME, PLACE_TOL, PLUGIN_DIR, Resolution,
     START_FLOOR, WindowPlugin, _as_resolution, _derived_id,
     _latch_target_in, _migrate_store, _mux_pending_in, _mux_slot,
@@ -189,7 +189,7 @@ def _t_registry(ck):
     # A PLAIN TERMINAL AT $HOME IS A NORMAL WINDOW, not an exception. It used
     # to be excluded end to end (never captured, never placed, never brought
     # back), which is the same shape as chrome's retired ^New Tab$ rule and is
-    # retired for the same reasons: steady state leaves a terminal opened
+    # retired for the same reasons: settled state leaves a terminal opened
     # mid-session where it opens, and when usher spawns one at session start it
     # can place it. The cwd IS the key, so drive these by stubbing the one
     # thing that reads it.
@@ -842,7 +842,7 @@ def _t_slots(ck):
     w = Watcher(launch=False)
     now = _t.time()
 
-    # aggressive, and inside the grace, so placement is actually attempted
+    # place, and inside the grace, so placement is actually attempted
     w.st["armed_at"] = now
     w.st["last_map"] = now
 
@@ -890,16 +890,16 @@ def _t_slots(ck):
         w._try_place(V(2))
         ck("slot-reusable-after-the-holder-closes", 2 in seated)
 
-        # ONE LATE CHANCE, and the distinction it encodes. In STEADY, past the
-        # AGGR_CAP (so nothing can re-enter aggressive), a window that MAPPED
-        # while aggressive was in force is still placed the first time it
+        # ONE LATE CHANCE, and the distinction it encodes. In SETTLED, past the
+        # PLACE_CAP (so nothing can re-enter place), a window that MAPPED
+        # while place was in force is still placed the first time it
         # becomes identifiable; one opened mid-session is not. Conflating
         # those cost a Chrome window its slot for 2.5 hours on manifold: it
         # logged `recognised late, re-graced` and was then refused.
-        from .engine import AGGR_CAP as _CAP
+        from .engine import PLACE_CAP as _CAP
         def _steady_watcher():
             x = Watcher(launch=False)
-            x.st["armed_at"] = _t.time() - _CAP - 1    # steady, past the cap
+            x.st["armed_at"] = _t.time() - _CAP - 1    # settled, past the cap
             x.st["last_map"] = _t.time()               # cannot rescue it
             x.place_sock = _Sock()
             x.kb = w.kb
@@ -918,7 +918,7 @@ def _t_slots(ck):
         y._seat_view = lambda v, e, o: (s2.append(v["id"]) or True)
         y.deadline[8] = _t.time() + PLACE_GRACE        # NOT in late_ok
         y._try_place(V(8))
-        ck("steady-still-leaves-a-new-window-alone", s2 == [])
+        ck("settled-still-leaves-a-new-window-alone", s2 == [])
         # ...and the chance is spent: identified, so not a first look again.
         s3 = []
         z = _steady_watcher()
@@ -1143,7 +1143,7 @@ def _t_lifecycle(ck):
         ("maps as a bare shell, mux still starting", W(1, "ksh"), "/h", True),
         ("mux still starting",                       W(1, "ksh"), "/h", True),
         ("the banner lands",                      W(1, BANNER), "/h", False),
-        ("steady",                                W(1, BANNER), "/h", False),
+        ("settled",                                W(1, BANNER), "/h", False),
     ])
     ck("life-shrink-t0-is-pending", trace[0]["state"] == Resolution.PENDING)
     ck("life-shrink-t1-is-pending", trace[1]["state"] == Resolution.PENDING)
@@ -1168,7 +1168,7 @@ def _t_lifecycle(ck):
     trace, kb = drive([
         ("maps, no shell in /proc yet", W(2, "terminal"), "", False),
         ("cwd readable",                W(2, "terminal"), "/w/p", False),
-        ("steady",                      W(2, "terminal"), "/w/p", False),
+        ("settled",                      W(2, "terminal"), "/w/p", False),
     ])
     ck("life-cwd-t0-is-pending", trace[0]["state"] == Resolution.PENDING)
     ck("life-cwd-t0-learns-nothing", trace[0]["store"] == [])
@@ -1372,29 +1372,29 @@ def _t_cli_split(ck):
     # THE PLACEMENT-MODE REQUESTS, as a table, because the cell that was wrong
     # is the one nobody looks at: with NO daemon the arm file is written, the
     # worker baselines its mtime and never adopts it, and the old code printed
-    # `re-armed aggressive placement` over that. Pure, so no daemon, no
+    # `placing every window that maps` over that. Pure, so no daemon, no
     # runtime dir and no compositor are needed.
-    for _act in ("aggressive", "settle", "toggle"):
+    for _act in ("place", "settle", "toggle"):
         _a, _m = cli.arm_plan(_act, None, None)
         ck(f"arm-{_act}-is-refused-with-no-daemon", _a == "none")
         ck(f"arm-{_act}-says-why", "no daemon" in _m)
     # with a daemon, each means itself and toggle reads the LIVE mode
-    ck("arm-aggressive-arms", cli.arm_plan("aggressive", 99, "steady")[0]
-       == "aggressive")
-    ck("arm-settle-settles", cli.arm_plan("settle", 99, "aggressive")[0]
+    ck("arm-place-arms", cli.arm_plan("place", 99, "settled")[0]
+       == "place")
+    ck("arm-settle-settles", cli.arm_plan("settle", 99, "place")[0]
        == "settle")
-    ck("arm-toggle-from-aggressive-settles",
-       cli.arm_plan("toggle", 99, "aggressive")[0] == "settle")
-    ck("arm-toggle-from-steady-arms",
-       cli.arm_plan("toggle", 99, "steady")[0] == "aggressive")
+    ck("arm-toggle-from-place-settles",
+       cli.arm_plan("toggle", 99, "place")[0] == "settle")
+    ck("arm-toggle-from-settled-arms",
+       cli.arm_plan("toggle", 99, "settled")[0] == "place")
     # AN UNREADABLE MODE WITH THE DAEMON UP still arms, deliberately: one
     # `settle` undoes it, where declining would leave the tray click dead.
     ck("arm-toggle-with-no-status-arms",
-       cli.arm_plan("toggle", 99, None)[0] == "aggressive")
+       cli.arm_plan("toggle", 99, None)[0] == "place")
     # the two messages are distinct, or a reader cannot tell which happened
     ck("arm-messages-are-distinct",
-       len({cli.arm_plan("aggressive", 99, "steady")[1],
-            cli.arm_plan("settle", 99, "steady")[1],
+       len({cli.arm_plan("place", 99, "settled")[1],
+            cli.arm_plan("settle", 99, "settled")[1],
             cli.arm_plan("settle", None, None)[1]}) == 3)
     # THE SEAM: usher must not hardcode how a session starts. It reads one
     # path, and the path is beside the other user config rather than in a
@@ -2899,11 +2899,11 @@ def _t_displays(ck):
             w.kb, w.kb_profile = {engine.kkey(_app, ""): _slot}, "DESK"
             w.identified.add(42)         # identified long ago
             w.deadline[42] = _time.time() - 10_000   # and settled long ago
-            w.st["armed_at"] = _time.time() - 10 * _wmod.AGGR_CAP  # steady
+            w.st["armed_at"] = _time.time() - 10 * _wmod.PLACE_CAP  # settled
             w.placed.clear()
             w.redisplay_ok.clear()
             w._place_view(_lv[0])
-            ck("a-settled-window-is-left-alone-in-steady-state",
+            ck("a-long-open-window-is-left-alone-when-settled",
                _seated == [])
             # Now the displays change. _adopt_profile must make it placeable.
             _rload = _wmod.load_knowledge
@@ -3412,23 +3412,23 @@ def _t_watcher(ck):
         _wmod.FORGET_FILE = _rwfk
         shutil.rmtree(_fd, ignore_errors=True)
 
-    # THE AGGRESSIVE/STEADY CLOCK. steady when the FLOOR has passed and it has
+    # THE PLACE/SETTLED CLOCK. settled when the FLOOR has passed and it has
     # been quiet for IDLE_SETTLE, but never past the CAP.
     w.st["armed_at"] = now
     w.st["last_map"] = now
-    ck("clock-aggressive-after-arming", w._aggressive_now())
+    ck("clock-place-after-arming", w._aggressive_now())
     w.st["armed_at"] = now - START_FLOOR - IDLE_SETTLE - 10
     w.st["last_map"] = now - IDLE_SETTLE - 10
     ck("clock-settles-when-quiet", not w._aggressive_now())
-    # a NEW window pushes last_map, which extends aggressive past the floor
+    # a NEW window pushes last_map, which extends place past the floor
     w.st["last_map"] = now
     ck("clock-extends-on-a-new-map", w._aggressive_now())
     # ...but never past the CAP, which is what bounds a login storm
-    w.st["armed_at"] = now - AGGR_CAP - 1
+    w.st["armed_at"] = now - PLACE_CAP - 1
     ck("clock-capped", not w._aggressive_now())
 
-    # A QUIET START (a code reload) MUST LAND STEADY. A fresh worker stamps
-    # armed_at with NOW, so without this every reload re-armed aggressive for
+    # A QUIET START (a code reload) MUST LAND SETTLED. A fresh worker stamps
+    # armed_at with NOW, so without this every reload re-armed place for
     # START_FLOOR and any window mapping in those five minutes was snapped to
     # its remembered slot: a deploy changing placement behaviour. This is the
     # property `setup.sh install` relies on to reload unconditionally, so it
@@ -3436,9 +3436,9 @@ def _t_watcher(ck):
     _q = Watcher(launch=False)
     _q.mode = "quiet"
     _q.st["armed_at"] = _q.st["last_map"] = _time.time()
-    ck("quiet-start-is-aggressive-before-init", _q._aggressive_now())
+    ck("quiet-start-is-place-before-init", _q._aggressive_now())
     _q._init_layout()
-    ck("quiet-start-lands-steady", not _q._aggressive_now())
+    ck("quiet-start-lands-settled", not _q._aggressive_now())
     # ...and a later kick still works, or quiet would have broken the knob.
     _q.st["armed_at"] = _time.time()
     ck("quiet-start-does-not-break-the-kick", _q._aggressive_now())
@@ -3447,9 +3447,9 @@ def _t_watcher(ck):
     _r = Watcher(launch=False)
     _r.mode = None
     _r.st["armed_at"] = _r.st["last_map"] = _time.time()
-    ck("restore-start-stays-aggressive", _r._aggressive_now())
+    ck("restore-start-stays-place", _r._aggressive_now())
 
-    # THE HOLD: while aggressive, a window the placer has not reached is
+    # THE HOLD: while place, a window the placer has not reached is
     # sitting where its app dropped it, and learning that overwrites the slot
     # the placer is about to aim at.
     w.st["armed_at"], w.st["last_map"] = now, now
@@ -3465,8 +3465,8 @@ def _t_watcher(ck):
     ck("hold-releases-when-the-grace-runs-out",
        w._held(_wins) == frozenset())
     w.deadline[7] = now + 60
-    w.st["armed_at"] = now - AGGR_CAP - 1          # steady
-    ck("hold-holds-nothing-in-steady-state", w._held(_wins) == frozenset())
+    w.st["armed_at"] = now - PLACE_CAP - 1          # settled
+    ck("hold-holds-nothing-in-settled-state", w._held(_wins) == frozenset())
 
     # EVENT ROUTING. A map grants the grace and feeds the settle clock; a
     # place-event queues the view for the placer with the right settle; an

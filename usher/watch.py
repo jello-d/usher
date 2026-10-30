@@ -27,7 +27,7 @@ import time
 # (engine.EXCLUDE_ERRORS). Everything imported by name below is a constant or a
 # function, which a rebind never touches.
 from . import chrome, engine
-from .engine import (AGGR_CAP, ARM_FILE, EXCLUDE_FILE, FORGET_FILE,
+from .engine import (PLACE_CAP, ARM_FILE, EXCLUDE_FILE, FORGET_FILE,
                      IDLE_SETTLE,
                      INCLUDE_FILE, INVERT_STORE, LAUNCHED, REDISPLAY_FILE,
                      SWEEP_FILE,
@@ -293,7 +293,7 @@ class Watcher:
 
     WHY A CLASS. Three threads share one pile of mutable placement state:
     what is already placed, what is pending a settle, each window's grace
-    deadline, the aggressive-mode clock, the knowledge base. That sharing is
+    deadline, the place-mode clock, the knowledge base. That sharing is
     inherent to the design, so the state is `self` rather than a pile of
     captured locals no method could be extracted from.
 
@@ -325,7 +325,7 @@ class Watcher:
         # dirty: knowledge needs a capture. layout: roll history too (not on a
         # tab-flip).
         self.st = {"dirty": True, "layout": True, "last": time.time(),
-                   "armed_at": time.time(),  # aggressive clock (reset by kick)
+                   "armed_at": time.time(),  # place clock (reset by kick)
                    "last_map": time.time()}  # last new toplevel map, which
         #                                      feeds IDLE_SETTLE
         self.placed = set()
@@ -341,10 +341,10 @@ class Watcher:
         # compositor overwrote, and it DEDUPS, so a lost race was locked in
         # for the life of the window. See placement_landed().
         # WINDOWS ENTITLED TO ONE LATE PLACEMENT: vids that MAPPED while
-        # aggressive was in force. Such a window was part of the session being
+        # place was in force. Such a window was part of the session being
         # restored, and if usher could not identify it in time that is usher's
         # problem, not a reason to leave it adrift. Distinct from a window
-        # OPENED mid-session, which steady deliberately leaves where it opens.
+        # OPENED mid-session, which the settled mode deliberately leaves alone.
         self.late_ok = set()
         self.verify = {}
         self.place_tries = {}  # vid -> placements ISSUED for it this map, so
@@ -443,19 +443,19 @@ class Watcher:
             # belong, so a reload can never be the reason the two silently
             # converge on the wrong answer.
             #
-            # AND IT STARTS STEADY, which is the other half of "touch
+            # AND IT STARTS SETTLED, which is the other half of "touch
             # nothing" and was missing: a fresh worker stamps armed_at with
-            # NOW, so every reload re-armed AGGRESSIVE for START_FLOOR and any
+            # NOW, so every reload re-armed PLACE for START_FLOOR and any
             # window mapping in those five minutes was snapped to its
             # remembered slot. A deploy must not change placement behaviour,
             # and this is what lets `setup.sh install` reload unconditionally.
             # Expiring the CAP is what settles it whatever last_map holds,
-            # since _steady_at takes min(armed + AGGR_CAP, ...). A later
-            # `usher aggressive` kick re-stamps armed_at and works normally.
+            # since _steady_at takes min(armed + PLACE_CAP, ...). A later
+            # `usher place` kick re-stamps armed_at and works normally.
             with self.lock:
-                self.st["armed_at"] = time.time() - AGGR_CAP
+                self.st["armed_at"] = time.time() - PLACE_CAP
             logline("reload: neither restoring nor re-baselining")
-            logline("reload: starting STEADY, so a deploy places nothing")
+            logline("reload: starting SETTLED, so a deploy places nothing")
         elif self.mode == "adopt":
             # Capture-and-resume: adopt the CURRENT layout as the baseline and
             # do NOT restore. No init-place and no grace deadlines for open
@@ -512,16 +512,16 @@ class Watcher:
         elif self.mode == "quiet":
             logline("reload: relaunch suppressed")
 
-    # --- the aggressive/steady clock, and what it publishes -------------------
+    # --- the place/settled clock, and what it publishes -------------------
 
     def _steady_at(self):
-        # steady when (FLOOR passed AND quiet for SETTLE) OR past CAP; the kick
+        # settled when (FLOOR passed AND quiet for SETTLE) OR past CAP; the kick
         # resets armed_at and a new map pushes last_map, and both extend
-        # aggressive.
+        # place.
         with self.lock:
             armed = self.st["armed_at"]
             last_map = self.st["last_map"]
-        return min(armed + AGGR_CAP,
+        return min(armed + PLACE_CAP,
                    max(armed + START_FLOOR, last_map + IDLE_SETTLE))
 
     def _aggressive_now(self):
@@ -529,18 +529,18 @@ class Watcher:
 
     def _write_status(self):
         # Publish {mode, seconds_left} for `usher status` + the tray. The
-        # steady-at estimate assumes no more windows arrive; a map or a kick
+        # settled-at estimate assumes no more windows arrive; a map or a kick
         # moves it out. Atomic replace so a reader never sees a half file.
         now = time.time()
         steady_at = self._steady_at()
-        # arc = fraction of the aggressive window still to run, for the tray's
-        # depleting ring; ~1.0 right after a kick, 0.0 once steady.
+        # arc = fraction of the place window still to run, for the tray's
+        # depleting ring; ~1.0 right after a kick, 0.0 once settled.
         arc = max(0.0, min(1.0, (steady_at - now) / START_FLOOR))
         try:
             tmp = STATUS_FILE + ".tmp"
             with open(tmp, "w") as f:
                 json.dump(
-                    {"mode": "aggressive" if now < steady_at else "steady",
+                    {"mode": "place" if now < steady_at else "settled",
                      "seconds_left": max(0, round(steady_at - now)),
                      "arc": round(arc, 3),
                      # TWO MORE FACTS, each on its own axis, so a reader never
@@ -660,7 +660,7 @@ class Watcher:
         # `not dock_chance` guard there could never change the outcome: a
         # planted regression removing it was uncatchable, which is how a dead
         # condition announces itself. The re-grace owns the grace gate and the
-        # entitlement owns the steady gate, one mechanism each.
+        # entitlement owns the settled gate, one mechanism each.
         dock_chance = vid in self.redisplay_ok
         if dock_chance:
             with self.lock:
@@ -669,24 +669,24 @@ class Watcher:
             return   # past the grace window: the window is settled, hands off
         # ONE LATE CHANCE FOR A WINDOW THAT WAS ALWAYS HERE. _recognise
         # re-graces a window the instant it becomes identifiable and says it
-        # is "still bounded, since the aggressive check still governs", and
+        # is "still bounded, since the place check still governs", and
         # that check is what defeated it: _steady_at takes
-        # min(armed + AGGR_CAP, ...), so once the cap has passed NOTHING can
-        # re-enter aggressive, and feeding last_map cannot help. Measured on
+        # min(armed + PLACE_CAP, ...), so once the cap has passed NOTHING can
+        # re-enter place, and feeding last_map cannot help. Measured on
         # manifold: a Chrome window became identifiable 2.5 hours after login,
         # logged `recognised late, re-graced`, and was then refused here, so
         # the re-grace was spent on nothing.
         #
-        # STEADY WAS CONFLATING TWO WINDOWS. One you OPENED mid-session should
+        # SETTLED WAS CONFLATING TWO WINDOWS. One you OPENED mid-session should
         # stay where it opens; one that was PRESENT at login and merely
         # unidentifiable until now should go to its remembered slot. `late_ok`
-        # is the ones that mapped while aggressive was in force, i.e. the
+        # is the ones that mapped while place was in force, i.e. the
         # session being restored, and this is their single chance: `placed`
         # dedups, and first_look is true exactly once per view.
         late_chance = first_look and vid in self.late_ok
         if (not self._aggressive_now() and not is_anchored(app, title)
                 and not late_chance and not dock_chance):
-            return   # steady state: only usher/include anchors are (re)placed
+            return   # settled state: only usher/include anchors are (re)placed
         if dock_chance and not self._aggressive_now():
             logline(f"display changed, re-placing: {app[:18]} | "
                     f"{title[:30]}")
@@ -695,16 +695,16 @@ class Watcher:
                     f"{app[:18]} | {title[:30]}")
         if not e:
             # NOTHING LEARNED HERE, so ask the surface map whether this window
-            # has a named home at another desk. Deliberately AFTER the steady
+            # has a named home at another desk. Deliberately AFTER the settled
             # gate above: a seed is a guess, so it may only happen where usher
-            # was going to place anyway, which is aggressive, an anchor, a
+            # was going to place anyway, which is place, an anchor, a
             # late chance, or a dock. A dock is exactly when it is wanted.
             e = self._seed(app, v)
         if not e:
             return   # never seen this identity -> we don't know where it goes
         # ONE WINDOW PER SLOT. Whoever got here first owns it until it
         # unmaps; a second window with the same key is LEFT WHERE IT OPENED,
-        # which is the same answer aggressive-vs-steady already gives a window
+        # which is the same answer place-vs-settled already gives a window
         # opened mid-session, and it refuses to invent geometry rather than
         # guessing an offset. Stacking is never what anyone wanted.
         skey = kkey(app, "") if self.kb.get(kkey(app, "")) else \
@@ -774,7 +774,7 @@ class Watcher:
         usher's point of view it just has. This needs no model of the sequence,
         no knowledge of keyrings or agents, and no new persistent state: it
         simply stays willing to place a window until it has had one real
-        chance. Still bounded, since the aggressive check still governs."""
+        chance. Still bounded, since the place check still governs."""
         self.identified.add(vid)
         late = time.time() > self.deadline.get(vid, 0)
         self.deadline[vid] = time.time() + PLACE_GRACE
@@ -870,7 +870,7 @@ class Watcher:
                 f"{app[:18]} | {title[:34]}")
         with self.lock:
             # Clearing `placed` is what lets _place_view consider it again;
-            # it re-runs every gate (grace, aggressive, the slot ledger), so
+            # it re-runs every gate (grace, place, the slot ledger), so
             # a retry can never place something a first attempt may not.
             self.placed.discard(vid)
             self.pending[vid] = {"v": v, "refetch": True, "due": time.time()}
@@ -1019,7 +1019,7 @@ class Watcher:
     def _poll_files(self, seen):
         """Adopt edits to the files that steer us, by mtime. Auto-incorporating
         usher/exclude + usher/include means a new never-place or anchor
-        rule applies on save; ARM_FILE is the one seam aggressive/settle/toggle
+        rule applies on save; ARM_FILE is the one seam place/settle/toggle
         drive; and a change to the invert store is the only signal a Super+N
         toggle gives us, since inversion has no view event of its own."""
         e = store_mtime(EXCLUDE_FILE)
@@ -1037,8 +1037,8 @@ class Watcher:
         if pl != seen["plugins"]:
             seen["plugins"] = pl
             reload_plugins()
-        # aggressive/settle/toggle all write a timestamp to ARM_FILE; adopt it
-        # as the new armed_at (now = kick, a past ts = settle to steady).
+        # place/settle/toggle all write a timestamp to ARM_FILE; adopt it
+        # as the new armed_at (now = kick, a past ts = settle to settled).
         a = store_mtime(ARM_FILE)
         if a != seen["arm"]:
             seen["arm"] = a
@@ -1046,8 +1046,8 @@ class Watcher:
                 with self.lock:
                     self.st["armed_at"] = float(
                         open(ARM_FILE).read().strip())
-                logline("aggressive re-armed (kick)"
-                        if self._aggressive_now() else "settled to steady")
+                logline("place re-armed (kick)"
+                        if self._aggressive_now() else "settled to settled")
             except (OSError, ValueError):
                 pass
         # Treat a change to the invert store as a capture trigger, so
@@ -1132,14 +1132,14 @@ class Watcher:
     def _held(self, windows):
         """The view ids whose CURRENT position must not be believed yet.
 
-        While placement is AGGRESSIVE, a window the placer has not reached is
+        While placement is PLACE, a window the placer has not reached is
         sitting wherever its app dropped it, and learning that OVERWRITES the
         remembered slot the placer is about to aim at. The capture loop runs
         every second and would otherwise win that race, teaching the store
         that the app's cascade position IS the window's home.
 
         A window is released the moment it is placed, or when its grace runs
-        out and usher is no longer going to act on it. In steady state nothing
+        out and usher is no longer going to act on it. In settled state nothing
         is placed, so nothing is held."""
         if not self._aggressive_now():
             return frozenset()
@@ -1215,7 +1215,7 @@ class Watcher:
         said "re-placing" over a sweep that could not act.
 
         A DISPLAY CHANGE IS THE THIRD KIND OF ENTITLEMENT, named rather than
-        folded into `late_ok`: that set means "mapped while aggressive, owed a
+        folded into `late_ok`: that set means "mapped while place, owed a
         placement at first identification", where this means "the display
         changed under a window that was already settled, so its slot is new
         information". Overloading the first would have made its own meaning

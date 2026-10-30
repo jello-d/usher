@@ -247,10 +247,10 @@ do_install() {
 # the next login. Measured 2026-10-07 on both boxes at once, one of them 41
 # hours stale, which quietly invalidated two verifications that day.
 #
-# SAFE TO DO UNCONDITIONALLY ONLY BECAUSE A QUIET START IS NOW STEADY. reload
+# SAFE TO DO UNCONDITIONALLY ONLY BECAUSE A QUIET START IS NOW SETTLED. reload
 # places nothing, re-baselines nothing, suppresses the relaunch and leaves the
-# aggressive clock expired, so a deploy cannot move a window or change
-# placement behaviour. Before that it re-armed aggressive for five minutes.
+# place clock expired, so a deploy cannot move a window or change
+# placement behaviour. Before that it re-armed place for five minutes.
 _reload_daemon() {
   # NO PID PROBE: `usher reload` REFUSES when there is nothing running and
   # exits EXIT_CANNOT (2), so the exit code answers the question and this does

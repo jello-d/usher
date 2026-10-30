@@ -8,9 +8,9 @@ actually are and puts them back where you left them. Two commands split the
 job: `usher-mgr` is the service your session starts, and `usher` is how you ask
 anything of it.
 
-- **Aggressive then steady.** For a window's first moments after login (or a
+- **Place then settled.** For a window's first moments after login (or a
   re-arm) every mapped window is placed back, which lets a browser open all its
-  windows and have them land. Then it goes steady: a reopened window just
+  windows and have them land. Then it goes settled: a reopened window just
   appears where you are and stays. `~/.config/usher/include` lists the few
   windows to keep snapping back even then; `~/.config/usher/exclude` lists
   windows never to place.
@@ -234,9 +234,9 @@ usher predict                # record what the next restore SHOULD produce
 usher verify                 # diff the live layout against that prediction
 usher doctor                 # what it is doing, and what it is NOT
 usher forget 'chrome:win:*'  # drop remembered slots (previews; --apply acts)
-usher status                 # placement mode and seconds until steady
-usher aggressive             # place every window that maps, for a while
-usher settle                 # go steady now: leave new windows where they open
+usher status                 # placement mode and seconds until settled
+usher place             # place every window that maps, for a while
+usher settle                 # go settled now: leave new windows where they open
 usher transpose              # sweep OPEN windows onto where they now belong
 usher toggle                 # flip between those two (what the tray click does)
 usher cleanly reboot         # wind down, keeping the layout, then reboot
@@ -294,7 +294,7 @@ and no live greeter, so the installed copy can be checked in place:
 ## Config
 
 - `~/.config/usher/exclude`: `<app-regex> :: <title-regex>` never-place list.
-- `~/.config/usher/include`: the same shape; the steady-state anchor list.
+- `~/.config/usher/include`: the same shape; the settled-state anchor list.
 - `~/.config/usher/plugins/*.py`: user window plugins.
 
 Example defaults ship in [`share/config/`](share/config/). The
@@ -334,11 +334,11 @@ with `usher reload`.
 - **`USHER_SKIP_TITLE`** (`^\[WORK`): titles matching this regex are ignored
   end to end, never captured, placed or relaunched. This is the work/personal
   boundary rather than a convenience, so widen it with care.
-- **`USHER_START_FLOOR`** (`300`): seconds after login, or an `aggressive`
+- **`USHER_START_FLOOR`** (`300`): seconds after login, or an `place`
   kick, during which every mapped window is placed back. A floor, not a race.
-- **`USHER_IDLE_SETTLE`** (`25`): seconds with no new window before aggressive
-  placement gives way to steady, where only `include` anchors are moved.
-- **`USHER_AGGR_CAP`** (`900`): hard cap on the aggressive window, whatever
+- **`USHER_IDLE_SETTLE`** (`25`): seconds with no new window before place
+  placement gives way to settled, where only `include` anchors are moved.
+- **`USHER_PLACE_CAP`** (`900`): hard cap on the place window, whatever
   the other two say.
 - **`USHER_DOCK_HOLD`** (`20`): seconds that a monitor arriving or leaving
   suppresses capture for, so an undock's collapse is not learned as the new

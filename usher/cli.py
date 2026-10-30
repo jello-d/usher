@@ -56,10 +56,10 @@ VERBS = {
     "forget":          ("both", "drop remembered slots [SEL...] [--apply]"),
     "wind-down":       ("both", "last capture, then let the apps go"),
     "doctor":          ("both", "what it is doing, and what it is NOT"),
-    "status":          ("both", "placement mode and seconds to steady"),
-    "aggressive":      ("both", "re-arm aggressive placement"),
-    "settle":          ("both", "go steady now"),
-    "toggle":          ("both", "flip aggressive/steady (the tray click)"),
+    "status":          ("both", "placement mode and seconds to settled"),
+    "place":           ("both", "place every window that maps, a while"),
+    "settle":          ("both", "settle now: leave new windows alone"),
+    "toggle":          ("both", "flip place/settled (the tray click)"),
     "transpose":       ("both", "sweep open windows onto where they now go"),
     "exclude":         ("both", "show the never-place rules as loaded"),
     "include":         ("both", "show the anchor rules as loaded"),
@@ -535,7 +535,7 @@ def _dispatch(verb, args):
               f"{len(engine.EXCLUDE_ERRORS)} error(s)"
               f" from {engine.EXCLUDE_FILE}", file=sys.stderr)
         sys.exit(1 if engine.EXCLUDE_ERRORS else 0)
-    elif verb == "include":       # show the anchor (steady-state) rules loaded
+    elif verb == "include":       # show the anchor (settled-state) rules loaded
         for ar, tr in engine.ANCHOR_RULES:
             print(f"{ar.pattern} :: {tr.pattern}")
         for n, text, msg in engine.ANCHOR_ERRORS:
@@ -566,9 +566,9 @@ def _dispatch(verb, args):
         sys.exit(_selftest.selftest())
     elif verb == "transpose":     # sweep the open windows, via the daemon
         sys.exit(engine.do_transpose())
-    elif verb in ("aggressive", "settle", "toggle"):
+    elif verb in ("place", "settle", "toggle"):
         sys.exit(_do_arm(verb))
-    elif verb == "status":        # current placement mode + seconds to steady
+    elif verb == "status":        # current placement mode + seconds to settled
         try:
             s = json.load(open(engine.STATUS_FILE))
             print(f"mode: {s.get('mode', '?')}  "
@@ -578,7 +578,7 @@ def _dispatch(verb, args):
 
 
 def arm_plan(act, running, mode):
-    """(action, message) for a placement-mode request: which of aggressive or
+    """(action, message) for a placement-mode request: which of place or
     settle to perform, or "none" and why not. Pure, so the whole table is
     checkable with no daemon, no runtime dir and no compositor.
 
@@ -586,10 +586,10 @@ def arm_plan(act, running, mode):
     clock lives in the WORKER, which stamps its own `armed_at` at startup and
     BASELINES the arm file's mtime, so a timestamp written before it starts is
     read once as the baseline and never adopted. The write would succeed and
-    the old code printed `re-armed aggressive placement` over it: a false
+    the old code printed `placing every window that maps` over it: a false
     success of exactly the shape that made a blind `reload` worth refusing.
 
-    TOGGLE RESOLVES FROM THE LIVE MODE, and keeps defaulting to aggressive
+    TOGGLE RESOLVES FROM THE LIVE MODE, and keeps defaulting to place
     when that cannot be read. With the daemon up a stale or unreadable status
     file is the only way to get here, and arming is the recoverable answer:
     one `settle` undoes it, where declining leaves the tray click dead."""
@@ -597,9 +597,9 @@ def arm_plan(act, running, mode):
         return "none", ("no daemon is running, so there is no placement clock"
                         f" to {act}: start one with `usher-mgr watch`")
     if act == "toggle":
-        act = "settle" if mode == "aggressive" else "aggressive"
-    return act, ("re-armed aggressive placement" if act == "aggressive"
-                 else "settled to steady")
+        act = "settle" if mode == "place" else "place"
+    return act, ("placing every window that maps" if act == "place"
+                 else "settled to settled")
 
 
 def _live_mode():
@@ -613,14 +613,14 @@ def _live_mode():
 
 def _do_arm(act):
     """Placement-mode controls (tray + CLI). Both ends drive the ONE armed_at
-    seam the watcher adopts from ARM_FILE: aggressive arms NOW (aggressive for
-    START_FLOOR) and settle arms in the PAST (steady at once, past the CAP)."""
+    seam the watcher adopts from ARM_FILE: place arms NOW (place for
+    START_FLOOR) and settle arms in the PAST (settled at once, past the CAP)."""
     act, msg = arm_plan(act, engine.watcher_pid(), _live_mode())
     if act == "none":
         print(f"{PROG}: {msg}", file=sys.stderr)
         return engine.EXIT_CANNOT
-    ts = (time.time() if act == "aggressive"
-          else time.time() - engine.AGGR_CAP - 1)
+    ts = (time.time() if act == "place"
+          else time.time() - engine.PLACE_CAP - 1)
     try:
         os.makedirs(os.path.dirname(engine.ARM_FILE), exist_ok=True)
         with open(engine.ARM_FILE, "w") as f:

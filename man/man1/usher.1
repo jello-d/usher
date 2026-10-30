@@ -15,8 +15,8 @@ back. Two commands split the job:
 .B usher-mgr
 is the service the session starts, and
 .B usher
-is how you ask anything of it. Placement is AGGRESSIVE for a
-window after login (or a re-arm), then STEADY: a reopened window just
+is how you ask anything of it. Placement is PLACE for a
+window after login (or a re-arm), then SETTLED: a reopened window just
 appears where you are; the opt-in
 .I usher/include
 anchors keep snapping back even then, and
@@ -139,8 +139,9 @@ starts the console session from a remote shell, through the provider at
 For a display-change hook. Re-places against the profile for the new monitor
 set, and does nothing at all when the set has not actually changed.
 .TP
-.B aggressive | settle | toggle
-Re-arm aggressive placement, force steady now, or flip between them. These
+.B place | settle | toggle
+Place every window that maps for a while, settle now so new
+windows are left alone, or flip between the two. These
 govern what happens to a window as it MAPS; they say nothing about windows
 already open.
 .TP
@@ -157,7 +158,7 @@ read-backs that follow are the ordinary placement verification, not part of
 this.
 .IP
 Distinct from
-.B aggressive
+.B place
 on purpose: that decides what happens to NEW windows and stays in force,
 where this acts once on the windows there are. Exit 2 with no daemon running,
 since placement is the service's job and nothing was assessed.
@@ -400,7 +401,7 @@ prints for an unmatched window, so the plugin that knows supplies it. The
 .SH FILES
 .TP
 .I ~/.config/usher/{exclude,include}
-never-place rules and steady-state anchors.
+never-place rules and settled-state anchors.
 .TP
 .I ~/.config/usher/plugins/*.py
 user window plugins.
@@ -421,18 +422,18 @@ banner.
 .TP
 .BI USHER_START_FLOOR " 300"
 Seconds after login (or an
-.B aggressive
+.B place
 kick) during which every mapped window is placed back. A floor, not a race:
 it is not shortened by the session going quiet.
 .TP
 .BI USHER_IDLE_SETTLE " 25"
-Seconds with no new window before aggressive placement gives way to steady,
+Seconds with no new window before placing gives way to settled,
 where only
 .I include
 anchors are moved.
 .TP
-.BI USHER_AGGR_CAP " 900"
-Hard cap on the aggressive window, whatever the other two say.
+.BI USHER_PLACE_CAP " 900"
+Hard cap on the place window, whatever the other two say.
 .TP
 .BI USHER_DOCK_HOLD " 20"
 Seconds that a monitor arriving or leaving suppresses capture for. A dock

@@ -183,9 +183,9 @@ def reload_exclude():
         logline(f"exclude rule error (line {_n}): {_msg}: {_text!r}")
 
 
-# --- anchor (include) rules: the OPT-IN set placed in STEADY state -----------
+# --- anchor (include) rules: the OPT-IN set placed in SETTLED state -----------
 # usher/include mirrors usher/exclude's '<app-regex> :: <title-regex>'
-# format. It is the steady-state whitelist: once the aggressive start window
+# format. It is the settled-state whitelist: once the place start window
 # ages out, ONLY windows matching an anchor rule are (re)placed; everything else
 # opens where you are and stays (default follow-me: an empty/absent file
 # anchors nothing). Exclude still wins: a window matching both is never placed.
@@ -197,7 +197,7 @@ ANCHOR_RULES, ANCHOR_ERRORS = load_exclude_rules(INCLUDE_FILE)
 
 def is_anchored(app, title):
     """True if the window matches a usher/include rule: the opt-in set that
-    is STILL placed in the conservative steady state."""
+    is STILL placed in the conservative settled state."""
     t = title.strip()
     return any(ar.search(app) and tr.search(t) for ar, tr in ANCHOR_RULES)
 
@@ -1513,7 +1513,7 @@ class KittyPlugin(WindowPlugin):
     A SHELL AT $HOME USED TO BE A SCRATCH TERMINAL, excluded end to end: never
     captured, never placed, never brought back. That was the same kind of
     exception as chrome's retired `^New Tab$` rule and it is retired for the
-    same two reasons. Aggressive-vs-steady means a terminal opened during
+    same two reasons. Place-vs-settled means a terminal opened during
     normal use is left exactly where it opens, so the whack-a-mole the rule
     was written against cannot happen; and when USHER is the one spawning the
     window at session start, it can put it where it belongs. The goal is every
@@ -2948,7 +2948,7 @@ def do_transpose():
 
     REFUSES WITH NO DAEMON rather than reporting success, which is the lesson
     the mode verbs taught: `usher settle` used to write the arm file and print
-    `settled to steady` having done nothing, because the clock lives in the
+    `settled to settled` having done nothing, because the clock lives in the
     worker. Nothing was assessed here either, so it is EXIT_CANNOT."""
     if not watcher_pid():
         print("usher: no daemon is running, so there are no windows to "
@@ -2970,10 +2970,10 @@ def do_display_changed():
 
     That edge fires on EVERY output burst: a monitor blanking and waking, a
     kanshi reapply, a re-detect, not only when the set of monitors actually
-    differs. Re-arming aggressive placement on each of those was a mistake:
-    aggressive means every mapped window is put back where it is remembered, so
+    differs. Re-arming the placing window on each of those was a mistake:
+    place means every mapped window is put back where it is remembered, so
     a window deliberately moved during the session would be yanked home every
-    time a screen blinked, which is exactly the teleporting the steady state
+    time a screen blinked, which is exactly the teleporting the settled state
     exists to prevent.
 
     So act only on a REAL profile change. The marker lives in the runtime dir,
@@ -3552,19 +3552,19 @@ def do_restore(dry, only=None, source=None):
                     outs, dry, acted)
 
 
-# --- aggressive vs steady placement (the anti-whack-a-mole state machine) ----
-# Placement is AGGRESSIVE (place any known, non-excluded window) for a window
-# after session start (or a `usher aggressive` kick), then goes STEADY
+# --- place vs settled placement (the anti-whack-a-mole state machine) ----
+# Placement is PLACE (place any known, non-excluded window) for a window
+# after session start (or a `usher place` kick), then goes SETTLED
 # (place ONLY usher/include anchors). A GLOBAL phase, orthogonal to the per-
-# view PLACE_GRACE. Steady when the FLOOR has passed AND it has been quiet (no
+# view PLACE_GRACE. Settled when the FLOOR has passed AND it has been quiet (no
 # new window mapped) for IDLE_SETTLE, but never past the CAP:
-#   aggressive := not( (now-armed >= FLOOR and now-last_map >= SETTLE)
+#   place := not( (now-armed >= FLOOR and now-last_map >= SETTLE)
 #                      or now-armed >= CAP )
 # FLOOR is a floor, not a race, so "log in, wander off, come back in 4 min and
 # launch Chrome" still lands. All three are env-overridable.
 START_FLOOR = float(os.environ.get("USHER_START_FLOOR", 300))  # 5 min
 IDLE_SETTLE = float(os.environ.get("USHER_IDLE_SETTLE", 25))   # 25 s quiet
-AGGR_CAP = float(os.environ.get("USHER_AGGR_CAP", 900))        # 15 min cap
+PLACE_CAP = float(os.environ.get("USHER_PLACE_CAP", 900))        # 15 min cap
 
 # Runtime seams (ephemeral, like the singleton lock): the kick writes ARM_FILE,
 # the worker reads it and publishes STATUS_FILE for `usher status` + the

@@ -4,13 +4,13 @@ near-black rounded tile, frame colour = state) so the tray reads as one system.
 
 It is a thin PRESENTER: the state machine lives in the usher daemon, which
 publishes {mode, seconds_left, arc} to STATUS_FILE each tick. This reads that to
-draw, and a left-click shells `usher toggle` (steady <-> aggressive). Nothing
+draw, and a left-click shells `usher toggle` (settled <-> place). Nothing
 here duplicates the placement logic.
 
 Three states by FRAME colour, one identity glyph (a 2x2 window grid, top-left
 window focused):
-  steady      green: windows stay where they are
-  aggressive  amber: placing windows back; a depleting ring counts the
+  settled      green: windows stay where they are
+  place  amber: placing windows back; a depleting ring counts the
                          seconds until it settles (arc drains clockwise)
   down        grey: usher not running (STATUS_FILE absent or stale)
 
@@ -29,16 +29,16 @@ from PIL import Image, ImageDraw
 
 _BASE = (0x14, 0x15, 0x19)      # near-black screen
 _TINT = 0.14                    # state hue bleed into the screen
-# Border colour per state. Aggressive is a loud RED, because it wants the eye
+# Border colour per state. `place` is a loud RED, because it wants the eye
 # AND must read distinct from the ORANGE gadgets beside it (mux, comms/dnd),
 # so a
-# clearly red (not amber/orange) hue; steady is a MUTED grey-green, quiet so
+# clearly red (not amber/orange) hue; settled is a MUTED grey-green, quiet so
 # the louder gadgets win the glance; down is neutral grey. _DULL is what the
-# aggressive border leaves behind as it recedes: the "not working" grey.
+# place border leaves behind as it recedes: the "not working" grey.
 FRAME = {
-    "steady":     (0x54, 0x86, 0x50),   # muted green: at rest, quiet
-    "aggressive": (0xF2, 0x3A, 0x2C),   # red: actively placing; stands out
-    "down":       (0x84, 0x84, 0x8A),   # neutral grey: daemon off
+    "settled": (0x54, 0x86, 0x50),   # muted green: at rest, quiet
+    "place":   (0xF2, 0x3A, 0x2C),   # red: actively placing; stands out
+    "down":    (0x84, 0x84, 0x8A),   # neutral grey: daemon off
 }
 _DULL = FRAME["down"]                   # the receded (elapsed) border grey
 
@@ -128,7 +128,7 @@ def _border(img, s, arc_frac):
     thresh = (1.0 - a) * total
     amber = [p for p, c in zip(pts, cum) if c >= thresh]
     if len(amber) >= 2:
-        d.line(amber, fill=FRAME["aggressive"] + (0xFF,), width=fw,
+        d.line(amber, fill=FRAME["place"] + (0xFF,), width=fw,
                joint="curve")
 
 
@@ -138,7 +138,7 @@ def _tile(state, arc, size):
     d = ImageDraw.Draw(img)
     r = max(2, s // 7)
     fw = max(1, s // 11)
-    if state == "aggressive":
+    if state == "place":
         d.rounded_rectangle([0, 0, s - 1, s - 1], r, fill=_screen(state))
         _border(img, s, arc)            # the border draws the cooldown itself
     else:
@@ -193,15 +193,15 @@ def read_status():
     except (OSError, ValueError):
         return ("down", 0.0, None)
     mode = s.get("mode")
-    if age > _STALE or mode not in ("aggressive", "steady"):
+    if age > _STALE or mode not in ("place", "settled"):
         return ("down", 0.0, None)
     return (mode, float(s.get("arc", 0.0)), s.get("seconds_left"))
 
 
 def _render_test(outdir):
     os.makedirs(outdir, exist_ok=True)
-    rows = [("steady", 0.0), ("aggressive", 1.0), ("aggressive", 0.66),
-            ("aggressive", 0.33), ("down", 0.0)]
+    rows = [("settled", 0.0), ("place", 1.0), ("place", 0.66),
+            ("place", 0.33), ("down", 0.0)]
     sizes = (22, 32, 48, 96)
     gap = 8
     w = sum(sizes) + gap * (len(sizes) + 1)
@@ -238,11 +238,11 @@ def _run():
     ITEM_PATH = "/StatusNotifierItem"
 
     def _tip(state, sec):
-        if state == "aggressive":
-            return (f"Window placement: AGGRESSIVE ({sec}s to steady)"
+        if state == "place":
+            return (f"Window placement: PLACE ({sec}s to settled)"
                     ", click to settle now")
-        if state == "steady":
-            return "Window placement: STEADY, click to kick aggressive"
+        if state == "settled":
+            return "Window placement: SETTLED, click to kick place"
         return "usher not running"
 
     def _sig(state, arc):
