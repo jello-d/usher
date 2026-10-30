@@ -303,6 +303,228 @@ def panel_map(fresh=False):
     return out
 
 
+# The desk's surface map, cached like the panel map and for the same reason.
+SURFACE_TTL = 5.0
+_SURFACES = {"map": None, "why": "", "at": 0.0}
+
+
+def surface_map(fresh=False):
+    """({surface: slot}, why) from `hwdp surfaces`, where a slot is the same
+    shape a store entry uses: output, workspace, pos, size.
+
+    A SURFACE IS A NAME FOR A PART OF A PANEL AT THIS DESK, authored per
+    display profile in hwdp. hwdp resolves the rect, so usher never sees a
+    fraction and the scale model stays where only hwdp can compute it: a
+    4K portrait at scale 1 is logically 2160x3840 and at 1.25 it is 1728x3072,
+    so the same "bottom half" is a different rect on the same hardware.
+
+    THE RECT NEEDS NO CONVERSION. hwdp reports it output-local and usher's
+    `pos` is cell-local, and those coincide because in wayfire every workspace
+    is exactly the output's size. Verified by round-tripping a real row
+    through target_geometry and place_of: identical.
+
+    `why` IS EMPTY WHEN THE ANSWER IS TRUSTWORTHY, including when it is
+    legitimately empty because this desk has no map authored. It is a sentence
+    only when we could not ask, because those are different facts and a report
+    that showed an empty map for both would be this project's oldest recurring
+    bug. hwdp separates them by STATUS on purpose:
+
+        rc 0   answered; no file is also 0, with nothing printed
+        rc 2   the file is BROKEN, and stdout is empty by design
+        rc 3   no session, so it cannot know what is switched on
+
+    SO ANY NON-ZERO IS "NO MAP", never a partial one. hwdp refuses a broken
+    file whole rather than emitting the good lines, for the reason usher's own
+    pick_socket refuses two sockets: a half-right map seeds windows into the
+    wrong places silently, which is worse than no map at all."""
+    now = time.time()
+    if not fresh and _SURFACES["map"] is not None \
+            and now - _SURFACES["at"] < SURFACE_TTL:
+        return _SURFACES["map"], _SURFACES["why"]
+    out, why = {}, ""
+    exe = shutil.which("hwdp")
+    if not exe:
+        why = "no hwdp on PATH, so this desk has no surface map"
+    else:
+        try:
+            r = subprocess.run([exe, "surfaces"], capture_output=True,
+                               text=True, timeout=5)
+            if r.returncode:
+                why = (f"`hwdp surfaces` exited {r.returncode}: "
+                       + (r.stderr.strip().splitlines() or ["no detail"])[0])
+            else:
+                out, why = _parse_surfaces(r.stdout)
+        except Exception as e:
+            why = f"could not run `hwdp surfaces`: {e}"
+    # THE INVARIANT A CONSUMER RELIES ON: a `why` always comes with an EMPTY
+    # map, so one test for "usable" is enough downstream and nobody has to
+    # check both. Asserted by a check, since duplicating the guard in every
+    # caller is how two of them come to disagree.
+    if why:
+        out = {}
+    _SURFACES.update({"map": out, "why": why, "at": now})
+    return out, why
+
+
+def _parse_surfaces(text):
+    """({surface: slot}, why) for one `hwdp surfaces` stdout.
+
+    REFUSED WHOLE ON A BAD LINE, matching what hwdp does with a bad FILE. A
+    map we have half parsed is the same hazard as one hwdp half validated, and
+    the two sides disagreeing about which half to trust is worse than either."""
+    out = {}
+    for n, ln in enumerate(text.splitlines(), 1):
+        if not ln.strip():
+            continue
+        f = ln.split()
+        if len(f) != 8:
+            return {}, (f"`hwdp surfaces` line {n} has {len(f)} fields, "
+                        "expected 8; ignoring the whole map")
+        try:
+            nums = [int(float(x)) for x in f[2:]]
+        except ValueError:
+            return {}, (f"`hwdp surfaces` line {n} has a non-numeric field; "
+                        "ignoring the whole map")
+        out[f[0]] = {"output": f[1], "workspace": nums[0:2],
+                     "pos": nums[2:4], "size": nums[4:6]}
+    return out, ""
+
+
+def surface_cell_fits(slot, outputs):
+    """Is a surface's workspace cell inside the live grid of its output?
+
+    hwdp passes the cell through WITHOUT checking it, deliberately: the grid
+    size is the integrator's (tackup's shapes/<shape>/), not hwdp's. Measured
+    on a 3x3 desk, `cell 5 9` resolves and prints at status 0.
+
+    USHER IS THE ONLY ONE THAT CAN CHECK IT, which is why it does. hwdp knows
+    the shape but not the grid, the integrator knows the grid but not the
+    surface file, and usher reads the LIVE grid straight off the compositor.
+    That is the same division as everything else here: a consumer reads
+    geometry, grid included, from the compositor, and asks hwdp only for what
+    the compositor cannot know.
+
+    AND IT MATTERS RATHER THAN BEING TIDY: seeding a window into a cell the
+    grid does not have puts it where no workspace navigation can reach it,
+    which is a shape this project has already met twice from other causes."""
+    o = outputs.get(slot.get("output"))
+    if not o:
+        return False
+    ws = o.get("workspace") or {}
+    gw = int(ws.get("grid_width") or 0)
+    gh = int(ws.get("grid_height") or 0)
+    if gw <= 0 or gh <= 0:
+        return True     # no grid reported: conclude nothing, as ever
+    x, y = slot.get("workspace", [0, 0])
+    return 0 <= int(x) < gw and 0 <= int(y) < gh
+
+
+def surface_of(w, surfaces):
+    """The surface name whose rect CONTAINS window w's placement, or "".
+
+    Recorded on a learned entry so the slot carries its logical address as
+    well as its pixels. That name is the only thing that can carry meaning
+    from one desk to another, because a cell coordinate cannot: (2,2) does not
+    exist in a 2x2 grid, and a 1920x1080 rect means nothing on a portrait
+    panel. The rect stays per-profile and learned; the name is what travels.
+
+    BY CENTRE, NOT BY CORNER OR BY CONTAINMENT. A window is rarely flush with
+    a surface and may overhang it, so "which half is it in" is the question
+    rather than "is it inside". With halves that is unambiguous, and it is the
+    cheapest rule that cannot report nothing for a window plainly in one.
+
+    THE FIRST CONTAINING MATCH WINS, AND THERE CAN ONLY BE ONE. hwdp refuses a
+    file whose surfaces overlap inside one panel and cell, verified against the
+    real verb (a `full` and a `top` in one cell exits 2, naming the pair), so
+    no centre can fall in two. A size tie-break was written here first and
+    removed: the planted regression inverting it was UNCATCHABLE, which is how
+    code that can never change an outcome announces itself."""
+    if not surfaces:
+        return ""
+    pos = w.get("pos") or [0, 0]
+    size = w.get("size") or [0, 0]
+    cx = pos[0] + size[0] / 2.0
+    cy = pos[1] + size[1] / 2.0
+    cell = [int(n) for n in (w.get("workspace") or [0, 0])]
+    for name, s in sorted(surfaces.items()):
+        if s["output"] != w.get("output"):
+            continue
+        if [int(n) for n in s["workspace"]] != cell:
+            continue
+        sx, sy = s["pos"]
+        sw, sh = s["size"]
+        if sx <= cx < sx + sw and sy <= cy < sy + sh:
+            return name
+    return ""
+
+
+def other_profile_entries(app, ident, profile=None):
+    """This identity's learned entries from every OTHER display profile,
+    newest first. Reads the stores directly, since the point is the desks that
+    are not attached."""
+    profile = profile or profile_id()
+    keys = (kkey(app, ident), kkey(app, ""))
+    found = []
+    for path in glob.glob(os.path.join(STATE, "knowledge-*.json")):
+        name = os.path.basename(path)[len("knowledge-"):-len(".json")]
+        if name == profile:
+            continue
+        try:
+            with open(path) as f:
+                kb = json.load(f)
+        except (OSError, ValueError):
+            continue
+        for k in keys:
+            e = kb.get(k)
+            if e:
+                found.append(e)
+                break
+    found.sort(key=lambda e: e.get("last_seen", 0), reverse=True)
+    return found
+
+
+def surface_seed(others, surfaces):
+    """A starting slot for a window this desk has never learned, from the
+    SURFACE it occupies on another desk. None when nothing can be derived.
+
+    THE NAME IS THE BRIDGE BETWEEN DESKS and the only thing that can be. A
+    cell coordinate cannot travel, because (2,2) does not exist in a 2x2 grid;
+    a rect cannot travel, because 1920x1080 means nothing on a portrait panel.
+    A name resolves to a different panel and a different rect at every desk,
+    which is the whole reason surfaces are named.
+
+    A SEED, NEVER A PROJECTION. It answers only where a profile has NO learned
+    slot; the moment the window is placed, the capture loop learns its real
+    geometry and that learned slot wins from then on, permanently. So this
+    cannot overrule "Slack on the laptop panel at home, on the portrait at the
+    office", which is the per-desk divergence the whole per-profile store
+    exists for.
+
+    AND IT MAY BE APPROXIMATE AT NO COST, which is what makes guessing
+    allowed here where this project normally refuses to. A wrong KEY corrupts
+    the store silently and invisibly; a wrong PLACEMENT is visible at once and
+    self-corrects on the first nudge. Different risk class, different rule.
+
+    POSITION FROM THE SURFACE, SIZE FROM THE WINDOW, clamped. Filling the
+    surface would throw away what the window was: a narrow chat window pinned
+    in `comms` on the laptop should arrive narrow, not stretched across a 4K
+    half. Clamping is what stops a 1800-tall window overflowing a 1080-tall
+    half."""
+    for e in others:
+        name = e.get("surface") or ""
+        s = surfaces.get(name)
+        if not s:
+            continue
+        w = min(int(e.get("size", [0, 0])[0]) or s["size"][0], s["size"][0])
+        h = min(int(e.get("size", [0, 0])[1]) or s["size"][1], s["size"][1])
+        seed = dict(e)
+        seed.update({"output": s["output"], "workspace": list(s["workspace"]),
+                     "pos": list(s["pos"]), "size": [w, h],
+                     "panel": "", "seeded_from": name})
+        return seed
+    return None
+
+
 def entry_output(e, outputs, panels=None):
     """The live output entry `e` should be placed on, or None.
 
@@ -1606,6 +1828,12 @@ def kb_entry(w, title, appid_only, when):
         # hwdp records no panel, and an entry learned before this existed has
         # none, so both must keep working. See entry_output.
         "panel": panel_map().get(w["output"], ""),
+        # WHICH NAMED SURFACE this placement sits in, at this desk. The rect
+        # beside it is per-profile and learned; this name is the part that can
+        # travel to another desk, where the same name resolves to a different
+        # panel and a different rect. Empty when the desk has no map, which is
+        # most desks and is not a fault.
+        "surface": surface_of(w, surface_map()[0]),
         "pos": w["pos"], "size": w["size"],
         "sticky": bool(w.get("sticky", False)),
         "inverted": bool(w.get("inverted", False)),

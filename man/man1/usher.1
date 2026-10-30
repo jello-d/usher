@@ -284,6 +284,35 @@ profile, which is the historical behaviour. Override with
 .BR USHER_PROFILE .
 A pre-profile store is adopted into the current profile once, so no learned
 placement is lost on upgrade.
+.SS Surfaces: a starting point at a desk you have never used
+The first dock at a new desk has nothing learned, so every window stays where
+it opens. A SURFACE MAP names a part of a panel at that desk, and a name is
+the only thing that can carry a window's home across desks: a workspace cell
+cannot, since (2,2) does not exist in a 2x2 grid, and a rect cannot, since
+1920x1080 means nothing on a portrait panel.
+.PP
+.BR hwdp (1)
+owns the map and resolves it, because turning "the bottom half of that
+monitor" into a rect needs the logical size after rotation and scale.
+.B usher
+reads
+.B hwdp surfaces
+and records, on each learned entry, which surface it sits in; a window with no
+slot at this desk is then SEEDED into the surface of the same name.
+.PP
+It is a SEED and not a projection. It applies only where a profile has no
+learned slot, and the moment the window is placed the capture loop learns its
+real geometry, which wins from then on. So arranging a window by hand at one
+desk never overrules what you arranged at another, which is what the
+per-profile store exists for.
+.PP
+NO MAP MEANS NO SEEDING, and that is the opt-out: with no
+.BR hwdp ,
+no surfaces file for this desk, or a file
+.B hwdp
+refuses, usher learns only, exactly as before.
+.B usher doctor
+prints the map and tells those cases apart.
 .SH IDENTITY AND PLUGINS
 A window is matched to its saved slot by (app_id, key). App-SPECIFIC identity
 and respawn live in PLUGINS. Three ship built in, and none keys on what the

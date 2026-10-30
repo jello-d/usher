@@ -676,6 +676,13 @@ class Watcher:
             logline(f"late chance (present at login, identifiable only now): "
                     f"{app[:18]} | {title[:30]}")
         if not e:
+            # NOTHING LEARNED HERE, so ask the surface map whether this window
+            # has a named home at another desk. Deliberately AFTER the steady
+            # gate above: a seed is a guess, so it may only happen where usher
+            # was going to place anyway, which is aggressive, an anchor, a
+            # late chance, or a dock. A dock is exactly when it is wanted.
+            e = self._seed(app, v)
+        if not e:
             return   # never seen this identity -> we don't know where it goes
         # ONE WINDOW PER SLOT. Whoever got here first owns it until it
         # unmaps; a second window with the same key is LEFT WHERE IT OPENED,
@@ -698,6 +705,42 @@ class Watcher:
             with self.lock:
                 self.slot_held[skey] = vid
         return moved
+
+    def _seed(self, app, v):
+        """A starting slot from the SURFACE this window occupies at another
+        desk, or None. Logged, because silently placing from a guess is as bad
+        as silently not placing: watch.log is what settles "usher or the
+        human", so a seeded placement has to be distinguishable from a learned
+        one in it."""
+        # ONE TEST, because surface_map guarantees an empty map whenever it
+        # sets `why` and a check in engine pins that. Testing both here was
+        # unprovable: the planted regression dropping `why` was uncatchable.
+        surfaces, _why = engine.surface_map()
+        if not surfaces:
+            return None
+        # Its own output list rather than the caller's, which is built
+        # further down: this runs only when a map EXISTS, so on a desk with
+        # none (every desk today) it costs one cached call and no IPC.
+        try:
+            outs = {o["name"]: o for o in self.place_sock.list_outputs()}
+        except Exception:
+            return None
+        others = engine.other_profile_entries(app, identity(v),
+                                              self.kb_profile)
+        seed = engine.surface_seed(others, surfaces)
+        if not seed:
+            return None
+        # THE CELL IS hwdp's PASSTHROUGH, so it is ours to check: seeding into
+        # a cell the live grid does not have puts the window where no
+        # workspace navigation reaches it.
+        if not engine.surface_cell_fits(seed, outs):
+            logline(f"surface `{seed['seeded_from']}` names cell "
+                    f"{tuple(seed['workspace'])}, which this grid does not "
+                    f"have: not seeding {app[:18]}")
+            return None
+        logline(f"seeded from surface `{seed['seeded_from']}`: {app[:18]} -> "
+                f"{seed['output']} ws{tuple(seed['workspace'])}")
+        return seed
 
     def _recognise(self, vid, app, title):
         """THE GRACE RUNS FROM RECOGNITION, NOT FROM THE MAP. A window can be

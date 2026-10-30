@@ -2624,6 +2624,181 @@ def _t_displays(ck):
     # stopped calling the resolver at all, which is the same bug.
     ck("the-resolver-is-actually-wired", _uses >= 5)
 
+    # ---- the SURFACE MAP: hwdp's contract, parsed and spent --------------
+    _row = ("code DP-2 0 0 0 0 3840 2160\n"
+            "comms DP-2 1 0 0 0 3840 1080\n"
+            "ref DP-2 1 0 0 1080 3840 1080\n")
+    _m, _w = engine._parse_surfaces(_row)
+    ck("surfaces-parse-the-eight-fields",
+       _w == "" and sorted(_m) == ["code", "comms", "ref"])
+    ck("surfaces-parse-the-rect",
+       _m["ref"] == {"output": "DP-2", "workspace": [1, 0],
+                     "pos": [0, 1080], "size": [3840, 1080]})
+    # A BAD LINE REFUSES THE WHOLE MAP, matching what hwdp does with a bad
+    # FILE. Half a map seeds windows into wrong places silently.
+    _m2, _w2 = engine._parse_surfaces(_row + "oops DP-2 1 0\n")
+    ck("surfaces-a-short-line-refuses-the-whole-map", _m2 == {} and _w2)
+    _m3, _w3 = engine._parse_surfaces("a DP-2 0 0 0 0 x 9\n")
+    ck("surfaces-a-non-numeric-field-refuses-the-whole-map",
+       _m3 == {} and _w3)
+    ck("surfaces-an-empty-answer-is-trustworthy",
+       engine._parse_surfaces("") == ({}, ""))
+
+    # ---- surface_map's STATUS table, which had no checks at all ---------
+    # Where a planted regression hid: reading a non-zero status as an empty
+    # map is exactly the three-states bug, and only _parse_surfaces was
+    # covered. subprocess.run is stubbed, so no hwdp is needed.
+    class _R:
+        def __init__(self, rc, out="", err=""):
+            self.returncode, self.stdout, self.stderr = rc, out, err
+
+    _rrun, _rwhich = engine.subprocess.run, engine.shutil.which
+    try:
+        engine.shutil.which = lambda n: "/usr/bin/hwdp"
+        engine._SURFACES.update({"map": None, "why": "", "at": 0.0})
+        engine.subprocess.run = lambda *a, **k: _R(0, _row)
+        _sm, _sw = engine.surface_map(fresh=True)
+        ck("surface-map-reads-a-good-answer", _sw == "" and len(_sm) == 3)
+        engine.subprocess.run = lambda *a, **k: _R(0, "")
+        ck("surface-map-no-file-is-trustworthy-and-empty",
+           engine.surface_map(fresh=True) == ({}, ""))
+        engine.subprocess.run = lambda *a, **k: _R(2, "", "it is broken")
+        _sm, _sw = engine.surface_map(fresh=True)
+        ck("surfaces-NOT-AVAILABLE-is-not-an-empty-map",
+           _sm == {} and "exited 2" in _sw and "broken" in _sw)
+        engine.subprocess.run = lambda *a, **k: _R(3, "", "no session")
+        _sm3, _sw3 = engine.surface_map(fresh=True)
+        ck("surface-map-no-session-says-so", _sm3 == {} and "exited 3" in _sw3)
+        # THE INVARIANT consumers rely on, asserted rather than duplicated in
+        # every caller: a `why` always comes with an empty map.
+        ck("a-why-always-comes-with-an-empty-map",
+           all(not m for m, wy in
+               [engine.surface_map(fresh=True)] if wy))
+        engine.subprocess.run = lambda *a, **k: _R(0, "bad line here\n")
+        _sm4, _sw4 = engine.surface_map(fresh=True)
+        ck("a-broken-line-reaches-the-caller-as-a-why",
+           _sm4 == {} and _sw4)
+        engine.shutil.which = lambda n: None
+        _sm5, _sw5 = engine.surface_map(fresh=True)
+        ck("no-hwdp-is-a-why-not-a-silent-empty",
+           _sm5 == {} and "hwdp" in _sw5)
+    finally:
+        engine.subprocess.run, engine.shutil.which = _rrun, _rwhich
+        engine._SURFACES.update({"map": None, "why": "", "at": 0.0})
+
+    # ---- the cell is hwdp's passthrough, so usher checks it --------------
+    _g = {"DP-2": {"name": "DP-2",
+                   "workspace": {"x": 0, "y": 0, "grid_width": 3,
+                                 "grid_height": 3}}}
+    ck("a-cell-inside-the-grid-fits",
+       engine.surface_cell_fits(_m["comms"], _g))
+    ck("a-cell-outside-the-grid-does-not",
+       not engine.surface_cell_fits(
+           {"output": "DP-2", "workspace": [5, 9]}, _g))
+    ck("a-surface-on-an-unattached-output-does-not-fit",
+       not engine.surface_cell_fits(
+           {"output": "HDMI-9", "workspace": [0, 0]}, _g))
+    # NO GRID REPORTED CONCLUDES NOTHING, the fail-safe direction this file
+    # takes everywhere else (recorded_window_ids, seen_terms, panel_map).
+    ck("no-grid-reported-concludes-nothing",
+       engine.surface_cell_fits(
+           {"output": "DP-2", "workspace": [9, 9]},
+           {"DP-2": {"name": "DP-2", "workspace": {"x": 0, "y": 0}}}))
+
+    # ---- which surface a placement sits in ------------------------------
+    _win = lambda ws, pos, size, out="DP-2": {
+        "output": out, "workspace": ws, "pos": pos, "size": size}
+    ck("surface-of-picks-the-half-the-centre-is-in",
+       engine.surface_of(_win([1, 0], [100, 1200], [800, 600]), _m) == "ref")
+    ck("surface-of-picks-the-other-half",
+       engine.surface_of(_win([1, 0], [100, 100], [800, 600]), _m) == "comms")
+    ck("surface-of-finds-a-full-surface",
+       engine.surface_of(_win([0, 0], [10, 10], [50, 50]), _m) == "code")
+    ck("surface-of-ignores-another-cell",
+       engine.surface_of(_win([2, 2], [100, 100], [800, 600]), _m) == "")
+    ck("surface-of-ignores-another-output",
+       engine.surface_of(_win([1, 0], [100, 100], [800, 600], "eDP-1"), _m)
+       == "")
+    ck("surface-of-with-no-map-is-empty",
+       engine.surface_of(_win([1, 0], [1, 1], [2, 2]), {}) == "")
+
+    # ---- reading the OTHER desks' stores, which is real file I/O ---------
+    _st2 = engine.STATE
+    _sd = tempfile.mkdtemp(prefix="usher-others-", dir="/var/tmp")
+    try:
+        engine.STATE = _sd
+        _k = engine.kkey("slack", "")
+        for prof, surf, seen in (("HOME", "comms", 10.0),
+                                 ("OFFICE", "ref", 99.0),
+                                 ("HERE", "nope", 50.0)):
+            with open(os.path.join(_sd, f"knowledge-{prof}.json"), "w") as f:
+                json.dump({_k: {"app_id": "slack", "surface": surf,
+                                "size": [10, 10], "last_seen": seen}}, f)
+        _got = engine.other_profile_entries("slack", "", "HERE")
+        ck("other-desks-exclude-the-one-we-are-on",
+           [e["surface"] for e in _got] == ["ref", "comms"])
+        ck("other-desks-come-back-newest-first",
+           _got[0]["last_seen"] == 99.0)
+        ck("an-identity-no-other-desk-knows-is-empty",
+           engine.other_profile_entries("nosuch", "", "HERE") == [])
+        # AN UNREADABLE STORE IS SKIPPED, not fatal: one corrupt file must not
+        # cost the seed from every other desk.
+        with open(os.path.join(_sd, "knowledge-BROKEN.json"), "w") as f:
+            f.write("{not json")
+        ck("a-corrupt-store-is-skipped-not-fatal",
+           len(engine.other_profile_entries("slack", "", "HERE")) == 2)
+        # AND THE APP-ID-ONLY KEY IS TRIED TOO, or a uniquely-identified app
+        # like Signal could never be seeded.
+        ck("the-app-id-only-key-is-tried",
+           len(engine.other_profile_entries("slack", "whatever", "HERE")) == 2)
+    finally:
+        engine.STATE = _st2
+        shutil.rmtree(_sd, ignore_errors=True)
+
+    # ---- the SEED: the name is the bridge between desks ------------------
+    _away = {"app_id": "slack", "title": "", "appid_only": True,
+             "output": "eDP-1", "workspace": [2, 0], "pos": [40, 50],
+             "size": [900, 700], "surface": "ref", "last_seen": 100.0}
+    _seed = engine.surface_seed([_away], _m)
+    ck("a-seed-lands-on-this-desk's-surface-of-that-name",
+       _seed["output"] == "DP-2" and _seed["workspace"] == [1, 0]
+       and _seed["pos"] == [0, 1080])
+    ck("a-seed-keeps-the-window's-own-size",
+       _seed["size"] == [900, 700])
+    ck("a-seed-says-where-it-came-from", _seed["seeded_from"] == "ref")
+    # CLAMPED, or a window taller than the half overflows it.
+    _tall = dict(_away, size=[9000, 1800])
+    ck("a-seed-is-clamped-to-the-surface",
+       engine.surface_seed([_tall], _m)["size"] == [3840, 1080])
+    # AND IT CANNOT INVENT ONE. No surface recorded, or a name this desk does
+    # not have, both decline: a seed is allowed to be approximate, never
+    # fabricated.
+    ck("no-surface-recorded-is-no-seed",
+       engine.surface_seed([dict(_away, surface="")], _m) is None)
+    ck("a-name-this-desk-lacks-is-no-seed",
+       engine.surface_seed([dict(_away, surface="nowhere")], _m) is None)
+    ck("nothing-from-another-desk-is-no-seed",
+       engine.surface_seed([], _m) is None)
+    # NEWEST DESK WINS when several remember it, since `others` arrives
+    # sorted and the first usable one is taken.
+    ck("the-newest-other-desk-wins",
+       engine.surface_seed([dict(_away, surface="comms"),
+                            dict(_away, surface="ref")], _m)["pos"]
+       == [0, 0])
+
+    # ---- and a learned entry RECORDS its surface -------------------------
+    _rsm, _rpm = engine.surface_map, engine.panel_map
+    try:
+        engine.surface_map = lambda fresh=False: (_m, "")
+        engine.panel_map = lambda fresh=False: {}
+        _ke = engine.kb_entry(
+            {"app_id": "x", "title": "X", "output": "DP-2",
+             "workspace": [1, 0], "pos": [100, 1200], "size": [800, 600]},
+            "X", True, 1_800_000_000)
+        ck("kb-entry-records-the-surface", _ke["surface"] == "ref")
+    finally:
+        engine.surface_map, engine.panel_map = _rsm, _rpm
+
     # ---- what a display event calls for ----------------------------------
     ck("redisplay-same-monitors-does-nothing",
        engine.redisplay_plan("abc", "abc", 123) == "none")
@@ -2750,6 +2925,58 @@ def _t_displays(ck):
             Watcher._seat_view = _rseat
             w.place_sock = None
             w.identified.discard(42)
+            w.deadline.pop(42, None)
+            w.placed.clear()
+            w.kb, w.kb_profile = {}, "DESK"
+
+        # ---- AND THE PLACER CALLS THE SEEDER ------------------------------
+        # The checks above prove surface_seed; they say nothing about whether
+        # _place_view reaches it, and a bug in the code AROUND the tested part
+        # is this project's most repeated shape. Driven on the real Watcher
+        # with the store EMPTY, which is the only state a seed may act in.
+        _seeded = []
+        _rseat2 = Watcher._seat_view
+        _rsm2, _rope = engine.surface_map, engine.other_profile_entries
+        try:
+            Watcher._seat_view = lambda self, v, e, o: (
+                _seeded.append((v["id"], e.get("seeded_from"),
+                                tuple(e["pos"]))) or True)
+            w.place_sock = _Sock(_lv, [dict(_lo[0], workspace={
+                "x": 0, "y": 0, "grid_width": 3, "grid_height": 3})])
+            engine.surface_map = lambda fresh=False: (
+                {"ref": {"output": "eDP-1", "workspace": [0, 0],
+                         "pos": [0, 300], "size": [800, 300]}}, "")
+            engine.other_profile_entries = lambda a, i, p=None: [
+                {"surface": "ref", "size": [400, 200], "last_seen": 1.0}]
+            w.kb, w.kb_profile = {}, "DESK"     # NOTHING learned here
+            w.placed.clear()
+            w.redisplay_ok = {42}               # a dock, so the gate passes
+            w.deadline[42] = _time.time() + 100
+            w._place_view(_lv[0])
+            ck("the-placer-seeds-from-a-surface-when-nothing-is-learned",
+               _seeded == [(42, "ref", (0, 300))])
+            # AND NOT WHEN THE CELL IS NOT IN THE GRID, which is the guard
+            # usher owns because hwdp passes the cell through unchecked.
+            _seeded.clear()
+            engine.surface_map = lambda fresh=False: (
+                {"ref": {"output": "eDP-1", "workspace": [5, 9],
+                         "pos": [0, 300], "size": [800, 300]}}, "")
+            w.placed.clear()
+            w.redisplay_ok = {42}
+            w._place_view(_lv[0])
+            ck("a-surface-outside-the-grid-is-not-seeded", _seeded == [])
+            # AND NOT AT ALL WHEN THE MAP COULD NOT BE READ: `why` set must
+            # never be treated as an empty map.
+            engine.surface_map = lambda fresh=False: ({}, "could not ask")
+            w.placed.clear()
+            w.redisplay_ok = {42}
+            w._place_view(_lv[0])
+            ck("an-unreadable-map-seeds-nothing", _seeded == [])
+        finally:
+            Watcher._seat_view = _rseat2
+            engine.surface_map, engine.other_profile_entries = _rsm2, _rope
+            w.place_sock = None
+            w.redisplay_ok = set()
             w.deadline.pop(42, None)
             w.placed.clear()
             w.kb, w.kb_profile = {}, "DESK"

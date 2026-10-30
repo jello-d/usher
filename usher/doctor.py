@@ -48,6 +48,37 @@ from .engine import (KB_SCHEMA, LOCAL_HOST, PLUGIN_HOOKS, STATE, TERM_KEY_RE,
 # thing?": it reports the store, the cross-tool contracts, and, per window,
 # what would happen and WHY. A zero-kitty knowledge base is obvious here.
 
+def _doctor_surfaces(out):
+    """This desk's named surfaces, and the three NO-MAP states kept apart.
+
+    "No map authored", "could not ask hwdp" and "the file is broken" are
+    different facts, and a report that printed an empty list for all three
+    would be the oldest recurring bug in this project: a diagnostic that
+    cannot see the thing it diagnoses must say so louder than it says anything
+    else. hwdp separates them by exit status for exactly this, so spending
+    that distinction here is the whole point of its having made it."""
+    surfaces, why = engine.surface_map(fresh=True)
+    if why:
+        out(f"  surfaces     NOT AVAILABLE: {why}")
+        return
+    if not surfaces:
+        out("  surfaces     none authored for this desk (learned-only, which"
+            " is the default)")
+        return
+    try:
+        outs = {o["name"]: o for o in engine.ipc().list_outputs()}
+    except Exception:
+        outs = {}
+    out(f"  surfaces     {len(surfaces)} on this desk")
+    for name, s in sorted(surfaces.items()):
+        bad = "" if engine.surface_cell_fits(s, outs) else \
+            "  CELL NOT IN THE LIVE GRID, so it is not seeded"
+        out(f"                 {name:12} {s['output']:8} "
+            f"ws{tuple(s['workspace'])} "
+            f"{s['size'][0]}x{s['size'][1]} at "
+            f"{s['pos'][0]},{s['pos'][1]}{bad}")
+
+
 def _doctor_store(out):
     kb = load_knowledge()
     counts = Counter(k.split("\x00", 1)[0] for k in kb)
@@ -63,6 +94,7 @@ def _doctor_store(out):
                     != profile_id())
     if others:
         out(f"  other sets   {', '.join(others)}  (remembered separately)")
+    _doctor_surfaces(out)
     try:
         schema = open(schema_path()).read().strip()
     except OSError:

@@ -299,6 +299,31 @@ and no live greeter, so the installed copy can be checked in place:
 Example defaults ship in [`share/config/`](share/config/). The
 daemon soft-degrades when any are absent.
 
+### Surfaces, for a laptop that docks
+
+A window's place is remembered per monitor set, so the first time you dock at
+a new desk usher has nothing to go on and leaves everything where it opens.
+A **surface map** gives it a starting point: a name for a part of a panel at
+that desk, so the name can carry a window's home from one desk to another
+where a pixel rect cannot.
+
+The map is not usher's to own: [hwdp](https://github.com/jello-d/hwdp) holds
+it, via `hwdp surfaces`, because resolving "the bottom half of that monitor"
+to a rect needs the logical size after rotation and scale. usher reads that
+and seeds a window into the surface it occupies at another desk.
+
+    hwdp surfaces           SURFACE CONNECTOR WS_X WS_Y X Y W H
+    usher doctor            the map, and which surfaces this desk has
+
+It is a SEED, never a projection, and only where a profile has no learned slot
+for that window. The moment the window is placed, the capture loop learns its
+real geometry and that learned slot wins from then on, so arranging a window
+by hand at one desk never overrules what you arranged at another.
+
+**No map means no seeding**, which is the opt-out: with no hwdp, no surfaces
+file for this desk, or an unreadable one, usher behaves exactly as it did
+before, learning only.
+
 ### Environment
 
 Every knob usher reads, with its default. All are read **once at import**, so
