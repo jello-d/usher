@@ -338,8 +338,11 @@ with `usher reload`.
   kick, during which every mapped window is placed back. A floor, not a race:
   activity extends it, and you can re-arm it by hand. Restoring a session
   takes seconds, so this is sized from measurement rather than caution.
-- **`USHER_IDLE_SETTLE`** (`25`): seconds with no new window before placing
-  gives way to settled, where only `include` anchors are moved.
+- **`USHER_IDLE_SETTLE`** (`15`): seconds with no new window before placing
+  gives way to settled, where only `include` anchors are moved. This is how
+  big a gap in arrivals means the restore is over, so it tracks how apps
+  spawn rather than how long you want placing: the widest gap measured during
+  a real restore is 4-5s.
 - **`USHER_PLACE_CAP`** (`180`): hard cap on the place window, whatever
   the other two say. A window that mapped while placing is still owed one
   placement when it first becomes identifiable, past the cap or not.

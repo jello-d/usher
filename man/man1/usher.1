@@ -432,11 +432,14 @@ re-arms it by hand when that is not enough. Sized from measurement rather than
 caution: restoring a session takes SECONDS, with a twelve-window login
 measured back in place within three.
 .TP
-.BI USHER_IDLE_SETTLE " 25"
+.BI USHER_IDLE_SETTLE " 15"
 Seconds with no new window before placing gives way to settled,
 where only
 .I include
-anchors are moved.
+anchors are moved. This is how big a GAP IN ARRIVALS means the restore is
+over, so it tracks how applications spawn rather than how long you want
+placing: the widest gap measured during a real restore is 4-5s, and Chrome's
+own per-profile stagger is 4s.
 .TP
 .BI USHER_PLACE_CAP " 180"
 Hard cap on the place window, whatever the other two say. It bounds a restore

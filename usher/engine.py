@@ -3584,7 +3584,20 @@ def do_restore(dry, only=None, source=None):
 # cover (a mux latch waiting on ssh, a browser that names a window late) are
 # held by that instead. Only a late MAP depends on the floor now.
 START_FLOOR = float(os.environ.get("USHER_START_FLOOR", 30))   # 30 s
-IDLE_SETTLE = float(os.environ.get("USHER_IDLE_SETTLE", 25))   # 25 s quiet
+# HOW BIG A GAP IN ARRIVALS MEANS THE STORM IS OVER, which is a property of
+# how APPS SPAWN rather than of how long anyone wants placing. Measured over
+# both boxes' logs: inter-arrival gaps during a restore run a median of 0s and
+# a p90 of 2s, with a largest real gap of 4-5s (Chrome's own profile stagger
+# is 4s, USHER_CHROME_STAGGER). The only larger gaps in either log, 20s and
+# 65s, were the human opening terminals a minute after login, which is the
+# opposite of a storm. So 15s is three times the widest real gap.
+#
+# DELIBERATELY NOT DERIVED FROM START_FLOOR, though it is half of it today.
+# They answer different questions from different bases, a preference against a
+# spawn rate, and a derived knob stops being a knob: this one is public,
+# documented and pinned, and the choice is between deleting it or inventing
+# "set it to override the derivation", which is worse than either.
+IDLE_SETTLE = float(os.environ.get("USHER_IDLE_SETTLE", 15))   # 15 s quiet
 PLACE_CAP = float(os.environ.get("USHER_PLACE_CAP", 180))      # 3 min cap
 
 # Runtime seams (ephemeral, like the singleton lock): the kick writes ARM_FILE,
