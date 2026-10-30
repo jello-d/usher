@@ -3560,11 +3560,32 @@ def do_restore(dry, only=None, source=None):
 # new window mapped) for IDLE_SETTLE, but never past the CAP:
 #   place := not( (now-armed >= FLOOR and now-last_map >= SETTLE)
 #                      or now-armed >= CAP )
-# FLOOR is a floor, not a race, so "log in, wander off, come back in 4 min and
-# launch Chrome" still lands. All three are env-overridable.
-START_FLOOR = float(os.environ.get("USHER_START_FLOOR", 300))  # 5 min
+# FLOOR is a floor, not a race: activity EXTENDS it, so a staggered restore
+# keeps place alive as long as windows keep arriving within IDLE_SETTLE of
+# each other, and `usher place` re-arms it by hand whenever that is not
+# enough. All three are env-overridable.
+#
+# MEASURED BEFORE SHORTENING, over both boxes' whole logs (2026-10-30):
+# restoration finishes in SECONDS, not minutes. The last placement after a
+# daemon start was a median of 2s and a p90 of 7-9s, and the richest cold
+# login in either log put TWELVE windows back in one second and was entirely
+# done by three. The old 300s floor was sized for a job that takes 3s.
+#
+# AND THE OUTLIERS WERE NOT RESTORATION, which is what makes shortening safe
+# rather than merely cheap: the only placements past 60s in either log were
+# terminals the user opened at +67s and +87s, and an nm-applet Wi-Fi auth
+# dialog at +386s. A window you open a minute in IS a mid-session window, and
+# leaving it where it opens is what `settled` is FOR, so those were place mode
+# reaching past its purpose rather than earning its length.
+#
+# A LATE IDENTITY NO LONGER NEEDS THE CLOCK, which is the other half. `late_ok`
+# gives any window that MAPPED during place one placement at first
+# identification whatever the clock says, so the slow cases this used to
+# cover (a mux latch waiting on ssh, a browser that names a window late) are
+# held by that instead. Only a late MAP depends on the floor now.
+START_FLOOR = float(os.environ.get("USHER_START_FLOOR", 30))   # 30 s
 IDLE_SETTLE = float(os.environ.get("USHER_IDLE_SETTLE", 25))   # 25 s quiet
-PLACE_CAP = float(os.environ.get("USHER_PLACE_CAP", 900))        # 15 min cap
+PLACE_CAP = float(os.environ.get("USHER_PLACE_CAP", 180))      # 3 min cap
 
 # Runtime seams (ephemeral, like the singleton lock): the kick writes ARM_FILE,
 # the worker reads it and publishes STATUS_FILE for `usher status` + the

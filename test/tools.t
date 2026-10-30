@@ -182,6 +182,7 @@ PYEOF
 # copy of the number.
 PYTHONPATH="$HERE" python3 - "$HERE" <<'PYEOF' || fail "a documented default
  disagrees with the code"
+import re
 import sys
 root = sys.argv[1]
 sys.path.insert(0, root)
@@ -194,13 +195,26 @@ KNOBS = (("USHER_START_FLOOR", engine.START_FLOOR),
          ("USHER_CHROME_STAGGER", chrome.CHROME_STAGGER),
          ("USHER_WIND_DOWN_TIMEOUT", engine.WIND_DOWN_TIMEOUT),
          ("USHER_DOCK_HOLD", watch.DOCK_HOLD))
+# THE DEFINITION LINE, not "the number appears somewhere near the name".
+# Two holes closed, both met for real:
+#   `30 in "300"` is TRUE, so a containment test passed while the docs still
+#   carried the old default of a knob shortened to a prefix of it.
+#   AND THE FIRST MENTION IS NOT ALWAYS THE DEFINITION: one entry gained a
+#   cross-reference to another knob and the check then read the 60 characters
+#   after the CROSS-REFERENCE, reporting a correct document as wrong.
+# Anchoring on the shape each document states a default IN is exact, and it
+# leaves prose free to mention a knob wherever it is useful.
+DEFN = {"man": lambda n: r'\.BI %s " ?(\d+)"' % re.escape(n),
+        "README": lambda n: r"\*\*`%s`\*\* \(`(\d+)`\)" % re.escape(n)}
 bad = []
 for name, val in KNOBS:
     want = str(int(val))
-    for label, doc, span in (("man", man, 60), ("README", rdm, 80)):
-        after = doc.split(name, 1)[1][:span]
-        if want not in after:
-            bad.append(f"{name}: code says {want}, {label} does not")
+    for label, doc in (("man", man), ("README", rdm)):
+        m = re.search(DEFN[label](name), doc)
+        if not m:
+            bad.append(f"{name}: {label} has no definition line for it")
+        elif m.group(1) != want:
+            bad.append(f"{name}: code says {want}, {label} says {m.group(1)}")
 assert not bad, "; ".join(bad)
 PYEOF
 

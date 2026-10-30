@@ -420,11 +420,17 @@ never placed, never relaunched. This is the work/personal boundary, so widen
 it with care and narrow it only if you know nothing sensitive wears the
 banner.
 .TP
-.BI USHER_START_FLOOR " 300"
-Seconds after login (or an
+.BI USHER_START_FLOOR " 30"
+Seconds after login (or a
 .B place
 kick) during which every mapped window is placed back. A floor, not a race:
-it is not shortened by the session going quiet.
+activity EXTENDS it (see
+.BR USHER_IDLE_SETTLE ),
+so a staggered restore keeps it alive, and
+.B usher place
+re-arms it by hand when that is not enough. Sized from measurement rather than
+caution: restoring a session takes SECONDS, with a twelve-window login
+measured back in place within three.
 .TP
 .BI USHER_IDLE_SETTLE " 25"
 Seconds with no new window before placing gives way to settled,
@@ -432,8 +438,11 @@ where only
 .I include
 anchors are moved.
 .TP
-.BI USHER_PLACE_CAP " 900"
-Hard cap on the place window, whatever the other two say.
+.BI USHER_PLACE_CAP " 180"
+Hard cap on the place window, whatever the other two say. It bounds a restore
+that keeps producing windows; past it, a window that MAPPED while placing is
+still owed one placement when it first becomes identifiable, so a late
+identity does not depend on this.
 .TP
 .BI USHER_DOCK_HOLD " 20"
 Seconds that a monitor arriving or leaving suppresses capture for. A dock

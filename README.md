@@ -334,12 +334,15 @@ with `usher reload`.
 - **`USHER_SKIP_TITLE`** (`^\[WORK`): titles matching this regex are ignored
   end to end, never captured, placed or relaunched. This is the work/personal
   boundary rather than a convenience, so widen it with care.
-- **`USHER_START_FLOOR`** (`300`): seconds after login, or an `place`
-  kick, during which every mapped window is placed back. A floor, not a race.
-- **`USHER_IDLE_SETTLE`** (`25`): seconds with no new window before place
-  placement gives way to settled, where only `include` anchors are moved.
-- **`USHER_PLACE_CAP`** (`900`): hard cap on the place window, whatever
-  the other two say.
+- **`USHER_START_FLOOR`** (`30`): seconds after login, or a `usher place`
+  kick, during which every mapped window is placed back. A floor, not a race:
+  activity extends it, and you can re-arm it by hand. Restoring a session
+  takes seconds, so this is sized from measurement rather than caution.
+- **`USHER_IDLE_SETTLE`** (`25`): seconds with no new window before placing
+  gives way to settled, where only `include` anchors are moved.
+- **`USHER_PLACE_CAP`** (`180`): hard cap on the place window, whatever
+  the other two say. A window that mapped while placing is still owed one
+  placement when it first becomes identifiable, past the cap or not.
 - **`USHER_DOCK_HOLD`** (`20`): seconds that a monitor arriving or leaving
   suppresses capture for, so an undock's collapse is not learned as the new
   truth. Ended early by hwdp's display-change hook.
