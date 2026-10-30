@@ -897,7 +897,7 @@ def _t_slots(ck):
         # those cost a Chrome window its slot for 2.5 hours on manifold: it
         # logged `recognised late, re-graced` and was then refused.
         from .engine import PLACE_CAP as _CAP
-        def _steady_watcher():
+        def _settled_watcher():
             x = Watcher(launch=False)
             x.st["armed_at"] = _t.time() - _CAP - 1    # settled, past the cap
             x.st["last_map"] = _t.time()               # cannot rescue it
@@ -905,23 +905,23 @@ def _t_slots(ck):
             x.kb = w.kb
             return x
         ck("cap-really-defeats-the-regrace",
-           not _steady_watcher()._aggressive_now())
+           not _settled_watcher()._placing_now())
         s1 = []
-        x = _steady_watcher()
+        x = _settled_watcher()
         x._seat_view = lambda v, e, o: (s1.append(v["id"]) or True)
         x.deadline[7] = _t.time() + PLACE_GRACE
         x.late_ok.add(7)                               # mapped at login
         x._try_place(V(7))
         ck("late-chance-places-a-login-window", s1 == [7])
         s2 = []
-        y = _steady_watcher()
+        y = _settled_watcher()
         y._seat_view = lambda v, e, o: (s2.append(v["id"]) or True)
         y.deadline[8] = _t.time() + PLACE_GRACE        # NOT in late_ok
         y._try_place(V(8))
         ck("settled-still-leaves-a-new-window-alone", s2 == [])
         # ...and the chance is spent: identified, so not a first look again.
         s3 = []
-        z = _steady_watcher()
+        z = _settled_watcher()
         z._seat_view = lambda v, e, o: (s3.append(v["id"]) or True)
         z.deadline[9] = _t.time() + PLACE_GRACE
         z.late_ok.add(9)
@@ -3416,16 +3416,16 @@ def _t_watcher(ck):
     # been quiet for IDLE_SETTLE, but never past the CAP.
     w.st["armed_at"] = now
     w.st["last_map"] = now
-    ck("clock-place-after-arming", w._aggressive_now())
+    ck("clock-place-after-arming", w._placing_now())
     w.st["armed_at"] = now - START_FLOOR - IDLE_SETTLE - 10
     w.st["last_map"] = now - IDLE_SETTLE - 10
-    ck("clock-settles-when-quiet", not w._aggressive_now())
+    ck("clock-settles-when-quiet", not w._placing_now())
     # a NEW window pushes last_map, which extends place past the floor
     w.st["last_map"] = now
-    ck("clock-extends-on-a-new-map", w._aggressive_now())
+    ck("clock-extends-on-a-new-map", w._placing_now())
     # ...but never past the CAP, which is what bounds a login storm
     w.st["armed_at"] = now - PLACE_CAP - 1
-    ck("clock-capped", not w._aggressive_now())
+    ck("clock-capped", not w._placing_now())
 
     # A QUIET START (a code reload) MUST LAND SETTLED. A fresh worker stamps
     # armed_at with NOW, so without this every reload re-armed place for
@@ -3436,18 +3436,18 @@ def _t_watcher(ck):
     _q = Watcher(launch=False)
     _q.mode = "quiet"
     _q.st["armed_at"] = _q.st["last_map"] = _time.time()
-    ck("quiet-start-is-place-before-init", _q._aggressive_now())
+    ck("quiet-start-is-place-before-init", _q._placing_now())
     _q._init_layout()
-    ck("quiet-start-lands-settled", not _q._aggressive_now())
+    ck("quiet-start-lands-settled", not _q._placing_now())
     # ...and a later kick still works, or quiet would have broken the knob.
     _q.st["armed_at"] = _time.time()
-    ck("quiet-start-does-not-break-the-kick", _q._aggressive_now())
+    ck("quiet-start-does-not-break-the-kick", _q._placing_now())
     # RESTORE mode must NOT be quietened: it is the login path and has to
     # place, so asserting quiet alone would pass with the clock always dead.
     _r = Watcher(launch=False)
     _r.mode = None
     _r.st["armed_at"] = _r.st["last_map"] = _time.time()
-    ck("restore-start-stays-place", _r._aggressive_now())
+    ck("restore-start-stays-place", _r._placing_now())
 
     # THE HOLD: while place, a window the placer has not reached is
     # sitting where its app dropped it, and learning that overwrites the slot

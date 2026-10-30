@@ -71,17 +71,18 @@ PLACE_GRACE = 120.0   # place a window only within this long of it appearing,
 #                       opens every window and only sets each title once its
 #                       content loads, and under CPU/network spikes that whole
 #                       storm can take a minute or two.
-PLACE_SETTLE = 1.5    # BROWSER windows: seconds the title must be QUIET before
+TITLE_QUIET = 1.5    # BROWSER windows: seconds the title must be QUIET before
 #                       we place. A browser churns its title through a session-
 #                       restore as tabs load, and reconfiguring it mid-restore
 # can make it DROP the window, since a heavy tab-group window
 #                       was lost exactly this way. A PLACE_EVENT only re-arms
 #                       the timer; the move waits for the churn to stop. Well
 #                       under PLACE_GRACE.
-PLACE_SETTLE_FAST = 0.15  # everything else: the title is already stable at map
+TITLE_QUIET_FAST = 0.15  # everything else: the title is already stable at map
 #                           and nothing restores tabs, so place almost at once
 #                           (one placer tick). No reason to make normal apps sit
-#                           out the browser settle, which is the common case.
+#                           out the browser's title churn, the
+#                           common case.
 
 # WHEN TO READ A PLACEMENT BACK, one delay per attempt, so the length of this
 # tuple is how many times a window may be re-placed per map.
@@ -137,7 +138,7 @@ WORKER_HEALTHY_S = 60      # ran at least this long -> it was working, so the
 
 def is_browser(app):
     # Chrome/Chromium/Firefox: restore-heavy, title-churning clients that can
-    # drop a window if it is moved mid-restore. ONLY these wait PLACE_SETTLE;
+    # drop a window if it is moved mid-restore. ONLY these wait TITLE_QUIET;
     # the (chrome-<ext>-Profile_N) app-mode ids match too, via the substring.
     a = (app or "").lower()
     return ("chrom" in a) or ("firefox" in a)
@@ -450,7 +451,7 @@ class Watcher:
             # remembered slot. A deploy must not change placement behaviour,
             # and this is what lets `setup.sh install` reload unconditionally.
             # Expiring the CAP is what settles it whatever last_map holds,
-            # since _steady_at takes min(armed + PLACE_CAP, ...). A later
+            # since _settled_at takes min(armed + PLACE_CAP, ...). A later
             # `usher place` kick re-stamps armed_at and works normally.
             with self.lock:
                 self.st["armed_at"] = time.time() - PLACE_CAP
@@ -514,7 +515,7 @@ class Watcher:
 
     # --- the place/settled clock, and what it publishes -------------------
 
-    def _steady_at(self):
+    def _settled_at(self):
         # settled when (FLOOR passed AND quiet for SETTLE) OR past CAP; the kick
         # resets armed_at and a new map pushes last_map, and both extend
         # place.
@@ -524,24 +525,24 @@ class Watcher:
         return min(armed + PLACE_CAP,
                    max(armed + START_FLOOR, last_map + IDLE_SETTLE))
 
-    def _aggressive_now(self):
-        return time.time() < self._steady_at()
+    def _placing_now(self):
+        return time.time() < self._settled_at()
 
     def _write_status(self):
         # Publish {mode, seconds_left} for `usher status` + the tray. The
         # settled-at estimate assumes no more windows arrive; a map or a kick
         # moves it out. Atomic replace so a reader never sees a half file.
         now = time.time()
-        steady_at = self._steady_at()
+        settled_at = self._settled_at()
         # arc = fraction of the place window still to run, for the tray's
         # depleting ring; ~1.0 right after a kick, 0.0 once settled.
-        arc = max(0.0, min(1.0, (steady_at - now) / START_FLOOR))
+        arc = max(0.0, min(1.0, (settled_at - now) / START_FLOOR))
         try:
             tmp = STATUS_FILE + ".tmp"
             with open(tmp, "w") as f:
                 json.dump(
-                    {"mode": "place" if now < steady_at else "settled",
-                     "seconds_left": max(0, round(steady_at - now)),
+                    {"mode": "place" if now < settled_at else "settled",
+                     "seconds_left": max(0, round(settled_at - now)),
                      "arc": round(arc, 3),
                      # TWO MORE FACTS, each on its own axis, so a reader never
                      # has to infer one from the other.
@@ -641,7 +642,7 @@ class Watcher:
             if time.time() <= self.deadline.get(vid, 0):
                 with self.lock:
                     self.pending[vid] = {"v": v, "refetch": True,
-                                         "due": time.time() + PLACE_SETTLE}
+                                         "due": time.time() + TITLE_QUIET}
             return
         with self.lock:
             e = (self.kb.get(kkey(app, ""))
@@ -670,7 +671,7 @@ class Watcher:
         # ONE LATE CHANCE FOR A WINDOW THAT WAS ALWAYS HERE. _recognise
         # re-graces a window the instant it becomes identifiable and says it
         # is "still bounded, since the place check still governs", and
-        # that check is what defeated it: _steady_at takes
+        # that check is what defeated it: _settled_at takes
         # min(armed + PLACE_CAP, ...), so once the cap has passed NOTHING can
         # re-enter place, and feeding last_map cannot help. Measured on
         # manifold: a Chrome window became identifiable 2.5 hours after login,
@@ -684,13 +685,13 @@ class Watcher:
         # session being restored, and this is their single chance: `placed`
         # dedups, and first_look is true exactly once per view.
         late_chance = first_look and vid in self.late_ok
-        if (not self._aggressive_now() and not is_anchored(app, title)
+        if (not self._placing_now() and not is_anchored(app, title)
                 and not late_chance and not dock_chance):
             return   # settled state: only usher/include anchors are (re)placed
-        if dock_chance and not self._aggressive_now():
+        if dock_chance and not self._placing_now():
             logline(f"display changed, re-placing: {app[:18]} | "
                     f"{title[:30]}")
-        if late_chance and not self._aggressive_now():
+        if late_chance and not self._placing_now():
             logline(f"late chance (present at login, identifiable only now): "
                     f"{app[:18]} | {title[:30]}")
         if not e:
@@ -889,7 +890,7 @@ class Watcher:
 
     def _placer_loop(self):
         """Settle-debounce placer. Moves a window only once its title has been
-        QUIET for PLACE_SETTLE: a restoring client churns its title as tabs
+        QUIET for TITLE_QUIET: a restoring client churns its title as tabs
         load, and reconfiguring it mid-restore can make it drop the window. The
         event loop only records the latest view + a due time in `pending`; this
         thread does the actual place when the churn stops, reusing place_sock
@@ -1047,7 +1048,7 @@ class Watcher:
                     self.st["armed_at"] = float(
                         open(ARM_FILE).read().strip())
                 logline("place re-armed (kick)"
-                        if self._aggressive_now() else "settled to settled")
+                        if self._placing_now() else "settled to settled")
             except (OSError, ValueError):
                 pass
         # Treat a change to the invert store as a capture trigger, so
@@ -1141,7 +1142,7 @@ class Watcher:
         A window is released the moment it is placed, or when its grace runs
         out and usher is no longer going to act on it. In settled state nothing
         is placed, so nothing is held."""
-        if not self._aggressive_now():
+        if not self._placing_now():
             return frozenset()
         now = time.time()
         return frozenset(w["id"] for w in windows
@@ -1430,19 +1431,19 @@ class Watcher:
             self._begin_transition(ev)
         if ev == "view-mapped" and v.get("id") is not None:
             self.deadline[v["id"]] = time.time() + PLACE_GRACE  # start grace
-            if self._aggressive_now():
+            if self._placing_now():
                 self.late_ok.add(v["id"])   # see Watcher.late_ok
             with self.lock:
                 self.st["last_map"] = time.time()  # feed the IDLE_SETTLE clock
         if ev in PLACE_EVENTS:
             vid = v.get("id")
             if vid is not None and vid not in self.placed:
-                # Defer to _placer_loop. Browsers wait PLACE_SETTLE (re-armed
+                # Defer to _placer_loop. Browsers wait TITLE_QUIET (re-armed
                 # on every title change) so we never move one mid-restore;
                 # other apps are stable at map -> a tiny settle, placed on the
                 # next tick.
-                wait = (PLACE_SETTLE if is_browser(app_of(v))
-                        else PLACE_SETTLE_FAST)
+                wait = (TITLE_QUIET if is_browser(app_of(v))
+                        else TITLE_QUIET_FAST)
                 with self.lock:
                     self.pending[vid] = {"v": v, "due": time.time() + wait}
         elif ev == "view-unmapped" and v.get("id") is not None:
