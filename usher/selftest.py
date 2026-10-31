@@ -676,6 +676,101 @@ def _t_lock(ck):
         os.environ.pop("USHER_SUMMONED", None)
         ck("marker-ignores-an-unsummoned-session",
            lock_summoned_session() is None and len(calls) == 2)
+
+        # THE MARKER PATH, which is the half that has to work once the
+        # compositor is a UNIT and the daemon no longer inherits greetd's
+        # environment. USHER_SUMMONED is unset throughout this block.
+        ck("summon-env-absent-and-no-marker-is-not-summoned",
+           engine.take_summoned() is False)
+        engine.arm_summoned()
+        ck("summon-marker-alone-is-enough",
+           os.path.exists(engine.summon_marker())
+           and engine.take_summoned() is True)
+        # CONSUMED, so a login that is declined, or a session that never
+        # arrives, cannot hand its lock to the NEXT console login.
+        ck("summon-marker-is-consumed-by-the-read",
+           not os.path.exists(engine.summon_marker()))
+        ck("summon-marker-does-not-fire-twice",
+           engine.take_summoned() is False)
+        # ...and it drives the real lock path, not just the predicate.
+        engine._seated_now = lambda: ("15", "1001")
+        engine.arm_summoned()
+        ck("summon-marker-locks-a-session-with-no-env-var",
+           lock_summoned_session() is True and len(calls) == 3)
+        # THE ENV VAR STILL WORKS, which is what lets this land BEFORE the
+        # session is recomposed: a box where usher is new and the session is
+        # not must keep locking.
+        os.environ["USHER_SUMMONED"] = "1"
+        engine._seated_now = lambda: ("16", "1002")
+        ck("summon-env-var-alone-still-locks",
+           not os.path.exists(engine.summon_marker())
+           and lock_summoned_session() is True and len(calls) == 4)
+        os.environ.pop("USHER_SUMMONED", None)
+        # AND A FAILED WRITE IS NOT FATAL. Losing the lock is bad; refusing
+        # the login because a marker could not be written is worse, and the
+        # warning is what makes it visible.
+        engine.runtime_dir = lambda: os.path.join(_d, "nope", "deeper")
+        with contextlib.redirect_stderr(io.StringIO()):
+            _armed = engine.arm_summoned()
+        ck("summon-arm-survives-an-unwritable-runtime-dir", _armed is False)
+        ck("summon-take-survives-an-unreadable-marker",
+           engine.take_summoned() is False)
+        engine.runtime_dir = lambda: _d
+        # THE WIRING, which the checks above say nothing about: a correct
+        # predicate nobody calls is the shape that cost `entry_output` its
+        # own separate check. `cleanly login` must ARM, and the ORDER matters
+        # as much as the call, so the refusal and the dry run are checked too.
+        import usher.cli as _cl
+        _rss, _rlc = _cl.session_start, engine.lock_capability
+        try:
+            started = []
+
+            class _Exec(Exception):
+                "session_start EXECS, so a stub that RETURNS is a liar."
+
+            def _start(a):
+                # RECORD AND RAISE, because the real one never comes back: a
+                # returning stub falls through to _cleanly_leave and takes a
+                # live connect() with it. Same fix the dock harness needed.
+                started.append(a)
+                raise _Exec()
+            _cl.session_start = _start
+            engine.lock_capability = lambda: (True, "lock", "ok")
+            _q = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(_q), \
+                        contextlib.redirect_stderr(_q):
+                    _cl.do_cleanly(["login"])
+                _reached = False
+            except _Exec:
+                _reached = True
+            ck("login-arms-the-summon-marker",
+               _reached and started == ["login"]
+               and os.path.exists(engine.summon_marker()))
+            os.remove(engine.summon_marker())
+            # A REFUSED LOGIN MUST LEAVE NOTHING. Arming before the refusal
+            # would hand a lock to whoever logs in at the console next, which
+            # is the one way this marker could do harm.
+            engine.lock_capability = lambda: (False, "no-loginctl", "none")
+            started.clear()
+            with contextlib.redirect_stdout(_q), \
+                    contextlib.redirect_stderr(_q):
+                _rc = _cl.do_cleanly(["login"])
+            ck("a-refused-login-arms-nothing",
+               _rc == 1 and started == []
+               and not os.path.exists(engine.summon_marker()))
+            # ...and a DRY RUN likewise: it starts nothing, so it must leave
+            # nothing for the next real login to consume.
+            engine.lock_capability = lambda: (True, "lock", "ok")
+            with contextlib.redirect_stdout(_q), \
+                    contextlib.redirect_stderr(_q):
+                _dry = _cl.do_cleanly(["login", "-n"])
+            ck("a-dry-run-login-arms-nothing",
+               _dry == 0 and started == []
+               and not os.path.exists(engine.summon_marker()))
+        finally:
+            _cl.session_start, engine.lock_capability = _rss, _rlc
+
     finally:
         engine._loginctl = _rl
         engine._seated_now = _rs

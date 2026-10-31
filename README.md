@@ -368,7 +368,11 @@ with `usher reload`.
   apply.
 - **`USHER_SUMMONED`** (unset): internal, and never set explicitly. `usher
   cleanly login` exports it into the session it starts, which is how the
-  daemon can tell a session begun remotely from one begun at the keyboard. On
+  daemon can tell a session begun remotely from one begun at the keyboard. It
+  is one of two routes: the variable travels by exec inheritance, which stops
+  working if the compositor is started as a systemd unit, so `cleanly login`
+  also leaves a one-shot marker at `$XDG_RUNTIME_DIR/usher.summoned` that the
+  daemon consumes as it reads. On
   that signal it locks the console once, before placing anything, because a
   summoned session would otherwise come up logged in and unlocked in front of
   nobody.

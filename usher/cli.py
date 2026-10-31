@@ -194,6 +194,13 @@ def do_cleanly(args):
         if not can:
             print(f"{PROG}: WARNING: forced past an unlockable console "
                   f"({plan}); it will be left UNLOCKED", file=sys.stderr)
+        # TELL THE DAEMON THIS LOGIN WAS SUMMONED, by a route that does not
+        # depend on being its ancestor. `USHER_SUMMONED=1` travels from the
+        # provider through greetd by exec inheritance and stops working the
+        # moment the compositor is a `--user` unit; see take_summoned. Written
+        # LAST, after every refusal above, so a login that was declined
+        # leaves nothing for a later console login to consume.
+        engine.arm_summoned()
         session_start("login")     # execs; never returns
     return _cleanly_leave(verb, dry, force)
 

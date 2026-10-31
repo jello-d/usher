@@ -537,7 +537,14 @@ still apply.
 Internal, and never set explicitly.
 .B usher cleanly login
 exports it into the session it starts, which is how the daemon can tell a
-session begun REMOTELY from one begun at the keyboard. On that signal it locks
+session begun REMOTELY from one begun at the keyboard. It is ONE OF TWO
+routes for that signal: the variable travels by exec inheritance, which stops
+working if the compositor is ever started as a systemd unit rather than as a
+child of the session command, so
+.B cleanly login
+also leaves a one-shot marker in
+.I $XDG_RUNTIME_DIR/usher.summoned
+that the daemon consumes as it reads. On that signal it locks
 the console once, before placing anything, because a summoned session would
 otherwise come up logged in and unlocked in front of nobody. Setting it by
 hand only makes a console session lock itself at login for no reason.

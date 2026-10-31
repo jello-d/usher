@@ -3177,6 +3177,81 @@ def seated_session(user, listing):
 # declared, and the measurement is the lock itself plus LockedHint read back.
 LOCK_WAIT = 8.0            # seconds to wait for LockedHint after asking
 LOCKED_MARKER = "usher.locked"
+SUMMON_MARKER = "usher.summoned"
+
+
+def summon_marker():
+    """The one path both sides of the summoned contract name. Resolved on
+    call, not at import, because runtime_dir() is what the tests sandbox."""
+    return os.path.join(runtime_dir(), SUMMON_MARKER)
+
+
+def arm_summoned():
+    """Record that the login about to start was summoned. Best effort: a
+    failure here costs the lock and must never stop the login, which is the
+    same reasoning as `cleanly`'s refusal never blocking a power action."""
+    try:
+        with open(summon_marker(), "w") as f:
+            f.write("1")
+        return True
+    except OSError as e:                                   # noqa: BLE001
+        print(f"usher: could not record the summon ({e}); the console may "
+              "come up UNLOCKED", file=sys.stderr)
+        return False
+
+
+def take_summoned():
+    """Was THIS session summoned? Consumed as it is read, like take_mode.
+
+    TWO SOURCES, because the first one stops working the moment the session
+    is composed of UNITS rather than a process tree:
+
+        USHER_SUMMONED=1   `usher-greetd` sets it into greetd's session
+                           environment, so it reaches the daemon by plain
+                           exec inheritance: greetd -> the session command ->
+                           the compositor -> the autostart.
+        the MARKER         `cleanly login` writes it before exec'ing the
+                           provider, in usher's own runtime dir.
+
+    A UNIT IS NOT A CHILD, which is what the marker is for. Under uwsm (or any
+    design where the compositor is a `--user` unit) the daemon is started by
+    the user manager and inherits the ACTIVATION environment, not greetd's.
+    Measured in uwsm 0.25.2: `env_session.conf` carries exactly
+    `Varnames.session_specific` (XDG_SEAT, XDG_SEAT_PATH, XDG_SESSION_ID,
+    XDG_SESSION_PATH, XDG_VTNR) from the launching context, and everything
+    else in a unit's environment is what the env preloader COMPUTES. A
+    per-login flag fits none of that, so the env var silently becomes absent
+    and a summoned console is left UNLOCKED with nobody at it.
+
+    THE OBVIOUS FIX IS WRONG IN THE OTHER DIRECTION: naming it in a static
+    env file makes EVERY console login read as summoned, so usher would lock a
+    console the user is sitting in front of. Worse than the gap it closes.
+
+    WRITTEN BY `cleanly login` AS THE USER, not by the root provider, which
+    keeps the privilege rule trivial: the file lives in the user's own runtime
+    dir beside every other usher marker, so there is no root-owned file in a
+    user tree and no user-writable file in a root tree. It is tmpfs, so it
+    cannot survive a boot.
+
+    CONSUMED RATHER THAN DATED, and this is the decision worth keeping. A
+    freshness window looks like the way to stop a stale marker locking a later
+    CONSOLE login, and it cannot work: the interval between the write and this
+    read contains A HUMAN TYPING A PASSWORD at the provider's prompt, so any
+    timeout tight enough to reject a stale marker is also tight enough to
+    reject a real one, and those two errors are not symmetric (a wrong lock is
+    an annoyance; a missed one is the exposure this exists to close). One-shot
+    consumption bounds the stale case to a single extra lock instead.
+    """
+    p = summon_marker()
+    present = os.path.exists(p)
+    if present:
+        # BEFORE acting on it, so a crash between here and the lock cannot
+        # leave it to be re-consumed by a later login.
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    return present or os.environ.get("USHER_SUMMONED") == "1"
 
 
 def _loginctl(*args, timeout=10):
@@ -3336,7 +3411,7 @@ def lock_summoned_session():
     ONCE PER SESSION via a runtime marker, because a reload re-execs the
     supervisor and would otherwise lock the user out mid-session on every
     deploy."""
-    if os.environ.get("USHER_SUMMONED") != "1":
+    if not take_summoned():
         return None
     # THE MARKER CARRIES THE SESSION ID, and must: the login user LINGERS on
     # this fleet (so the ssh agent survives the last logout), so
