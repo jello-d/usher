@@ -139,8 +139,18 @@ def do_cleanly(args):
                "shutdown": "shutdown", "poweroff": "shutdown",
                "down": "shutdown"}
     if verb not in aliases:
-        sys.exit(f"usage: {PROG} cleanly [-n] "
-                 "login | logoff | reboot | shutdown")
+        # THE EXIT CONTRACT IS IN THE USAGE, because a caller reaching for
+        # this sequence is deciding its own control flow and the asymmetry
+        # (reboot and shutdown exec; logoff returns) is otherwise only
+        # visible in this source. tackup had the wrong belief about it for as
+        # long as its power menu existed.
+        sys.exit(f"usage: {PROG} cleanly [-n] [--force] "
+                 "login | logoff | reboot | shutdown\n"
+                 "  reboot and shutdown EXEC systemctl and never return on\n"
+                 "  success; logoff signals the session and returns. A"
+                 " non-zero\n"
+                 "  exit means usher did NOT hand over, so one idiom covers\n"
+                 f"  all three:  {PROG} cleanly <verb> || <your fallback>")
     verb = aliases[verb]
     # ENTERING IS THE ONE THAT RUNS WITH NO SESSION, so it must not meet any of
     # the checks below, every one of which would refuse for the very reason it

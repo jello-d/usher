@@ -119,6 +119,31 @@ for _d in $(grep -rho 'USHER_[A-Z_]*' "$HERE/man/man1/usher.1" \
     || fail "$_d is documented but no code reads it"
 done
 
+# THE `cleanly` EXIT CONTRACT IS PUBLISHED, in the man page and in the verb's
+# own usage. Asked for by tackup (T1), whose power menu carried a wrong belief
+# about this control flow for as long as the menu existed, because the
+# asymmetry (reboot and shutdown exec, logoff returns) was only ever visible
+# in usher's source. The BEHAVIOUR has its own checks in selftest; this asks
+# only whether a caller can find it out without reading the source.
+#
+# ON THE IDIOM LITERAL rather than on prose about it: that string is what a
+# caller copies, so a reword that drops it has dropped the thing being
+# documented. Both documents must carry it, since the usage is what somebody
+# typing the verb wrong actually sees.
+_idiom='cleanly <verb> || '
+grep -qF "$_idiom" "$HERE/man/man1/usher.1" \
+  || fail "the man page does not give the caller idiom for cleanly"
+# THE USAGE IS ASKED OF THE PROGRAM, not grepped out of cli.py: the literal
+# sitting in the source says nothing about whether a human ever sees it, and
+# this is the path somebody typing the verb wrong actually takes. BOTH streams
+# combined, since usage goes to stderr.
+_usage=$(cd "$HERE" && PYTHONPATH="$HERE" python3 -m usher cleanly \
+         not-a-verb 2>&1 || true)
+printf '%s' "$_usage" | grep -qF "$_idiom" \
+  || fail "cleanly's usage does not give the caller idiom"
+printf '%s' "$_usage" | grep -qi 'never return' \
+  || fail "cleanly's usage does not say which verbs never return"
+
 # EVERY PUBLIC VERB HAS A MAN ENTRY, and nothing in that section is not a
 # verb. Same argument as the tunables above and found the same way: the user
 # asked for "command line equivalents of the tray toggle" when `place`

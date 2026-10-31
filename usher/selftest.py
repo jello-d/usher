@@ -1641,6 +1641,113 @@ def _t_cli_split(ck):
     ck("no-session-logoff-does-nothing-and-needs-no-force",
        _c._leave_plan("logoff", False, False) == "nothing"
        and _c._leave_plan("logoff", False, False, True) == "nothing")
+    # THE EXIT CONTRACT, which is the half the matrix above says nothing about
+    # and the half a CALLER has to match. Asked for by tackup (T1 in
+    # `_usher-requests-tackup.md`) after its power menu carried a wrong belief
+    # about the control flow for as long as the menu had existed: `reboot` and
+    # `shutdown` exec and never return, `logoff` returns, and nothing said so
+    # outside this source.
+    #
+    # THE RULE IS ONE-DIRECTIONAL and that is deliberate: NON-ZERO means usher
+    # did NOT hand over, so the caller must act. Zero does NOT prove a
+    # handover happened, because a logoff with no session and any --dry-run
+    # also exit 0 with nothing to do. Non-zero is the direction a caller
+    # needs, and it is the safe one.
+    _saved = (engine.connect, engine.do_wind_down,
+              _c._no_session_here, _c._end_session, _c._hand_over_power)
+
+    def _leave(verb, reachable, present, force=False, sid=7, dry=False):
+        """The REAL _cleanly_leave with only its terminal actions stubbed, so
+        the gating, the plan and the return paths are production's own."""
+        gone, ended = [], []
+
+        def _no_connect(*a, **k):
+            raise RuntimeError("planted: no compositor")
+
+        def _end(dry=False):
+            ended.append(dry)
+            return (sid, "stub")
+        engine.connect = (lambda *a, **k: object()) if reachable \
+            else _no_connect
+        engine.do_wind_down = lambda: 0
+        _c._no_session_here = lambda: not present
+        _c._end_session = _end
+        # The real one execs and never returns; returning 0 is what a
+        # successful exec is indistinguishable from, for a caller.
+        _c._hand_over_power = lambda v: (gone.append(v) or 0)
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf), \
+                    contextlib.redirect_stderr(buf):
+                rc = _c._cleanly_leave(verb, dry, force)
+        except SystemExit as e:
+            rc = e.code if isinstance(e.code, int) else 1
+        # OBSERVED, NOT INFERRED, and the first version got this wrong in the
+        # one way that matters: it derived the handover from the arguments
+        # (`verb == "logoff" and sid is not None`), which calls the
+        # nothing-to-do cell a handover and so failed the very check that
+        # cell exists for. Ask what the code DID.
+        did_end = bool(ended) and sid is not None and not ended[0]
+        return rc or 0, bool(gone) or did_end
+
+    try:
+        cells = [
+            # verb      reach  present force  sid   dry
+            ("reboot",   True,  True,  False, 7,    False),
+            ("shutdown", True,  True,  False, 7,    False),
+            ("logoff",   True,  True,  False, 7,    False),
+            ("logoff",   True,  True,  False, None, False),
+            ("reboot",   False, True,  False, 7,    False),
+            ("logoff",   False, True,  False, 7,    False),
+            ("reboot",   False, False, False, 7,    False),
+            ("logoff",   False, False, False, 7,    False),
+            ("reboot",   False, False, True,  7,    False),
+            ("reboot",   False, True,  True,  7,    False),
+            ("reboot",   True,  True,  False, 7,    True),
+            ("logoff",   True,  True,  False, 7,    True),
+        ]
+        bad = []
+        for _v, _r, _p, _f, _s, _d in cells:
+            rc, handed = _leave(_v, _r, _p, _f, _s, _d)
+            if rc != 0 and handed:
+                bad.append((_v, _r, _p, _f, _s, _d, rc))
+        # THE INVARIANT, over every cell at once: nothing may both hand over
+        # and report failure, or a caller running its fallback on non-zero
+        # would double-fire the terminal action.
+        ck("leave-nonzero-never-means-a-handover-happened", not bad)
+
+        # The cells a caller's control flow actually turns on, named one by
+        # one because collapsing them is how the wrong one gets missed.
+        ck("leave-reachable-reboot-hands-over-and-is-zero",
+           _leave("reboot", True, True) == (0, True))
+        ck("leave-reachable-logoff-is-zero-when-it-signalled",
+           _leave("logoff", True, True) == (0, True))
+        # THE GAP A CALLER'S BACKSTOP IS FOR: wound down, capture taken, and
+        # no process found to signal. _end_session reports 0 when it
+        # SIGNALLED something, not when the session demonstrably ended.
+        ck("leave-logoff-with-no-target-is-nonzero-so-the-caller-acts",
+           _leave("logoff", True, True, sid=None) == (1, False))
+        for _v in ("reboot", "logoff"):
+            ck(f"leave-refusal-is-nonzero-and-hands-over-nothing-{_v}",
+               _leave(_v, False, True) == (1, False))
+        ck("leave-no-session-reboot-is-nonzero-and-hands-over-nothing",
+           _leave("reboot", False, False) == (1, False))
+        # ...and the one zero WITHOUT a handover, which is why the rule only
+        # runs one way: there is nothing to end, so a caller must NOT act.
+        ck("leave-no-session-logoff-is-zero-with-nothing-done",
+           _leave("logoff", False, False) == (0, False))
+        ck("leave-force-hands-over", _leave("reboot", False, False, True)
+           == (0, True))
+        # A DRY RUN NEVER HANDS OVER AND NEVER REPORTS FAILURE, or `-n` would
+        # trip a caller's fallback into doing the real thing.
+        ck("leave-dry-run-reboot-is-zero-and-does-nothing",
+           _leave("reboot", True, True, dry=True) == (0, False))
+        ck("leave-dry-run-logoff-is-zero-and-does-nothing",
+           _leave("logoff", True, True, dry=True) == (0, False))
+    finally:
+        (engine.connect, engine.do_wind_down, _c._no_session_here,
+         _c._end_session, _c._hand_over_power) = _saved
+
     # NO COMPOSITOR NAME IN THE CODE of the leaving path: that is the whole
     # point, and a reappearing `killall <compositor>` is how it would come back.
     #

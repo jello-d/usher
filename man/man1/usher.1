@@ -134,6 +134,42 @@ overrides and says what is being given up.
 .B login
 starts the console session from a remote shell, through the provider at
 .IR ~/.config/usher/session-start .
+.IP
+THE EXIT CONTRACT, which is what a caller must match.
+.B reboot
+and
+.B shutdown
+.I exec
+systemctl and so never return on success, while
+.B logoff
+signals the session and returns; a caller should not have to know which.
+A NON-ZERO EXIT MEANS usher DID NOT HAND OVER, so the caller should take the
+action itself. Zero means the end state is reached or under way, so it should
+not. One idiom is therefore correct for all three:
+.IP
+.EX
+usher cleanly <verb> || <the caller's own fallback>
+.EE
+.IP
+On
+.B reboot
+and
+.B shutdown
+the exec makes the right-hand side unreachable; on
+.B logoff
+the zero return does. A non-zero exit is a refusal, or a
+.B logoff
+that found no process to signal, and in both the caller's fallback is wanted.
+Note the rule holds in ONE direction only: zero does not prove a handover
+happened, because a
+.B logoff
+with no session, and any
+.BR --dry-run ,
+also exit 0 with nothing to do. That is the direction a caller needs, and it
+is the safe one. An unconditional
+.B ;
+is not wrong, only less legible: the fallback then runs on success too, which
+for a crude session-end backstop costs nothing.
 .TP
 .B display-changed
 For a display-change hook. Re-places against the profile for the new monitor
