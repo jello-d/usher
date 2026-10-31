@@ -161,9 +161,16 @@ class Supervisor:
     restart). If a watcher is ALREADY running, run() reloads it in place
     (SIGHUP re-exec, picking up a code edit and the armed mode) instead of
     exiting, so re-running watch/resume IS the reload. Two paths in one
-    script, self-contained (contrast kanshi/kanshi-mgr); session teardown reaps
-    both via the cgroup kill, so the supervisor need not detect session end
-    itself."""
+    script, self-contained (contrast kanshi/kanshi-mgr).
+
+    NEITHER PROCESS DETECTS SESSION END, deliberately: whatever owns the
+    cgroup the autostart lands in reaps both when the session goes. That is
+    the session scope today and will be the compositor's own unit once tackup
+    makes it one, so the PROPERTY is what this relies on and not the owner.
+    IT WANTS A CGROUP KILL AND NOT A MAIN-PROCESS ONE: under systemd's default
+    `KillMode=control-group` the whole group goes, but a unit configured
+    `KillMode=process` would leave this supervisor orphaned into a dead
+    session, respawning a worker that can never connect, for ever."""
 
     def __init__(self, launch=True):
         self.launch = launch
