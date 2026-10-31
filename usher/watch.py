@@ -41,6 +41,7 @@ from .engine import (PLACE_CAP, ARM_FILE, EXCLUDE_FILE, FORGET_FILE,
                      load_knowledge, logline, persist, place, placement_landed,
                      plugins_sig,
                      reload_anchor, reload_exclude, reload_plugins,
+                     runtime_dir,
                      rekey_chrome, save_knowledge, snapshot,
                      store_mtime, take_mode, target_geometry, unidentified)
 
@@ -150,6 +151,32 @@ def is_browser(app):
 # this long, where a full respawn (fresh sockets + connect() retry) is the
 # correct recovery, not limping on a dead thread.
 CAPTURE_FAIL_LIMIT = 15
+
+
+WORKER_ERR = "usher.worker-err"   # the worker's stderr, re-made per spawn
+WORKER_ERR_LINES = 6              # how much of it reaches watch.log
+WORKER_ERR_WIDTH = 200            # per line, so one long row cannot flood
+
+
+def worker_error_tail(path, keep=WORKER_ERR_LINES, width=WORKER_ERR_WIDTH):
+    """The last few lines a dead worker wrote to stderr, for watch.log.
+
+    PURE OVER A PATH so the bounds are checkable without spawning anything,
+    and BOUNDED BOTH WAYS because this runs on every respawn: a worker that
+    crash-loops on a bad event subscription would otherwise write its
+    traceback into watch.log every two seconds, which is the log turning into
+    the problem. Six lines keeps the exception and its last frame, which is
+    the part that names the cause.
+
+    MISSING OR EMPTY IS SILENT, not an error: a worker told to stop exits
+    cleanly and writes nothing, and that is the overwhelmingly common case.
+    """
+    try:
+        with open(path, errors="replace") as f:
+            lines = [ln.rstrip() for ln in f.read().splitlines() if ln.strip()]
+    except OSError:
+        return []
+    return [ln[:width] for ln in lines[-keep:]]
 
 
 class Supervisor:
@@ -262,8 +289,23 @@ class Supervisor:
             # harmless.
             argv = base if (self.launch and not os.path.exists(LAUNCHED)) \
                 else base + ["--no-launch"]
+            errlog = os.path.join(runtime_dir(), WORKER_ERR)
             try:
-                self.proc = subprocess.Popen(argv)
+                # STDERR TO A FILE WE READ ON EXIT, because the autostart's
+                # stderr goes NOWHERE and watch.log is the one place a reader
+                # looks. A worker that dies before it can log (a bad event
+                # subscription, an import error, any traceback) otherwise
+                # leaves `rc 1` with no cause: tackup lost a VM run to exactly
+                # that, over a compositor with no `output-added` event, and
+                # had to re-run `_worker` by hand in the session's environment
+                # to see the traceback at all.
+                #
+                # A FILE AND NOT `subprocess.PIPE`: this loop calls `wait()`,
+                # and a PIPE nobody drains deadlocks the moment a worker that
+                # runs for weeks fills the buffer. A file never blocks, and a
+                # fixed name in the runtime dir cannot accumulate.
+                with open(errlog, "wb") as ef:
+                    self.proc = subprocess.Popen(argv, stderr=ef)
             except OSError as e:
                 logline(f"spawn failed: {e}; retry in {backoff}s")
                 time.sleep(backoff)
@@ -281,6 +323,8 @@ class Supervisor:
                 backoff = RESPAWN_BACKOFF_MIN
             logline(f"worker exited (rc {rc}, ran {ran}s); "
                     f"respawn in {backoff}s")
+            for line in worker_error_tail(errlog):
+                logline(f"  worker stderr: {line}")
             time.sleep(backoff)
             backoff = min(backoff * 2, RESPAWN_BACKOFF_MAX)
 
@@ -344,6 +388,10 @@ class Watcher:
         # taskbar is invisible. Worst for an app_id-keyed app, where
         # kkey(app, "") matches EVERY window of that app whatever its title.
         self.slot_held = {}
+        # THE OUTPUT SET AS OF THE LAST POLL, or None before the first one.
+        # None is not the empty set: the first poll must not read "everything
+        # arrived" as a display change. See _poll_outputs.
+        self.outputs_seen = None
         # ISSUED PLACEMENTS AWAITING A READ-BACK: vid -> {"e", "o", "due"}.
         # `placed` on its own cannot tell a request that worked from one the
         # compositor overwrote, and it DEDUPS, so a lost race was locked in
@@ -1029,6 +1077,7 @@ class Watcher:
         while True:
             time.sleep(1)
             self._poll_files(seen)
+            cap = self._poll_outputs(cap)
             self._write_status()
             with self.lock:
                 due = (self.st["dirty"]
@@ -1045,6 +1094,57 @@ class Watcher:
             except Exception as e:
                 errstreak += 1
                 cap = self._capture_failed(e, cap, errstreak)
+
+    def _poll_outputs(self, cap):
+        """Notice an output arriving or leaving, because the COMPOSITOR DOES
+        NOT TELL US ABOUT ARRIVALS.
+
+        MEASURED on wayfire 0.11.0-d3990237, subscribing to usher's own
+        fourteen events in a nested compositor: creating an output emits
+        ZERO events and destroying the same output emits `output-removed`.
+        So half of `OUTPUT_EVENTS` has never fired, and the half that never
+        fires is the DOCK, which is the direction a laptop user meets every
+        morning.
+
+        WHAT THAT COST, and it is not merely the missing log line: with no
+        event nothing calls `_begin_transition`, so there is no HOLD while an
+        arriving monitor is being laid out, and a capture triggered by any
+        view event in that window teaches the new desk's store a layout taken
+        mid-transition. `_profile_drift` is the backstop and could not reach
+        it either, because CAPTURE IS EVENT-DRIVEN: on an idle session nothing
+        dirtied the store, so no snapshot was taken, so the derived profile
+        never changed and the drift was never noticed. tackup measured
+        exactly that in a guest, 40 seconds of total silence on an addition
+        against the full cascade on the matching removal.
+
+        SO THE SET IS POLLED, in the one loop that runs whether or not
+        anything happens. This is the file's own rule about an event-driven
+        decision needing to be re-run when its INPUTS change, in the case
+        where the input changes with no event at all.
+
+        BOTH DIRECTIONS GO THROUGH HERE rather than only arrivals, so the
+        behaviour no longer depends on which half a compositor implements.
+        `output-removed` still fires `_begin_transition` from `_on_event`
+        first, and that is harmless: it extends the hold rather than
+        restarting it.
+
+        NO EVIDENCE CHANGES NOTHING. An IPC failure leaves the remembered set
+        alone and reconnects, because reading a failure as "every output went
+        away" would start a transition on every blip.
+        """
+        try:
+            now = frozenset(o.get("name") for o in cap.list_outputs())
+        except Exception as e:                                 # noqa: BLE001
+            return self._capture_failed(e, cap, 1)
+        was, self.outputs_seen = self.outputs_seen, now
+        if was is None or was == now:
+            return cap
+        gone, came = sorted(was - now), sorted(now - was)
+        what = ", ".join(filter(None, [
+            "+" + "/".join(came) if came else "",
+            "-" + "/".join(gone) if gone else ""]))
+        self._begin_transition(f"outputs polled: {what}")
+        return cap
 
     def _poll_files(self, seen):
         """Adopt edits to the files that steer us, by mtime. Auto-incorporating

@@ -1011,6 +1011,85 @@ def _t_slots(ck):
         w._try_place(V(2))
         ck("slot-reusable-after-the-holder-closes", 2 in seated)
 
+        # THE COMPOSITOR DOES NOT TELL US AN OUTPUT ARRIVED, measured on
+        # wayfire 0.11.0 by subscribing to usher's own fourteen events in a
+        # nested compositor: creating an output emits ZERO events, destroying
+        # it emits `output-removed`. So the DOCK direction had no signal, and
+        # `_profile_drift` could not cover it either, because capture is
+        # event-driven and an idle session never dirtied the store.
+        #
+        # ITS OWN WATCHER, because the slot fixture below shares place_sock
+        # and swapping it here broke two ledger checks on the first attempt.
+        wp, _tr = Watcher(launch=False), []
+        wp._begin_transition = lambda why: _tr.append(why)
+        wp._capture_failed = lambda e, c, n: c
+
+        def _outs(*names):
+            class _O:
+                def list_outputs(self):
+                    if names and names[0] is None:
+                        raise RuntimeError("planted: ipc down")
+                    return [{"name": n} for n in names]
+            return _O()
+
+        one = _outs("DP-1")
+        ck("outputs-first-poll-is-not-a-change",
+           wp._poll_outputs(one) is one and not _tr)
+        ck("outputs-first-poll-remembers-the-set",
+           wp.outputs_seen == frozenset({"DP-1"}))
+        ck("outputs-unchanged-is-silent",
+           wp._poll_outputs(one) is one and not _tr)
+        wp._poll_outputs(_outs("DP-1", "HEADLESS-1"))
+        ck("outputs-an-ARRIVAL-starts-a-transition",
+           len(_tr) == 1 and "+HEADLESS-1" in _tr[0])
+        wp._poll_outputs(one)
+        ck("outputs-a-DEPARTURE-does-too",
+           len(_tr) == 2 and "-HEADLESS-1" in _tr[1])
+        # NO EVIDENCE CHANGES NOTHING: an IPC failure must not read as every
+        # output having vanished, or a blip starts a transition.
+        wp._poll_outputs(_outs(None))
+        ck("outputs-an-ipc-failure-is-not-a-display-change", len(_tr) == 2)
+        ck("outputs-an-ipc-failure-keeps-the-remembered-set",
+           wp.outputs_seen == frozenset({"DP-1"}))
+
+        # THE WORKER'S STDERR REACHES watch.log, which is the one place a
+        # reader looks: a worker that dies before it can log left `rc 1` with
+        # no cause, and tackup lost a VM run to exactly that. BOUNDED BOTH
+        # WAYS, because this runs on every respawn and a crash loop would
+        # otherwise write a traceback into the log every two seconds.
+        import tempfile as _tf2
+        from . import watch as _wt
+        _ed = _tf2.mkdtemp(prefix="usher-werr-")
+        try:
+            _ep = os.path.join(_ed, "err")
+            ck("worker-stderr-missing-file-is-silent",
+               _wt.worker_error_tail(_ep) == [])
+            with open(_ep, "w") as f:
+                f.write("\n")
+            ck("worker-stderr-blank-is-silent",
+               _wt.worker_error_tail(_ep) == [])
+            with open(_ep, "w") as f:
+                f.write("".join(f"line{i}\n" for i in range(40)))
+            _tail = _wt.worker_error_tail(_ep)
+            ck("worker-stderr-keeps-only-the-last-lines",
+               len(_tail) == _wt.WORKER_ERR_LINES and _tail[-1] == "line39")
+            with open(_ep, "w") as f:
+                f.write("x" * 5000 + "\n")
+            ck("worker-stderr-truncates-a-long-line",
+               len(_wt.worker_error_tail(_ep)[0]) == _wt.WORKER_ERR_WIDTH)
+            # The shape that matters: the LAST frame and the exception, which
+            # is what names the cause.
+            with open(_ep, "w") as f:
+                f.write("Traceback (most recent call last):\n"
+                        '  File "x", line 1, in <module>\n'
+                        "Exception: Event not found: \"output-added\"\n")
+            ck("worker-stderr-keeps-the-exception",
+               any("output-added" in ln
+                   for ln in _wt.worker_error_tail(_ep)))
+        finally:
+            import shutil as _sh2
+            _sh2.rmtree(_ed, ignore_errors=True)
+
         # THE HOLDER WENT AND ITS UNMAP NEVER ARRIVED. No view-unmapped event
         # here, deliberately: that is the whole fault. The ledger says 2 and
         # the compositor no longer lists it, so 3 must get the slot. Pre-fix
