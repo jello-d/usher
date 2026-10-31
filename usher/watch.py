@@ -37,7 +37,7 @@ from .engine import (PLACE_CAP, ARM_FILE, EXCLUDE_FILE, FORGET_FILE,
                      apply_invert, connect, do_capture, identity, is_anchored,
                      is_desync_error,
                      entry_output, is_transient, kb_for_profile, kkey,
-                     launch_missing, learn,
+                     launch_missing, learn, live_holder,
                      load_knowledge, logline, persist, place, placement_landed,
                      plugins_sig,
                      reload_anchor, reload_exclude, reload_plugins,
@@ -712,9 +712,19 @@ class Watcher:
             kkey(app, identity(v))
         with self.lock:
             holder = self.slot_held.get(skey)
-        if holder is not None and holder != vid:
+        own = live_holder(holder, vid, self._live_ids())
+        if own == "held":
             logline(f"slot taken, left in place: {app} | {title[:34]}")
             return
+        if own == "stale":
+            # The holder is GONE and its unmap never reached us. Drop it only
+            # if it is still the holder we just read, so a concurrent seating
+            # cannot be evicted by this.
+            with self.lock:
+                if self.slot_held.get(skey) == holder:
+                    del self.slot_held[skey]
+            logline(f"slot holder {holder} is gone, releasing: {app} | "
+                    f"{title[:30]}")
         outs = {o["name"]: o for o in self.place_sock.list_outputs()}
         o = entry_output(e, outs)
         if not o:
@@ -940,6 +950,18 @@ class Watcher:
         except Exception as e:
             logline(f"refetch view {vid}: {e}")
         return None
+
+    def _live_ids(self):
+        """The ids of every mapped toplevel right now, or an EMPTY set if the
+        list could not be read. Empty is the no-evidence answer `live_holder`
+        refuses on, so a failure here costs a placement rather than handing a
+        held slot away. Runs on the placer thread, place_sock's one writer."""
+        try:
+            return {v.get("id") for v in
+                    self.place_sock.list_views(filter_mapped_toplevel=True)}
+        except Exception as e:
+            logline(f"live view list: {e}")
+            return set()
 
     def _recheck_all(self):
         """Give every live window another chance at placement, because what

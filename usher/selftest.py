@@ -839,6 +839,23 @@ def _t_slots(ck):
     double-place; only the DAEMON's per-window path had never learned it."""
     from .watch import Watcher, PLACE_GRACE
     import time as _t
+
+    # THE RULE, PURE, and every WORD proven: live_holder dispatches on which
+    # of three it answers, so one returning the wrong word would still be
+    # "non-empty" and match no arm. Asserting the exact word is the only
+    # thing that catches that.
+    ck("holder-nobody-is-free", engine.live_holder(None, 7, {7}) == "free")
+    ck("holder-ourselves-is-free", engine.live_holder(7, 7, {7}) == "free")
+    ck("holder-alive-is-held", engine.live_holder(5, 7, {5, 7}) == "held")
+    ck("holder-gone-is-stale", engine.live_holder(5, 7, {7}) == "stale")
+    # NO EVIDENCE REFUSES: an unreadable view list is not proof the holder
+    # died, and reading it that way would hand a held slot away on an IPC
+    # blip and bring back the stacking the ledger exists to prevent.
+    ck("holder-no-evidence-is-held", engine.live_holder(5, 7, set()) == "held")
+    # ...but a window with no rival is never refused for want of a list.
+    ck("holder-no-evidence-still-frees-an-unheld-slot",
+       engine.live_holder(None, 7, set()) == "free")
+
     w = Watcher(launch=False)
     now = _t.time()
 
@@ -849,9 +866,18 @@ def _t_slots(ck):
     seated = []
 
     class _Sock:
+        # `live` is what the compositor would report as mapped toplevels, and
+        # it has to be here rather than absent: without list_views the ledger
+        # check falls to live_holder's NO-EVIDENCE arm and every check below
+        # would pass for the wrong reason, which is this file's oldest trap.
+        live = {1, 2, 3}
+
         def list_outputs(self):
             return [{"name": "DP-1", "geometry": {"x": 0, "y": 0,
                                                   "width": 100, "height": 100}}]
+
+        def list_views(self, filter_mapped_toplevel=False):
+            return [{"id": i} for i in sorted(self.live)]
 
     w.place_sock = _Sock()
     w._seat_view = lambda v, e, o: (seated.append(v["id"]) or True)
@@ -889,6 +915,44 @@ def _t_slots(ck):
         w.identified.add(2)
         w._try_place(V(2))
         ck("slot-reusable-after-the-holder-closes", 2 in seated)
+
+        # THE HOLDER WENT AND ITS UNMAP NEVER ARRIVED. No view-unmapped event
+        # here, deliberately: that is the whole fault. The ledger says 2 and
+        # the compositor no longer lists it, so 3 must get the slot. Pre-fix
+        # this was refused for the life of the generation, which cost calibre
+        # its place on manifold and let the capture loop learn the cascade.
+        w.place_sock.live = {3}
+        w.placed.discard(3)
+        w.deadline[3] = _t.time() + PLACE_GRACE
+        w.identified.add(3)
+        w._try_place(V(3))
+        ck("slot-taken-from-a-holder-that-is-gone", 3 in seated)
+        ck("slot-ledger-moves-to-the-new-holder",
+           w.slot_held.get(kkey("signal", "")) == 3)
+
+        # AND A LIVE HOLDER IS STILL A HOLDER, which is the half that must not
+        # regress: the fix changes LIVENESS, never precedence.
+        w.place_sock.live = {3, 4}
+        w.deadline[4] = _t.time() + PLACE_GRACE
+        w.identified.add(4)
+        w._try_place(V(4))
+        ck("slot-still-refused-while-the-holder-lives", 4 not in seated)
+
+        # AND A DEAD HOLDER IS DROPPED EVEN WHERE THE PLACEMENT CANNOT GO ON,
+        # or the ledger keeps asserting a window we have just proved is gone,
+        # which is the asserted-vs-actual drift that caused this in the first
+        # place. Reachable: the entry names an output nobody has, so
+        # _place_view returns before seating anything.
+        w.place_sock.live = {5}
+        w.slot_held[kkey("signal", "")] = 3          # 3 is no longer live
+        w.kb[kkey("signal", "")]["output"] = "GONE-1"
+        w.deadline[5] = _t.time() + PLACE_GRACE
+        w.identified.add(5)
+        w._try_place(V(5))
+        ck("slot-dead-holder-dropped-even-with-nowhere-to-place",
+           kkey("signal", "") not in w.slot_held)
+        ck("slot-nowhere-to-place-seats-nothing", 5 not in seated)
+        w.kb[kkey("signal", "")]["output"] = "DP-1"   # later blocks share kb
 
         # ONE LATE CHANCE, and the distinction it encodes. In SETTLED, past the
         # PLACE_CAP (so nothing can re-enter place), a window that MAPPED

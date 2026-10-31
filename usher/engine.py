@@ -2790,6 +2790,44 @@ def place(sock, view_id, e, o):
 PLACE_TOL = 8
 
 
+def live_holder(holder, vid, live_ids):
+    """Does `holder` still own the slot that `vid` is asking for? One of
+    "free", "stale" or "held".
+
+    THE LEDGER IS NOT A LEASE, which is the fault this answers. It was
+    released only on `view-unmapped`, so a holder whose unmap never reached
+    us kept the slot for the whole worker generation and the real window was
+    refused FOREVER. Measured on manifold 2026-10-30: calibre's library
+    window was refused 18 times over 27 seconds, 22 of those seconds after
+    the holder had already left the snapshot, and it ended at wayfire's
+    cascade with the capture loop then learning that as its home.
+
+    So liveness is asked of the VIEW LIST, which the placer already reads,
+    instead of waiting for an event to arrive.
+
+        holder is None, or it IS us   -> "free"   nobody else holds it
+        holder not among live ids     -> "stale"  the holder is gone
+        otherwise                     -> "held"   a live window owns it
+
+    NO EVIDENCE REFUSES. An empty `live_ids` means the list could not be
+    read, not that every window died, so it answers "held": reading it the
+    other way would hand the slot to whoever asked during an IPC blip and
+    reintroduce the silent stacking the ledger exists to prevent. Checked
+    AFTER the two cheap answers, so a window with no rival is never refused
+    for want of a view list.
+
+    LAST-WINS WAS THE OTHER CANDIDATE AND IS WORSE. It mirrors the same
+    failure (a transient mapping LATER would steal the slot from the real
+    window) and for two genuine windows it restores the perfect stacking of
+    2026-10-05. Precedence stays first-wins; only liveness changes.
+    """
+    if holder is None or holder == vid:
+        return "free"
+    if not live_ids:
+        return "held"
+    return "held" if holder in live_ids else "stale"
+
+
 def placement_landed(v, e, o, tol=PLACE_TOL):
     """Did view v actually END UP on the slot e asks for, on output o?
 
