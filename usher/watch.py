@@ -153,9 +153,95 @@ def is_browser(app):
 CAPTURE_FAIL_LIMIT = 15
 
 
+def subscribe(sock, events, connect_one=None):
+    """Subscribe to as many of `events` as this compositor HAS. Returns the
+    ones it accepted.
+
+    A MISSING EVENT IS A CAPABILITY GAP, NOT A FATAL ERROR, and before this it
+    was fatal: wayfire refuses the whole call on the first name it does not
+    know, the worker died rc 1, and `_respawn_forever` then did exactly what
+    it is written to do, settling at one dead worker every 30s FOREVER with
+    `rc 1` and no cause in the log. Reported by tackup (T8) from the distro's
+    wayfire 0.10.0, which has no `output-added`; reachable on a CURRENT box
+    with any name the compositor has retired or renamed.
+
+    THE FALLBACK NEEDS NO ERROR PARSING, which is what makes it safe to keep.
+    Measured on wayfire 0.11.0: a REJECTED `watch` leaves the connection
+    USABLE (the same socket accepted a good list straight afterwards), so the
+    retry happens on the socket we already have, and wayfire's wording is
+    never read. tackup rightly warned off parsing it: the release that renames
+    an event is exactly the one that rewords the error.
+
+    AND ONE CONNECTION WATCHES ONCE. A second `watch` on a subscribed socket
+    is refused outright (`Client is already watching events!`), so the probe
+    cannot share this socket and per-event subscribing is not available at
+    all. Each name is tried on a THROWAWAY connection, which costs 14 connects
+    ONLY on the failure path: a healthy box makes exactly one call, as before.
+
+    WHAT IS LOST IS NAMED, both in the log and to `doctor`, because a silently
+    reduced daemon is the thing this repo keeps finding. Losing
+    `output-added` costs dock DETECTION, which `_poll_outputs` and
+    `_profile_drift` already cover, so the degradation is real rather than
+    theoretical.
+    """
+    try:
+        sock.watch(list(events))
+        return list(events)
+    except Exception as e:                                     # noqa: BLE001
+        logline(f"event subscription refused ({e}); asking name by name")
+    one = connect_one or connect
+    ok, bad = [], []
+    for ev in events:
+        try:
+            probe = one()
+            probe.watch([ev])
+            ok.append(ev)
+        except Exception:                                      # noqa: BLE001
+            bad.append(ev)
+    if not ok:
+        # Nothing at all: let the caller die rather than pretend to watch.
+        raise RuntimeError(
+            f"this compositor accepted none of {len(events)} events")
+    logline(f"compositor has no {', '.join(bad)}: that capability is "
+            f"DEGRADED, the daemon is not")
+    sock.watch(ok)
+    return ok
+
+
 WORKER_ERR = "usher.worker-err"   # the worker's stderr, re-made per spawn
 WORKER_ERR_LINES = 6              # how much of it reaches watch.log
 WORKER_ERR_WIDTH = 200            # per line, so one long row cannot flood
+LOOP_SHOUT_AT = 4                 # consecutive early deaths before saying so
+
+
+def respawn_report(streak, shout_at=LOOP_SHOUT_AT):
+    """What to put in the log after `streak` consecutive early worker deaths:
+    one of "quiet", "detail", "shout".
+
+    IT NEVER GIVES UP, which is where this parts company with the shape
+    tackup suggested ("stop respawning and say so loudly"). The premise that
+    N early deaths mean the next one will too is FALSE here, and this repo has
+    the counter-example written down: the compositor IPC dropped five seconds
+    into a session on manifold and the supervisor respawned correctly, which
+    was that machinery working under load. A slow or storm-bound login
+    produces exactly this streak and then recovers, so a supervisor that quit
+    would turn a transient into a dead session, on the one path where the user
+    is least able to see why.
+
+    SO IT STOPS SHOUTING INSTEAD OF STOPPING WORKING. Up to `shout_at` the
+    stderr tail is logged, because the first deaths are where the cause is;
+    AT the threshold it says once that this looks deterministic; after that it
+    goes quiet, which is the actual complaint (the same line twice a minute
+    for the life of the session, indistinguishable from a transient).
+
+    THE TAIL IS RATE-LIMITED BY THE SAME COUNTER, and it has to be: logging
+    six lines of traceback on every respawn made the spam SEVEN TIMES worse
+    than the bare `rc 1` tackup was complaining about. A fix that multiplies
+    the thing it was asked to fix is worth catching before it ships.
+    """
+    if streak < shout_at:
+        return "detail"
+    return "shout" if streak == shout_at else "quiet"
 
 
 def worker_error_tail(path, keep=WORKER_ERR_LINES, width=WORKER_ERR_WIDTH):
@@ -277,6 +363,9 @@ class Supervisor:
         """Respawn the worker forever, with backoff."""
         base = [sys.executable, self.script, "_worker"]
         backoff = RESPAWN_BACKOFF_MIN
+        # CONSECUTIVE deaths inside WORKER_HEALTHY_S. See respawn_report: this
+        # decides how LOUD to be, never whether to carry on.
+        streak = 0
         while True:
             # Relaunch missing mux terminals on the first worker that actually
             # REACHES launch_missing (which drops LAUNCHED), NOT merely the
@@ -321,10 +410,24 @@ class Supervisor:
             ran = int(time.time() - started)
             if ran >= WORKER_HEALTHY_S:
                 backoff = RESPAWN_BACKOFF_MIN
-            logline(f"worker exited (rc {rc}, ran {ran}s); "
-                    f"respawn in {backoff}s")
-            for line in worker_error_tail(errlog):
-                logline(f"  worker stderr: {line}")
+                if streak >= LOOP_SHOUT_AT:
+                    logline(f"worker is healthy again after {streak} early "
+                            f"death(s)")
+                streak = 0
+            else:
+                streak += 1
+            say = respawn_report(streak)
+            if say != "quiet":
+                logline(f"worker exited (rc {rc}, ran {ran}s); "
+                        f"respawn in {backoff}s")
+                for line in worker_error_tail(errlog):
+                    logline(f"  worker stderr: {line}")
+            if say == "shout":
+                logline(f"WORKER HAS DIED {streak} TIMES IN A ROW inside "
+                        f"{WORKER_HEALTHY_S:.0f}s: this looks deterministic "
+                        f"rather than transient. Still respawning every "
+                        f"{RESPAWN_BACKOFF_MAX}s, and going QUIET about it "
+                        f"from here. The cause is in the stderr above.")
             time.sleep(backoff)
             backoff = min(backoff * 2, RESPAWN_BACKOFF_MAX)
 
@@ -478,7 +581,7 @@ class Watcher:
         engine.lock_summoned_session()
         self._init_layout()
         watch = connect()
-        watch.watch(list(KNOWLEDGE_TRIGGERS | PLACE_EVENTS))
+        subscribe(watch, sorted(KNOWLEDGE_TRIGGERS | PLACE_EVENTS))
         print(f"usher-mgr: {len(self.kb)} known windows; watching",
               flush=True)
         logline(f"watching, {len(self.kb)} known windows")
