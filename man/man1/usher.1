@@ -168,8 +168,20 @@ with no session, and any
 also exit 0 with nothing to do. That is the direction a caller needs, and it
 is the safe one. An unconditional
 .B ;
-is not wrong, only less legible: the fallback then runs on success too, which
-for a crude session-end backstop costs nothing.
+is a deliberate choice rather than a mistake: the fallback then runs on
+success too, which for a crude session-end backstop costs nothing, and it
+ends the session even when usher is WRONG rather than only when usher reports
+that it did not hand over.
+It is wrong in exactly one cell, though, and that is
+.BR --dry-run :
+.B usher cleanly reboot -n ; systemctl reboot
+reboots for real. A dry run cannot protect itself here, because no exit code
+is safe under both separators (zero defeats
+.BR ; ,
+non-zero would make
+.B ||
+do the very thing the dry run is declining to do), which is the sharpest
+argument for the idiom above.
 .TP
 .B display-changed
 For a display-change hook. Re-places against the profile for the new monitor
