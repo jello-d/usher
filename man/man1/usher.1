@@ -336,6 +336,61 @@ NoDisplay means "do not show this in menus" and says nothing about launching,
 so it is read as a refusal only for an entry you did NOT author.
 .I Hidden=true
 is a deletion in the spec's own words and is honoured everywhere.
+.SH ANOTHER ACCOUNT'S WINDOWS
+A window on this desk may belong to a different system account: a sandboxed
+enclave running its own browser inside the session user's compositor. usher
+treats those differently in four places, and the division is a privilege
+boundary rather than a preference.
+.TP
+.B what usher does for them
+It PLACES them. The compositor's IPC needs no cooperation from the client, so
+a remembered slot works whoever owns the window. It keys them by SOURCE, so
+another account's app can never change the key shape of this user's copy of
+the same app.
+.TP
+.B what usher refuses
+It never LEARNS a window it cannot identify, and it cannot identify one whose
+application state lives in a home it may not read. It never starts another
+account's app as this user, which would open a second, personal copy of a
+remembered work application. And it redacts the title, which is that
+account's content.
+.TP
+.B what it asks for
+Starting and recording are that account's own business, because the privilege
+is. usher asks through
+.I ~/.config/usher/source-trigger
+(see FILES) and the account then runs, as itself, one of two verbs that take
+no argument ever:
+.TP
+.B usher-mgr _source-capture
+Record which apps THIS account has open, to
+.IR roster.json .
+Reads them from the compositor over
+.IR ext_foreign_toplevel_list_v1 ,
+which the compositor filters to this account's own windows, so the filtering
+is the scoping and no caller can widen it. A ROSTER AND NOT A LAYOUT: a
+sandboxed client gets no compositor IPC, and that protocol carries nothing
+positional, so there is no geometry to be had on this side. Placement stays
+the session user's.
+.IP
+An observation with no windows at all does NOT overwrite a remembered roster,
+and says so. Capture while the session is intact, before anything is torn
+down; an account captured after its apps are killed would otherwise record an
+empty desk, and the next login would restore nothing from a record that looks
+perfectly valid.
+.TP
+.B usher-mgr _source-resume
+Start this account's remembered apps that are not running, resolving each
+app-id against THIS account's own desktop registry. Refuses rather than
+starting blind when it cannot see what is already up, since starting a second
+copy of everything is worse than starting nothing.
+.IP
+Both verbs are internal: they are hidden from the usage text and refused by
+the
+.B usher
+entry point, which is what lets a sudoers grant name a fixed command with no
+wildcard. A verb a human types is one that may later grow a flag, and a grant
+must not be able to mean something nobody reviewed.
 .SH DISPLAY PROFILES
 A placement only means anything on the monitors it was learned on, so the
 knowledge base is keyed by the CONNECTED DISPLAY SET: docked and undocked
@@ -471,21 +526,38 @@ relaunched: usher cannot read that account's application state, so it cannot
 identify the window, and keying it on a guess corrupts one of this user's own
 slots instead.
 .TP
-.I ~/.config/usher/source-relaunch
-OPTIONAL hook, asked to START another account's apps. Run as
-.I source-relaunch
+.I ~/.config/usher/source-trigger
+OPTIONAL hook, asked to make another account act on its OWN windows. Run as
+.I source-trigger
 .I SOURCE
-.IR APP-ID ...,
-once per source, with the app-ids that were open at the last capture and are
-not now. Exit 0 means accepted; anything else is reported. Handed APP-IDS AND
-NEVER COMMANDS, so the privileged side resolves them against its own desktop
-registry: this side can name an app and cannot inject a command. usher has no
-privilege to spawn as another user and does not acquire any, so without this
+.BR capture | resume ,
+once per source that has windows on this desk. Exit 0 means accepted; anything
+else is reported.
+.IP
+NO CONTENT CROSSES THIS SEAM. Both words come from a closed set usher itself
+defines, so there is nothing for the far side to validate and nothing for this
+side to inject. An earlier design handed over the app-ids to start, and that
+is an escalation rather than a convenience: a recognised terminal app-id
+resolves to a terminal on the far side, so the session user could have
+arbitrary code run as the other account, which is the one thing the account
+boundary exists to prevent.
+.IP
+usher names no mechanism. Whether the integrator reaches that account by sudo,
+by a transient unit, or by dropping a request in a shared directory is its
+business, and so is which system account a source name means. Without this
 hook another account's windows are placed but never started, and usher says
-which apps of whose it could not start.
+which accounts it could not reach.
 .TP
 .I ~/.local/state/usher/
 the layout store (current snapshot, history, knowledge base).
+.TP
+.I ~/.local/state/usher/roster.json
+which apps THIS account had open, written by
+.B usher-mgr _source-capture
+and read by
+.BR "usher-mgr _source-resume" .
+Present only on an account reached through the seam above; the session user's
+own layout is the store, not this.
 .SH ENVIRONMENT
 Every knob usher reads, with its default. All are read ONCE at import, so a
 running daemon keeps the values it started with: change one and restart it

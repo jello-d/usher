@@ -46,6 +46,12 @@ from .chrome import (CHROME_FLAGS, CHROME_STAGGER, browser_pids,
                      chrome_window_tabs, is_chrome, is_chrome_slot,
                      recorded_window_ids, session_history, window_slot)
 
+# usher.toplevels is the other leaf, and is imported QUALIFIED rather than by
+# name so a test can stub `toplevels.list_toplevels` and have the engine see
+# it: a name imported here would be a snapshot, which is the stale-copy hazard
+# the package split already records for EXCLUDE_ERRORS and _PLUGINS.
+from . import toplevels
+
 # pywayfire is needed only to talk to the live compositor, and is guarded so the
 # module still imports (and `usher selftest` runs) without it.
 try:
@@ -3140,89 +3146,263 @@ def desktop_relaunch_missing(saved, live, spawn=None):
     return n
 
 
-# THE SOURCE-RELAUNCH SEAM. usher can PLACE another account's window (the IPC
-# is compositor-side and needs no cooperation from a client usher cannot talk
-# to) and it cannot START one: that needs the other account's privilege, which
-# usher must not acquire. So it asks.
+# THE SOURCE SEAM. usher can PLACE another account's window (the IPC is
+# compositor-side and needs no cooperation from a client usher cannot talk to)
+# and it cannot START one: that needs the other account's privilege, which
+# usher must not acquire. So it asks, and WHAT IT ASKS FOR IS A TRIGGER.
 #
-#   usher/source-relaunch <SOURCE> <APP-ID>...
-#     exit 0        accepted; that source is starting them
+#   usher/source-trigger <SOURCE> capture|resume
+#     exit 0        accepted; that account is doing it
 #     anything else could not, and usher says so
 #
-# APP-IDS AND NEVER COMMANDS, which is the whole security content of this
-# seam. The privileged side resolves each app-id against ITS OWN registry, so
-# the owner can NAME an app and cannot inject a command. That is usher's
-# standing invariant ("the only command usher ever runs is an Exec= out of a
-# desktop file it read") carried across an account boundary, where usher
-# cannot read the registry itself and so must not be the one resolving.
+# NO CONTENT CROSSES THIS SEAM, which is its whole security content and was
+# the second design rather than the first. The first handed over APP-IDS, and
+# that is an escalation: a recognised terminal app-id resolves to a terminal
+# on the far side, so the owner could get arbitrary code run as the other
+# account, which is exactly what the account boundary exists to prevent. Both
+# words here come from a CLOSED SET usher itself defines, so there is nothing
+# for the far side to validate and nothing for this side to inject.
+#
+# THE AUTHORITY MOVED WITH IT. The account decides what it had open and what
+# to start, in its own home, which the owner can neither read nor write (see
+# `do_source_capture` below, which is what the far side runs). The owner's
+# half is now only knowing WHICH ACCOUNTS have windows here, which is the one
+# question it can answer and the other cannot.
 #
 # AND usher NAMES NO MECHANISM. Whether the integrator reaches that account by
 # sudo, by a transient unit, or by dropping a request in a shared directory is
-# its business; usher's half is knowing WHICH apps of WHOSE were open.
-SOURCE_RELAUNCH_HOOK = config_path("source-relaunch")
+# its business, and so is which system account a source name means: that
+# mapping is the integrator's vocabulary, not usher's.
+SOURCE_TRIGGER_HOOK = config_path("source-trigger")
+SOURCE_ACTIONS = ("capture", "resume")
 
 
-def source_relaunch_plan(saved, live):
-    """{source: sorted app-ids} that were open at capture and are not now.
+def source_trigger_plan(rows):
+    """The sources named by these windows, sorted. PURE.
 
-    PURE, so the decision is checkable with no hook, no compositor and no
-    other account. A source with nothing missing does not appear at all, which
-    is what keeps a quiet login quiet.
-
-    MISSING IS PER (SOURCE, APP), not per app: the owner running Slack says
-    nothing about whether the work account's Slack is up, and the window of
-    one is not a substitute for the other. That asymmetry is the same one
-    `ChromePlugin.relaunch_missing` had to learn."""
-    want = {}
-    for w in saved:
-        src = w.get("source")
-        app = w.get("app_id") or ""
-        if not src or not app:
-            continue
-        want.setdefault(src, set()).add(app)
-    if not want:
-        return {}
-    for v in live:
-        app = app_of(v)
-        src = source_of(v)
-        if src and app and src in want:
-            want[src].discard(app)
-    return {s: sorted(a) for s, a in want.items() if a}
+    A SOURCE WITH NOTHING HERE IS NOT TRIGGERED AT ALL, which is what keeps a
+    box with no enclaves silent and keeps usher from waking an account the
+    human has never used on this desk.
+    """
+    return sorted({s for s in (source_of(w) for w in rows) if s})
 
 
-def source_relaunch_missing(saved, live, run=None, hook=None):
-    """Ask each source to start its own saved-but-absent apps. Returns how
-    many apps were asked for.
+def source_trigger(sources, action, run=None, hook=None):
+    """Ask each source to capture or resume ITSELF. Returns how many accepted.
 
-    NEVER FATAL AND NEVER SILENT. A missing hook is reported ONLY when there
+    NEVER FATAL AND NEVER SILENT. A missing hook is reported only when there
     is something it would have been asked, so a box with no other accounts
     gains no new line at every login, and a box with them never loses the
-    reason nothing came back."""
-    plan = source_relaunch_plan(saved, live)
-    if not plan:
+    reason nothing came back.
+    """
+    if action not in SOURCE_ACTIONS:
+        raise ValueError(f"source_trigger: no such action {action!r}")
+    if not sources:
         return 0
-    path = SOURCE_RELAUNCH_HOOK if hook is None else hook
+    path = SOURCE_TRIGGER_HOOK if hook is None else hook
     if not path or not os.access(path, os.X_OK):
-        for src, apps in sorted(plan.items()):
-            logline(f"cannot relaunch {src}'s {' '.join(apps)}: no "
-                    f"source-relaunch hook at {path}, and usher must not "
-                    f"start another account's apps itself")
+        for src in sorted(sources):
+            logline(f"cannot ask {src} to {action}: no source-trigger hook "
+                    f"at {path}, and usher has no privilege to act as "
+                    "another account")
         return 0
     n = 0
-    for src, apps in sorted(plan.items()):
-        _announce(f"launch  [{src}] {' '.join(apps)}")
+    for src in sorted(sources):
         try:
             r = (subprocess.run if run is None else run)(
-                [path, src] + apps, capture_output=True, text=True, timeout=30)
+                [path, src, action], capture_output=True, text=True,
+                timeout=30)
         except Exception as e:                                 # noqa: BLE001
-            logline(f"source-relaunch for {src} failed: {e}")
+            logline(f"source-trigger {action} for {src} failed: {e}")
             continue
         if r.returncode != 0:
-            logline(f"source-relaunch for {src} refused (rc "
+            logline(f"source-trigger {action} for {src} refused (rc "
                     f"{r.returncode}): {(r.stderr or '').strip()[:160]}")
             continue
-        n += len(apps)
+        _announce(f"asked {src} to {action}")
+        n += 1
     return n
+
+
+# --- the OTHER side of that seam: this account's own roster ----------------
+# Everything above is the OWNER asking a source to act. These two verbs are
+# what the source RUNS, as itself, and they are the half that makes the ask
+# safe: the record of what an account had open is written BY that account, in
+# its own home, which the owner can neither read nor write. So the owner
+# supplies a TRIGGER and never CONTENT, and cannot introduce an app the human
+# did not run inside the enclave. An app-id list crossing the boundary was the
+# first design and it was an escalation: a recognised terminal app-id resolves
+# to a terminal, and arbitrary code as the enclave user is exactly what the
+# account boundary exists to prevent.
+#
+# A ROSTER AND NOT A LAYOUT, because that is all there is to be had. An
+# enclave has NO wayfire IPC (zero IPC names on the security-context
+# allowlist, deliberately), so it cannot read geometry, and
+# ext_foreign_toplevel_list_v1 carries nothing positional. Hence two verbs of
+# their own rather than `save` and `restore` meaning something different
+# depending on who typed them: one name for two operations is the split this
+# package already made once.
+#
+# PLACEMENT IS STILL THE OWNER'S, and nothing here duplicates it. The owner's
+# daemon sees every window on the desk, enclave windows included, and already
+# keys and places them by source. This only ever STARTS things.
+#
+# NO ARGUMENTS, EVER. Both verbs discover everything: who they are from the
+# euid, which windows are theirs from the compositor's own filtering, what to
+# start from their own roster. That is what lets the sudoers grant name a
+# fixed command with no wildcard and nothing to validate.
+ROSTER_VERSION = 1
+
+
+def roster_path():
+    return os.path.join(STATE, "roster.json")
+
+
+def save_roster(apps, when=None, path=None):
+    """Record which apps this account has open. Returns what was written."""
+    kept = sorted({a for a in apps if a})
+    p = roster_path() if path is None else path
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    write_json(p, json.dumps({"version": ROSTER_VERSION,
+                              "when": time.time() if when is None else when,
+                              "apps": kept}, indent=2))
+    return kept
+
+
+def load_roster(path=None):
+    """(apps, why) from this account's roster.
+
+    THREE STATES AND NOT TWO. An empty list with why == "" means the account
+    was captured and had nothing open; why != "" means it could not be read at
+    all, and the caller must not start anything on the strength of that.
+    """
+    p = roster_path() if path is None else path
+    try:
+        with open(p) as f:
+            blob = json.load(f)
+    except FileNotFoundError:
+        return [], (f"no roster at {p}, so this account has never been "
+                    "captured: nothing can be brought back yet")
+    except (OSError, ValueError) as e:
+        return [], f"cannot read the roster at {p}: {e}"
+    if not isinstance(blob, dict):
+        return [], f"the roster at {p} is not an object"
+    got = blob.get("version")
+    if got != ROSTER_VERSION:
+        return [], (f"the roster at {p} is version {got!r} and this usher "
+                    f"writes {ROSTER_VERSION}")
+    apps = blob.get("apps")
+    if not isinstance(apps, list):
+        return [], f"the roster at {p} carries no app list"
+    return sorted({a for a in apps if isinstance(a, str) and a}), ""
+
+
+def roster_plan(saved, live):
+    """The apps to start: remembered, and not up now. PURE, so the decision
+    is checkable with no compositor and no other account."""
+    return sorted({a for a in saved if a} - {a for a in live if a})
+
+
+def roster_launch(apps, live, spawn=None):
+    """Start each remembered app of this account's that is not running.
+
+    THROUGH THE SAME MACHINERY THE OWNER USES, so the standing invariant holds
+    on this side too: the only command usher ever runs is an `Exec=` out of a
+    desktop file it read. Here that registry is the ENCLAVE'S OWN, which is
+    the whole point, since the owner cannot read it and so must not be the one
+    resolving an app-id into a command.
+
+    DELIBERATELY NOT `launch_missing`, whose last step asks every OTHER source
+    to start its own apps. An account reached through that seam must not reach
+    back through it: one enclave triggering another is a loop, and nothing
+    here is the owner.
+
+    A ROSTER ROW IS app_id AND NOTHING ELSE, which the plugins already cope
+    with correctly rather than by accident: chrome reads `owner` (absent, so
+    ours) and falls back to one unnamed launch carrying its restore flags, and
+    the terminal plugins key on a recorded `cmd` a roster does not have, so
+    they find nothing instead of guessing.
+    """
+    missing = roster_plan(apps, live)
+    if not missing:
+        return 0
+    saved = [{"app_id": a} for a in missing]
+    seen = [{"app-id": a, "pid": -1} for a in live if a]
+    n = 0
+    for p in plugins():
+        try:
+            n += p.relaunch_missing(saved, seen)
+        except Exception as e:                                 # noqa: BLE001
+            logline(f"relaunch ({getattr(p, 'name', '?')}) error: {e}")
+    try:
+        n += desktop_relaunch_missing(saved, seen, spawn)
+    except Exception as e:                                     # noqa: BLE001
+        logline(f"relaunch (desktop default) error: {e}")
+    return n
+
+
+def do_source_capture():
+    """Record this account's own open apps. Takes no arguments."""
+    rows, why = toplevels.list_toplevels()
+    if why:
+        print(f"usher: cannot read this account's own windows: {why}",
+              file=sys.stderr)
+        return EXIT_CANNOT
+    apps = sorted({r["app_id"] for r in rows if r["app_id"]})
+    # AN EMPTY OBSERVATION NEVER OVERWRITES A REMEMBERED DESK. The ordering
+    # discipline is the real protection (capture while the session is intact,
+    # THEN tear it down), and this is the backstop for getting it wrong: an
+    # enclave captured after its apps are killed records an empty desk, and
+    # the next login then restores nothing from a record that looks perfectly
+    # valid. That is September's browser-less capture, one account over.
+    #
+    # IT STILL SELF-CORRECTS, which is what keeps the rule narrow: any
+    # observation with at least one window REPLACES the roster wholesale, so
+    # an app the human really did close stops coming back at the next capture.
+    # Only the all-zero case is refused, and refusing costs at most one
+    # unwanted window, where accepting costs the whole restore.
+    if not apps:
+        had, _why = load_roster()
+        if had:
+            print(f"usher: this account shows no windows, and its roster "
+                  f"remembers {len(had)} app(s), so it is NOT being "
+                  f"overwritten: {' '.join(had)}", file=sys.stderr)
+            print(f"usher: capture while the session is still intact, "
+                  "before anything is torn down.", file=sys.stderr)
+            return EXIT_CANNOT
+    save_roster(apps)
+    print(f"usher: recorded {len(apps)} app(s) for this account"
+          + (": " + " ".join(apps) if apps else ""))
+    return EXIT_OK
+
+
+def do_source_resume():
+    """Start this account's remembered apps. Takes no arguments."""
+    apps, why = load_roster()
+    if why:
+        print(f"usher: {why}", file=sys.stderr)
+        return EXIT_CANNOT
+    if not apps:
+        print(f"usher: this account's roster is empty, so there is nothing "
+              "to start")
+        return EXIT_OK
+    # LIVENESS IS REQUIRED, NOT OPTIONAL. Without it we cannot tell a cold
+    # start from a second trigger, and starting a second copy of everything is
+    # worse than starting nothing: this is the only path here that acts.
+    rows, lwhy = toplevels.list_toplevels()
+    if lwhy:
+        print(f"usher: cannot see which of this account's apps are already "
+              f"running, so it is not starting any: {lwhy}", file=sys.stderr)
+        return EXIT_CANNOT
+    live = [r["app_id"] for r in rows if r["app_id"]]
+    want = roster_plan(apps, live)
+    if not want:
+        print(f"usher: all {len(apps)} remembered app(s) are already running")
+        return EXIT_OK
+    n = roster_launch(apps, live)
+    print(f"usher: asked for {n} of {len(want)} missing app(s): "
+          + " ".join(want))
+    return EXIT_OK if n else EXIT_FAIL
 
 
 def launch_missing(snap=None):
@@ -3256,11 +3436,16 @@ def launch_missing(snap=None):
         n += desktop_relaunch_missing(saved, live)
     except Exception as e:
         logline(f"relaunch (desktop default) error: {e}")
-    # AND ANOTHER ACCOUNT'S APPS ARE ASKED FOR, never started here. Last,
-    # because it is the only one that leaves this process: everything above
-    # has already decided about the owner's own windows.
+    # AND ANOTHER ACCOUNT IS ASKED TO START ITS OWN. Last, because it is the
+    # only one that leaves this process: everything above has already decided
+    # about the owner's own windows.
+    #
+    # DRIVEN BY THE SAVED SNAPSHOT, NOT BY WHAT IS MISSING. Which of that
+    # account's apps are absent is ITS question, answered against its own
+    # roster and its own live windows, so asking is idempotent and the owner
+    # does not need (and must not have) an opinion about the contents.
     try:
-        n += source_relaunch_missing(saved, live)
+        n += source_trigger(source_trigger_plan(saved), "resume")
     except Exception as e:
         logline(f"relaunch (source) error: {e}")
     return n
@@ -3753,6 +3938,25 @@ def do_wind_down():
         do_capture()
     except Exception as e:
         print(f"usher: capture failed, winding down anyway: {e}",
+              file=sys.stderr)
+    # STEP 1 NOW REACHES ACROSS ACCOUNTS, and the order is the same feature it
+    # has always been, one account over. An enclave captured AFTER its apps
+    # are killed records an empty desk, and the next login then restores
+    # nothing from a record that looks perfectly valid: September's
+    # browser-less capture, on somebody else's uid.
+    #
+    # ASKED FOR THE ACCOUNTS WITH WINDOWS HERE RIGHT NOW, read live rather
+    # than from the snapshot just written, because this is the last moment
+    # they are true and a stale source would be woken for nothing.
+    #
+    # BOUNDED AND NEVER FATAL, like every other step here: a source that
+    # cannot be reached is logged and the machine still goes down. `usher
+    # cleanly` must never be the reason a box will not reboot.
+    try:
+        source_trigger(source_trigger_plan(
+            ipc().list_views(filter_mapped_toplevel=True)), "capture")
+    except Exception as e:
+        print(f"usher: could not ask other accounts to capture: {e}",
               file=sys.stderr)
     try:
         do_stop()

@@ -333,20 +333,60 @@ because the state that would tell them apart is in a home usher may not read,
 so the first gets the remembered place and the rest stay where they open.
 
 **Starting them is the other account's job**, since usher has no privilege to
-spawn as another user and should not acquire any. So there is a second seam:
+spawn as another user and should not acquire any. So there is a second seam,
+and what crosses it is a *trigger*:
 
 ```
-~/.config/usher/source-relaunch <SOURCE> <APP-ID>...
-  exit 0          accepted; that source is starting them
+~/.config/usher/source-trigger <SOURCE> capture|resume
+  exit 0          accepted; that account is doing it
   anything else   could not, and usher says so
 ```
 
-It is handed **app-ids, never commands**. The privileged side resolves each
-one against *its own* desktop registry, so this side can name an app and
-cannot inject a command: the same invariant usher holds for itself, carried
-across an account boundary where usher cannot read the registry and so must
-not be the one resolving. usher names no mechanism; reach that account
-however suits you.
+**No content crosses.** Both words come from a closed set usher itself
+defines, so there is nothing for the far side to validate and nothing for
+this side to inject. An earlier design handed over the app-ids to start, and
+that is an escalation rather than a convenience: a recognised terminal app-id
+resolves to a terminal on the far side, so the session user could have
+arbitrary code run as the other account, which is the one thing the account
+boundary exists to prevent.
+
+No mechanism is named here: reach that account however suits you, and which
+system account a source name means is yours to decide too.
+
+The account then runs, as itself, one of two **internal** verbs that never
+take an argument:
+
+- **`usher-mgr _source-capture`** records which apps *this* account has open,
+  into `~/.local/state/usher/roster.json`. It reads them from the compositor
+  over `ext_foreign_toplevel_list_v1`, which the compositor filters to this
+  account's own windows, so the filtering *is* the scoping and no caller can
+  widen it. A roster and not a layout: a sandboxed client gets no compositor
+  IPC and that protocol carries nothing positional, so there is no geometry
+  to be had on this side. Placement stays the session user's.
+- **`usher-mgr _source-resume`** starts the remembered apps that are not
+  running, resolving each app-id against *this* account's own desktop
+  registry.
+
+The authority sits on the side that cannot be forged: the record of what an
+account had open is written *by* that account, in a home the session user can
+neither read nor write. So a caller supplies a trigger and never content, and
+cannot introduce an app the human did not run there.
+
+Two rules that are easy to get backwards, both of them refusals:
+
+- An observation with **no windows at all** does not overwrite a remembered
+  roster. Capture while the session is intact, before anything is torn down;
+  an account captured after its apps are killed would otherwise record an
+  empty desk, and the next login would restore nothing from a record that
+  looks perfectly valid. `usher cleanly logoff` does this in the right order.
+- A resume **refuses rather than starting blind** when it cannot see what is
+  already up, since starting a second copy of everything is worse than
+  starting nothing.
+
+Both verbs are hidden from the usage text and refused by the `usher` entry
+point, which is what lets a sudoers grant name a fixed command with no
+wildcard: a verb a human types is one that may later grow a flag, and a grant
+must not be able to mean something nobody reviewed.
 
 Nothing is logged when there is nothing to ask. When there *is* and no hook is
 wired, usher says which apps of whose it could not start, so the reason
