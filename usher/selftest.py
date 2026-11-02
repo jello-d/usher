@@ -577,6 +577,56 @@ def _t_resolution(ck):
     finally:
         engine._owner = _real
 
+    # 1c. ANOTHER ACCOUNT'S WINDOW IS NEVER OURS TO IDENTIFY.
+    #
+    # LIVE DAMAGE, measured 2026-11-02: a work account's Chrome window joined
+    # the OWNER's recorded session ids and was LEARNED into a personal
+    # window's slot, overwriting its workspace and position. A title is no
+    # discriminator between two browsers owned by two users.
+    #
+    # THE TABLE FIRST, injectable so all four cells are reachable with no
+    # second account on the box. Only a POSITIVE read of a different uid is
+    # foreign: declining a window that IS ours would break every placement.
+    ck("foreign-a-stored-entry-pid-is-ours",
+       engine.foreign_owner(-1, uid_of=lambda _p: 999, me=1000) is None)
+    ck("foreign-an-unreadable-uid-is-ours",
+       engine.foreign_owner(42, uid_of=lambda _p: None, me=1000) is None)
+    ck("foreign-my-own-uid-is-ours",
+       engine.foreign_owner(42, uid_of=lambda _p: 1000, me=1000) is None)
+    ck("foreign-another-uid-is-foreign",
+       engine.foreign_owner(42, uid_of=lambda _p: 997, me=1000) == 997)
+
+    # ...AND END TO END ON A REAL FOREIGN PID, needing no stub and no second
+    # account: pid 1 is root's, so a view carrying it is genuinely somebody
+    # else's on any box this is not run as root on.
+    if os.getuid() != 0:
+        _fv = _trv("google-chrome", "Settings - Appearance", pid=1, vid=91)
+        _r = engine.resolution(_fv)
+        ck("foreign-resolution-is-never", _st(_fv) == Resolution.NEVER)
+        ck("foreign-resolution-says-whose", "uid 0" in (_r.why or ""))
+        # THE CONSEQUENCE THAT MATTERS: `unidentified` is the one predicate
+        # both learning and placing ask, so Never there is what actually
+        # stops the slot being taken.
+        ck("foreign-is-unidentified", engine.unidentified(_fv))
+        ck("foreign-has-no-identity-key", _single_id(_fv) is None)
+        # AND THE BUG ITSELF: a learn pass over a foreign window must create
+        # no slot. This is the check the live damage would have failed.
+        # The window shape is a SNAPSHOT row, which is what learn() consumes,
+        # built the way the lifecycle harness builds one.
+        _kb, _groups = {}, {}
+        _fw = {"app_id": "google-chrome", "title": "Settings - Appearance",
+               "key": "chrome:win:1", "pid": 1, "id": 91,
+               "output": "eDP-1", "workspace": [1, 0],
+               "pos": [172, 115], "size": [100, 100]}
+        engine.learn(_kb, _groups, [_fw], time.time())
+        ck("foreign-is-never-learned", not _kb)
+        # AND THE POSITIVE CONTROL, or the check above passes for any reason
+        # at all: the SAME row with OUR pid is learned.
+        _kb2, _g2 = {}, {}
+        _ow = dict(_fw, pid=os.getpid(), id=92)
+        engine.learn(_kb2, _g2, [_ow], time.time())
+        ck("foreign-check-has-a-working-control", bool(_kb2))
+
 def _t_lock(ck):
     """The lock decision, as the full matrix. PURE, so no session is needed.
 
@@ -940,6 +990,15 @@ def _t_desktop(ck):
         got = []
         n = desktop_relaunch_missing([W("kitty")], [], spawn=got.append)
         ck("desktop-pass-skips-an-owned-app", n == 0 and got == [])
+        # ANOTHER ACCOUNT'S SAVED WINDOW IS NOT OURS TO START. The entry
+        # carries an app-id and nothing else, so resolving it in OUR registry
+        # and running it would open a second, PERSONAL copy of somebody's
+        # work application. `snapshot` stamps `owner` for exactly this, and
+        # the control above (same row, no owner) is what makes this non-vacuous.
+        got = []
+        n = desktop_relaunch_missing([dict(W("calibre-gui"), owner=997)], [],
+                                     spawn=got.append)
+        ck("desktop-pass-skips-another-accounts-app", n == 0 and got == [])
         # ONE INVOCATION PER APP, not per window: all six chrome windows
         # report one pid and a desktop entry describes an APP.
         got = []
@@ -2284,6 +2343,43 @@ def _t_chrome(ck):
     # chrome relaunch: only when the last session had Chrome and none is up
     _ch = ps["chrome"]
     ck("chrome-no-saved", _ch.relaunch_missing([], []) == 0)
+    # PER USER ON BOTH SIDES. Another account's browser answers neither
+    # question for us, and the second half is the quiet direction: without it
+    # a personal Chrome simply would not come back on any login where the work
+    # one was already running.
+    if os.getuid() != 0:
+        ck("chrome-skips-another-accounts-saved-window",
+           _ch.relaunch_missing([{"app_id": "google-chrome", "owner": 997}],
+                                []) == 0)
+        # THE LIVE SIDE, WITHOUT EVER LAUNCHING A BROWSER. relaunch_missing
+        # spawns internally, so the seam is the executable lookup: it is
+        # reached only if BOTH guards passed, and answering None stops it
+        # before any spawn. So "did it ask for the exe" IS the decision.
+        _asked = []
+
+        class _NoExe:
+            @staticmethod
+            def which(c):
+                _asked.append(c)
+                return None
+
+        _rsh = engine.shutil
+        try:
+            engine.shutil = _NoExe
+            _asked.clear()
+            _ch.relaunch_missing([{"app_id": "google-chrome"}],
+                                 [_trv("google-chrome", "theirs", pid=1)])
+            ck("chrome-a-foreign-live-browser-does-not-suppress-ours",
+               bool(_asked))
+            # THE CONTROL, which is what makes the line above mean anything:
+            # OUR OWN live browser must still suppress it.
+            _asked.clear()
+            _ch.relaunch_missing(
+                [{"app_id": "google-chrome"}],
+                [_trv("google-chrome", "mine", pid=os.getpid())])
+            ck("chrome-our-own-live-browser-still-suppresses", not _asked)
+        finally:
+            engine.shutil = _rsh
     ck("chrome-already-live",
        _ch.relaunch_missing([{"app_id": "google-chrome"}],
                             [_tv("google-chrome", "x")]) == 0)
@@ -2846,6 +2942,31 @@ def _t_snapshots(ck):
         {"app_id": "signal", "title": "Signal", "key": "Signal",
          "output": "DP-1", "workspace": [1.0, 1.0], "pos": [0.0, 0.0],
          "size": [800.0, 600.0]}]}
+    # snapshot() STAMPS WHOSE WINDOW IT IS, and only when it is not ours, so
+    # the field's PRESENCE is the fact and our own snapshots are byte-for-byte
+    # what they were. The relaunch paths read it.
+    if os.getuid() != 0:
+        class _SnapSock:
+            @staticmethod
+            def list_outputs():
+                return [{"name": "DP-1",
+                         "geometry": {"x": 0, "y": 0, "width": 100,
+                                      "height": 100},
+                         "workspace": {"x": 0, "y": 0, "grid_width": 1,
+                                       "grid_height": 1}}]
+
+            @staticmethod
+            def list_views(**_kw):
+                return [_trv("signal", "Signal", pid=os.getpid(), vid=1),
+                        _trv("google-chrome", "Theirs", pid=1, vid=2)]
+
+        _snapped = engine.snapshot(_SnapSock)["windows"]
+        _by = {w["app_id"]: w for w in _snapped}
+        ck("snapshot-records-another-accounts-window",
+           _by.get("google-chrome", {}).get("owner") == 0)
+        ck("snapshot-leaves-our-own-window-unstamped",
+           "owner" not in _by.get("signal", {}))
+
     _e = entries_from_snapshot(_snap)
     ck("milestone-entries", len(_e) == 3)
     ck("milestone-keys",

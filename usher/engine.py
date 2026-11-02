@@ -766,7 +766,8 @@ def snapshot(sock):
             continue   # work / scratch / transient-chrome: never record it
         p = place_of(v, outputs)
         pid = v.get("pid", -1)
-        windows.append({
+        _own = foreign_owner(pid)
+        w = {
             "id": v.get("id"),   # wayfire view id: the in-session window key
             "app_id": v.get("app-id") or v.get("app_id") or "",
             "title": v.get("title", ""),
@@ -791,7 +792,16 @@ def snapshot(sock):
             "sticky": bool(v.get("sticky", False)),
             "inverted": is_inverted(sock, v.get("id"), inverts),
             "raw_geometry": p["raw"],
-        })
+        }
+        # WHOSE WINDOW, recorded ONLY when it is not ours, so the field's
+        # presence is the fact and our own snapshots are unchanged. The
+        # relaunch paths read it: a saved window belonging to another account
+        # must not be started by us, since resolving its app-id in OUR
+        # registry and running it would launch a second, personal copy of
+        # somebody's work application.
+        if _own is not None:
+            w["owner"] = _own
+        windows.append(w)
     return {
         "version": SNAPSHOT_VERSION,
         "time": int(time.time()),
@@ -1093,6 +1103,48 @@ def identity(v):
     return r.key if r.key else pview(v)["title"]
 
 
+def proc_uid(pid):
+    """The uid owning process `pid`, or None if it cannot be read.
+
+    `/proc/<pid>`'s OWNER rather than `Uid:` in status: one stat instead of a
+    read and parse, and the same fact for anything not setuid."""
+    try:
+        return os.stat(f"/proc/{pid}").st_uid
+    except OSError:
+        return None
+
+
+def foreign_owner(pid, uid_of=None, me=None):
+    """The uid owning `pid` when that is NOT this session's user, else None.
+
+    THE WHOLE QUESTION IS "IS THIS WINDOW MINE?", and it is deliberately not
+    "which enclave is it": a uid comparison needs no vocabulary from any other
+    package, where knowing WHICH would mean usher reading somebody else's
+    registry. So this answers the narrow question usher can answer for itself,
+    and the compositor's security context is the upgrade when it arrives.
+
+    THREE CASES AND ONLY ONE IS FOREIGN, because the costs are not symmetric.
+    A wrong key corrupts the store silently, which is this project's whole bug
+    history, while declining costs one placement and is visible. But declining
+    a window that IS ours would break every placement, so it answers "foreign"
+    only on a POSITIVE read of a different uid:
+
+        pid < 0 or None   a STORED entry, whose pid is long dead   -> ours
+        uid unreadable    gone, or a racy read                     -> ours
+        uid == mine                                                -> ours
+        uid != mine       somebody else's process                  -> FOREIGN
+
+    Injectable so the table is checkable without a second account on the box.
+    """
+    if pid is None or pid < 0:
+        return None
+    me = os.getuid() if me is None else me
+    u = (proc_uid if uid_of is None else uid_of)(pid)
+    if u is None or u == me:
+        return None
+    return u
+
+
 def resolution(v):
     """What usher knows about this window's identity. See Resolution.
 
@@ -1111,6 +1163,31 @@ def resolution(v):
     geometry the last one had. The same rule as a plugin declining, one level
     down, where there is not even an app to ask about."""
     v = pview(v)
+    # ANOTHER ACCOUNT'S WINDOW IS NOT OURS TO IDENTIFY, asked BEFORE any
+    # plugin because no plugin can answer for it: the app's own state lives in
+    # a home this user may not read, so every handle a plugin would reach for
+    # is missing and the fallbacks are worse than nothing.
+    #
+    # MEASURED, NOT PREDICTED. On 2026-11-02 a work account's Chrome window
+    # joined the OWNER's recorded session ids and was learned into the slot of
+    # a personal window, overwriting its workspace and position with the work
+    # window's. A title is not a discriminator between two BROWSERS owned by
+    # two users, and `claim_by_elimination` forces a pairing when one view and
+    # one id are left free, which an unidentifiable stranger in the pool makes
+    # likely rather than rare.
+    #
+    # NEVER RATHER THAN PENDING, and the reason is honest: waiting cannot
+    # help, because the state usher would need is behind a uid wall. It costs
+    # the placement of that window, which usher could do, and buys the
+    # correctness of every slot of ours it would otherwise take. When the
+    # compositor publishes the security context a window arrived through,
+    # these become keyable per source and the trade goes away.
+    other = foreign_owner(v.get("pid"))
+    if other is not None:
+        return Resolution.never(
+            f"this window's process belongs to uid {other}, not to this "
+            f"session's user, so the app's own state is in a home usher "
+            f"cannot read and there is no handle to key it on")
     p = _owner(v)
     if p is None:
         if not v["app"] and not v["title"].strip():
@@ -1439,9 +1516,17 @@ class ChromePlugin(WindowPlugin):
         with several profiles and no `Default` opens the profile PICKER and
         waits for a human, restoring nothing at all, so the one thing usher
         had to get right about starting it was which profile to start."""
-        if not any(is_chrome(w.get("app_id")) for w in saved):
+        # PER USER ON BOTH SIDES, because another account running its own
+        # browser on this display answers neither question for us: its saved
+        # window is not ours to restore, and its LIVE browser is not evidence
+        # that ours is up. Without the second test a personal Chrome would
+        # simply not come back on any login where the work one was already
+        # running, which is the quiet direction.
+        if not any(is_chrome(w.get("app_id")) and w.get("owner") is None
+                   for w in saved):
             return 0
-        if any(is_chrome(pview(v)["app"]) for v in live):
+        if any(is_chrome(pview(v)["app"])
+               and foreign_owner(pview(v).get("pid")) is None for v in live):
             return 0
         exe = next((shutil.which(c) for c in
                     ("google-chrome", "google-chrome-stable", "chromium",
@@ -2612,6 +2697,13 @@ def desktop_relaunch_missing(saved, live, spawn=None):
     for w in saved:
         app = w.get("app_id") or ""
         if not app or is_owned(app) or is_transient(w):
+            continue
+        # NOT OURS, NOT OURS TO START. The saved entry carries an app-id and
+        # nothing else, so resolving it in OUR desktop registry and running it
+        # would open a second, PERSONAL copy of another account's application:
+        # a work Slack remembered, a personal Slack started, both on the same
+        # desk. `snapshot` stamps `owner` for exactly this.
+        if w.get("owner") is not None:
             continue
         want.setdefault(app, w)
     if not want:
