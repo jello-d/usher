@@ -2,13 +2,13 @@
 name = "usher-indicator"
 version = "0.1.0"
 description = "SNI tray indicator for usher window placement"
+license = "Apache-2.0"
 requires-python = ">=3.9"
 dependencies = ["dbus-next>=0.2.3", "Pillow>=9"]
-classifiers = ["License :: OSI Approved :: Apache Software License"]
 
 [project.scripts]
 usher-indicator = "usher_indicator.__main__:main"
 
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77.0.1"]
 build-backend = "setuptools.build_meta"
