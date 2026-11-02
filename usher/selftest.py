@@ -48,7 +48,7 @@ import time
 from collections import Counter
 from datetime import date
 
-from . import chrome, engine
+from . import chrome, engine, toplevels
 # FROM chrome ITSELF, not through the engine, which merely re-exports them.
 # Importing a name through whoever happened to use it first is how a module's
 # real dependency stops being visible in its own header.
@@ -2041,6 +2041,263 @@ def _t_launch_source(ck):
     finally:
         (engine.load_snapshot, engine.plugins,
          engine.desktop_relaunch_missing) = real
+
+def _raises(exc, fn):
+    """True when fn() raises exc. A GUARDED call rather than letting it
+    propagate, so a check that stops holding reports as one clean FAIL
+    instead of aborting its area before the summary line."""
+    try:
+        fn()
+    except exc:
+        return True
+    except Exception:                                         # noqa: BLE001
+        return False
+    return False
+
+
+def _fake_compositor(path, offer=True, rows=(), stop_after_bind=False):
+    """A thread speaking just enough of the protocol to answer one client.
+
+    A REAL UNIX SOCKET AND REAL WIRE BYTES, not a stubbed `list_toplevels`.
+    The thing under test is a hand-written protocol client, so a fixture that
+    stands in for the conversation tests nothing: every framing, padding and
+    opcode decision has to actually go over a socket. Same reason the chrome
+    checks write real SNSS files to disk instead of passing dicts.
+
+    `rows` is [(app_id, title, identifier)]; `offer=False` advertises only
+    wl_shm, which is the "this compositor has no window list" case.
+    """
+    import socket as _s
+    import struct as _st
+    import threading
+
+    srv = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(1)
+
+    def hdr(obj, opcode, body):
+        return _st.pack("<II", obj, ((8 + len(body)) << 16) | opcode) + body
+
+    def wstr(s):
+        b = s.encode() + b"\0"
+        return _st.pack("<I", len(b)) + b + b"\0" * (-len(b) % 4)
+
+    def serve():
+        try:
+            conn, _ = srv.accept()
+        except OSError:
+            return
+        buf = b""
+        bound = False
+        try:
+            conn.settimeout(5.0)
+            while True:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    return
+                buf += chunk
+                while len(buf) >= 8:
+                    obj, hi = _st.unpack_from("<II", buf, 0)
+                    size, opcode = hi >> 16, hi & 0xFFFF
+                    if size < 8 or len(buf) < size:
+                        break
+                    body, buf = buf[8:size], buf[size:]
+                    if obj == 1 and opcode == toplevels.RQ_GET_REGISTRY:
+                        (reg,) = _st.unpack_from("<I", body, 0)
+                        names = ([(7, toplevels.PROTOCOL, 1)] if offer
+                                 else []) + [(9, "wl_shm", 2)]
+                        for nm, iface, ver in names:
+                            conn.sendall(hdr(
+                                reg, toplevels.EV_GLOBAL,
+                                _st.pack("<I", nm) + wstr(iface)
+                                + _st.pack("<I", ver)))
+                    elif obj != 1 and opcode == toplevels.RQ_BIND:
+                        (_nm,) = _st.unpack_from("<I", body, 0)
+                        _iface, off = toplevels._read_string(body, 4)
+                        _ver, lst = _st.unpack_from("<II", body, off)
+                        bound = True
+                        if stop_after_bind:
+                            conn.close()
+                            return
+                        handle = 0xFF000001
+                        for app, title, ident in rows:
+                            conn.sendall(hdr(
+                                lst, toplevels.EV_LIST_TOPLEVEL,
+                                _st.pack("<I", handle)))
+                            for op, val in ((toplevels.EV_H_TITLE, title),
+                                            (toplevels.EV_H_APP_ID, app),
+                                            (toplevels.EV_H_IDENTIFIER,
+                                             ident)):
+                                conn.sendall(hdr(handle, op, wstr(val)))
+                            conn.sendall(hdr(handle, toplevels.EV_H_DONE, b""))
+                            handle += 1
+                    elif obj == 1 and opcode == toplevels.RQ_SYNC:
+                        (cb,) = _st.unpack_from("<I", body, 0)
+                        conn.sendall(hdr(cb, toplevels.EV_CALLBACK_DONE,
+                                         _st.pack("<I", 0)))
+                        if bound:
+                            return
+        except OSError:
+            return
+        finally:
+            with contextlib.suppress(OSError):
+                conn.close()
+
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    return srv, t
+
+
+def _t_toplevels(ck):
+    """The hand-written wayland client: framing, discovery, three states.
+
+    WHY THIS AREA EXISTS AT ALL: an enclave account has NO wayfire IPC (zero
+    IPC names on the security-context allowlist, deliberately), so the only
+    way it can be told which windows are its own is this protocol. That makes
+    a hand-written client load-bearing for the enclave restore, and an opcode
+    is declaration order, so a wrong one reports plausible nonsense rather
+    than failing. `test/tools.t` re-derives every opcode from the installed
+    XMLs; this area proves the conversation those opcodes drive.
+    """
+    # THE WIRE STRING, where the padding is the easy thing to get wrong: the
+    # length INCLUDES the NUL and the whole field is padded to 4 bytes.
+    ck("wire-string-length-counts-the-nul",
+       toplevels._string("ab")[:4] == b"\x03\x00\x00\x00")
+    ck("wire-string-is-padded-to-four",
+       len(toplevels._string("ab")) == 8
+       and len(toplevels._string("abc")) == 8
+       and len(toplevels._string("abcd")) == 12)
+    ck("wire-string-round-trips",
+       toplevels._read_string(toplevels._string("hello"), 0) == ("hello", 12))
+    # AN EMPTY STRING IS LENGTH 0 WITH NO BYTES, not length 1 with a NUL, and
+    # reading it as the latter walks the offset into the next argument.
+    ck("wire-empty-string-has-no-bytes",
+       toplevels._read_string(b"\x00\x00\x00\x00", 0) == ("", 4))
+    ck("wire-truncated-string-raises", _raises(
+        toplevels.ProtocolError,
+        lambda: toplevels._read_string(b"\x40\x00\x00\x00ab", 0)))
+
+    # DISCOVERY MIRRORS pick_socket, refusal included.
+    with tempfile.TemporaryDirectory() as d:
+        env = {"XDG_RUNTIME_DIR": d}
+        ck("socket-none-present-is-a-reason",
+           toplevels.wayland_socket(env)[0] == ""
+           and "no wayland socket is in" in toplevels.wayland_socket(env)[1])
+        open(os.path.join(d, "wayland-1"), "w").close()
+        open(os.path.join(d, "wayland-1.lock"), "w").close()
+        ck("socket-lock-file-is-not-a-candidate",
+           toplevels.wayland_socket(env)[0] == os.path.join(d, "wayland-1"))
+        open(os.path.join(d, "wayland-9"), "w").close()
+        got, why = toplevels.wayland_socket(env)
+        # TWO REFUSE RATHER THAN GUESS: a stale socket from a previous session
+        # would answer, with somebody else's windows, which is worse than an
+        # error. The same call `pick_socket` makes for the same reason.
+        ck("socket-two-candidates-refuse", got == "" and "ambiguous" in why)
+        ck("socket-absolute-wins-over-discovery",
+           toplevels.wayland_socket(
+               {"WAYLAND_DISPLAY": os.path.join(d, "wayland-1"),
+                "XDG_RUNTIME_DIR": "/nonexistent"})[0]
+           == os.path.join(d, "wayland-1"))
+        ck("socket-absolute-but-missing-says-so",
+           toplevels.wayland_socket({"WAYLAND_DISPLAY": "/no/such"})[1]
+           .startswith("WAYLAND_DISPLAY names /no/such"))
+        ck("socket-relative-with-no-runtime-dir-says-so",
+           "XDG_RUNTIME_DIR is unset"
+           in toplevels.wayland_socket({"WAYLAND_DISPLAY": "wayland-1"})[1])
+
+    # THE WHOLE CONVERSATION, against a real socket.
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "wl")
+        srv, _t = _fake_compositor(p, rows=[
+            ("google-chrome", "Inbox", "aa"), ("slack", "Alex", "bb")])
+        try:
+            rows, why = toplevels.list_toplevels(p, timeout=5.0)
+        finally:
+            srv.close()
+        ck("toplevels-reads-a-roster", why == "" and len(rows) == 2)
+        ck("toplevels-carries-app-id-title-identifier",
+           sorted((r["app_id"], r["title"], r["identifier"]) for r in rows)
+           == [("google-chrome", "Inbox", "aa"), ("slack", "Alex", "bb")])
+        # NO GEOMETRY, EVER, and that is the point rather than a limitation:
+        # the protocol has no positional argument, so a caller cannot come to
+        # believe a roster is a layout.
+        ck("toplevels-report-no-geometry",
+           all(set(r) == {"app_id", "title", "identifier"} for r in rows))
+
+    # THREE STATES AND NOT TWO, which this tree has shipped collapsed twice.
+    # An empty roster with no reason is a real answer; every failure carries
+    # one. A caller must not read "no windows" as "could not look".
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "wl")
+        srv, _t = _fake_compositor(p, rows=[])
+        try:
+            rows, why = toplevels.list_toplevels(p, timeout=5.0)
+        finally:
+            srv.close()
+        ck("toplevels-empty-session-is-a-real-answer",
+           rows == [] and why == "")
+
+        p2 = os.path.join(d, "wl2")
+        srv, _t = _fake_compositor(p2, offer=False)
+        try:
+            rows, why = toplevels.list_toplevels(p2, timeout=5.0)
+        finally:
+            srv.close()
+        ck("toplevels-missing-protocol-is-a-reason",
+           rows == [] and toplevels.PROTOCOL in why)
+        ck("toplevels-three-states-are-pairwise-distinct",
+           len({"", why, "the compositor closed the connection"}) == 3)
+
+        ck("toplevels-no-socket-is-a-reason",
+           toplevels.list_toplevels(os.path.join(d, "absent"))[1]
+           .startswith("cannot reach the wayland display"))
+
+        p3 = os.path.join(d, "wl3")
+        srv, _t = _fake_compositor(p3, rows=[("x", "y", "z")],
+                                   stop_after_bind=True)
+        try:
+            rows, why = toplevels.list_toplevels(p3, timeout=5.0)
+        finally:
+            srv.close()
+        ck("toplevels-disconnect-mid-answer-is-a-reason",
+           rows == [] and why != "")
+
+    # A SHORT HEADER IS REFUSED rather than looped on: size < 8 cannot be a
+    # message, and treating it as one spins forever on the same bytes.
+    class _Sock:
+        def __init__(self, data):
+            self.data = data
+
+        def settimeout(self, _t):
+            pass
+
+        def recv(self, _n):
+            d, self.data = self.data, b""
+            return d
+
+    import struct as _st
+    ck("framing-short-header-raises", _raises(
+        toplevels.ProtocolError,
+        lambda: toplevels._Reader(_Sock(_st.pack("<II", 1, (4 << 16) | 0)))
+        .message(time.monotonic() + 1)))
+    # AND A MESSAGE SPLIT ACROSS READS IS REASSEMBLED, which is the normal
+    # case on a stream socket and the one a naive reader gets wrong once.
+    whole = _st.pack("<II", 5, ((8 + 4) << 16) | 2) + _st.pack("<I", 99)
+
+    class _Split:
+        def __init__(self):
+            self.parts = [whole[:3], whole[3:]]
+
+        def settimeout(self, _t):
+            pass
+
+        def recv(self, _n):
+            return self.parts.pop(0) if self.parts else b""
+
+    ck("framing-reassembles-a-split-message",
+       toplevels._Reader(_Split()).message(time.monotonic() + 1)
+       == (5, 2, _st.pack("<I", 99)))
+
 
 def _t_cli_split(ck):
     """The two front ends: one table, and each refuses the other's verbs.
@@ -4735,6 +4992,7 @@ def selftest():
     # planting the Resolution guard removal), so it is fixed here rather than
     # in each caller.
     for area in (_t_registry, _t_resolution, _t_lock,
+                 _t_toplevels,
                  _t_lifecycle, _t_desktop, _t_slots, _t_verify,
                  _t_terminals, _t_cli_split,
                  _t_launch_source,

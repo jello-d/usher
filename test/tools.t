@@ -243,10 +243,98 @@ for name, val in KNOBS:
 assert not bad, "; ".join(bad)
 PYEOF
 
+# THE WAYLAND OPCODES ARE RE-DERIVED FROM THE PROTOCOL XMLs, because an opcode
+# is DECLARATION ORDER and a wrong one does not fail: it decodes a different
+# event's arguments and reports plausible nonsense. usher/toplevels.py says this
+# check exists, so it has to.
+#
+# SKIPPED, LOUDLY, WHERE THE XMLs ARE ABSENT. They ship with wayland and
+# wayland-protocols, which a box running this compositor has, but the suite must
+# run on one that does not (a CI image, a container) rather than fail there. An
+# announced skip is the honest answer; a silent one is what this file exists to
+# prevent.
+_wl=/usr/share/wayland/wayland.xml
+_ext=/usr/share/wayland-protocols/staging/ext-foreign-toplevel-list
+_ext=$_ext/ext-foreign-toplevel-list-v1.xml
+_opc=0
+if [ -f "$_wl" ] && [ -f "$_ext" ]; then
+  _opc=$(PYTHONPATH="$HERE" python3 - "$HERE" "$_wl" "$_ext" <<'PYEOF'
+import sys
+import xml.etree.ElementTree as ET
+sys.path.insert(0, sys.argv[1])
+from usher import toplevels as T
+
+def opcodes(path):
+    """{interface: {"request"/"event": {name: opcode}}} from declaration
+    order, which is what the wire format means by an opcode."""
+    out = {}
+    for iface in ET.parse(path).getroot().findall("interface"):
+        kinds = {}
+        for kind in ("request", "event"):
+            kinds[kind] = {m.get("name"): i for i, m
+                           in enumerate(iface.findall(kind))}
+        out[iface.get("name")] = (kinds, int(iface.get("version")))
+    return out
+
+got = opcodes(sys.argv[2])
+got.update(opcodes(sys.argv[3]))
+
+# EVERY CONSTANT THE MODULE DECLARES, including the ones it does not currently
+# send or read: an unused protocol constant is only safe while it is still
+# TRUE, and this is what keeps it true.
+WANT = [
+    ("wl_display", "request", "sync", T.RQ_SYNC),
+    ("wl_display", "request", "get_registry", T.RQ_GET_REGISTRY),
+    ("wl_display", "event", "error", T.EV_ERROR),
+    ("wl_display", "event", "delete_id", T.EV_DELETE_ID),
+    ("wl_registry", "request", "bind", T.RQ_BIND),
+    ("wl_registry", "event", "global", T.EV_GLOBAL),
+    ("wl_registry", "event", "global_remove", T.EV_GLOBAL_REMOVE),
+    ("wl_callback", "event", "done", T.EV_CALLBACK_DONE),
+    (T.PROTOCOL, "event", "toplevel", T.EV_LIST_TOPLEVEL),
+    (T.PROTOCOL, "event", "finished", T.EV_LIST_FINISHED),
+    ("ext_foreign_toplevel_handle_v1", "event", "closed", T.EV_H_CLOSED),
+    ("ext_foreign_toplevel_handle_v1", "event", "done", T.EV_H_DONE),
+    ("ext_foreign_toplevel_handle_v1", "event", "title", T.EV_H_TITLE),
+    ("ext_foreign_toplevel_handle_v1", "event", "app_id", T.EV_H_APP_ID),
+    ("ext_foreign_toplevel_handle_v1", "event", "identifier",
+     T.EV_H_IDENTIFIER),
+]
+bad = []
+for iface, kind, name, ours in WANT:
+    if iface not in got:
+        bad.append(f"{iface}: no such interface in the XMLs")
+        continue
+    theirs = got[iface][0][kind].get(name)
+    if theirs is None:
+        bad.append(f"{iface}.{name}: no such {kind} in the XML")
+    elif theirs != ours:
+        bad.append(f"{iface}.{name}: XML says {theirs}, usher says {ours}")
+
+# AND THE VERSION WE BIND MUST EXIST. Binding a version the compositor's XML
+# does not define is a protocol error at runtime, not a wrong answer.
+have = got.get(T.PROTOCOL, (None, 0))[1]
+if T.PROTOCOL_VERSION > have:
+    bad.append(f"{T.PROTOCOL}: usher binds v{T.PROTOCOL_VERSION}, the XML "
+               f"defines v{have}")
+
+assert not bad, "; ".join(bad)
+# COUNT THE SCRAPE, not the findings: naming the opcodes is exactly what
+# removes the literals, so a check that only asserted agreement would pass by
+# comparing nothing the moment the table went empty.
+print(len(WANT))
+PYEOF
+) || fail "wayland opcode drift check: $_opc"
+  [ "$_opc" -ge 15 ] || fail "only $_opc wayland opcode(s) compared"
+else
+  warn "wayland protocol XMLs absent, so the opcode drift check was SKIPPED" \
+       "(wanted $_wl and $_ext)"
+fi
+
 # A FLOOR, so an empty set cannot pass. Every selector above is a glob, and a
 # glob that matches nothing checks nothing while still reporting success, which
 # is how a renamed package went uncompiled behind a green test. The numbers only
 # have to be low enough never to need touching and high enough to catch a
 # collapse; they are not an inventory.
 [ "$_sh" -ge 5 ] || fail "only $_sh shell file(s): a selector is gone"
-pass "$_py python, $_sh shell, $_nk tunables, $_nv verbs"
+pass "$_py python, $_sh shell, $_nk tunables, $_nv verbs, $_opc opcodes"
