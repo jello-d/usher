@@ -2619,7 +2619,16 @@ def forget_apply(kb, selectors, profile=None):
     gone = forget_matches(kb, selectors)
     if not gone:
         return []
-    backup_knowledge()
+    # THE BACKUP IS ANNOUNCED, because it RETAINS WHAT WAS JUST DROPPED and
+    # nothing else says where it is. That is the right default for the case
+    # this verb was built for (an entry dropped by mistake can be read back),
+    # and exactly wrong for a PRIVACY purge, where the backup is a copy of
+    # the thing being removed. Met for real: purging another account's leaked
+    # titles left them sitting in `knowledge-<profile>.json.pre-forget-...`,
+    # found only by sweeping the whole state directory afterwards. A side
+    # effect nobody is told about is one nobody cleans up.
+    _bk = os.path.basename(backup_knowledge())
+    logline(f"forget: backed the store up to {_bk}")
     for k in gone:
         del kb[k]
         app, _, ident = k.partition("\x00")
