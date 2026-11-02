@@ -627,6 +627,27 @@ def _t_resolution(ck):
         engine.learn(_kb2, _g2, [_ow], time.time())
         ck("foreign-check-has-a-working-control", bool(_kb2))
 
+        # AND AGAIN WITH AN UNOWNED, SINGLE-WINDOW APP, which is a DIFFERENT
+        # PATH THROUGH learn and the one that was actually broken. The check
+        # above uses chrome, which a plugin OWNS, so `is_unique` is False and
+        # it reaches the gate by the third branch; an app_id-only window takes
+        # the FIRST branch, which did not ask. It passed for the wrong reason
+        # and a live box found what the suite could not: a work account's
+        # Slack kept being learned into `slack\0` with the resolution fix in
+        # place. The lesson is the file's own: when a check passes, ask which
+        # branch it proved.
+        _kb3, _g3 = {}, {}
+        _sw = {"app_id": "slack", "title": "Sign in | Slack", "key": "slack",
+               "pid": 1, "id": 94, "output": "eDP-1", "workspace": [1, 0],
+               "pos": [415, 55], "size": [1244, 1151]}
+        engine.learn(_kb3, _g3, [_sw], time.time())
+        ck("foreign-appid-only-app-is-never-learned", not _kb3)
+        _kb4, _g4 = {}, {}
+        engine.learn(_kb4, _g4,
+                     [dict(_sw, pid=os.getpid(), id=95)], time.time())
+        ck("foreign-appid-only-control-is-learned",
+           engine.kkey("slack", "") in _kb4)
+
     # 1d. THE WINDOW-SOURCE SEAM: whose window, from a hook, so usher names
     #     no provider and works identically with none.
     #

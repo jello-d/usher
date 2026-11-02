@@ -2168,27 +2168,42 @@ def _learn_stamp(kb, groups, windows, counts, when, hold=()):
         app, vid = w["app_id"], w.get("id")
         if vid in hold:
             continue
+        # A WINDOW usher CANNOT IDENTIFY IS NOT LEARNED, WHATEVER KEY SHAPE
+        # IT WOULD HAVE TAKEN, and the gate belongs HERE rather than inside one
+        # branch of the dispatch below.
+        #
+        # Falling through to the title path stored a key known to be wrong.
+        # Chrome hits this whenever its session file has not caught up with a
+        # window, which is often, and every title change then minted another
+        # entry: measured on manifold 2026-09-29, 286 of a 333-entry store were
+        # chrome keyed by raw TITLE, 86% of everything usher knew, none of it
+        # matchable. The window is simply not remembered until its id resolves,
+        # which is normally seconds, and the cost is a window whose session
+        # file never catches up never being remembered. That is the right
+        # trade: an entry nothing can ever match is not memory, it is litter,
+        # and it crowds out the entries that work.
+        #
+        # IT USED TO SIT THIRD, reached only after is_unique and the plugin key
+        # had both declined, which made it a rule about OWNED windows whose
+        # plugin could not answer. An app_id-only window never reached it,
+        # because for that key shape there is no identity to be unsure about:
+        # the app-id IS the handle.
+        #
+        # THAT STOPPED BEING TRUE when `unidentified` gained a second reason. A
+        # window belonging to ANOTHER ACCOUNT must not be keyed at all, and a
+        # single-window unowned app is exactly the case that bypassed the
+        # check: measured 2026-11-02, a work account's Slack was still learned
+        # into `slack\0` with the resolution fix in place and the daemon
+        # confirmed current, because this branch never asked. Third instance of
+        # the shape in this file: a gate scoped to one category, met by
+        # something outside the category.
+        if unidentified(w):
+            continue
         key = _single_id(w)
         if is_unique(app, counts):
             kb[kkey(app, "")] = kb_entry(w, w["title"], True, when)
         elif key:
             kb[kkey(app, key)] = kb_entry(w, key, False, when)
-        elif unidentified(w):
-            # AN OWNED WINDOW ITS PLUGIN COULD NOT IDENTIFY IS NOT LEARNED.
-            # Falling through to the title path stored a key known to be wrong.
-            # Chrome hits this whenever its session file has not caught up with
-            # a window, which is often, and every title change then minted
-            # another entry: measured on manifold 2026-09-29, 286 of a
-            # 333-entry store were chrome keyed by raw TITLE: 86% of
-            # everything usher knew, none of it matchable, and exactly the
-            # tab-in-titlebar spam three schema bumps have now tried to kill.
-            #
-            # The window is simply not remembered until its id resolves, which
-            # is normally seconds. The cost is a window whose session file
-            # never catches up never being remembered, and that is the right
-            # trade: an entry nothing can ever match is not memory, it is
-            # litter, and it crowds out the entries that work.
-            continue
         elif vid is not None and vid in groups:
             for t in groups[vid]["titles"]:
                 kb[kkey(app, t)] = kb_entry(w, t, False, when)
