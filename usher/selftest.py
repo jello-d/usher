@@ -2299,6 +2299,250 @@ def _t_toplevels(ck):
        == (5, 2, _st.pack("<I", 99)))
 
 
+def _quiet_launch(apps, live, spawned):
+    """roster_launch with its announcements swallowed. `_announce` prints as
+    well as logging, and the suite's `_quiet_log` only covers the log."""
+    with contextlib.redirect_stdout(io.StringIO()):
+        return engine.roster_launch(apps, live, spawn=spawned.append)
+
+
+def _t_roster(ck):
+    """The enclave's own two verbs: its roster, and starting from it.
+
+    THE AUTHORITY IS THE POINT. The owner triggers these and supplies no
+    content, so the record of what an account had open is written by that
+    account in its own home. Everything here pins the cases where getting it
+    wrong would either lose a desk or let the owner start something.
+    """
+    # PURE, so the decision needs no compositor and no other account.
+    ck("roster-plan-is-the-difference",
+       engine.roster_plan(["a", "b", "c"], ["b"]) == ["a", "c"])
+    ck("roster-plan-empty-when-all-live",
+       engine.roster_plan(["a"], ["a", "z"]) == [])
+    ck("roster-plan-ignores-blanks",
+       engine.roster_plan(["a", ""], ["", "z"]) == ["a"])
+
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "state", "roster.json")
+        ck("roster-round-trips-sorted-and-deduped",
+           engine.save_roster(["slack", "google-chrome", "slack", ""],
+                              path=p) == ["google-chrome", "slack"]
+           and engine.load_roster(p) == (["google-chrome", "slack"], ""))
+        # THREE STATES AND NOT TWO: a captured account with nothing open is a
+        # real answer, and must not read the same as a roster that cannot be
+        # read at all. Collapsing those is how a resume would start nothing
+        # and report success.
+        empty = os.path.join(d, "empty.json")
+        engine.save_roster([], path=empty)
+        ck("roster-captured-but-empty-is-a-real-answer",
+           engine.load_roster(empty) == ([], ""))
+        ck("roster-absent-is-a-reason",
+           engine.load_roster(os.path.join(d, "none.json"))[1]
+           .startswith("no roster at"))
+        bad = os.path.join(d, "bad.json")
+        open(bad, "w").write("{not json")
+        ck("roster-unreadable-is-a-reason",
+           engine.load_roster(bad)[1].startswith("cannot read the roster"))
+        ver = os.path.join(d, "ver.json")
+        open(ver, "w").write('{"version": 99, "apps": ["x"]}')
+        got, why = engine.load_roster(ver)
+        ck("roster-wrong-version-is-a-reason-not-an-app-list",
+           got == [] and "version 99" in why)
+        ck("roster-three-states-are-pairwise-distinct",
+           len({"", engine.load_roster(os.path.join(d, "none.json"))[1],
+                engine.load_roster(bad)[1]}) == 3)
+        shape = os.path.join(d, "shape.json")
+        open(shape, "w").write('{"version": 1, "apps": "slack"}')
+        ck("roster-app-list-must-be-a-list",
+           engine.load_roster(shape)[1].endswith("carries no app list"))
+        # A HAND-WRITTEN OR HALF-WRITTEN ROSTER IS THE CASE THE FILTER IS FOR,
+        # and checking only the round trip tested nothing: save_roster already
+        # normalises, so load_roster could return the list raw and still
+        # agree. A planted regression doing exactly that passed the whole
+        # suite. This is the file as a human or an interrupted write leaves it.
+        raw = os.path.join(d, "raw.json")
+        open(raw, "w").write(
+            '{"version": 1, "apps": ["b", "", "a", 7, "a", null]}')
+        ck("roster-normalises-what-it-reads-off-disk",
+           engine.load_roster(raw) == (["a", "b"], ""))
+
+    # WHAT doctor SAYS ABOUT THE SEAM, as a pure table. The lines matter as
+    # much as the mechanism: the symptom of a missing hook is "my work apps
+    # did not come back" with nothing anywhere saying why.
+    from .doctor import source_seam_report as _seam
+    ck("seam-reports-a-source-it-can-ask",
+       _seam(["titan"], True, [], "no roster")
+       == [("OK", "source-trigger present; 1 other account(s) can be asked: "
+                  "titan")])
+    _unreachable = _seam(["titan"], False, [], "no roster", hook="/h")
+    ck("seam-warns-when-a-source-cannot-be-asked",
+       _unreachable[0][0] == "WARN" and "titan" in _unreachable[0][1]
+       and "/h" in _unreachable[0][1])
+    ck("seam-says-what-that-costs",
+       _unreachable[1] == ("", "their windows are placed, and their apps "
+                               "are never started"))
+    # SILENCE IS ONE OF THE ANSWERS and it is the common one. Every ordinary
+    # box has neither a hook nor another account, and a line that is always
+    # there and never actionable is the kind that gets skimmed past.
+    ck("seam-says-nothing-on-a-box-with-neither",
+       _seam([], False, [], "no roster") == [])
+    ck("seam-reports-this-accounts-own-roster",
+       _seam([], False, ["slack"], "")
+       == [("OK", "this account's own roster: slack")])
+    # AND CAPTURED-BUT-EMPTY MUST NOT READ LIKE NOT-AN-ENCLAVE. One is a desk
+    # that will come back as nothing; the other is an ordinary box. Three
+    # states again, and collapsing two is how the wrong remedy prints.
+    # COMPARED AS A LIST OF LEVELS, not by indexing: with the branch removed
+    # the rows are empty, and `[0][0]` then raises instead of failing by name.
+    # The area guard does report that, so it is not silent, but a named FAIL
+    # is what a reader can act on.
+    ck("seam-empty-roster-and-no-roster-differ",
+       [r[0] for r in _seam([], False, [], "")] == ["WARN", ""]
+       and _seam([], False, [], "no roster") == [])
+
+    # THE VERBS, with the wayland client and the spawn both stubbed.
+    real_list = toplevels.list_toplevels
+    real_state = engine.STATE
+    real_src = engine.source_trigger
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            engine.STATE = d
+            rows = [{"app_id": "google-chrome", "title": "t",
+                     "identifier": "1"},
+                    {"app_id": "slack", "title": "u", "identifier": "2"}]
+            toplevels.list_toplevels = lambda *a, **k: (rows, "")
+            out = _capture_out(engine.do_source_capture)
+            ck("capture-records-its-own-apps",
+               engine.load_roster()[0] == ["google-chrome", "slack"]
+               and "2 app(s)" in out)
+
+            # A FAILING CLIENT MUST NOT WRITE. "Could not look" is not "there
+            # was nothing", and writing an empty roster on a failed read is
+            # exactly how a desk is lost.
+            toplevels.list_toplevels = lambda *a, **k: ([], "no socket here")
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                rc = engine.do_source_capture()
+            ck("capture-refuses-when-it-cannot-look",
+               rc == engine.EXIT_CANNOT
+               and "no socket here" in buf.getvalue()
+               and engine.load_roster()[0] == ["google-chrome", "slack"])
+
+            # AND AN EMPTY OBSERVATION NEVER OVERWRITES A REMEMBERED DESK.
+            # This is September's browser-less capture one account over: an
+            # enclave captured AFTER its apps are killed records an empty desk
+            # and the next login restores nothing from a record that looks
+            # perfectly valid.
+            toplevels.list_toplevels = lambda *a, **k: ([], "")
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                rc = engine.do_source_capture()
+            ck("capture-empty-does-not-clobber-a-remembered-desk",
+               rc == engine.EXIT_CANNOT
+               and engine.load_roster()[0] == ["google-chrome", "slack"]
+               and "NOT being overwritten" in buf.getvalue())
+
+            # IT STILL SELF-CORRECTS, which is what keeps that rule narrow:
+            # any observation with a window REPLACES the roster wholesale, so
+            # an app really closed stops coming back.
+            toplevels.list_toplevels = lambda *a, **k: ([rows[1]], "")
+            _capture_out(engine.do_source_capture)
+            ck("capture-a-smaller-desk-replaces-the-roster",
+               engine.load_roster()[0] == ["slack"])
+
+        with tempfile.TemporaryDirectory() as d:
+            engine.STATE = d
+            spawned = []
+            asked = []
+            engine.source_trigger = \
+                lambda *a, **k: asked.append(a) or 0
+
+            # NO ROSTER MEANS NOTHING WAS ASSESSED, not nothing to do.
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                rc = engine.do_source_resume()
+            ck("resume-with-no-roster-cannot-rather-than-fails",
+               rc == engine.EXIT_CANNOT and "never been captured"
+               in buf.getvalue())
+
+            engine.save_roster([])
+            ck("resume-with-an-empty-roster-is-ok-and-starts-nothing",
+               "nothing to start" in _capture_out(engine.do_source_resume))
+
+            engine.save_roster(["google-chrome", "slack"])
+            # LIVENESS IS REQUIRED. Unable to tell a cold start from a second
+            # trigger, starting a second copy of everything is worse than
+            # starting nothing, and this is the only path here that acts.
+            toplevels.list_toplevels = lambda *a, **k: ([], "cannot look")
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                rc = engine.do_source_resume()
+            ck("resume-refuses-rather-than-start-blind",
+               rc == engine.EXIT_CANNOT and not spawned
+               and "not starting any" in buf.getvalue())
+
+            # THE ORCHESTRATION IS TESTED WITH THE LAUNCHER STUBBED, and that
+            # is not tidiness: `roster_launch` with no spawn hands
+            # ChromePlugin a missing `google-chrome` and it runs the real
+            # browser. This suite has opened 16 real terminals on the
+            # developer's desktop once already, for the same reason, and the
+            # capture loop then learned them as slots. So the decision and
+            # the launching are checked separately, each with the stub its own
+            # path needs.
+            toplevels.list_toplevels = lambda *a, **k: (
+                [{"app_id": "slack", "title": "", "identifier": "2"}], "")
+            real_launch = engine.roster_launch
+            try:
+                wanted = []
+                engine.roster_launch = \
+                    lambda apps, live, spawn=None: (
+                        wanted.append((sorted(apps), sorted(live)))
+                        or len(engine.roster_plan(apps, live)))
+                out = _capture_out(engine.do_source_resume)
+            finally:
+                engine.roster_launch = real_launch
+            ck("resume-passes-the-roster-and-the-live-set",
+               wanted == [(["google-chrome", "slack"], ["slack"])])
+            ck("resume-names-only-what-is-missing",
+               out.rstrip().endswith(": google-chrome")
+               and "1 missing app(s)" in out)
+
+            # AND THE LAUNCHER ITSELF, with no plugin able to claim the app
+            # and the spawn injected, so nothing real can start. An app-id no
+            # desktop entry matches would be refused before spawning, so this
+            # uses one the fixture registry does answer.
+            real_plugins = engine.plugins
+            real_entries = engine.desktop_entries
+            try:
+                engine.plugins = lambda: []
+                engine.desktop_entries = lambda *a, **k: {
+                    "zzz-probe": {"exec": "true", "terminal": "false",
+                                  "name": "probe", "nodisplay": "false",
+                                  "hidden": "false"}}
+                # _announce PRINTS as well as logging, and _quiet_log only
+                # covers the log, so without this every run prints
+                # `launch  true` into the suite's own output.
+                with contextlib.redirect_stdout(io.StringIO()):
+                    n = engine.roster_launch(["zzz-probe"], [],
+                                             spawn=spawned.append)
+            finally:
+                engine.plugins = real_plugins
+                engine.desktop_entries = real_entries
+            # THE LOOP GUARD: an account reached through the source seam must
+            # not reach back through it. One enclave triggering another is a
+            # loop, and nothing on this side is the owner.
+            ck("roster-launch-never-asks-another-source", asked == [])
+            ck("roster-launch-spawns-through-the-registry",
+               n == 1 and spawned == [["true"]])
+            ck("roster-launch-starts-nothing-already-live",
+               _quiet_launch(["zzz-probe"], ["zzz-probe"], spawned) == 0
+               and len(spawned) == 1)
+    finally:
+        toplevels.list_toplevels = real_list
+        engine.STATE = real_state
+        engine.source_trigger = real_src
+
+
 def _t_cli_split(ck):
     """The two front ends: one table, and each refuses the other's verbs.
 
@@ -2868,32 +3112,27 @@ def _t_relaunch(ck):
     finally:
         engine.spawn_term, engine._announce = _rst, _ran2
 
-    # STEP 3: ANOTHER ACCOUNT'S APPS ARE ASKED FOR, never started here.
+    # STEP 3: ANOTHER ACCOUNT IS ASKED TO ACT, and is handed NO CONTENT.
     #
     # THE PLAN IS PURE, so the decision is checkable with no hook, no
     # compositor and no second account.
     _sv = [{"app_id": "slack", "source": "titan"},
            {"app_id": "google-chrome", "source": "titan"},
            {"app_id": "signal"}]
-    ck("source-plan-groups-by-source",
-       engine.source_relaunch_plan(_sv, [])
-       == {"titan": ["google-chrome", "slack"]})
+    ck("source-plan-names-the-sources-present",
+       engine.source_trigger_plan(_sv) == ["titan"])
     ck("source-plan-ignores-the-owners-own-windows",
-       "signal" not in str(engine.source_relaunch_plan(_sv, [])))
-    # MISSING IS PER (SOURCE, APP). The OWNER running Slack says nothing about
-    # whether the work account's Slack is up, and one is not a substitute for
-    # the other: counting them together is how a work app would silently never
-    # come back.
-    ck("source-plan-the-owners-live-app-does-not-satisfy-a-source",
-       engine.source_relaunch_plan(_sv, [_trv("slack", "mine",
-                                              pid=os.getpid())])
-       == {"titan": ["google-chrome", "slack"]})
-    ck("source-plan-empty-when-nothing-is-foreign",
-       engine.source_relaunch_plan([{"app_id": "signal"}], []) == {})
+       engine.source_trigger_plan([{"app_id": "signal"}]) == [])
+    ck("source-plan-is-one-entry-per-source-not-per-window",
+       engine.source_trigger_plan(_sv + [{"app_id": "x", "source": "titan"},
+                                         {"app_id": "y", "source": "other"}])
+       == ["other", "titan"])
 
-    # AND THE HOOK IS HANDED APP-IDS, NEVER A COMMAND, which is the whole
-    # security content: the privileged side resolves each one against ITS OWN
-    # registry, so the owner can NAME an app and cannot inject a command.
+    # AND THE HOOK IS HANDED A SOURCE AND AN ACTION, NOTHING ELSE. This is the
+    # whole security content of the seam and it was the SECOND design: the
+    # first handed over app-ids, which is an escalation, because a recognised
+    # terminal app-id resolves to a terminal on the far side and the owner
+    # would then have arbitrary code running as the other account.
     _asked_sr = []
 
     def _sr_ok(argv, **_k):
@@ -2904,27 +3143,43 @@ def _t_relaunch(ck):
             stderr = ""
         return R()
 
-    _rsrh, _rl3 = engine.SOURCE_RELAUNCH_HOOK, engine.logline
+    _rsrh, _rl3 = engine.SOURCE_TRIGGER_HOOK, engine.logline
     _said3 = []
     _hd3 = tempfile.mkdtemp(prefix="usher-sr-", dir="/var/tmp")
     try:
         engine.logline = _said3.append
-        _hk = os.path.join(_hd3, "source-relaunch")
+        _hk = os.path.join(_hd3, "source-trigger")
         with open(_hk, "w") as f:
             f.write("#!/bin/sh\nexit 0\n")
         os.chmod(_hk, 0o755)
         _ra = engine._announce
         engine._announce = lambda *a, **k: None
         try:
-            _n_sr = engine.source_relaunch_missing(_sv, [], run=_sr_ok,
-                                                   hook=_hk)
-            ck("source-relaunch-asks-once-per-source", len(_asked_sr) == 1)
-            ck("source-relaunch-passes-the-source-then-app-ids",
-               _asked_sr == [[_hk, "titan", "google-chrome", "slack"]])
-            ck("source-relaunch-counts-the-apps-asked-for", _n_sr == 2)
-            # NO COMMAND ANYWHERE IN WHAT THE HOOK IS HANDED.
-            ck("source-relaunch-hands-over-no-command",
-               not any("/" in a for a in _asked_sr[0][2:]))
+            _n_sr = engine.source_trigger(["titan"], "resume", run=_sr_ok,
+                                          hook=_hk)
+            ck("source-trigger-asks-once-per-source", len(_asked_sr) == 1)
+            ck("source-trigger-passes-the-source-and-the-action",
+               _asked_sr == [[_hk, "titan", "resume"]])
+            ck("source-trigger-counts-what-accepted", _n_sr == 1)
+            # EXACTLY THREE WORDS, and the argv length is the check rather
+            # than a scan of its contents: a scan can be satisfied by content
+            # that merely looks harmless, where a fixed arity cannot carry a
+            # list of anything.
+            ck("source-trigger-hands-over-no-content",
+               len(_asked_sr[0]) == 3
+               and _asked_sr[0][2] in engine.SOURCE_ACTIONS)
+            # AN ACTION OUTSIDE THE CLOSED SET IS A PROGRAMMING ERROR, not
+            # something to pass through: the far side validates nothing, so
+            # this side is where it has to stop.
+            ck("source-trigger-refuses-an-unknown-action", _raises(
+                ValueError,
+                lambda: engine.source_trigger(["titan"], "rm", run=_sr_ok,
+                                              hook=_hk)))
+            ck("source-trigger-capture-is-a-known-action",
+               engine.source_trigger(["titan"], "capture", run=_sr_ok,
+                                     hook=_hk) == 1
+               and _asked_sr[-1] == [_hk, "titan", "capture"])
+
             # A REFUSAL IS REPORTED AND NOT COUNTED.
             def _sr_no(argv, **_k):
                 class R:
@@ -2932,32 +3187,32 @@ def _t_relaunch(ck):
                     stderr = "nope"
                 return R()
             _said3.clear()
-            ck("source-relaunch-a-refusal-is-not-counted",
-               engine.source_relaunch_missing(_sv, [], run=_sr_no,
-                                              hook=_hk) == 0)
-            ck("source-relaunch-a-refusal-is-reported",
+            ck("source-trigger-a-refusal-is-not-counted",
+               engine.source_trigger(["titan"], "resume", run=_sr_no,
+                                     hook=_hk) == 0)
+            ck("source-trigger-a-refusal-is-reported",
                any("refused" in m for m in _said3))
         finally:
             engine._announce = _ra
         # NO HOOK, BUT SOMETHING TO ASK: reported, because the reason nothing
         # came back must not be silent.
         _said3.clear()
-        ck("source-relaunch-no-hook-asks-nothing",
-           engine.source_relaunch_missing(_sv, [],
-                                          hook=os.path.join(_hd3, "nope"))
-           == 0)
-        ck("source-relaunch-no-hook-says-why",
-           any("no source-relaunch hook" in m for m in _said3))
+        ck("source-trigger-no-hook-asks-nothing",
+           engine.source_trigger(["titan"], "resume",
+                                 hook=os.path.join(_hd3, "nope")) == 0)
+        ck("source-trigger-no-hook-says-why",
+           any("no source-trigger hook" in m for m in _said3))
         # ...AND NOTHING TO ASK STAYS QUIET, or a box with no other account
         # gains a line at every login and the line gets ignored.
         _said3.clear()
-        ck("source-relaunch-quiet-when-there-is-nothing-to-do",
-           engine.source_relaunch_missing([{"app_id": "signal"}], [],
-                                          hook=os.path.join(_hd3, "nope"))
-           == 0 and not _said3)
+        ck("source-trigger-quiet-when-there-is-nothing-to-do",
+           engine.source_trigger([], "resume",
+                                 hook=os.path.join(_hd3, "nope")) == 0
+           and not _said3)
     finally:
-        engine.SOURCE_RELAUNCH_HOOK, engine.logline = _rsrh, _rl3
+        engine.SOURCE_TRIGGER_HOOK, engine.logline = _rsrh, _rl3
         shutil.rmtree(_hd3, ignore_errors=True)
+
 
 def _t_chrome(ck):
     """chrome identity, profiles, and the restore flags."""
@@ -4992,7 +5247,7 @@ def selftest():
     # planting the Resolution guard removal), so it is fixed here rather than
     # in each caller.
     for area in (_t_registry, _t_resolution, _t_lock,
-                 _t_toplevels,
+                 _t_toplevels, _t_roster,
                  _t_lifecycle, _t_desktop, _t_slots, _t_verify,
                  _t_terminals, _t_cli_split,
                  _t_launch_source,

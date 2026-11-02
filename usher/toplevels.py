@@ -66,6 +66,17 @@ class ProtocolError(Exception):
     because every caller reports it rather than branching on it."""
 
 
+def standard_runtime_dir(euid=None):
+    """The runtime directory the spec defines for a uid.
+
+    PURE AND INJECTABLE, so the rule can be pinned without the answer
+    depending on which box the suite runs on. A check that reads real system
+    state is a check on the host, which has passed for the wrong reason three
+    times in this tree already.
+    """
+    return f"/run/user/{os.geteuid() if euid is None else euid}"
+
+
 def wayland_socket(env=None):
     """(path, why) for THIS process's own display socket.
 
@@ -93,7 +104,17 @@ def wayland_socket(env=None):
             return path, ""
         return "", f"no wayland socket at {path}"
     if not run:
-        return "", "neither WAYLAND_DISPLAY nor XDG_RUNTIME_DIR is set"
+        # THE STANDARD LOCATION, because `sudo` clears XDG_RUNTIME_DIR and
+        # these verbs are reached through one. This is the path the spec
+        # defines and the only one that can be derived rather than told, so it
+        # is a derivation and NOT a guess about any particular session's
+        # layout. An account whose socket lives elsewhere gets the refusal
+        # below, naming where this looked, which is the answer a reader can
+        # act on.
+        run = standard_runtime_dir()
+        if not os.path.isdir(run):
+            return "", ("neither WAYLAND_DISPLAY nor XDG_RUNTIME_DIR is set, "
+                        f"and there is no {run} to look in")
     found = sorted(p for p in glob.glob(os.path.join(run, "wayland-*"))
                    if not p.endswith(".lock"))
     if len(found) == 1:

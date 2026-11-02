@@ -128,7 +128,44 @@ def _doctor_store(out):
     return kb, snap
 
 
-def _doctor_contracts(out):
+def source_seam_report(sources, reachable, apps, roster_why, hook=""):
+    """The source-seam lines, as (level, text); level "" continues the one
+    above. PURE, because the cell that was wrong could not be checked while
+    it was four branches wrapped around an os.access.
+
+    SILENCE IS ONE OF THE ANSWERS, and it is the common one: a box with
+    neither a hook nor another account says NOTHING here. A line that is
+    always present and never actionable is the kind a reader learns to skim
+    past, and this section is read when something did not come back.
+    """
+    rows = []
+    if sources and reachable:
+        rows.append(("OK", f"source-trigger present; {len(sources)} other "
+                           f"account(s) can be asked: {' '.join(sources)}"))
+    elif sources:
+        rows.append(("WARN", f"{len(sources)} other account(s) had windows "
+                             f"here ({' '.join(sources)}) and there is no "
+                             f"source-trigger hook at {hook}"))
+        rows.append(("", "their windows are placed, and their apps are "
+                         "never started"))
+    elif reachable:
+        rows.append(("OK", "source-trigger present; no other account had "
+                           "windows at the last capture"))
+    # IF THIS ACCOUNT IS ITSELF A SOURCE, its roster is what decides whether
+    # anything comes back, so the contents are the finding. An UNREADABLE
+    # roster says nothing at all: that is simply a box that is not an
+    # enclave, and it must not read the same as a captured-but-empty one.
+    if apps:
+        rows.append(("OK", f"this account's own roster: {' '.join(apps)}"))
+    elif not roster_why:
+        rows.append(("WARN", "this account's roster is EMPTY, so a resume "
+                             "would start nothing"))
+        rows.append(("", "it is captured while the session is intact, "
+                         "before a teardown"))
+    return rows
+
+
+def _doctor_contracts(out, snap=None):
     """The cross-tool assumptions. These are the ones that break in SILENCE,
     because they live in another repo's output format."""
     rc = 0
@@ -151,6 +188,22 @@ def _doctor_contracts(out):
         # Only loud when this session WAS summoned: an unlocked console you
         # are sitting at is not a finding.
         out("  [WARN] this session was SUMMONED and is not locked")
+    # ANOTHER ACCOUNT'S APPS, and reported HERE rather than lower down
+    # because the mux block below RETURNS EARLY when mux is absent, so
+    # anything after it is silently skipped on a box without mux.
+    #
+    # DRIVEN BY THE LAST CAPTURE, which is the only source list available at
+    # this point (the live views are read further down, after this section).
+    # That is the right one anyway: it is what `launch_missing` asks from.
+    _hook = engine.SOURCE_TRIGGER_HOOK
+    for _lvl, _msg in source_seam_report(
+            engine.source_trigger_plan((snap or {}).get("windows", [])),
+            bool(_hook) and os.access(_hook, os.X_OK),
+            *engine.load_roster(), hook=_hook):
+        # ONE PREFIX WIDTH for both levels, matching every other line in this
+        # section: `[OK]` and `[WARN]` differ by two characters, so padding
+        # the bracketed word rather than the level is what keeps the column.
+        out(f"  {'[' + _lvl + ']':<6} {_msg}" if _lvl else f"{'':9}{_msg}")
     # RESOLVED BY PATH, never a prefix, and not a third copy of the name: this
     # hardcoded `~/.local/bin/mux` and reported mux ABSENT on a box where mux
     # had simply moved to a machine-wide install. Reporting the path it FOUND
@@ -473,7 +526,7 @@ def do_doctor():
         hooks = [h for h in PLUGIN_HOOKS
                  if h in getattr(type(p), "__dict__", {})]
         out(f"  {getattr(p, 'name', '?'):10} {', '.join(hooks)}")
-    rc = _doctor_contracts(out)
+    rc = _doctor_contracts(out, snap)
     live, outs, ok = _doctor_compositor(out)
     if ok:
         _doctor_relaunch(out, snap, live)

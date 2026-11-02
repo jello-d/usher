@@ -38,6 +38,15 @@ VERBS = {
     "display-changed": ("mgr", "hwdp changed hook; no-op if the set matches"),
     "_super":          ("mgr", None),   # internal: the re-exec'd supervisor
     "_worker":         ("mgr", None),   # internal: the supervised worker
+    # INTERNAL, AND REACHED THROUGH A SUDOERS GRANT. An enclave account runs
+    # these as ITSELF to record and bring back its OWN apps, so the grant
+    # names a fixed command with no wildcard and neither verb ever takes an
+    # argument. Hidden from the usage text and refused by the `usher` entry
+    # point for the same reason `_super` and `_worker` are: a verb a human
+    # types is one somebody may extend, and the grant must not be able to
+    # mean something nobody reviewed.
+    "_source-capture": ("mgr", None),   # internal: this account's own roster
+    "_source-resume":  ("mgr", None),   # internal: start this account's apps
     "save":            ("cli", "record the current layout"),
     "capture":         ("both", "record the current layout (alias of save)"),
     "restore":         ("cli", "put windows back [--dry-run] [--only S] "
@@ -538,6 +547,10 @@ def _dispatch(verb, args):
         watch.do_watch(launch="--no-launch" not in args)
     elif verb == "_worker":       # internal: the supervised worker
         watch.watch_worker(launch="--no-launch" not in args)
+    elif verb == "_source-capture":   # internal: record THIS account's apps
+        sys.exit(engine.do_source_capture())
+    elif verb == "_source-resume":    # internal: start THIS account's apps
+        sys.exit(engine.do_source_resume())
     elif verb == "stop":          # SIGTERM the supervisor cleanly (no pkill)
         engine.do_stop()
     elif verb == "launch":
