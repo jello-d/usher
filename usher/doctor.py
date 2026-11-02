@@ -403,8 +403,12 @@ def _doctor_placement(out, kb, live, outs):
                 f" -> {where} NOT ATTACHED")
     for lv in unlive:
         tag, why = _unmatched_why(lv)
+        # THE ONE REPORT LINE THAT RENDERS A LIVE VIEW'S OWN TITLE, so it is
+        # the one that needs redacting: every other line here prints a kb
+        # entry's key-title, which for another account is already its source
+        # name. `engine.log_title` is the same predicate watch.log uses.
         out(f"  {tag:10} {app_of(lv)[:14]:14}"
-            f" {lv.get('title','')[:34]:34}{why}")
+            f" {engine.log_title(lv)[:34]:34}{why}")
 
 
 def _unmatched_why(lv):

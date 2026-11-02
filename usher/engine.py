@@ -1349,6 +1349,34 @@ def source_of(v):
     return window_origin(pview(v).get("pid"))[0] or ""
 
 
+def log_title(v):
+    """The title a LOG LINE or a REPORT may carry for this view.
+
+    ANOTHER ACCOUNT'S TITLE IS ITS CONTENT, and `watch.log` sits in the
+    session user's own readable state, so a foreign window contributes its
+    SOURCE NAME and never its title. The name is not a secret: the compositor
+    already paints it on the window's frame.
+
+    THE SAME DISCLOSURE BY A SECOND ROUTE, which is why this exists at all.
+    `snapshot()` redacts what is STORED, and that was fixed first; a log line
+    printing a LIVE view's title was still live afterwards. Measured on
+    manifold within a minute of the fixed daemon starting:
+
+        recognised late, re-graced: google-chrome | Inbox (23) - jello@...
+
+    So the rule is the one this package keeps arriving at: ONE predicate, and
+    every site that renders a window for a human asks it. Eight log sites are
+    fed by three derivations, and they all come through here.
+
+    THE OWNER'S OWN TITLE IS UNTOUCHED, deliberately. watch.log's entire
+    value is being readable afterwards, and this repo's forensics quote those
+    lines constantly, so redacting everything would cost the thing the log is
+    for.
+    """
+    src = source_of(v)
+    return f"[{src}]" if src else (v.get("title") or "")
+
+
 def foreign_owner(pid, uid_of=None, me=None):
     """The uid owning `pid` when that is NOT this session's user, else None.
 
