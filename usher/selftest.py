@@ -3186,6 +3186,30 @@ def _t_snapshots(ck):
            _by.get("google-chrome", {}).get("owner") == 0)
         ck("snapshot-leaves-our-own-window-unstamped",
            "owner" not in _by.get("signal", {}))
+        # AND IT REDACTS THE CONTENT-BEARING FIELDS, which is a privacy
+        # boundary and not tidiness: usher's state lives in the OWNER's home
+        # where every one of their processes can read it, and `history/` is a
+        # rolling ring, so a work window's TITLE recorded here is work content
+        # in the owner's filesystem. Measured on a live box before this
+        # existed: a Slack DM's correspondent, a meeting invitation naming a
+        # person, and a calendar week, in current.json and two history files.
+        _fr2 = _by.get("google-chrome", {})
+        ck("snapshot-redacts-a-foreign-title", _fr2.get("title") == "")
+        # `key` IS identity(), which falls back to the RAW TITLE for a window
+        # nothing can identify, so leaving it would reinstate the leak under
+        # another field name.
+        ck("snapshot-redacts-the-foreign-key", _fr2.get("key") == "")
+        ck("snapshot-drops-the-foreign-command", _fr2.get("cmd") is None)
+        # WHAT usher STILL NEEDS SURVIVES, or the redaction has taken the
+        # relaunch skip and a future restore with it.
+        ck("snapshot-keeps-the-foreign-app-id",
+           _fr2.get("app_id") == "google-chrome")
+        ck("snapshot-keeps-the-foreign-geometry",
+           _fr2.get("pos") is not None and _fr2.get("size") is not None)
+        # AND OUR OWN WINDOW IS UNTOUCHED, or this would pass by redacting
+        # everything.
+        ck("snapshot-does-not-redact-our-own-title",
+           _by.get("signal", {}).get("title") == "Signal")
 
     _e = entries_from_snapshot(_snap)
     ck("milestone-entries", len(_e) == 3)

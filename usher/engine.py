@@ -801,6 +801,37 @@ def snapshot(sock):
         # somebody's work application.
         if _own is not None:
             w["owner"] = _own
+            # REDACTED, AND THIS IS A PRIVACY BOUNDARY RATHER THAN TIDINESS.
+            # A window belonging to another account is captured so the
+            # relaunch paths can SKIP it and so a reader can see one was
+            # here, and its TITLE is the one field that carries that
+            # account's content: a chat window names who is messaging, a
+            # browser window names the page.
+            #
+            # usher's state lives in the OWNER's `~/.local/state/usher`, which
+            # every one of the owner's processes can read, and `history/` is a
+            # rolling ring, so a title recorded here is work content sitting
+            # in the owner's filesystem for as long as the ring holds it.
+            # The whole point of a separate account is that the owner's side
+            # cannot stumble into that.
+            #
+            # MEASURED 2026-11-02 before this existed: `current.json` and two
+            # history files held a work Slack DM's correspondent, a meeting
+            # invitation naming a person, and a calendar week.
+            #
+            # WHAT SURVIVES IS WHAT usher NEEDS: the app-id, whose window it
+            # was, and the geometry. That is enough to skip it in the
+            # relaunch, enough to say "a titan window was here" in a report,
+            # and enough for a future restore to ask the OWNING account to
+            # start that app. Position and size are not content.
+            #
+            # `key` AND `cmd` GO TOO. `key` is `identity()`, which for an
+            # unidentifiable window falls back to the raw title, so leaving it
+            # would reinstate the leak under another field name; `cmd` is read
+            # from a process tree usher may not run anything from anyway.
+            w["title"] = ""
+            w["key"] = ""
+            w["cmd"] = None
         windows.append(w)
     return {
         "version": SNAPSHOT_VERSION,
