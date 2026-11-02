@@ -41,6 +41,7 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -176,6 +177,38 @@ def _trv(app, title="", pid=-1, vid=None):
     with _tv: anything reached through pview takes either, but app_of and the
     matcher read `app-id` and see nothing in a normalized view."""
     return {"app-id": app, "title": title, "pid": pid, "id": vid}
+
+
+def _stat_uid(path):
+    """The owner of `path`, or None if it is gone. For asking whose process a
+    /proc entry is without parsing status."""
+    try:
+        return os.stat(path).st_uid
+    except OSError:
+        return None
+
+
+def _dead_pid():
+    """A pid that is NOT running, found rather than guessed: a hardcoded high
+    number is a pid somebody else may be using, and this is handed to
+    os.kill."""
+    for p in range(4194300, 4194000, -1):
+        if not os.path.exists(f"/proc/{p}"):
+            return p
+    raise AssertionError("could not find an unused pid")
+
+
+_DEAD_PID = _dead_pid()
+
+
+def _capture_out(fn, *a, **kw):
+    """Run `fn` and return what it PRINTED. The wind-down reports to stdout,
+    because it talks to a human holding down a power button, so its stdout is
+    the thing under test."""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        fn(*a, **kw)
+    return buf.getvalue()
 
 def _t_registry(ck):
     """the plugin registry: who claims which window, and the
@@ -2279,6 +2312,94 @@ def _t_chrome(ck):
        and not is_browser_cmdline(b"")
        and not is_browser_cmdline(
            b"/opt/google/chrome/chrome_crashpad_handler\0--monitor-self\0"))
+
+    # ...AND IT MUST FIND ONLY *THIS USER'S* BROWSER, which became reachable
+    # the day a second account ran its own Chrome on the same display.
+    # Measured 2026-11-02: browser_pids() returned [mine, theirs] and the
+    # foreign one is not signalable, so wind-down counted a process it could
+    # not touch as having exited.
+    #
+    # THE INVARIANT OVER THE REAL WALK, and the count is stated because with
+    # no browser running this half is vacuous and a bare ok would hide that.
+    _bp = chrome.browser_pids()
+    _notmine = [p for p in _bp
+                if _stat_uid(f"/proc/{p}") not in (os.getuid(), None)]
+    ck(f"browser-pids-only-this-user ({len(_bp)} found)", not _notmine)
+
+    # ...AND THE FILTER PROVED IN BOTH DIRECTIONS, which the invariant above
+    # cannot do on a box with no second account's browser running. A REAL
+    # process that `is_browser_cmdline` matches, with no browser installed and
+    # no second uid needed: `Popen(args, executable=...)` runs /bin/sleep
+    # while argv[0] says chrome, which is what the walk reads.
+    _fake = subprocess.Popen(["/opt/google/chrome/chrome", "30"],
+                             executable="/bin/sleep",
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+    try:
+        ck("browser-pids-finds-my-own-browser",
+           _fake.pid in chrome.browser_pids())
+        # Now ask the SAME walk as somebody else: every /proc entry fails the
+        # owner test, so a filtered walk finds nothing and an unfiltered one
+        # still finds the process above.
+        ck("browser-pids-excludes-another-users-browser",
+           _fake.pid not in chrome.browser_pids(uid=999999))
+    finally:
+        _fake.kill()
+        _fake.wait()
+
+    # wind_down RETURNS ONLY WHAT IT SIGNALLED, because the caller WAITS on
+    # that list: a pid we could not signal would be waited for and then read
+    # as exited. Driven with pids that cannot be signalled for the two
+    # different reasons.
+    # STUBBED ON `engine`, NOT ON `chrome`: engine does `from .chrome import
+    # browser_pids`, so it holds its OWN binding and patching chrome's leaves
+    # the real /proc walk in place. Written the other way first, and both
+    # checks below passed over an empty list for that reason, which the
+    # message check caught.
+    _rbp2 = engine.browser_pids
+    _rlog = engine.logline
+    _said = []
+    try:
+        engine.logline = lambda m: _said.append(m)
+        engine.browser_pids = lambda: [_DEAD_PID]
+        ck("wind-down-drops-a-pid-that-is-already-gone",
+           _ch.wind_down([]) == [])
+        # EPERM, not ESRCH: pid 1 is alive and root's. SIGTERM to it is
+        # REFUSED for a non-root caller and delivers nothing; skipped
+        # outright if this ever runs as root, where it would not be.
+        if os.getuid() != 0:
+            _said.clear()
+            engine.browser_pids = lambda: [1]
+            ck("wind-down-drops-a-pid-it-cannot-signal",
+               _ch.wind_down([]) == [])
+            ck("wind-down-says-what-it-could-not-signal",
+               any("could not signal browser 1" in m for m in _said))
+    finally:
+        engine.browser_pids, engine.logline = _rbp2, _rlog
+
+    # _wind_down_wait MUST NOT READ EPERM AS "EXITED", which is the overclaim
+    # that made a logout report a clean browser stop it had not performed.
+    _rwt = engine.WIND_DOWN_TIMEOUT
+    try:
+        engine.WIND_DOWN_TIMEOUT = 0.3        # the loop must stay bounded
+        ck("wind-down-wait-nothing-asked",
+           "nothing asked" in _capture_out(engine._wind_down_wait, []))
+        ck("wind-down-wait-a-gone-pid-is-clean",
+           "all exited cleanly"
+           in _capture_out(engine._wind_down_wait, [_DEAD_PID]))
+        if os.getuid() != 0:
+            _out = _capture_out(engine._wind_down_wait, [1])
+            # THE THREE CLAIMS, PAIRWISE: it must NOT say the clean line, it
+            # must name the pid, and it must say whose problem it is. Checking
+            # only the first would pass over a message that said nothing.
+            ck("wind-down-wait-foreign-is-not-clean",
+               "all exited cleanly" not in _out)
+            ck("wind-down-wait-foreign-is-named",
+               "another user" in _out and "(1)" in _out)
+            ck("wind-down-wait-foreign-still-reports-what-went",
+               "everything this session owns exited cleanly" in _out)
+    finally:
+        engine.WIND_DOWN_TIMEOUT = _rwt
 
     # A PROFILE CHROME HAS NOT OPENED THIS RUN MUST CONTRIBUTE NO WINDOWS.
     # Its newest session file is still on disk, so the live id set gained

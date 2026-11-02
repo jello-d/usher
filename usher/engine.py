@@ -1411,13 +1411,22 @@ class ChromePlugin(WindowPlugin):
         compositor still needed: the profile keeps exit_type = "Crashed",
         and every subsequent login opens with a "Chrome didn't shut down
         correctly" prompt instead of the windows."""
-        pids = browser_pids()
-        for p in pids:
+        # ONLY WHAT WAS ACTUALLY SIGNALLED IS RETURNED, because the caller
+        # WAITS on this list and a pid we could not signal would be waited
+        # for and then read as having exited. `browser_pids` already narrows
+        # to this user, so a refusal here means something moved under us:
+        # that is worth a line, not a silent drop.
+        asked, refused = [], []
+        for p in browser_pids():
             try:
                 os.kill(p, signal.SIGTERM)
-            except OSError:
-                pass
-        return pids
+                asked.append(p)
+            except OSError as e:
+                refused.append((p, e.strerror))
+        for p, why in refused:
+            logline(f"wind-down could not signal browser {p} ({why}), so it "
+                    f"is left running and NOT waited for")
+        return asked
 
     def relaunch_missing(self, saved, live):
         """Start the browser if the last session had Chrome windows and none
@@ -3062,11 +3071,31 @@ WIND_DOWN_TIMEOUT = float(os.environ.get("USHER_WIND_DOWN_TIMEOUT", 8))
 def _wind_down_wait(pids):
     """Wait for everything a plugin asked to quit, under ONE bounded deadline.
     Bounded because this runs between a human pressing Reboot and the machine
-    rebooting, so it must never be the reason that does not happen."""
+    rebooting, so it must never be the reason that does not happen.
+
+    EPERM IS NOT ESRCH, and reading them as one thing is how this reported a
+    clean stop it had not performed. `os.kill(p, 0)` answers three ways and
+    only two of them used to be distinguished:
+
+        gone            ProcessLookupError (ESRCH, errno 3)   what we waited
+                                                              for
+        there, not ours PermissionError    (EPERM, errno 1)   NOT gone
+        there, ours     no exception
+
+    Measured: against a live process of another uid the probe raises EPERM,
+    and against a dead pid ESRCH, so a bare `except OSError` counts a running
+    process somebody else owns as having exited. That became reachable the day
+    a second account ran its own browser on this display.
+
+    A FOREIGN PID IS REPORTED AND NOT WAITED FOR, rather than waited for and
+    then given up on: we can never signal it, so the deadline would be spent
+    learning nothing while a human waits to reboot. Its own session is what
+    winds it down."""
     if not pids:
         print("usher: nothing asked to quit; session captured")
         return 0
     print(f"usher: asked {len(pids)} process(es) to quit")
+    foreign = set()
     end = time.time() + WIND_DOWN_TIMEOUT
     while time.time() < end:
         alive = []
@@ -3074,15 +3103,31 @@ def _wind_down_wait(pids):
             try:
                 os.kill(p, 0)
                 alive.append(p)
+            except ProcessLookupError:
+                pass                     # exited, which is the whole point
+            except PermissionError:
+                foreign.add(p)           # THERE, and not ours to stop
             except OSError:
                 pass
-        if not alive:
-            print("usher: all exited cleanly")
-            return 0
         pids = alive
+        if not pids:
+            break
         time.sleep(0.2)
-    print(f"usher: {len(pids)} still running after "
-          f"{WIND_DOWN_TIMEOUT:g}s; going ahead anyway")
+    if foreign:
+        print(f"usher: {len(foreign)} process(es) belong to another user and "
+              f"cannot be stopped from here, so they were NOT waited for "
+              f"({' '.join(str(p) for p in sorted(foreign))}); that account's "
+              f"own session is what winds them down")
+    if pids:
+        print(f"usher: {len(pids)} still running after "
+              f"{WIND_DOWN_TIMEOUT:g}s; going ahead anyway")
+    elif foreign:
+        # NOT "all exited cleanly", which would be the same overclaim one
+        # level up: everything we could reach went, and something we could
+        # not reach is still there.
+        print("usher: everything this session owns exited cleanly")
+    else:
+        print("usher: all exited cleanly")
     return 0
 
 

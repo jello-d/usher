@@ -606,13 +606,49 @@ def is_browser_cmdline(raw):
             and not any(a.startswith(b"--type=") for a in argv))
 
 
-def browser_pids():
-    """Every live browser process, by is_browser_cmdline."""
+def browser_pids(uid=None):
+    """Every live browser process OF THIS USER, by is_browser_cmdline.
+
+    THE uid FILTER IS NOT TIDINESS: a window source that is a separate account
+    runs its OWN browser on the same display, and `/proc/<pid>/cmdline` is
+    readable across uids, so without it this walk returns somebody else's
+    browser. Measured 2026-11-02 on a box running both:
+
+        browser_pids() -> [2694384, 2764782]
+          2694384  uid 1000   mine
+          2764782  uid  997   another account's, and NOT signalable (EPERM)
+
+    BOTH CALLERS WANT THE SAME NARROWING, which is why it belongs here rather
+    than in either one:
+
+      wind_down       SIGTERM fails EPERM on a foreign pid, and the engine
+                      then cannot tell "I could not signal it" from "it
+                      exited", so a logout reports a clean browser stop it
+                      did not perform.
+      browser_started takes the EARLIEST start, so a foreign browser that
+                      started first makes the answer too early, and
+                      session_files() then discards FEWER stale files than it
+                      should: the 2026-10-09 phantom-window-id bug, back by
+                      another road.
+
+    The uid comes from `/proc/<pid>`'s OWNER rather than from `Uid:` in
+    status, which is one stat instead of a read and parse, and is the same
+    fact for anything not setuid.
+
+    `uid` IS INJECTABLE SO THE FILTER CAN BE PROVEN, and that is the only
+    reason it is a parameter: no caller passes it. The alternative was a test
+    that monkeypatches `os.getuid`, which is the SHARED module and would have
+    changed the answer for every thread in the process, the Watcher's
+    included.
+    """
+    me = os.getuid() if uid is None else uid
     out = []
     for d in os.listdir("/proc"):
         if not d.isdigit():
             continue
         try:
+            if os.stat(f"/proc/{d}").st_uid != me:
+                continue
             with open(f"/proc/{d}/cmdline", "rb") as f:
                 raw = f.read()
         except OSError:
