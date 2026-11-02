@@ -3235,13 +3235,18 @@ def source_trigger(sources, action, run=None, hook=None):
 # to a terminal, and arbitrary code as the enclave user is exactly what the
 # account boundary exists to prevent.
 #
-# A ROSTER AND NOT A LAYOUT, because that is all there is to be had. An
-# enclave has NO wayfire IPC (zero IPC names on the security-context
-# allowlist, deliberately), so it cannot read geometry, and
-# ext_foreign_toplevel_list_v1 carries nothing positional. Hence two verbs of
-# their own rather than `save` and `restore` meaning something different
-# depending on who typed them: one name for two operations is the split this
-# package already made once.
+# A ROSTER AND NOT A LAYOUT, because that is all there is to be had. NO
+# WAYLAND PROTOCOL EXPOSES A WINDOW'S POSITION, not even to the window's own
+# client (`xdg_toplevel.configure` is width, height and states), and the
+# compositor that does know is reachable only over an IPC socket sitting in
+# the session user's 0700 runtime dir. So this side can neither read a
+# position nor act on one, and the owner doing all the placing is the only
+# split available. Hence two verbs of their own rather than `save` and
+# `restore` meaning something different depending on who typed them: one name
+# for two operations is the split this package already made once.
+# NOT because of the security-context allowlist, which an earlier version of
+# this comment cited: that filters wayland GLOBALS and never governed the IPC
+# socket at all.
 #
 # PLACEMENT IS STILL THE OWNER'S, and nothing here duplicates it. The owner's
 # daemon sees every window on the desk, enclave windows included, and already

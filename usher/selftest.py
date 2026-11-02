@@ -2151,9 +2151,10 @@ def _fake_compositor(path, offer=True, rows=(), stop_after_bind=False):
 def _t_toplevels(ck):
     """The hand-written wayland client: framing, discovery, three states.
 
-    WHY THIS AREA EXISTS AT ALL: an enclave account has NO wayfire IPC (zero
-    IPC names on the security-context allowlist, deliberately), so the only
-    way it can be told which windows are its own is this protocol. That makes
+    WHY THIS AREA EXISTS AT ALL: an enclave account cannot reach the wayfire
+    IPC (it lives in the session user's 0700 runtime dir) and no wayland
+    protocol carries a window's position anyway, so the only way it can be
+    told which windows are its own is this protocol. That makes
     a hand-written client load-bearing for the enclave restore, and an opcode
     is declaration order, so a wrong one reports plausible nonsense rather
     than failing. `test/tools.t` re-derives every opcode from the installed

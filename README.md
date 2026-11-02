@@ -360,9 +360,13 @@ take an argument:
   into `~/.local/state/usher/roster.json`. It reads them from the compositor
   over `ext_foreign_toplevel_list_v1`, which the compositor filters to this
   account's own windows, so the filtering *is* the scoping and no caller can
-  widen it. A roster and not a layout: a sandboxed client gets no compositor
-  IPC and that protocol carries nothing positional, so there is no geometry
-  to be had on this side. Placement stays the session user's.
+  widen it. A roster and not a layout, for Wayland's reasons rather than any
+  policy: no Wayland protocol exposes a window's position, not even to the
+  window's own client, so the apps this account launched do not know where
+  they are either. The compositor does know and is reachable only over an IPC
+  socket in the session user's `0700` runtime directory, so this side can
+  neither read a position nor act on one. Placement stays the session user's
+  not as a restriction but as the only split there is.
 - **`usher-mgr _source-resume`** starts the remembered apps that are not
   running, resolving each app-id against *this* account's own desktop
   registry.

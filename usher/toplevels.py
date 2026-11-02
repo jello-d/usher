@@ -1,18 +1,37 @@
 """The compositor's toplevel list, read over ext_foreign_toplevel_list_v1.
 
 WHY THIS EXISTS AT ALL, when usher already has the wayfire IPC: an enclave
-account gets NO wayfire IPC. tackup's `allowed_protocols` for a sandboxed
-client carries zero IPC names, deliberately, so a client inside a security
-context cannot read geometry, cannot move a window and cannot see anybody
-else's. What it does get is this protocol, filtered by the compositor to its
-own instance's windows.
+account cannot reach that IPC, and NOTHING on this side can learn a window's
+position by any other route.
 
-SO THIS IS A ROSTER AND NEVER A LAYOUT. The protocol carries title, app_id
-and identifier and NOTHING POSITIONAL (measured against the XML: seven events,
-zero positional terms). An account on this side can therefore answer "which of
-my apps are open" and can never answer "where". That asymmetry is why the
-enclave verbs are their own verbs rather than `save` and `restore` wearing a
-different hat.
+THREE SEPARATE REASONS, and only the last is anybody's policy. Recorded
+because an earlier version of this comment gave a WRONG one (it said the
+security-context allowlist carries no IPC names, which is true and
+irrelevant: that allowlist filters wayland GLOBALS, and wayfire's IPC is a
+separate unix socket it never governed):
+
+  1. NO WAYLAND PROTOCOL EXPOSES A WINDOW'S POSITION, not even to the
+     window's own client. `xdg_toplevel.configure` carries width, height and
+     states, and that is the whole of it. So the apps an account launched do
+     not know where they are either; this is Wayland's design and not a
+     restriction placed on anybody.
+  2. THE COMPOSITOR IS THE ONLY THING THAT KNOWS, and the only way in is
+     the wayfire IPC socket.
+  3. THAT SOCKET SITS IN THE SESSION USER'S XDG_RUNTIME_DIR, mode 0700, so
+     another account cannot traverse to it. The socket's OWN mode is 0775,
+     so the directory is the entire gate: it must never be bind-mounted or
+     linked into a shared location, because that IPC is full compositor
+     control (79 methods here, including setting any config option, binding
+     a key to a shell command, and listing every window's title).
+
+SO THIS IS A ROSTER AND NEVER A LAYOUT. This protocol carries title, app_id
+and identifier and NOTHING POSITIONAL (measured against the XML: seven
+events, zero positional terms). An account on this side can therefore answer
+"which of my apps are open" and can never answer "where". It could not ACT on
+an answer either, since placement is the same socket behind the same gate, so
+the owner doing all the placing is the only split available rather than a
+workaround. That asymmetry is why the enclave verbs are their own verbs
+rather than `save` and `restore` wearing a different hat.
 
 AND WHY A HAND-WRITTEN CLIENT. There are no Wayland bindings on this fleet
 (measured: no pywayland, no lswt, nothing in the venv but pywayfire), and the
