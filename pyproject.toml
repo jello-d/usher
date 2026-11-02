@@ -2,16 +2,16 @@
 name = "usher"
 version = "0.1.0"
 description = "Record and restore the Wayland window layout (wlroots/Wayfire)"
+license = "Apache-2.0"
 requires-python = ">=3.9"
 dependencies = ["wayfire==3.2"]
-classifiers = ["License :: OSI Approved :: Apache Software License"]
 
 [project.scripts]
 usher = "usher.cli:main"
 usher-mgr = "usher.cli:main_mgr"
 
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77.0.1"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
