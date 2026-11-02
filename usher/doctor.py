@@ -197,10 +197,17 @@ def _doctor_contracts(out):
     return rc
 
 
-def collision_fix(ident):
-    """What to tell a reader whose windows share one store key. THREE cases,
+def collision_fix(ident, source=""):
+    """What to tell a reader whose windows share one store key. FOUR cases,
     and they must stay distinct: handing the wrong one out sends somebody to
     fix the wrong thing.
+
+    A WINDOW FROM ANOTHER ACCOUNT IS THE FOURTH AND MUST NOT SAY "write a
+    plugin": a plugin could not read that account's application state either,
+    because it is behind the uid wall, so there is nothing a reader can DO and
+    saying so plainly is the honest answer. usher keys such windows by their
+    SOURCE alone, so several windows of one of its apps legitimately share one
+    key.
 
     A TERMINAL CAN BE NAMED, which makes it title-keyed and gives it a slot
     of its own. For an ordinary app a plugin is the answer, which is what the
@@ -212,6 +219,9 @@ def collision_fix(ident):
     HAS a plugin. The resolution cache is per view, so it clears on a reload
     or when either window closes. Measured on manifold 2026-10-13, where this
     state sat live for two days and the advice would have been useless."""
+    if source:
+        return (f"usher cannot tell the {source} source's windows apart: "
+                f"that account's app state is in a home it may not read")
     if is_chrome_slot(ident):
         return "usher mis-resolved these; usher reload clears it"
     if ident.startswith("kitty:"):
@@ -294,18 +304,27 @@ def _doctor_relaunch(out, snap, live):
         _a = app_of(lv)
         if not _a:
             continue
-        _k = kkey(_a, "") if kb.get(kkey(_a, "")) else kkey(_a, identity(lv))
+        # GATED ON THE SOURCE, like every other lookup: without it a window
+        # from another account is counted against the OWNER's app_id-only
+        # key, inflating a collision the owner does not have. SIXTH place
+        # asking which keys a window may match, and the reason match_keys
+        # exists.
+        _src = engine.source_of(lv)
+        _ks = engine.match_keys(_a, identity(lv), _src)
+        _k = next((k for k in _ks if kb.get(k)), _ks[-1])
         live_dupes[_k] += 1
     for key, n in live_dupes.items():
         if n < 2:
             continue
         _app, _ident = key.split("\0", 1)
-        _shown = _ident or f"{_app} (by app-id)"
+        _csrc = (kb.get(key) or {}).get("source", "")
+        _shown = (f"{_app} ({_csrc})" if _csrc
+                  else _ident or f"{_app} (by app-id)")
         # "1 keep" read as a typo; phrase it so the count never needs a
         # plural, which is the cheapest fix and reads better at every n.
         out(f"  COLLISION  {_shown[:40]:40}  {n} live windows share this"
             f" key; 1 gets the remembered place, {n - 1} stay where they"
-            f" opened ({collision_fix(_ident)})")
+            f" opened ({collision_fix(_ident, _csrc)})")
 
 
 def _doctor_placement(out, kb, live, outs):

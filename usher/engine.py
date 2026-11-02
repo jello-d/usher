@@ -458,12 +458,51 @@ def surface_of(w, surfaces):
     return ""
 
 
-def other_profile_entries(app, ident, profile=None):
+def match_keys(app, ident, source="", ident_first=False):
+    """The store keys a window may match, most specific first.
+
+    ONE DEFINITION, because FIVE places ask this question and a disagreement
+    between any two of them is how every silent failure in this package has
+    started.
+
+    A WINDOW FROM ANOTHER ACCOUNT MATCHES EXACTLY ONE KEY, ITS OWN SOURCE'S.
+    The app_id-only key means "every window of this app whatever its
+    identity", which is true only WITHIN one account: offering it to another
+    account's window would place a work Slack onto the owner's Slack slot, and
+    the owner's onto the work one. `kkey(app, "")` is the OWNER's by
+    construction, so a foreign window must never be offered it.
+
+    `ident_first` PRESERVES A PRE-EXISTING DIFFERENCE rather than quietly
+    changing it: the placer has always tried the app_id-only key first and
+    `other_profile_entries` has always tried the identity first. That
+    disagreement is latent (it shows only where BOTH keys exist for one app)
+    and worth unifying on its own, not inside this change."""
+    if source:
+        return (kkey(app, source),)
+    return ((kkey(app, ident), kkey(app, "")) if ident_first
+            else (kkey(app, ""), kkey(app, ident)))
+
+
+def entry_matches(e, app, ident, source=""):
+    """Does stored entry `e` describe this window? The SCAN form of
+    match_keys, for the matcher, which walks entries rather than keys.
+
+    Same rule and the same reason: `appid_only` means "every window of this
+    app", so an owner's app_id-only entry must not claim another account's
+    window. A foreign window matches only an entry stored under its source."""
+    if e.get("app_id") != app:
+        return False
+    if source:
+        return e.get("source") == source
+    return bool(e.get("appid_only")) or e.get("title") == ident
+
+
+def other_profile_entries(app, ident, profile=None, source=""):
     """This identity's learned entries from every OTHER display profile,
     newest first. Reads the stores directly, since the point is the desks that
     are not attached."""
     profile = profile or profile_id()
-    keys = (kkey(app, ident), kkey(app, ""))
+    keys = match_keys(app, ident, source, ident_first=True)
     found = []
     for path in glob.glob(os.path.join(STATE, "knowledge-*.json")):
         name = os.path.basename(path)[len("knowledge-"):-len(".json")]
@@ -766,7 +805,7 @@ def snapshot(sock):
             continue   # work / scratch / transient-chrome: never record it
         p = place_of(v, outputs)
         pid = v.get("pid", -1)
-        _own = foreign_owner(pid)
+        _src, _own = window_origin(pid)
         w = {
             "id": v.get("id"),   # wayfire view id: the in-session window key
             "app_id": v.get("app-id") or v.get("app_id") or "",
@@ -799,8 +838,14 @@ def snapshot(sock):
         # must not be started by us, since resolving its app-id in OUR
         # registry and running it would launch a second, personal copy of
         # somebody's work application.
-        if _own is not None:
+        if _own is not None or _src:
             w["owner"] = _own
+            # THE NAME AS WELL AS THE NUMBER. The name is what a key carries
+            # and what a future relaunch hands to the owning account; the uid
+            # is kept because it is the reading usher can always make for
+            # itself, so a row stays meaningful with no provider wired.
+            if _src:
+                w["source"] = _src
             # REDACTED, AND THIS IS A PRIVACY BOUNDARY RATHER THAN TIDINESS.
             # A window belonging to another account is captured so the
             # relaunch paths can SKIP it and so a reader can see one was
@@ -1279,6 +1324,25 @@ def window_origin(pid, source=None, uid_of=None, me=None):
     return (name if state == "source" else None, other)
 
 
+def source_of(v):
+    """This window's SOURCE name, or "" for the session user's own.
+
+    ONE DEFINITION, because `resolution` and `_single_id` both need it and a
+    disagreement between them is how this package's silent failures start.
+
+    A RECORDED SOURCE WINS OVER A RE-DERIVED ONE, for the same reason the
+    snapshot's `key` field exists: capture is the only moment the fact can be
+    read. A replayed row's pid is long dead, so re-deriving would answer "this
+    is ours" about a window that was somebody else's, which is the dangerous
+    direction. A live view never carries the field, so nothing changes for one.
+    """
+    if isinstance(v, dict):
+        rec = v.get("source")
+        if rec:
+            return rec
+    return window_origin(pview(v).get("pid"))[0] or ""
+
+
 def foreign_owner(pid, uid_of=None, me=None):
     """The uid owning `pid` when that is NOT this session's user, else None.
 
@@ -1327,6 +1391,13 @@ def resolution(v):
     every other handle-less window and would drag the next one onto whatever
     geometry the last one had. The same rule as a plugin declining, one level
     down, where there is not even an app to ask about."""
+    # A RECORDED SOURCE WINS OVER A RE-DERIVED ONE, for the same reason the
+    # snapshot's `key` field exists: capture is the only moment the fact can be
+    # read. A replayed row's pid is long dead, so re-deriving would answer
+    # "this is ours" for a window that was somebody else's, which is the
+    # dangerous direction. A live view never carries the field, so nothing
+    # changes for one.
+    _rec_src = source_of(v)
     v = pview(v)
     # ANOTHER ACCOUNT'S WINDOW IS NOT OURS TO IDENTIFY, asked BEFORE any
     # plugin because no plugin can answer for it: the app's own state lives in
@@ -1347,17 +1418,33 @@ def resolution(v):
     # correctness of every slot of ours it would otherwise take. When the
     # compositor publishes the security context a window arrived through,
     # these become keyable per source and the trade goes away.
-    src, other = window_origin(v.get("pid"))
-    if src is not None or other is not None:
-        # NAMED WHEN A PROVIDER CAN NAME IT, and that is not cosmetic: the
-        # name is what `doctor` shows a human and what a stored key will carry
-        # once the source is keyable, where a uid is an allocation nobody
-        # recognises and that renumbers on a repave.
-        whose = f"the {src} source" if src else f"uid {other}"
+    _unused_src, other = window_origin(v.get("pid"))
+    src = _rec_src
+    if src:
+        # A NAMED SOURCE *IS* THE KEY. Keyed on the NAME and never on the uid,
+        # which is an allocation: `useradd --system` picks a number, a repave
+        # or a second account renumbers it, and every slot keyed on it is
+        # orphaned with nothing to say it was ever valid.
+        #
+        # THE SOURCE ALONE, with no per-window part, because there is no
+        # per-window handle to add: the app's own state lives in a home usher
+        # may not read, so the SNSS-style join that tells the owner's Chrome
+        # windows apart is unavailable across the uid wall and the title is
+        # precisely the thing that does not discriminate. So several windows
+        # of one foreign app share this key, the slot ledger places the first
+        # and leaves the rest where they open, and doctor reports the
+        # collision: the same honest degradation an app_id-only app has always
+        # had, rather than a guess.
+        return Resolution.ready(src)
+    if other is not None:
+        # FOREIGN AND UNNAMED: no provider is wired, or it could not answer.
+        # NOT keyable, because the only thing usher has is the uid and a uid
+        # must not be a key. Declining is what it has always been, and a
+        # window with no stable name is better forgotten than mis-filed.
         return Resolution.never(
-            f"this window belongs to {whose}, not to this session's user, so "
-            f"the app's own state is in a home usher cannot read and there is "
-            f"no handle to key it on")
+            f"this window belongs to uid {other}, not to this session's user, "
+            f"and nothing here can name its source, so there is no stable "
+            f"handle to key it on")
     p = _owner(v)
     if p is None:
         if not v["app"] and not v["title"].strip():
@@ -1403,6 +1490,11 @@ def _as_resolution(r, who):
 def _single_id(v):
     """An owning plugin's stable single-key identity, or None to fall through
     to the title-grouping path. Drives the keying branch in upsert()/learn()."""
+    # NO SOURCE BRANCH HERE, DELIBERATELY. One was written and removed: both
+    # callers (`upsert` and `_learn_stamp`) now ask `source_of` themselves,
+    # because the app_id-only branch above them had to be gated anyway, so a
+    # second answer here was unreachable. A planted regression removing it
+    # changed nothing, which is this file's own signal for dead code.
     v = pview(v)
     if _owner(v) is None:
         return None       # unowned: the title-grouping path, as before
@@ -2124,6 +2216,11 @@ def kb_entry(w, title, appid_only, when):
         # hwdp records no panel, and an entry learned before this existed has
         # none, so both must keep working. See entry_output.
         "panel": panel_map().get(w["output"], ""),
+        # WHOSE SLOT THIS IS, when it is not the session user's. Recorded
+        # rather than inferred from the title, so the prune below and the
+        # matcher can both ask directly. Absent for the owner's own entries,
+        # which is every entry that existed before this.
+        **({"source": w["source"]} if w.get("source") else {}),
         # WHICH NAMED SURFACE this placement sits in, at this desk. The rect
         # beside it is per-profile and learned; this name is the part that can
         # travel to another desk, where the same name resolves to a different
@@ -2154,7 +2251,19 @@ def prune_kb(kb, when):
     learned, so the app can never relearn (kitty's mux terminals hit exactly
     this). So enforce the invariant rather than assume it: drop such keys
     outright, and keep owned apps out of appid_keyed so their per-title set
-    survives."""
+    survives.
+
+    A SOURCE KEY IS NOT A STALE PER-TITLE ENTRY, and that exemption is what
+    makes another account's slot survivable at all. `slack\0titan` has the
+    same SHAPE as a per-title entry for an app now keyed app_id-only, so the
+    owner's `slack\0` deleted it on the very pass that wrote it: measured
+    2026-11-02, the foreign window was learned and then pruned within one
+    call, and `_learn_stamp` alone looked correct. The entry carries `source`
+    for exactly this, so the sweep can tell "a leftover title key" from
+    "a different account's slot for the same app".
+
+    FOURTH INSTANCE OF THE SAME SHAPE here: a rule scoped to one category,
+    met by something outside the category."""
     appid_keyed = {k[:-1] for k in kb
                    if k.endswith("\x00") and not is_owned(k[:-1])}
     cutoff = when - KNOWLEDGE_TTL
@@ -2164,6 +2273,7 @@ def prune_kb(kb, when):
               or is_transient(v)
               or (k.endswith("\x00") and is_owned(k[:-1]))
               or ("\x00" in k and not k.endswith("\x00")
+                  and not v.get("source")
                   and k.split("\x00", 1)[0] in appid_keyed)]:
         del kb[k]
 
@@ -2174,11 +2284,26 @@ def upsert(kb, windows, when):
     title. Used by `usher capture` and the seed-from-snapshot path;
     the watch daemon uses learn() instead, which groups a window's tabs by
     view id."""
-    counts = Counter(w["app_id"] for w in windows)
+    counts = Counter(w["app_id"] for w in windows
+                      if not w.get("source") and
+                      w.get("owner") is None)
     for w in windows:
         app = w["app_id"]
         key = _single_id(w)   # plugin single identity (chrome/mux/kitty)
-        if is_unique(app, counts):
+        # A FOREIGN WINDOW IS KEYED ON ITS SOURCE AND NEVER app_id-ONLY.
+        # `kkey(app, "")` is the OWNER's key and matches every window of that
+        # app, so writing a foreign window there overwrites the owner's slot
+        # with it.
+        #
+        # MEASURED, because `is_unique` looks only at the app and cannot know
+        # whose window it is: with one Slack of each, `counts` saw ONE (it
+        # excludes foreign rows by design), `is_unique` was therefore True for
+        # BOTH, and the foreign window took the owner's key. Asked here rather
+        # than inside `is_unique`, whose question really is about the app.
+        _src_w = source_of(w)
+        if _src_w:
+            kb[kkey(app, _src_w)] = kb_entry(w, _src_w, False, when)
+        elif is_unique(app, counts):
             kb[kkey(app, "")] = kb_entry(w, w["title"], True, when)
         elif key:
             kb[kkey(app, key)] = kb_entry(w, key, False, when)
@@ -2263,7 +2388,20 @@ def _learn_stamp(kb, groups, windows, counts, when, hold=()):
         if unidentified(w):
             continue
         key = _single_id(w)
-        if is_unique(app, counts):
+        # A FOREIGN WINDOW IS KEYED ON ITS SOURCE AND NEVER app_id-ONLY.
+        # `kkey(app, "")` is the OWNER's key and matches every window of that
+        # app, so writing a foreign window there overwrites the owner's slot
+        # with it.
+        #
+        # MEASURED, because `is_unique` looks only at the app and cannot know
+        # whose window it is: with one Slack of each, `counts` saw ONE (it
+        # excludes foreign rows by design), `is_unique` was therefore True for
+        # BOTH, and the foreign window took the owner's key. Asked here rather
+        # than inside `is_unique`, whose question really is about the app.
+        _src_w = source_of(w)
+        if _src_w:
+            kb[kkey(app, _src_w)] = kb_entry(w, _src_w, False, when)
+        elif is_unique(app, counts):
             kb[kkey(app, "")] = kb_entry(w, w["title"], True, when)
         elif key:
             kb[kkey(app, key)] = kb_entry(w, key, False, when)
@@ -2341,7 +2479,9 @@ def learn(kb, groups, windows, when, hold=(), seen=None, outputs=None):
     fresh ids next session, self-healing. Unique-app_id windows (--app Gmail)
     stay keyed by app_id alone; kitty is forced to per-title keys; Chrome keys
     by its active-tab URL identity (see identity(), stamped below)."""
-    counts = Counter(w["app_id"] for w in windows)
+    counts = Counter(w["app_id"] for w in windows
+                      if not w.get("source") and
+                      w.get("owner") is None)
     tcount = Counter((w["app_id"], w["title"]) for w in windows if w["title"])
     ambiguous = {k for k, c in tcount.items() if c >= 2}
     live = {w["id"] for w in windows if w.get("id") is not None}
@@ -3049,7 +3189,9 @@ def entries_from_snapshot(snap):
     degrades to what its raw title yields, which for terminals will simply not
     match anything: honest, and better than matching the wrong window."""
     windows = snap.get("windows", [])
-    counts = Counter(w.get("app_id", "") for w in windows)
+    counts = Counter(w.get("app_id", "") for w in windows
+                      if not w.get("source") and
+                      w.get("owner") is None)
     out = []
     for w in windows:
         app = w.get("app_id", "")
@@ -3123,9 +3265,9 @@ def match(live, entries):
     for lv in live:
         app = app_of(lv)
         key = identity(lv)
+        src = window_origin(lv.get("pid"))[0] if isinstance(lv, dict) else ""
         idx = next((i for i, e in enumerate(rem)
-                    if e["app_id"] == app
-                    and (e.get("appid_only") or e["title"] == key)), None)
+                    if entry_matches(e, app, key, src or "")), None)
         if idx is None:
             unlive.append(lv)
         else:
@@ -3889,7 +4031,9 @@ def _prediction_rows():
         # An app_id-ONLY key ends in NUL (see kkey / appid_only), which is how
         # a uniquely-identified app like Signal is stored, so both shapes have
         # to be tried or those windows read as having no slot.
-        e = kb.get(kkey(app, w.get("key") or "")) or kb.get(kkey(app, ""))
+        e = next((kb[k] for k in
+                  match_keys(app, w.get("key") or "", w.get("source") or "")
+                  if k in kb), None)
         # THE RESOLVED output, not the stored name. Those differ exactly when
         # a panel has moved connector, and a prediction quoting the stale name
         # would report every such window as WRONG on the next verify.

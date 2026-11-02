@@ -802,9 +802,16 @@ class Watcher:
                     self.pending[vid] = {"v": v, "refetch": True,
                                          "due": time.time() + TITLE_QUIET}
             return
+        # THE SOURCE GATES WHICH KEYS THIS WINDOW MAY MATCH. Without it a
+        # window from another account would be offered `kkey(app, "")`, the
+        # app_id-only key, which is the OWNER's and matches every window of
+        # that app: a work Slack would be placed onto the owner's Slack slot
+        # and the owner's onto the work one. match_keys is the one definition.
+        _src = engine.window_origin(v.get("pid"))[0]
         with self.lock:
-            e = (self.kb.get(kkey(app, ""))
-                 or self.kb.get(kkey(app, identity(v))))
+            e = next((self.kb[k] for k in
+                      engine.match_keys(app, identity(v), _src or "")
+                      if k in self.kb), None)
         # CAPTURED BEFORE _recognise, which is what records the identification:
         # read it afterwards and this is always False.
         first_look = e is not None and vid not in self.identified
@@ -866,8 +873,13 @@ class Watcher:
         # which is the same answer place-vs-settled already gives a window
         # opened mid-session, and it refuses to invent geometry rather than
         # guessing an offset. Stacking is never what anyone wanted.
-        skey = kkey(app, "") if self.kb.get(kkey(app, "")) else \
-            kkey(app, identity(v))
+        # THE LEDGER KEY IS THE ONE THAT MATCHED, by the same rule: a
+        # foreign window must not take (or be refused by) the owner's
+        # app_id-only slot.
+        skey = next((k for k in
+                     engine.match_keys(app, identity(v), _src or "")
+                     if self.kb.get(k)),
+                    engine.match_keys(app, identity(v), _src or "")[-1])
         with self.lock:
             holder = self.slot_held.get(skey)
         own = live_holder(holder, vid, self._live_ids())

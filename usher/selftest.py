@@ -542,6 +542,17 @@ def _t_resolution(ck):
     # send the reader nowhere. Asserted PAIRWISE, since collapsing two is
     # exactly how the wrong remedy gets printed.
     from .doctor import collision_fix as _cfix
+    # FOUR CASES NOW, PAIRWISE DISTINCT. A window from another account must
+    # NOT be told to write a plugin: a plugin could not read that account's
+    # app state either, so there is nothing a reader can do and saying so is
+    # the only honest answer. Collapsing any two of these sends somebody to
+    # fix the wrong thing, which is why they are asserted as a SET.
+    ck("collision-fix-names-a-source",
+       "titan" in _cfix("titan", "titan")
+       and "plugin" not in _cfix("titan", "titan"))
+    ck("collision-fix-four-cases-are-pairwise-distinct",
+       len({_cfix("titan", "titan"), _cfix("chrome:win:1"),
+            _cfix("kitty:/tmp"), _cfix("whatever")}) == 4)
     ck("collision-chrome-blames-usher",
        "mis-resolved" in _cfix("chrome:win:123"))
     ck("collision-chrome-does-not-say-plugin",
@@ -632,6 +643,64 @@ def _t_resolution(ck):
     ck("foreign-another-uid-is-foreign",
        engine.foreign_owner(42, uid_of=lambda _p: 997, me=1000) == 997)
 
+    # AND A FOREIGN WINDOW WITH NO NAME IS STILL NEVER, which is the half that
+    # keeps the uid out of the store: with no provider wired the only thing
+    # usher has is a number, and a number must not be a key. Driven with the
+    # hook absent, which is the state of a box that wired nothing.
+    if os.getuid() != 0:
+        _rsh3 = engine.SOURCE_HOOK
+        engine._SOURCE_CACHE.clear()
+        try:
+            engine.SOURCE_HOOK = "/nonexistent/window-source"
+            _un = engine.resolution(_trv("slack", "x", pid=1, vid=97))
+            ck("foreign-unnamed-is-never", not _un.is_ready)
+            ck("foreign-unnamed-says-nothing-can-name-it",
+               "name its source" in (_un.why or ""))
+        finally:
+            engine.SOURCE_HOOK = _rsh3
+            engine._SOURCE_CACHE.clear()
+
+    # match_keys / entry_matches: ONE definition for the five places that ask
+    # which stored keys a window may match. A FOREIGN WINDOW MATCHES EXACTLY
+    # ONE, its own source's: the app_id-only key means "every window of this
+    # app", which is the OWNER's, so offering it across the boundary would
+    # place a work Slack on the owner's Slack slot.
+    ck("match-keys-owner-gets-both",
+       engine.match_keys("slack", "ident")
+       == (engine.kkey("slack", ""), engine.kkey("slack", "ident")))
+    ck("match-keys-foreign-gets-only-its-source",
+       engine.match_keys("slack", "ident", "titan")
+       == (engine.kkey("slack", "titan"),))
+    ck("match-keys-foreign-never-offers-the-appid-only-key",
+       engine.kkey("slack", "")
+       not in engine.match_keys("slack", "ident", "titan"))
+    # The ident-first order is a PRE-EXISTING difference, preserved rather
+    # than quietly changed inside this work.
+    ck("match-keys-ident-first-is-preserved",
+       engine.match_keys("slack", "ident", ident_first=True)
+       == (engine.kkey("slack", "ident"), engine.kkey("slack", "")))
+    _own_e = {"app_id": "slack", "title": "", "appid_only": True}
+    # CARRIES `source` AS A FIELD, which is what the matcher asks: inferring
+    # it from `title == source` was loose, and the field is also what stops
+    # the per-title prune mistaking this for a leftover title key.
+    _src_e = {"app_id": "slack", "title": "titan", "appid_only": False,
+              "source": "titan"}
+    ck("entry-matches-owner-appid-only-claims-an-owner-window",
+       engine.entry_matches(_own_e, "slack", "anything"))
+    ck("entry-matches-owner-appid-only-REFUSES-a-foreign-window",
+       not engine.entry_matches(_own_e, "slack", "anything", "titan"))
+    ck("entry-matches-a-source-entry-claims-its-own-window",
+       engine.entry_matches(_src_e, "slack", "anything", "titan"))
+    ck("entry-matches-a-source-entry-refuses-an-owner-window",
+       not engine.entry_matches(_src_e, "slack", "anything"))
+    # AND AN ENTRY WITH NO `source` FIELD NEVER CLAIMS A FOREIGN WINDOW, even
+    # if its title happens to equal the source name. That is the loose
+    # inference this replaced, and a title is user-controlled.
+    ck("entry-matches-a-title-that-merely-equals-the-source-does-not-count",
+       not engine.entry_matches(
+           {"app_id": "slack", "title": "titan", "appid_only": False},
+           "slack", "anything", "titan"))
+
     # ...AND END TO END ON A REAL FOREIGN PID, needing no stub and no second
     # account: pid 1 is root's, so a view carrying it is genuinely somebody
     # else's on any box this is not run as root on.
@@ -683,6 +752,37 @@ def _t_resolution(ck):
                      [dict(_sw, pid=os.getpid(), id=95)], time.time())
         ck("foreign-appid-only-control-is-learned",
            engine.kkey("slack", "") in _kb4)
+
+        # STEP 1 END TO END: a window with a NAMED source is learned under
+        # that source's key, and the OWNER's key shape is untouched by its
+        # presence. Driven as learn() receives them, i.e. snapshot rows, with
+        # the source already stamped and the title already redacted.
+        _kb5, _g5 = {}, {}
+        _f_src = {"app_id": "slack", "title": "", "key": "", "cmd": None,
+                  "pid": 1, "id": 98, "owner": 0, "source": "titan",
+                  "output": "eDP-1", "workspace": [1, 0],
+                  "pos": [415, 55], "size": [1244, 1151]}
+        _o_slack = {"app_id": "slack", "title": "Slack", "key": "Slack",
+                    "pid": os.getpid(), "id": 99,
+                    "output": "eDP-1", "workspace": [2, 0],
+                    "pos": [10, 20], "size": [800, 600]}
+        engine.learn(_kb5, _g5, [_f_src, _o_slack], time.time())
+        ck("step1-a-named-source-is-learned-under-its-source-key",
+           engine.kkey("slack", "titan") in _kb5)
+        # THE KEY-SHAPE HAZARD, which is what `counts` excluding foreign rows
+        # fixes: before it, two Slacks made counts["slack"] == 2 and the
+        # OWNER's window flipped off its app_id-only key, orphaning its slot.
+        ck("step1-the-owners-key-shape-is-unaffected",
+           engine.kkey("slack", "") in _kb5)
+        ck("step1-the-owner-entry-is-still-appid-only",
+           _kb5[engine.kkey("slack", "")].get("appid_only") is True)
+        # AND NO LABEL FOR THE FOREIGN ENTRY. `label` is the human title, and
+        # a work window's title is that account's content; the snapshot
+        # redacts it, and this asserts nothing downstream puts it back.
+        ck("step1-a-foreign-entry-carries-no-label",
+           _kb5[engine.kkey("slack", "titan")].get("label") == "")
+        ck("step1-the-owner-entry-keeps-its-label",
+           _kb5[engine.kkey("slack", "")].get("label") == "Slack")
 
     # 1d. THE WINDOW-SOURCE SEAM: whose window, from a hook, so usher names
     #     no provider and works identically with none.
@@ -773,10 +873,20 @@ def _t_resolution(ck):
                 engine.SOURCE_HOOK = _h_src
                 _fr = engine.resolution(
                     _trv("slack", "Sign in | Slack", pid=1, vid=93))
-                ck("foreign-reason-names-the-source",
-                   "titan source" in (_fr.why or ""))
-                ck("foreign-with-a-source-is-still-never",
-                   not _fr.is_ready)
+                # A NAMED SOURCE *IS* THE KEY, which is the whole of step 1:
+                # keyed on the NAME, never the uid, because a uid is an
+                # allocation that renumbers on a repave and orphans every
+                # slot keyed on it.
+                ck("foreign-named-source-is-ready", _fr.is_ready)
+                ck("foreign-key-is-the-source-name", _fr.key == "titan")
+                # THE SOURCE ALONE, with no per-window part, because there is
+                # none to add: the app's state is behind the uid wall. So two
+                # windows of one foreign app SHARE this key and the slot
+                # ledger places the first, which is the honest degradation an
+                # app_id-only app has always had.
+                _fr2x = engine.resolution(
+                    _trv("slack", "Something else entirely", pid=1, vid=96))
+                ck("foreign-key-ignores-the-title", _fr2x.key == "titan")
             finally:
                 engine.SOURCE_HOOK = _rsh2
                 engine._SOURCE_CACHE.clear()
