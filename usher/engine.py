@@ -3140,6 +3140,91 @@ def desktop_relaunch_missing(saved, live, spawn=None):
     return n
 
 
+# THE SOURCE-RELAUNCH SEAM. usher can PLACE another account's window (the IPC
+# is compositor-side and needs no cooperation from a client usher cannot talk
+# to) and it cannot START one: that needs the other account's privilege, which
+# usher must not acquire. So it asks.
+#
+#   usher/source-relaunch <SOURCE> <APP-ID>...
+#     exit 0        accepted; that source is starting them
+#     anything else could not, and usher says so
+#
+# APP-IDS AND NEVER COMMANDS, which is the whole security content of this
+# seam. The privileged side resolves each app-id against ITS OWN registry, so
+# the owner can NAME an app and cannot inject a command. That is usher's
+# standing invariant ("the only command usher ever runs is an Exec= out of a
+# desktop file it read") carried across an account boundary, where usher
+# cannot read the registry itself and so must not be the one resolving.
+#
+# AND usher NAMES NO MECHANISM. Whether the integrator reaches that account by
+# sudo, by a transient unit, or by dropping a request in a shared directory is
+# its business; usher's half is knowing WHICH apps of WHOSE were open.
+SOURCE_RELAUNCH_HOOK = config_path("source-relaunch")
+
+
+def source_relaunch_plan(saved, live):
+    """{source: sorted app-ids} that were open at capture and are not now.
+
+    PURE, so the decision is checkable with no hook, no compositor and no
+    other account. A source with nothing missing does not appear at all, which
+    is what keeps a quiet login quiet.
+
+    MISSING IS PER (SOURCE, APP), not per app: the owner running Slack says
+    nothing about whether the work account's Slack is up, and the window of
+    one is not a substitute for the other. That asymmetry is the same one
+    `ChromePlugin.relaunch_missing` had to learn."""
+    want = {}
+    for w in saved:
+        src = w.get("source")
+        app = w.get("app_id") or ""
+        if not src or not app:
+            continue
+        want.setdefault(src, set()).add(app)
+    if not want:
+        return {}
+    for v in live:
+        app = app_of(v)
+        src = source_of(v)
+        if src and app and src in want:
+            want[src].discard(app)
+    return {s: sorted(a) for s, a in want.items() if a}
+
+
+def source_relaunch_missing(saved, live, run=None, hook=None):
+    """Ask each source to start its own saved-but-absent apps. Returns how
+    many apps were asked for.
+
+    NEVER FATAL AND NEVER SILENT. A missing hook is reported ONLY when there
+    is something it would have been asked, so a box with no other accounts
+    gains no new line at every login, and a box with them never loses the
+    reason nothing came back."""
+    plan = source_relaunch_plan(saved, live)
+    if not plan:
+        return 0
+    path = SOURCE_RELAUNCH_HOOK if hook is None else hook
+    if not path or not os.access(path, os.X_OK):
+        for src, apps in sorted(plan.items()):
+            logline(f"cannot relaunch {src}'s {' '.join(apps)}: no "
+                    f"source-relaunch hook at {path}, and usher must not "
+                    f"start another account's apps itself")
+        return 0
+    n = 0
+    for src, apps in sorted(plan.items()):
+        _announce(f"launch  [{src}] {' '.join(apps)}")
+        try:
+            r = (subprocess.run if run is None else run)(
+                [path, src] + apps, capture_output=True, text=True, timeout=30)
+        except Exception as e:                                 # noqa: BLE001
+            logline(f"source-relaunch for {src} failed: {e}")
+            continue
+        if r.returncode != 0:
+            logline(f"source-relaunch for {src} refused (rc "
+                    f"{r.returncode}): {(r.stderr or '').strip()[:160]}")
+            continue
+        n += len(apps)
+    return n
+
+
 def launch_missing(snap=None):
     """Ask every plugin to respawn any of its saved-but-absent windows. Takes
     the last snapshot + the live views ONCE and hands both to each plugin's
@@ -3171,6 +3256,13 @@ def launch_missing(snap=None):
         n += desktop_relaunch_missing(saved, live)
     except Exception as e:
         logline(f"relaunch (desktop default) error: {e}")
+    # AND ANOTHER ACCOUNT'S APPS ARE ASKED FOR, never started here. Last,
+    # because it is the only one that leaves this process: everything above
+    # has already decided about the owner's own windows.
+    try:
+        n += source_relaunch_missing(saved, live)
+    except Exception as e:
+        logline(f"relaunch (source) error: {e}")
     return n
 
 

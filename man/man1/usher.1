@@ -471,6 +471,19 @@ relaunched: usher cannot read that account's application state, so it cannot
 identify the window, and keying it on a guess corrupts one of this user's own
 slots instead.
 .TP
+.I ~/.config/usher/source-relaunch
+OPTIONAL hook, asked to START another account's apps. Run as
+.I source-relaunch
+.I SOURCE
+.IR APP-ID ...,
+once per source, with the app-ids that were open at the last capture and are
+not now. Exit 0 means accepted; anything else is reported. Handed APP-IDS AND
+NEVER COMMANDS, so the privileged side resolves them against its own desktop
+registry: this side can name an app and cannot inject a command. usher has no
+privilege to spawn as another user and does not acquire any, so without this
+hook another account's windows are placed but never started, and usher says
+which apps of whose it could not start.
+.TP
 .I ~/.local/state/usher/
 the layout store (current snapshot, history, knowledge base).
 .SH ENVIRONMENT

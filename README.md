@@ -326,6 +326,32 @@ wire whatever on your box can answer. A one-line shim is the normal shape:
 exec some-tool which-account-is pid "$1"
 ```
 
+Once a source is named, those windows are *remembered and placed* like any
+other: their slots key on the source name, so they survive a reboot and a
+reinstall of that account. Several windows of one of its apps share one key,
+because the state that would tell them apart is in a home usher may not read,
+so the first gets the remembered place and the rest stay where they open.
+
+**Starting them is the other account's job**, since usher has no privilege to
+spawn as another user and should not acquire any. So there is a second seam:
+
+```
+~/.config/usher/source-relaunch <SOURCE> <APP-ID>...
+  exit 0          accepted; that source is starting them
+  anything else   could not, and usher says so
+```
+
+It is handed **app-ids, never commands**. The privileged side resolves each
+one against *its own* desktop registry, so this side can name an app and
+cannot inject a command: the same invariant usher holds for itself, carried
+across an account boundary where usher cannot read the registry and so must
+not be the one resolving. usher names no mechanism; reach that account
+however suits you.
+
+Nothing is logged when there is nothing to ask. When there *is* and no hook is
+wired, usher says which apps of whose it could not start, so the reason
+nothing came back is never silent.
+
 ### Providers
 
 One ships, in [`share/providers/`](share/providers/):

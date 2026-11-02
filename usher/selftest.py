@@ -1268,7 +1268,7 @@ def _t_desktop(ck):
         got = []
         n = desktop_relaunch_missing([W("kitty")], [], spawn=got.append)
         ck("desktop-pass-skips-an-owned-app", n == 0 and got == [])
-        # ANOTHER ACCOUNT'S SAVED WINDOW IS NOT OURS TO START. The entry
+            # ANOTHER ACCOUNT'S SAVED WINDOW IS NOT OURS TO START. The entry
         # carries an app-id and nothing else, so resolving it in OUR registry
         # and running it would open a second, PERSONAL copy of somebody's
         # work application. `snapshot` stamps `owner` for exactly this, and
@@ -1369,6 +1369,58 @@ def _t_slots(ck):
         ck("slot-third-window-is-not-stacked", 3 not in seated)
         ck("slot-ledger-records-the-holder",
            w.slot_held.get(kkey("signal", "")) == 1)
+
+        # STEP 2: A WINDOW FROM ANOTHER ACCOUNT IS PLACED FROM ITS OWN
+        # SLOT, AND NEVER FROM THE OWNER'S. Both slots exist here on purpose:
+        # `signal\0` is the owner's app_id-only key and matches every window
+        # of that app, so an ungated placer would seat the foreign window on
+        # the owner's geometry. That is the mis-bind the whole area exists to
+        # prevent, and it is the one thing step 2 could get wrong.
+        if os.getuid() != 0:
+            _hd2 = tempfile.mkdtemp(prefix="usher-slot-src-", dir="/var/tmp")
+            _rh2, _rc2 = engine.SOURCE_HOOK, dict(engine._SOURCE_CACHE)
+            try:
+                _hp = os.path.join(_hd2, "src")
+                with open(_hp, "w") as f:
+                    f.write("#!/bin/sh\necho titan\nexit 0\n")
+                os.chmod(_hp, 0o755)
+                engine.SOURCE_HOOK = _hp
+                engine._SOURCE_CACHE.clear()
+                w.kb[kkey("signal", "titan")] = {
+                    "app_id": "signal", "title": "titan", "appid_only": False,
+                    "source": "titan", "label": "", "output": "DP-1",
+                    "workspace": [2.0, 2.0], "pos": [9.0, 9.0],
+                    "size": [10.0, 10.0], "last_seen": now, "sticky": False,
+                    "inverted": False, "fullscreen": False}
+                _got = []
+                w._seat_view = lambda v, e, o: (_got.append((v["id"], e))
+                                                or True)
+                _Sock.live = {1, 2, 3, 9}
+                _fv9 = {"id": 9, "app-id": "signal", "title": "Signal",
+                        "pid": 1, "parent": -1,
+                        "geometry": {"x": 0, "y": 0, "width": 1, "height": 1}}
+                w.deadline[9] = now + PLACE_GRACE
+                w.identified.add(9)
+                w._try_place(_fv9)
+                ck("step2-a-foreign-window-is-placed", [i for i, _ in _got]
+                   == [9])
+                ck("step2-placed-from-its-own-source-slot",
+                   bool(_got) and _got[0][1].get("source") == "titan")
+                # AND NOT FROM THE OWNER'S SLOT, which is the assertion that
+                # would have caught an ungated lookup: the owner's entry sits
+                # at ws(1,1) and the source's at ws(2,2).
+                ck("step2-not-placed-from-the-owners-slot",
+                   bool(_got) and list(_got[0][1].get("workspace")) == [2.0,
+                                                                        2.0])
+                ck("step2-the-ledger-uses-the-source-key",
+                   w.slot_held.get(kkey("signal", "titan")) == 9)
+            finally:
+                engine.SOURCE_HOOK = _rh2
+                engine._SOURCE_CACHE.clear()
+                engine._SOURCE_CACHE.update(_rc2)
+                shutil.rmtree(_hd2, ignore_errors=True)
+                _Sock.live = {1, 2, 3}
+                w._seat_view = lambda v, e, o: (seated.append(v["id"]) or True)
 
         # CLOSING THE HOLDER RELEASES THE SLOT, or its place would be
         # permanently unusable and every later window of that app adrift.
@@ -2558,6 +2610,97 @@ def _t_relaunch(ck):
                [_tmw()], []) == 0 and not _ann)
     finally:
         engine.spawn_term, engine._announce = _rst, _ran2
+
+    # STEP 3: ANOTHER ACCOUNT'S APPS ARE ASKED FOR, never started here.
+    #
+    # THE PLAN IS PURE, so the decision is checkable with no hook, no
+    # compositor and no second account.
+    _sv = [{"app_id": "slack", "source": "titan"},
+           {"app_id": "google-chrome", "source": "titan"},
+           {"app_id": "signal"}]
+    ck("source-plan-groups-by-source",
+       engine.source_relaunch_plan(_sv, [])
+       == {"titan": ["google-chrome", "slack"]})
+    ck("source-plan-ignores-the-owners-own-windows",
+       "signal" not in str(engine.source_relaunch_plan(_sv, [])))
+    # MISSING IS PER (SOURCE, APP). The OWNER running Slack says nothing about
+    # whether the work account's Slack is up, and one is not a substitute for
+    # the other: counting them together is how a work app would silently never
+    # come back.
+    ck("source-plan-the-owners-live-app-does-not-satisfy-a-source",
+       engine.source_relaunch_plan(_sv, [_trv("slack", "mine",
+                                              pid=os.getpid())])
+       == {"titan": ["google-chrome", "slack"]})
+    ck("source-plan-empty-when-nothing-is-foreign",
+       engine.source_relaunch_plan([{"app_id": "signal"}], []) == {})
+
+    # AND THE HOOK IS HANDED APP-IDS, NEVER A COMMAND, which is the whole
+    # security content: the privileged side resolves each one against ITS OWN
+    # registry, so the owner can NAME an app and cannot inject a command.
+    _asked_sr = []
+
+    def _sr_ok(argv, **_k):
+        _asked_sr.append(argv)
+
+        class R:
+            returncode = 0
+            stderr = ""
+        return R()
+
+    _rsrh, _rl3 = engine.SOURCE_RELAUNCH_HOOK, engine.logline
+    _said3 = []
+    _hd3 = tempfile.mkdtemp(prefix="usher-sr-", dir="/var/tmp")
+    try:
+        engine.logline = _said3.append
+        _hk = os.path.join(_hd3, "source-relaunch")
+        with open(_hk, "w") as f:
+            f.write("#!/bin/sh\nexit 0\n")
+        os.chmod(_hk, 0o755)
+        _ra = engine._announce
+        engine._announce = lambda *a, **k: None
+        try:
+            _n_sr = engine.source_relaunch_missing(_sv, [], run=_sr_ok,
+                                                   hook=_hk)
+            ck("source-relaunch-asks-once-per-source", len(_asked_sr) == 1)
+            ck("source-relaunch-passes-the-source-then-app-ids",
+               _asked_sr == [[_hk, "titan", "google-chrome", "slack"]])
+            ck("source-relaunch-counts-the-apps-asked-for", _n_sr == 2)
+            # NO COMMAND ANYWHERE IN WHAT THE HOOK IS HANDED.
+            ck("source-relaunch-hands-over-no-command",
+               not any("/" in a for a in _asked_sr[0][2:]))
+            # A REFUSAL IS REPORTED AND NOT COUNTED.
+            def _sr_no(argv, **_k):
+                class R:
+                    returncode = 3
+                    stderr = "nope"
+                return R()
+            _said3.clear()
+            ck("source-relaunch-a-refusal-is-not-counted",
+               engine.source_relaunch_missing(_sv, [], run=_sr_no,
+                                              hook=_hk) == 0)
+            ck("source-relaunch-a-refusal-is-reported",
+               any("refused" in m for m in _said3))
+        finally:
+            engine._announce = _ra
+        # NO HOOK, BUT SOMETHING TO ASK: reported, because the reason nothing
+        # came back must not be silent.
+        _said3.clear()
+        ck("source-relaunch-no-hook-asks-nothing",
+           engine.source_relaunch_missing(_sv, [],
+                                          hook=os.path.join(_hd3, "nope"))
+           == 0)
+        ck("source-relaunch-no-hook-says-why",
+           any("no source-relaunch hook" in m for m in _said3))
+        # ...AND NOTHING TO ASK STAYS QUIET, or a box with no other account
+        # gains a line at every login and the line gets ignored.
+        _said3.clear()
+        ck("source-relaunch-quiet-when-there-is-nothing-to-do",
+           engine.source_relaunch_missing([{"app_id": "signal"}], [],
+                                          hook=os.path.join(_hd3, "nope"))
+           == 0 and not _said3)
+    finally:
+        engine.SOURCE_RELAUNCH_HOOK, engine.logline = _rsrh, _rl3
+        shutil.rmtree(_hd3, ignore_errors=True)
 
 def _t_chrome(ck):
     """chrome identity, profiles, and the restore flags."""
