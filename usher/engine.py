@@ -1114,6 +1114,140 @@ def proc_uid(pid):
         return None
 
 
+# THE WINDOW-SOURCE SEAM. Some windows on this display belong to a different
+# account, and usher must treat those differently (see resolution). The uid
+# below answers "is it mine"; this answers "WHOSE", which usher cannot work out
+# for itself without learning another tool's vocabulary.
+#
+# SO IT IS A HOOK AND NOT A DEPENDENCY. usher names no provider, knows nothing
+# about what a source IS, and works identically with no hook at all. An
+# integrator wires whatever on this box can answer the question. Same shape as
+# the session-start seam beside it, and the same reasoning: ONE QUESTION WITH
+# ONE ANSWER wants a single path rather than a `.d` directory, because it needs
+# that provider's exit status and its one word, where a fan-out directory suits
+# an event every provider reacts to and none answers.
+#
+#   usher/window-source <PID>
+#     exit 0 + ONE WORD on stdout   that window's SOURCE name
+#     exit 1, no output             no source: the session user's own window
+#     anything else                 could NOT tell
+#
+# THREE STATES AND NOT TWO, which this fleet has had to learn repeatedly: "it
+# is mine", "it is somebody's, named" and "I cannot tell" are different facts,
+# and a hook that cannot answer must not be read as either answer.
+#
+# A NAME, NEVER A NUMBER, and that is the whole reason this beats the uid for
+# anything DURABLE: a uid is an allocation, so a repave or a second account
+# renumbers it and every slot keyed on it is orphaned, where a name survives.
+SOURCE_HOOK = config_path("window-source")
+
+# pid -> the provider's settled answer, valid for that process's lifetime.
+_SOURCE_CACHE = {}
+
+
+def _pid_stamp(pid):
+    """(pid, starttime) or None: a key a REUSED pid cannot collide with.
+
+    starttime is field 22 of /proc/<pid>/stat, read the unambiguous way
+    (`comm` can hold spaces and parens, so the fields start after the LAST
+    ')'), which is the same reading browser_started already does."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            st = f.read()
+        return (pid, st[st.rindex(")") + 2:].split()[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def window_source(pid, run=None, hook=None):
+    """(name, state) for the account a window's process belongs to.
+
+    state is one of:
+        "source"   a provider named it; `name` is that name
+        "mine"     a provider says this is the session user's own window
+        "unknown"  a provider exists and could not answer
+        "nohook"   no provider is wired, so nothing was asked
+
+    BOUNDED AND NEVER FATAL. This is called per window on a placement path, so
+    a hook that hangs would hang placement: it gets 2 seconds, and every
+    failure mode (missing, not executable, raising, timing out, answering
+    rubbish) lands in a state the caller already handles rather than in an
+    exception.
+
+    ONE WORD, VALIDATED. A provider that prints a usage block or a sentence has
+    not answered the question, and reading its first word as a source name
+    would key windows on prose. Anything that is not a single bare token is
+    "unknown".
+    """
+    path = SOURCE_HOOK if hook is None else hook
+    if not path or not os.access(path, os.X_OK):
+        return (None, "nohook")
+    # CACHED PER PROCESS, because a foreign window is re-resolved on every
+    # event and every capture pass too, and the answer cannot change while
+    # the process lives. KEYED ON THE START TIME AS WELL AS THE PID, since a
+    # pid is reused: without it a new window could inherit a dead process's
+    # source, which is the mis-binding this whole seam exists to prevent.
+    # THE HOOK PATH IS PART OF THE KEY, not just the process: an answer from
+    # one provider must never be handed back for another. Found by the checks
+    # below, which vary the hook for one pid and got the first hook's answer
+    # every time.
+    stamp = _pid_stamp(pid)
+    stamp = None if stamp is None else (path,) + stamp
+    if stamp is not None and stamp in _SOURCE_CACHE:
+        return _SOURCE_CACHE[stamp]
+    try:
+        r = (subprocess.run if run is None else run)(
+            [path, str(pid)], capture_output=True, text=True, timeout=2)
+    except Exception:                                      # noqa: BLE001
+        return (None, "unknown")
+    if r.returncode == 1:
+        ans = (None, "mine")
+    elif r.returncode != 0:
+        ans = (None, "unknown")
+    else:
+        name = (r.stdout or "").strip()
+        ans = ((name, "source") if name and len(name.split()) == 1
+               else (None, "unknown"))
+    # ONLY A SETTLED ANSWER IS CACHED. "unknown" is the state a provider
+    # reaches when it could not tell YET (a race, a timeout), and freezing
+    # that for the life of the process would turn a blip into a permanent
+    # wrong answer.
+    if stamp is not None and ans[1] != "unknown":
+        _SOURCE_CACHE[stamp] = ans
+    return ans
+
+
+def window_origin(pid, source=None, uid_of=None, me=None):
+    """Where this window came from: (source_name, foreign_uid).
+
+    TWO SIGNALS, EACH FOR WHAT IT KNOWS, AND THE uid GOES FIRST:
+
+        uid == mine     -> (None, None)         ours. The hook is NOT asked.
+        uid != mine     -> (name-or-None, uid)  foreign; the hook supplies the
+                                                NAME when it can
+
+    THE ORDER IS A COST DECISION, measured in forks rather than guessed:
+    `resolution` runs on every event and on every capture pass for every
+    window, so asking a hook first would mean a subprocess per window per
+    second, forever, in a daemon. The uid is one stat and answers for all but
+    a handful of windows.
+
+    WHAT THAT GIVES UP, said rather than hidden: a client of the SESSION
+    USER'S OWN uid that arrived through another account's display socket reads
+    as ours and is never put to the hook. The compositor's security context is
+    the only signal that settles that one (U-W1); this seam upgrades "not
+    mine" to "whose", which is a different and smaller claim.
+
+    WITH NO PROVIDER WIRED the answer is exactly what usher computed for
+    itself before this seam existed, which is what makes it safe to adopt: a
+    box with no hook behaves identically to one that never had the concept."""
+    other = foreign_owner(pid, uid_of=uid_of, me=me)
+    if other is None:
+        return (None, None)
+    name, state = window_source(pid) if source is None else source
+    return (name if state == "source" else None, other)
+
+
 def foreign_owner(pid, uid_of=None, me=None):
     """The uid owning `pid` when that is NOT this session's user, else None.
 
@@ -1182,12 +1316,17 @@ def resolution(v):
     # correctness of every slot of ours it would otherwise take. When the
     # compositor publishes the security context a window arrived through,
     # these become keyable per source and the trade goes away.
-    other = foreign_owner(v.get("pid"))
-    if other is not None:
+    src, other = window_origin(v.get("pid"))
+    if src is not None or other is not None:
+        # NAMED WHEN A PROVIDER CAN NAME IT, and that is not cosmetic: the
+        # name is what `doctor` shows a human and what a stored key will carry
+        # once the source is keyable, where a uid is an allocation nobody
+        # recognises and that renumbers on a repave.
+        whose = f"the {src} source" if src else f"uid {other}"
         return Resolution.never(
-            f"this window's process belongs to uid {other}, not to this "
-            f"session's user, so the app's own state is in a home usher "
-            f"cannot read and there is no handle to key it on")
+            f"this window belongs to {whose}, not to this session's user, so "
+            f"the app's own state is in a home usher cannot read and there is "
+            f"no handle to key it on")
     p = _owner(v)
     if p is None:
         if not v["app"] and not v["title"].strip():

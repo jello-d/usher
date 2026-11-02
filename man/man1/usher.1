@@ -454,6 +454,23 @@ never-place rules and settled-state anchors.
 .I ~/.config/usher/plugins/*.py
 user window plugins.
 .TP
+.I ~/.config/usher/window-source
+OPTIONAL hook, asked which account a window belongs to. Run as
+.I window-source
+.IR PID :
+exit 0 with ONE WORD on stdout names that window's source, exit 1 with no
+output means the window is the session user's own, and anything else means it
+could not tell. usher names no provider and works identically with none,
+falling back to comparing the owner of the window's process against the
+session user, so the only thing a missing hook costs is the NAME. Asked only
+about windows that are already not ours, cached for the life of the process,
+and bounded at two seconds.
+.IP
+A window belonging to another account is never keyed, learned, placed or
+relaunched: usher cannot read that account's application state, so it cannot
+identify the window, and keying it on a guess corrupts one of this user's own
+slots instead.
+.TP
 .I ~/.local/state/usher/
 the layout store (current snapshot, history, knowledge base).
 .SH ENVIRONMENT

@@ -292,6 +292,40 @@ start a console session here and deliberately not how, so it execs whatever
 The provider obtains its own privilege if it needs any. Without one, the verb
 says so and tells you where to link it.
 
+### Windows that belong to another account
+
+If some windows on your display are run by a *different user* (a work account
+with its own browser, say), usher must not treat them as yours: it cannot read
+that account's application state, so it cannot identify those windows, and a
+guess corrupts one of your own slots. So it declines them. They open where
+they open, usher leaves them alone, and `doctor` says why.
+
+Telling them apart needs nothing from you: usher compares the owner of the
+window's process against the session user. **Whose** window it is is a
+separate question usher cannot answer for itself, so there is a seam:
+
+```
+~/.config/usher/window-source <PID>
+  exit 0, one word on stdout    that window's SOURCE name
+  exit 1, no output             no source: the session user's own window
+  anything else                 could not tell
+```
+
+Optional, and usher works identically with none: without a provider it falls
+back to the uid comparison it can always make, so the only thing missing is
+the *name*. A provider is asked only about windows that are already not ours,
+and its answer is cached for the life of the process, so this is not on the
+hot path. It gets two seconds.
+
+No provider is named here, and usher knows nothing about what a source *is*:
+wire whatever on your box can answer. A one-line shim is the normal shape:
+
+```sh
+#!/bin/sh
+# ~/.config/usher/window-source
+exec some-tool which-account-is pid "$1"
+```
+
 ### Providers
 
 One ships, in [`share/providers/`](share/providers/):

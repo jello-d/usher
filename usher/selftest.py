@@ -627,6 +627,117 @@ def _t_resolution(ck):
         engine.learn(_kb2, _g2, [_ow], time.time())
         ck("foreign-check-has-a-working-control", bool(_kb2))
 
+    # 1d. THE WINDOW-SOURCE SEAM: whose window, from a hook, so usher names
+    #     no provider and works identically with none.
+    #
+    # REAL SCRIPTS AND REAL SUBPROCESSES, not a stubbed runner: the access
+    # check, the exit code and the stdout parsing are the contract, and a
+    # stub would test my idea of them instead.
+    _hd = tempfile.mkdtemp(prefix="usher-src-", dir="/var/tmp")
+    try:
+        def _mkhook(name, body, mode=0o755):
+            p = os.path.join(_hd, name)
+            with open(p, "w") as f:
+                f.write("#!/bin/sh\n" + body + "\n")
+            os.chmod(p, mode)
+            return p
+
+        _h_src = _mkhook("src", 'echo titan\nexit 0')
+        _h_mine = _mkhook("mine", "exit 1")
+        _h_cannot = _mkhook("cannot", "exit 2")
+        _h_prose = _mkhook("prose", 'echo "usage: hook <pid>"\nexit 0')
+        _h_empty = _mkhook("empty", "exit 0")
+        _h_noexec = _mkhook("noexec", "echo titan", mode=0o644)
+
+        ck("source-hook-names-the-source",
+           engine.window_source(1, hook=_h_src) == ("titan", "source"))
+        ck("source-hook-exit-1-is-mine",
+           engine.window_source(1, hook=_h_mine) == (None, "mine"))
+        ck("source-hook-exit-2-is-unknown",
+           engine.window_source(1, hook=_h_cannot) == (None, "unknown"))
+        # A PROVIDER THAT PRINTS PROSE HAS NOT ANSWERED, and reading its first
+        # word as a source name would key windows on a usage block.
+        ck("source-hook-prose-is-not-a-name",
+           engine.window_source(1, hook=_h_prose) == (None, "unknown"))
+        ck("source-hook-silence-is-not-a-name",
+           engine.window_source(1, hook=_h_empty) == (None, "unknown"))
+        ck("source-hook-not-executable-is-nohook",
+           engine.window_source(1, hook=_h_noexec) == (None, "nohook"))
+        ck("source-hook-absent-is-nohook",
+           engine.window_source(1, hook=os.path.join(_hd, "nope"))
+           == (None, "nohook"))
+        # A HOOK THAT HANGS MUST NOT HANG PLACEMENT. Driven through the
+        # injected runner rather than by actually sleeping, so the suite
+        # stays fast while the except arm is still executed.
+        def _boom(*_a, **_k):
+            raise subprocess.TimeoutExpired("hook", 2)
+
+        # ITS OWN HOOK PATH, so this cannot read a cached answer from the
+        # `src` hook above: the cache is keyed on the provider as well as the
+        # process, and reusing a path made this depend on call ORDER.
+        _h_hang = _mkhook("hang", "exit 0")
+        ck("source-hook-timeout-is-unknown",
+           engine.window_source(1, run=_boom, hook=_h_hang) == (None,
+                                                                "unknown"))
+        # FOUR STATES, PAIRWISE DISTINCT. Collapsing two is how a mechanism
+        # that distinguishes N cases ends up spending none of it, which this
+        # file records twice.
+        ck("source-hook-states-are-pairwise-distinct",
+           len({engine.window_source(1, hook=_h_src)[1],
+                engine.window_source(1, hook=_h_mine)[1],
+                engine.window_source(1, hook=_h_cannot)[1],
+                engine.window_source(1, hook=_h_noexec)[1]}) == 4)
+
+        # window_origin: THE uid GOES FIRST, and that is observable. A source
+        # tuple that WOULD name a source is ignored when the uid says the
+        # window is ours, which is what keeps the hook off the hot path.
+        ck("origin-our-own-window-does-not-consult-the-hook",
+           engine.window_origin(1, source=("titan", "source"),
+                                uid_of=lambda _p: 1000, me=1000)
+           == (None, None))
+        ck("origin-a-foreign-window-carries-the-name",
+           engine.window_origin(1, source=("titan", "source"),
+                                uid_of=lambda _p: 997, me=1000)
+           == ("titan", 997))
+        # NO PROVIDER, OR ONE THAT CANNOT ANSWER: the uid answer alone, which
+        # is exactly what usher computed before this seam existed.
+        for _st in ("nohook", "unknown"):
+            ck(f"origin-falls-back-to-the-uid-when-{_st}",
+               engine.window_origin(1, source=(None, _st),
+                                    uid_of=lambda _p: 997, me=1000)
+               == (None, 997))
+
+        # AND THE REASON NAMES THE SOURCE, which is what a human reads in
+        # doctor and what a stored key will carry once the source is keyable.
+        if os.getuid() != 0:
+            _rsh2 = engine.SOURCE_HOOK
+            engine._SOURCE_CACHE.clear()
+            try:
+                engine.SOURCE_HOOK = _h_src
+                _fr = engine.resolution(
+                    _trv("slack", "Sign in | Slack", pid=1, vid=93))
+                ck("foreign-reason-names-the-source",
+                   "titan source" in (_fr.why or ""))
+                ck("foreign-with-a-source-is-still-never",
+                   not _fr.is_ready)
+            finally:
+                engine.SOURCE_HOOK = _rsh2
+                engine._SOURCE_CACHE.clear()
+
+        # THE CACHE KEEPS A SETTLED ANSWER AND NOT AN UNSETTLED ONE: freezing
+        # "unknown" would turn a blip into a permanent wrong answer.
+        engine._SOURCE_CACHE.clear()
+        engine.window_source(os.getpid(), hook=_h_src)
+        ck("source-hook-caches-a-settled-answer",
+           len(engine._SOURCE_CACHE) == 1)
+        engine._SOURCE_CACHE.clear()
+        engine.window_source(os.getpid(), hook=_h_cannot)
+        ck("source-hook-does-not-cache-unknown",
+           not engine._SOURCE_CACHE)
+        engine._SOURCE_CACHE.clear()
+    finally:
+        shutil.rmtree(_hd, ignore_errors=True)
+
 def _t_lock(ck):
     """The lock decision, as the full matrix. PURE, so no session is needed.
 
