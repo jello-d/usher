@@ -42,15 +42,52 @@ APP=usher-indicator
 UNIT=$APP.service
 UNIT_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
 
+# _pip_from_copy <venv> <source>: install WITHOUT writing into the source.
+#
+# THIS IS THE ONE THAT BROKE, and it broke a whole provision. pip BUILDS IN
+# TREE (the default since 21.3), so `pip install <dir>` writes `*.egg-info`
+# and `build/` BESIDE the code. The tray is PER-USER and its source is now the
+# package's DEPLOYED CLONE, which became root-owned the day usher gained a
+# machine-wide mode, so the build had nowhere to put them:
+#
+#     creating usher_indicator.egg-info
+#     error: could not create 'usher_indicator.egg-info': Permission denied
+#     ERROR: Failed to build ... when getting requirements to build wheel
+#
+# A per-user install from a root-owned source is the NORMAL state now, not an
+# edge case, so this no longer depends on writing where it reads. The same
+# shape is in the core setup.sh, deliberately duplicated: the two installers
+# share no library, and the shape is the fact rather than a list, so a copy
+# cannot drift into a wrong answer.
+_pip_from_copy() {
+  _pc_v=$1 _pc_s=$2
+  _pc_t=$(mktemp -d) || return 1
+  # EXPANDED AND CHECKED BEFORE ANY `rm -rf`, per the standing rule.
+  case $_pc_t in
+  /*/*) ;;
+  *) echo "$APP: refusing a scratch dir at '$_pc_t'" >&2; return 1 ;;
+  esac
+  _pc_rc=0
+  # deps from pyproject.toml; the forced --no-deps reinstall guarantees a
+  # code change is picked up on a re-run (same version would else no-op).
+  # THE COPY MUST BE WRITABLE WHATEVER THE SOURCE'S MODES WERE. `cp -R`
+  # carries them, so a read-only source yielded a read-only copy: pip could
+  # not build in it and the cleanup below could not remove it, which turned a
+  # fixed bug into a different failure with the same exit code.
+  cp -R "$_pc_s/." "$_pc_t/" \
+    && chmod -R u+w "$_pc_t" \
+    && "$_pc_v/bin/pip" install -q "$_pc_t" \
+    && "$_pc_v/bin/pip" install -q --force-reinstall --no-deps "$_pc_t" \
+    || _pc_rc=$?
+  rm -rf -- "$_pc_t"
+  return "$_pc_rc"
+}
+
 app() {
   if [ -z "${UI_SKIP_BUILD:-}" ]; then
     [ -d "$VENV" ] || python3 -m venv "$VENV"
     "$VENV/bin/pip" install -q --upgrade pip
-    # deps from pyproject.toml; the forced --no-deps reinstall guarantees a
-    # code change is picked up on a re-run (same version would else no-op).
-    "$VENV/bin/pip" install -q "$PKG_DIR"
-    "$VENV/bin/pip" install -q --force-reinstall --no-deps "$PKG_DIR"
-    rm -rf "$PKG_DIR/build" "$PKG_DIR"/*.egg-info
+    _pip_from_copy "$VENV" "$PKG_DIR"
   fi
   mkdir -p "$BIN_DIR"
   ln -sfn "$VENV/bin/$APP" "$BIN_DIR/$APP"

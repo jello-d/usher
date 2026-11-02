@@ -313,14 +313,57 @@ _retire_old_venv() {
   echo "$PKG: retired the pre-payload venv ($OLD_VENV)"
 }
 
+# _pip_from_copy <venv> <source>: install a python project WITHOUT writing
+# into its source tree.
+#
+# pip BUILDS IN TREE (the default since 21.3), so `pip install <dir>` creates
+# `*.egg-info` and `build/` BESIDE the code. Fine for a checkout, fatal for a
+# READ-ONLY source, which is exactly what this package's deployed clone became
+# the day it gained a machine-wide mode: the clone is root-owned, and the
+# PER-USER tray installs from it AS THE USER. Measured 2026-11-02, it broke a
+# provision outright:
+#
+#     creating usher_indicator.egg-info
+#     error: could not create 'usher_indicator.egg-info': Permission denied
+#
+# THE CORE ONLY ESCAPED BECAUSE `--system` RUNS IT AS ROOT, which could write
+# there; the same call as a user fails identically, and a user-scope verb now
+# resolves to the SYSTEM clone's setup.sh whenever one exists. So neither
+# installer depends on writing to its own source any more, and the old
+# `rm -rf $_root/build` cleanup is gone with the need for it.
+#
+# DUPLICATED IN indicator/setup.sh on purpose: the two installers share no
+# library today, and a sourced one is a bigger change than this is worth. The
+# shape is the fact, not a list, so a copy cannot drift into a wrong answer.
+_pip_from_copy() {
+  _pc_v=$1 _pc_s=$2
+  _pc_t=$(mktemp -d) || return 1
+  # EXPANDED AND CHECKED BEFORE ANY `rm -rf`, per the standing rule: an empty
+  # mktemp answer must never reach it.
+  case $_pc_t in
+  /*/*) ;;
+  *) echo "$PKG: refusing a scratch dir at '$_pc_t'" >&2; return 1 ;;
+  esac
+  _pc_rc=0
+  # deps come from pyproject.toml; the forced --no-deps reinstall guarantees a
+  # code change is picked up on a re-run (same version would else no-op).
+  # THE COPY MUST BE WRITABLE WHATEVER THE SOURCE'S MODES WERE. `cp -R`
+  # carries them, so a read-only source yielded a read-only copy: pip could
+  # not build in it and the cleanup below could not remove it, which turned a
+  # fixed bug into a different failure with the same exit code.
+  cp -R "$_pc_s/." "$_pc_t/" \
+    && chmod -R u+w "$_pc_t" \
+    && "$_pc_v/bin/pip" install -q "$_pc_t" \
+    && "$_pc_v/bin/pip" install -q --force-reinstall --no-deps "$_pc_t" \
+    || _pc_rc=$?
+  rm -rf -- "$_pc_t"
+  return "$_pc_rc"
+}
+
 build_venv() {
   [ -d "$VENV" ] || python3 -m venv "$VENV"
   "$VENV/bin/pip" install -q --upgrade pip
-  # deps come from pyproject.toml; the forced --no-deps reinstall guarantees a
-  # code change is picked up on a re-run (same version would else no-op).
-  "$VENV/bin/pip" install -q "$_root"
-  "$VENV/bin/pip" install -q --force-reinstall --no-deps "$_root"
-  rm -rf "$_root/build" "$_root"/*.egg-info    # in-place build detritus
+  _pip_from_copy "$VENV" "$_root"
 }
 
 # EVERY CONSOLE SCRIPT THE PACKAGE PROVIDES, named once so install, uninstall

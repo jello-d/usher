@@ -164,4 +164,47 @@ runh "$H/.local" >/dev/null 2>&1 || fail "install with a dud new venv errored"
 [ -d "$H/.venvs/usher" ] \
   || fail "retired the pre-payload venv while the new one was unusable"
 
+# THE SOURCE MAY BE READ-ONLY, and on this fleet it normally IS: the deployed
+# clone is root-owned since usher gained a machine-wide mode, and a per-user
+# verb resolves to the SYSTEM clone's setup.sh whenever one exists. pip BUILDS
+# IN TREE (the default since 21.3), so installing straight from the source
+# wants to write `*.egg-info` beside the code and cannot. Measured 2026-11-02:
+# it broke a whole provision at the indicator step.
+#
+# DRIVEN WITH A STUB pip SO NO NETWORK IS NEEDED and the argument pip was
+# actually given can be asserted, which is the thing under test: it must be a
+# COPY and never the source. build_venv skips `python3 -m venv` when the dir
+# already exists, so planting one with a stub `bin/pip` is enough to reach it.
+RO=$T/ro; mkdir -p "$RO"
+cp -R "$HERE"/. "$RO/" 2>/dev/null || :
+rm -rf "$RO/.git" "$RO"/*.egg-info "$RO/build"
+PV=$T/pipvenv/bin; mkdir -p "$PV"
+printf '#!/bin/sh\nprintf "%%s\\n" "$@" >> %s/pip.log\nexit 0\n' "$T" \
+  >"$PV/pip"
+chmod +x "$PV/pip"
+printf '#!/bin/sh\nexit 0\n' > "$PV/usher"; chmod +x "$PV/usher"
+# THE SOURCE *DIRECTORY* IS WHAT IS NOT WRITABLE, which is what a root-owned
+# clone actually looks like to a non-root caller: its dirs are 0755 root-owned,
+# so a copy MADE by this user is this user's and removable. `chmod -R a-w`
+# models something harsher and wrong, and it failed the payload swap rather
+# than the pip build: the real bug is pip writing egg-info INTO the source
+# dir, so that is the one bit to take away.
+chmod a-w "$RO" "$RO/usher"
+_rc=0
+env HOME="$H" PREFIX="$T/ro-prefix" XDG_BIN_HOME="$T/ro-prefix/bin" \
+  XDG_DATA_HOME="$T/ro-prefix/share" XDG_CONFIG_HOME="$T/ro-cfg" \
+  USHER_VENV="$T/pipvenv" NO_COLOR=1 \
+  sh "$RO/setup.sh" install >"$T/ro.out" 2>&1 || _rc=$?
+chmod u+w "$RO" "$RO/usher"
+[ "$_rc" = 0 ] || fail "install from a READ-ONLY source errored: $(cat \
+  "$T/ro.out")"
+# pip WAS CALLED, or this check proves nothing at all.
+grep -q . "$T/pip.log" 2>/dev/null \
+  || fail "the stub pip was never called, so nothing was proven"
+# AND NOT ON THE SOURCE. That is the whole assertion.
+grep -qx -- "$RO" "$T/pip.log" \
+  && fail "pip was pointed AT THE SOURCE: $(cat "$T/pip.log")"
+[ -z "$(ls -a "$RO" | grep -E 'egg-info|^build$')" ] \
+  || fail "the install wrote build detritus into the source"
+
 pass "payload + links + hooks + uninstall + venv canary + retirement guard"

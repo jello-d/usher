@@ -77,4 +77,43 @@ run "$H/.local" >/dev/null 2>&1 || fail "install with a dud venv errored"
 [ -d "$H/.venvs/$APP" ] \
   || fail "retired the pre-payload venv while the new one was unusable"
 
-pass "payload venv-indicator, the carry name, and the retirement guard"
+# THE SOURCE IS NORMALLY NOT WRITABLE BY THIS USER, and THIS is the install
+# that broke on it. The tray is per-user and its source is the package's
+# DEPLOYED CLONE, which became root-owned the day usher gained a machine-wide
+# mode. pip BUILDS IN TREE (the default since 21.3), so it wanted to write
+# `usher_indicator.egg-info` into a directory it could not write:
+#
+#     error: could not create 'usher_indicator.egg-info': Permission denied
+#     ERROR: Failed to build ... when getting requirements to build wheel
+#
+# A STUB pip, so no network, and so the ARGUMENT pip was handed can be
+# asserted: it must be a COPY and never the source. `app` skips
+# `python3 -m venv` when the dir exists, so a planted venv with a stub
+# `bin/pip` reaches the build.
+RO=$T/ro; mkdir -p "$RO"
+cp -R "$HERE/indicator"/. "$RO/" 2>/dev/null || :
+rm -rf "$RO"/*.egg-info "$RO/build"
+PV=$T/pipvenv/bin; mkdir -p "$PV"
+printf '#!/bin/sh\nprintf "%%s\\n" "$@" >> %s/pip.log\nexit 0\n' "$T" \
+  >"$PV/pip"
+chmod +x "$PV/pip"
+printf '#!/bin/sh\nexit 0\n' > "$PV/$APP"; chmod +x "$PV/$APP"
+# ONLY THE DIRECTORY, which is what a root-owned 0755 clone looks like to a
+# non-root caller: a copy made BY this user is this user's and removable.
+chmod a-w "$RO" "$RO/usher_indicator"
+_rc=0
+env HOME="$H" UI_BIN="$T/ro-bin" XDG_DATA_HOME="$T/ro-share" \
+  XDG_CONFIG_HOME="$T/ro-cfg" UI_VENV="$T/pipvenv" NO_COLOR=1 \
+  sh "$RO/setup.sh" app >"$T/ro.out" 2>&1 || _rc=$?
+chmod u+w "$RO" "$RO/usher_indicator"
+[ "$_rc" = 0 ] || fail "app install from a READ-ONLY source errored: $(cat \
+  "$T/ro.out")"
+grep -q . "$T/pip.log" 2>/dev/null \
+  || fail "the stub pip was never called, so nothing was proven"
+grep -qx -- "$RO" "$T/pip.log" \
+  && fail "pip was pointed AT THE SOURCE: $(cat "$T/pip.log")"
+[ -z "$(ls -a "$RO" | grep -E 'egg-info|^build$')" ] \
+  || fail "the install wrote build detritus into the source"
+
+pass "payload venv-indicator, the carry name, the retirement guard, \
+read-only source"
