@@ -3384,24 +3384,27 @@ def roster_launch(apps, live, spawn=None):
 
 
 def do_source_capture():
-    """Record this account's own open apps. Takes no arguments."""
-    # AN ADVISORY AND NEVER A REFUSAL, which is the whole point of it being a
-    # print. Run as the SESSION USER this verb works and is meaningless: an
-    # unsandboxed client sees every toplevel on the desk, so the roster it
-    # writes lists other accounts' apps too, and nothing on this side ever
-    # reads a roster (the owner restores from the layout store). Met for real
-    # while the integrator was building the shim: a stray roster.json in the
-    # owner's state, and `doctor` then reporting the owner as a source.
-    #
-    # IT MUST NOT REFUSE. Whether a sudo'd process counts as being INSIDE its
-    # enclave is the provider's business, not a fact usher may assume, so a
-    # guard here could break the one path this verb exists for to prevent an
-    # untidy file. Saying so costs nothing and cannot.
-    if not window_origin(os.getpid())[0]:
-        print("usher: NOTE this account is not itself a source, so nothing "
-              "reads the roster this writes;", file=sys.stderr)
-        print("usher:      an unsandboxed client also sees other accounts' "
-              "windows, so the list is not scoped.", file=sys.stderr)
+    """Record this account's own open apps. Takes no arguments.
+
+    RUN AS THE SESSION USER THIS WORKS AND IS MEANINGLESS, and it is left
+    that way deliberately. An unsandboxed client sees every toplevel, so the
+    roster would list other accounts' apps, and nothing on the owner's side
+    reads a roster at all. `doctor` reports a roster in the owner's state,
+    which is how one got noticed, and that is the whole of the protection.
+
+    AN ADVISORY FOR IT WAS BUILT AND REMOVED THE SAME DAY. It tested
+    `window_origin(os.getpid())`, which is uid-relative to the CALLER and so
+    can never report a process as foreign to itself: it therefore fired on
+    the FIRST REAL RUN, through the integrator's own seam, as noise on the one
+    path the verb exists for. Being a print rather than a refusal is the only
+    reason that was noise instead of a breakage, which is the asymmetry it
+    was commented with, paying off within the hour.
+
+    A CORRECT VERSION IS AVAILABLE AND NOT WORTH IT: the source hook does
+    answer for a non-window process of an enclave (measured, rc=0 by uid), so
+    asking it about our own pid would work, at one subprocess per capture and
+    a fresh false positive on any box with no hook. The convenience was for a
+    one-time integration that has now happened."""
     rows, why = toplevels.list_toplevels()
     if why:
         print(f"usher: cannot read this account's own windows: {why}",
