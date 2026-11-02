@@ -2450,7 +2450,16 @@ def _t_roster(ck):
                      "identifier": "1"},
                     {"app_id": "slack", "title": "u", "identifier": "2"}]
             toplevels.list_toplevels = lambda *a, **k: (rows, "")
-            out = _capture_out(engine.do_source_capture)
+            # THE ADVISORY IS A PRINT AND NEVER A REFUSAL, which is the
+            # property worth pinning: a guard here could break the one path
+            # the verb exists for, to prevent an untidy file. So it must
+            # still SUCCEED and still write when the account is not itself a
+            # source, which is exactly the fixture's situation.
+            _adv = io.StringIO()
+            with contextlib.redirect_stderr(_adv):
+                out = _capture_out(engine.do_source_capture)
+            ck("capture-advises-when-the-account-is-not-a-source",
+               "not itself a source" in _adv.getvalue())
             ck("capture-records-its-own-apps",
                engine.load_roster()[0] == ["google-chrome", "slack"]
                and "2 app(s)" in out)
@@ -2485,7 +2494,8 @@ def _t_roster(ck):
             # any observation with a window REPLACES the roster wholesale, so
             # an app really closed stops coming back.
             toplevels.list_toplevels = lambda *a, **k: ([rows[1]], "")
-            _capture_out(engine.do_source_capture)
+            with contextlib.redirect_stderr(io.StringIO()):
+                _capture_out(engine.do_source_capture)
             ck("capture-a-smaller-desk-replaces-the-roster",
                engine.load_roster()[0] == ["slack"])
 

@@ -3385,6 +3385,23 @@ def roster_launch(apps, live, spawn=None):
 
 def do_source_capture():
     """Record this account's own open apps. Takes no arguments."""
+    # AN ADVISORY AND NEVER A REFUSAL, which is the whole point of it being a
+    # print. Run as the SESSION USER this verb works and is meaningless: an
+    # unsandboxed client sees every toplevel on the desk, so the roster it
+    # writes lists other accounts' apps too, and nothing on this side ever
+    # reads a roster (the owner restores from the layout store). Met for real
+    # while the integrator was building the shim: a stray roster.json in the
+    # owner's state, and `doctor` then reporting the owner as a source.
+    #
+    # IT MUST NOT REFUSE. Whether a sudo'd process counts as being INSIDE its
+    # enclave is the provider's business, not a fact usher may assume, so a
+    # guard here could break the one path this verb exists for to prevent an
+    # untidy file. Saying so costs nothing and cannot.
+    if not window_origin(os.getpid())[0]:
+        print("usher: NOTE this account is not itself a source, so nothing "
+              "reads the roster this writes;", file=sys.stderr)
+        print("usher:      an unsandboxed client also sees other accounts' "
+              "windows, so the list is not scoped.", file=sys.stderr)
     rows, why = toplevels.list_toplevels()
     if why:
         print(f"usher: cannot read this account's own windows: {why}",
