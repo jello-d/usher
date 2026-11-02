@@ -419,6 +419,31 @@ _mode_switch() {
     echo "$PKG: NOTE $_c names the removed user copy; point it at" >&2
     echo "$PKG:      $_bint/usher   (and $_bint/usher-mgr)" >&2
   done
+  # AND A DAEMON STARTED FROM THE REMOVED COPY IS STILL RUNNING IT, which the
+  # fleet recipe asks of any package with one and which this switch could not
+  # otherwise say. It survives on open file descriptors and keeps working, so
+  # nothing looks wrong, and then:
+  #   - a WORKER respawn re-runs the removed command and cannot, so placement
+  #     stops at the first worker death rather than at the install
+  #   - `usher reload` makes the supervisor re-exec its OWN original argv,
+  #     which is now a path that does not exist
+  # Measured on a box whose session predated the switch: the supervisor was
+  # alive on `~/.local/share/usher/venv/bin/python3` after that venv was gone.
+  #
+  # SAID AND NOT FIXED, because as root this has no business restarting a
+  # user's session daemon, and a restart from the wrong environment is worse
+  # than a stale one (a daemon with no WAYLAND_DISPLAY spawns terminals that
+  # die instantly). The remedy is the user's, in their own session.
+  for _d in /proc/[0-9]*; do
+    [ -r "$_d/cmdline" ] || continue
+    tr '\0' ' ' < "$_d/cmdline" 2>/dev/null \
+      | grep -q -- "$_lh/.local/\(bin/$PKG-mgr\|share/$PKG/venv\)" || continue
+    echo "$PKG: NOTE a daemon (pid ${_d#/proc/}) is still RUNNING the copy" \
+      "just removed; it works until its next respawn. Restart it from the" \
+      "session that owns it: 'usher stop', then log out and in, or re-run" \
+      "the compositor autostart." >&2
+    break
+  done
 }
 
 # _system_leftover: is there a system-mode command beside a user install?

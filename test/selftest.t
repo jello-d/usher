@@ -25,8 +25,23 @@ PYTHONPATH="$HERE" python3 -m usher selftest >/dev/null 2>&1 \
 
 # The deployed interpreter, which differs in the one way that matters: it can
 # import pywayfire, so any check whose answer depends on that is exercised.
+# ASK THE INSTALLED COMMAND FIRST, which is the one answer that cannot go
+# stale: the machine-wide mode puts the venv at /opt/usher/venv and removes
+# the per-user one, so a LIST of candidate paths silently stopped finding it
+# and this check announced "NO VENV FOUND" on a box that had one. A selector
+# that covers less is the failure this suite exists to catch, met here by the
+# suite itself. `usher-mgr` resolves into whichever venv is live.
 _venv=
-for _c in "$HOME/.local/share/usher/venv/bin/python" \
+_cmd=$(command -v usher-mgr 2>/dev/null || true)
+if [ -n "$_cmd" ]; then
+  _rl=$(readlink -f "$_cmd" 2>/dev/null || true)
+  case $_rl in
+  */venv/bin/*) _c=${_rl%/bin/*}/bin/python
+                [ -x "$_c" ] && _venv=$_c ;;
+  esac
+fi
+[ -n "$_venv" ] || for _c in "/opt/usher/venv/bin/python" \
+          "$HOME/.local/share/usher/venv/bin/python" \
           "$HOME/.venvs/usher/bin/python"; do
   [ -x "$_c" ] && { _venv=$_c; break; }
 done

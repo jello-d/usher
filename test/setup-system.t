@@ -38,6 +38,13 @@ mkdir -p "$H/.config/hwdp/hooks/changed.d"
 sysrun() { env HOME="$H" DESTDIR="$D" USHER_SKIP_BUILD=1 NO_COLOR=1 \
   sh "$HERE/setup.sh" "$@"; }
 
+# The REAL system payload may legitimately exist (this box may be running the
+# machine-wide mode), so what a refused install owes is to leave it ALONE
+# rather than to leave it absent. One string, so a creation, a removal or a
+# touch all show up as a difference.
+_opt_state() { ls -ldi --time-style=+%s /opt/usher 2>&1; }
+_opt_before=$(_opt_state)
+
 # --- THE FLAG IS REFUSED WHERE IT MEANS NOTHING ------------------------------
 # A verb with no system mode that silently ignored `--system` would do the
 # user-mode thing while the caller believed otherwise. That is not a
@@ -74,7 +81,13 @@ if [ "$(id -u)" != 0 ]; then
     *"sudo sh setup.sh install --system"*) ;;
     *) fail "the refusal does not name the remedy: $_o" ;;
   esac
-  [ ! -e /opt/usher ] || fail "a refused install reached the real /opt/usher"
+  # UNCHANGED, not ABSENT. This asserted `! -e /opt/usher` and so FAILED on
+  # the first box that legitimately had a machine-wide install: a check that
+  # depends on the host is a check on the host, which this fleet has caught
+  # three times in one other repo. What the refusal owes is to write nothing,
+  # so compare the state before and after.
+  [ "$_opt_before" = "$(_opt_state)" ] \
+    || fail "a refused install changed the real /opt/usher"
 fi
 
 # --- A USER-MODE INSTALL FOR THE SUDO CALLER, to be switched away ------------
