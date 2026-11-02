@@ -199,6 +199,7 @@ socket via `pywayfire`), so `setup.sh` builds a venv:
 ./setup.sh all          # both
 ./setup.sh hooks        # link the hwdp display-change hook
 ./setup.sh check        # audit the install
+./setup.sh paths        # every root this package owns, KIND<tab>PATH
 ./setup.sh test         # run the in-repo suite
 ```
 
@@ -208,6 +209,40 @@ exists, so a box with hwdp needs no extra step and one without is untouched.
 Everything is userspace (no sudo), into `~/.local` (override with `PREFIX` /
 `XDG_*`). Under a provisioning layer (e.g. tackup) the same `setup.sh` is the
 door.
+
+### Machine-wide (`--system`)
+
+```sh
+sudo sh setup.sh install --system     # /opt/usher + /usr/local/bin
+sh setup.sh check --system            # audit it (needs no root)
+sudo sh setup.sh uninstall --system
+```
+
+One root-owned payload at `/opt/usher`, nothing writable by group or other,
+with the commands at `/usr/local/bin` and the man page under
+`/usr/local/share/man`. Every user then gets `usher` from one copy, which is
+what makes it reachable **from another account**: if some windows on your
+display belong to a different user, that user has to be able to invoke `usher`
+without a copy inside a home nobody else can read.
+
+Each user's config, state and runtime stay per-user, because none of it was
+ever inside the payload. So does the tray indicator, which is a
+`systemd --user` service with its own venv.
+
+Two things worth knowing before switching:
+
+- **It removes the sudo caller's `~/.local` copy in the same install**, because
+  `/usr/local/bin` precedes `~/.local/bin` and the shadowed copy would rot. It
+  keeps the tray's venv, and it repoints the hwdp hook.
+- **Anything naming `~/.local/bin/usher-mgr` by absolute path must be updated**,
+  the compositor autostart above especially. The install names each such file
+  it finds rather than editing it: those are yours. A dangling autostart means
+  no placement daemon at the next login, with nothing on screen saying why.
+
+`DESTDIR` stages the tree and the links for packagers, but **not** the venv:
+`python3 -m venv` bakes an absolute interpreter path into every console script,
+so the venv is always built at its final path. `check --system` asserts that
+baked path rather than trusting it.
 
 Then wire the daemon into your compositor's autostart, e.g. in `wayfire.ini`:
 
