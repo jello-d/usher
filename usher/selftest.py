@@ -2367,6 +2367,44 @@ def _t_roster(ck):
         ck("roster-normalises-what-it-reads-off-disk",
            engine.load_roster(raw) == (["a", "b"], ""))
 
+    # WHAT A LOG LINE OR A REPORT MAY SAY ABOUT A FOREIGN WINDOW.
+    #
+    # THE SECOND ROUTE FOR THE SAME DISCLOSURE. The snapshot redaction was
+    # fixed first and this was still live afterwards: measured on manifold a
+    # minute after the fixed daemon started, `recognised late, re-graced:
+    # google-chrome | Inbox (23) - jello@...` in the session user's own
+    # watch.log. So the title is not the only thing to redact; every site
+    # that renders a window FOR A HUMAN has to ask.
+    ck("log-title-passes-our-own-window-through",
+       engine.log_title({"app_id": "signal", "title": "Signal", "pid": -1})
+       == "Signal")
+    ck("log-title-gives-a-foreign-window-its-source-not-its-title",
+       engine.log_title({"app_id": "slack", "title": "SECRET SUBJECT",
+                         "source": "titan"}) == "[titan]")
+    # AND IT MUST NOT LEAK VIA A MISSING TITLE either: no title at all is
+    # still "" rather than None, because every caller slices it.
+    ck("log-title-is-always-a-string",
+       engine.log_title({"app_id": "x", "pid": -1}) == "")
+    # A RECORDED SOURCE WINS, which is what makes a REPLAYED row safe: its
+    # pid is long dead, so re-deriving would call it ours.
+    ck("log-title-trusts-a-recorded-source-over-a-dead-pid",
+       engine.log_title({"app_id": "slack", "title": "SECRET",
+                         "source": "titan", "pid": -1}) == "[titan]")
+
+    # AND THE WIRING, because the helper's own checks say nothing about
+    # whether the log sites call it. Matched against the exact pattern the
+    # pre-fix code used, with a vacuity guard so an emptied scan cannot pass.
+    import pathlib
+    _wd = pathlib.Path(engine.__file__).parent
+    _watch = (_wd / "watch.py").read_text()
+    _doc = (_wd / "doctor.py").read_text()
+    ck("no-log-site-reads-a-raw-view-title",
+       'v.get("title", "")' not in _watch
+       and "lv.get('title','')" not in _doc)
+    ck("the-log-sites-do-call-the-redactor",
+       _watch.count("engine.log_title(") >= 3
+       and _doc.count("engine.log_title(") >= 1)
+
     # WHAT doctor SAYS ABOUT THE SEAM, as a pure table. The lines matter as
     # much as the mechanism: the symptom of a missing hook is "my work apps
     # did not come back" with nothing anywhere saying why.

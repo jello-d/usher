@@ -778,7 +778,10 @@ class Watcher:
             # where is_transient's title match is not (a portal file
             # chooser has a null/foreign title).
         app = app_of(v)
-        title = v.get("title", "")
+        # REDACTED FOR ANOTHER ACCOUNT. Every log line below renders
+        # this value, and watch.log is the session user's readable
+        # state, so the derivation is the one place to ask.
+        title = engine.log_title(v)
         if SKIP_TITLE.search(title) or is_transient(v):
             return   # work / scratch / transient-chrome: leave where it opened
         if unidentified(v):
@@ -968,7 +971,7 @@ class Watcher:
         """Move the view onto its remembered slot (unless it is already exactly
         there), carry the invert with it, and say so in the log."""
         vid = v["id"]
-        app, title = app_of(v), v.get("title", "")
+        app, title = app_of(v), engine.log_title(v)
         # Skip if already exactly there (init-place over an in-place session
         # would otherwise re-issue every window). The event view carries
         # geometry for init (list_views); a freshly-mapped view may not, and
@@ -1037,7 +1040,7 @@ class Watcher:
         if placement_landed(v, e, o):
             return             # it stuck, which is the overwhelmingly common
             #                    case and says nothing worth logging
-        app, title = app_of(v), v.get("title", "")
+        app, title = app_of(v), engine.log_title(v)
         with self.lock:
             n = self.place_tries.get(vid, 0)
         if n >= len(PLACE_VERIFY):
