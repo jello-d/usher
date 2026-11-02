@@ -368,10 +368,15 @@ Record which apps THIS account has open, to
 Reads them from the compositor over
 .IR ext_foreign_toplevel_list_v1 ,
 which the compositor filters to this account's own windows, so the filtering
-is the scoping and no caller can widen it. A ROSTER AND NOT A LAYOUT: a
-sandboxed client gets no compositor IPC, and that protocol carries nothing
-positional, so there is no geometry to be had on this side. Placement stays
-the session user's.
+is the scoping and no caller can widen it.
+.IP
+A ROSTER AND NOT A LAYOUT, and the reason is Wayland's rather than any
+policy: no Wayland protocol exposes a window's position, not even to the
+window's own client, so the apps this account launched do not know where they
+are either. The compositor does know, and is reachable only over an IPC
+socket in the session user's 0700 runtime directory. So this side can neither
+read a position nor act on one, and placement stays the session user's not as
+a restriction but as the only split there is.
 .IP
 An observation with no windows at all does NOT overwrite a remembered roster,
 and says so. Capture while the session is intact, before anything is torn
