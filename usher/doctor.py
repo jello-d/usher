@@ -19,6 +19,7 @@ import glob
 import json
 import os
 import re
+import shutil
 import time
 from collections import Counter
 
@@ -150,10 +151,15 @@ def _doctor_contracts(out):
         # Only loud when this session WAS summoned: an unlocked console you
         # are sitting at is not a finding.
         out("  [WARN] this session was SUMMONED and is not locked")
-    mux = os.path.expanduser("~/.local/bin/mux")
-    if not os.path.exists(mux):
-        out(f"  [WARN] mux absent ({mux}); terminal relaunch degrades to a"
-            " no-op")
+    # RESOLVED BY PATH, never a prefix, and not a third copy of the name: this
+    # hardcoded `~/.local/bin/mux` and reported mux ABSENT on a box where mux
+    # had simply moved to a machine-wide install. Reporting the path it FOUND
+    # is the useful half, since "present" and "present where I expected" are
+    # different facts and only one of them is worth printing.
+    mux = shutil.which(engine.MUX_BIN)
+    if not mux:
+        out(f"  [WARN] {engine.MUX_BIN} not on PATH; terminal relaunch"
+            " degrades to a no-op")
         return rc
     out(f"  [OK]   mux present ({mux})")
     # Terminals inherit THIS process's environment, so a missing agent here is

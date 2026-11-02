@@ -262,6 +262,42 @@ def _t_registry(ck):
        _mux_pending_in(["ksh", "-c", f"{MUX_BIN} resume; exec ksh -i"]))
     ck("mux-pending-wrapped-latch",
        _mux_pending_in(["ksh", "-c", f"{MUX_BIN} latch box; exec ksh -i"]))
+    # HOWEVER MUX IS SPELLED, which is the half that broke: mux moved to a
+    # machine-wide install, every recorded command named the old
+    # `~/.local/bin/mux`, and a window started from the NEW path no longer
+    # deferred, so KittyPlugin claimed it with a confident cwd key and the
+    # shrink bug came back. Both spellings, pinned as LITERALS so this cannot
+    # pass merely by agreeing with whatever MUX_BIN happens to be today.
+    ck("mux-pending-the-bare-name",
+       _mux_pending_in(["ksh", "-c", "mux resume; exec ksh -i"]))
+    ck("mux-pending-an-absolute-path",
+       _mux_pending_in(["ksh", "-c",
+                        "/usr/local/bin/mux resume; exec ksh -i"]))
+    ck("mux-pending-a-retired-absolute-path",
+       _mux_pending_in(["ksh", "-c",
+                        "/home/u/.local/bin/mux resume; exec ksh -i"]))
+    # ANCHORED TO COMMAND POSITION. A command that merely MENTIONS a path
+    # ending in `mux` must not defer: deferring forever is the direction that
+    # costs a window its memory altogether.
+    ck("mux-pending-not-a-path-that-merely-ends-in-mux",
+       not _mux_pending_in(["ksh", "-c", "cd /home/u/src/mux && ls"]))
+    # AND READING A LIVE argv MUST NOT RAISE. This is arbitrary bytes from
+    # /proc on a placement path, and an unbalanced quote is a thing a real
+    # command line contains.
+    ck("mux-pending-survives-unbalanced-quoting",
+       _mux_pending_in(["ksh", "-c", "mux resume 'oops"]) in (True, False))
+
+    # AND THE COMMAND NAME IS A BARE NAME, which is the invariant that makes
+    # all of the above survive the NEXT move. It was `~/.local/bin/mux`, and
+    # reverting it passed this entire suite until this check existed.
+    ck("mux-bin-is-a-bare-name", "/" not in MUX_BIN)
+    ck("mux-resume-uses-the-bare-name", MUX_RESUME.split()[0] == MUX_BIN)
+    # Host-dependent, so it SAYS which it was rather than asserting silently:
+    # the invariant above is the durable claim, this is the live corroboration.
+    _mw = shutil.which(MUX_BIN)
+    ck(f"mux-bin-resolves-on-PATH ({_mw or 'mux ABSENT here'})",
+       _mw is not None or shutil.which("mux") is None)
+
     # AND IT MUST NOT FIRE ON AN ORDINARY SHELL, or every plain kitty would
     # defer forever and never be remembered at all.
     ck("mux-pending-not-a-plain-shell",
@@ -2337,7 +2373,15 @@ def _t_relaunch(ck):
     _real = (engine.spawn_term, engine._spawn_kitty, engine.logline)
     _spawned, _logged = [], []
     try:
-        engine.spawn_term = lambda *a, **k: _spawned.append(("mux", a))
+        # RETURNS TRUE, because spawn_term's contract is now "did it
+        # actually start": it REFUSES a recorded command whose program is
+        # gone, and the caller must not count or announce a refusal. A stub
+        # returning None reads as a refusal, which is what caught this.
+        def _st_ok(*a, **k):
+            _spawned.append(("mux", a))
+            return True
+
+        engine.spawn_term = _st_ok
         engine._spawn_kitty = lambda *a, **k: _spawned.append(("kitty",
                                                                      a))
         # CAPTURE THE LOG instead of writing it. _announce appends to the REAL
@@ -2360,6 +2404,50 @@ def _t_relaunch(ck):
     finally:
         (engine.spawn_term, engine._spawn_kitty,
          engine.logline) = _real
+
+    # A RECORDED COMMAND WHOSE PROGRAM IS GONE IS REFUSED, LOUDLY. This is the
+    # general form of "usher resume stopped working when mux moved install
+    # mode": usher tracks where a window WAS and did not notice that the
+    # command to recreate it had been replaced. Unrefused, kitty starts,
+    # `ksh -c` finds nothing, the window closes, and watch.log says `launch`.
+    #
+    # THE REAL spawn_term, not a stub: it returns before Popen, so nothing is
+    # spawned and the refusal itself is what is under test.
+    _rl2 = engine.logline
+    _said2 = []
+    try:
+        engine.logline = _said2.append
+        ck("spawn-term-refuses-a-missing-program",
+           engine.spawn_term("/nonexistent/bin/mux resume") is False)
+        ck("spawn-term-says-which-program-is-missing",
+           any("/nonexistent/bin/mux" in m and "not on PATH" in m
+               for m in _said2))
+        # AND A PROGRAM THAT DOES EXIST IS NOT REFUSED, or the check above
+        # would pass against a function that refuses everything. Asserted
+        # WITHOUT SPAWNING by stopping at the Popen seam.
+        _rp = engine.subprocess.Popen
+        try:
+            engine.subprocess.Popen = lambda *a, **k: None
+            ck("spawn-term-accepts-a-program-that-exists",
+               engine.spawn_term("/bin/sh -c true") is True)
+        finally:
+            engine.subprocess.Popen = _rp
+    finally:
+        engine.logline = _rl2
+
+    # AND THE CALLER MUST NOT COUNT OR ANNOUNCE A REFUSAL, which is the half
+    # that keeps watch.log honest: `launch <cmd>` is the line a reader trusts
+    # to mean a window was opened.
+    _rst, _ran2 = engine.spawn_term, engine._announce
+    _ann = []
+    try:
+        engine.spawn_term = lambda *a, **k: False
+        engine._announce = _ann.append
+        ck("relaunch-does-not-count-a-refused-spawn",
+           engine.mux_relaunch_missing(
+               [_tmw()], []) == 0 and not _ann)
+    finally:
+        engine.spawn_term, engine._announce = _rst, _ran2
 
 def _t_chrome(ck):
     """chrome identity, profiles, and the restore flags."""

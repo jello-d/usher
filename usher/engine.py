@@ -1477,6 +1477,29 @@ def _latch_target_in(argv):
     return None
 
 
+def _names_mux(word):
+    """Is this word the mux command, HOWEVER it is spelled?
+
+    By BASENAME, so `mux`, `~/.local/bin/mux` and `/usr/local/bin/mux` all
+    answer yes and a window started before or after mux changed install mode
+    is read the same way. `mux-latch` is mux's own helper and counts.
+    """
+    return os.path.basename(word) in ("mux", "mux-latch")
+
+
+def _shell_words(s):
+    """`s` split the way a shell would, or on whitespace if it will not parse.
+
+    NEVER RAISES: this reads a live process's argv, which is arbitrary bytes
+    that may hold an unbalanced quote, and a placement path must not fall over
+    on one.
+    """
+    try:
+        return shlex.split(s)
+    except ValueError:
+        return s.split()
+
+
 def _mux_pending_in(argv):
     """True if this process IS a mux command, or a shell wrapping one.
 
@@ -1494,9 +1517,18 @@ def _mux_pending_in(argv):
     the wrapper once the mux command ends, so the argv stops naming mux and
     the window becomes an ordinary kitty with no timer involved."""
     for a in argv:
-        if os.path.basename(a) == "mux-latch":
+        if _names_mux(a):
             return True
-        if MUX_BIN and MUX_BIN in a:
+        # THE WRAPPED FORM IS ONE ELEMENT HOLDING A WHOLE COMMAND LINE, so the
+        # command has to be dug out of it rather than compared to the element.
+        #
+        # ANCHORED TO COMMAND POSITION, not matched anywhere in the string: a
+        # bare substring test would defer any window whose argv merely
+        # mentions a path ending in `mux` (`~/src/mux`), and deferring
+        # FOREVER is the direction that costs a window its memory. spawn_term
+        # builds `"<cmd>; exec ksh -i"`, so mux is always the FIRST token.
+        toks = _shell_words(a)
+        if toks and _names_mux(toks[0]):
             return True
     return False
 
@@ -2434,8 +2466,32 @@ def app_of(v):
 # rather than the one session a titlebar happened to name, and it is what a
 # human types after a reboot. The remote counterpart is `mux latch <host>`,
 # which mux itself maps to a `mux resume` on the far side.
-MUX_BIN = os.path.expanduser("~/.local/bin/mux")
-MUX_RESUME = f"{shlex.quote(MUX_BIN)} resume"
+# A BARE NAME, RESOLVED BY PATH, never a prefix. This was
+# `~/.local/bin/mux` and mux moved to a machine-wide install, which broke four
+# things at once from one string (measured 2026-11-02, reported as "usher
+# resume fails to bring it back"):
+#
+#   the relaunch        spawned a command that does not exist, so the terminal
+#                       died instantly: the documented `[kitty] <defunct>`
+#                       beside a cheerful `launch` line
+#   mux_sessions        `<old path> resume --list` failed into its own
+#                       `except: return set()`, so the durable session SET came
+#                       back EMPTY and the whole relaunch had nothing to
+#                       relaunch. That is the 2026-09-15 failure exactly, by a
+#                       path instead of by a glyph
+#   _mux_pending_in     scanned argv for the OLD absolute path, so a window
+#                       started from the new one never deferred and KittyPlugin
+#                       claimed it with a confident `kitty:<cwd>` key: the
+#                       2026-10-03 shrink bug, back
+#   doctor              reported on a path nothing uses
+#
+# TWO OF THOSE ARE REGRESSIONS OF BUGS THIS PACKAGE ALREADY FIXED ONCE, which
+# is what a hardcoded prefix buys. The bare name is resolved by the SHELL at
+# spawn time and by execvp for a direct call, so it is correct before and after
+# any future move with nothing to update. Same reasoning as the bare
+# `usher-mgr` the compositor autostart now carries.
+MUX_BIN = "mux"
+MUX_RESUME = f"{MUX_BIN} resume"
 
 
 def _announce(msg):
@@ -2510,11 +2566,36 @@ def spawn_term(cmd, size=None):
     TTY (arranging one is what mux is FOR) so a window is the right place
     for all of them, local and remote alike, and usher's job is only to put a
     window around the command it recorded."""
+    # A RECORDED COMMAND WHOSE PROGRAM IS GONE MUST NOT BE SPAWNED, and the
+    # reason is that the failure is INVISIBLE rather than noisy: kitty starts,
+    # `ksh -c` cannot find the program, the shell exits, `exec ksh -i` never
+    # runs, and the window vanishes. What a reader finds afterwards is
+    # `[kitty] <defunct>` in the process table beside a cheerful `launch` line
+    # in watch.log, which this file already records as reading like a
+    # successful relaunch.
+    #
+    # MEASURED 2026-11-02: mux changed install mode, every recorded mux
+    # command named a path that no longer existed, and `usher resume` brought
+    # nothing back with nothing anywhere saying why. usher tracks where a
+    # window WAS; it did not notice that the command to recreate it had been
+    # replaced, which is the general fault and not a mux one.
+    #
+    # BOTH TESTS, because a recorded command may name either a program on PATH
+    # or an absolute path to one: `which` answers the first, `os.path.exists`
+    # the second, and refusing when neither holds is the only safe reading.
+    prog = _shell_words(cmd)[:1]
+    if prog and not shutil.which(prog[0]) and not os.path.exists(prog[0]):
+        logline(f"NOT launching {cmd!r}: {prog[0]} is not on PATH, so the "
+                f"window would open and close. The recorded command names a "
+                f"program this box no longer has (did it change install "
+                f"mode?)")
+        return False
     env = {k: v for k, v in os.environ.items() if k != "TMUX"}
     subprocess.Popen(["kitty"] + _size_opts(size)
                      + ["ksh", "-c", f"{cmd}; exec ksh -i"],
                      env=env, start_new_session=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return True
 
 
 def saved_key(w):
@@ -2545,7 +2626,7 @@ def mux_session_set():
     Empty when mux is absent or errors: the soft-dep no-op."""
     try:
         out = subprocess.run(
-            [os.path.expanduser("~/.local/bin/mux"), "resume", "--list"],
+            [MUX_BIN, "resume", "--list"],
             capture_output=True, text=True, timeout=5).stdout
     except Exception:
         return set()
@@ -2633,7 +2714,12 @@ def mux_relaunch_missing(saved, live):
     not now, running the command it was running."""
     n = 0
     for cmd, size in mux_candidates(saved, live):
-        spawn_term(cmd, size)
+        # COUNTED AND ANNOUNCED ONLY IF IT ACTUALLY STARTED. `launch  <cmd>`
+        # is the line a reader trusts to mean a window was opened, and the
+        # refusal above logs its own reason, so announcing both would be two
+        # claims about one event with only one of them true.
+        if not spawn_term(cmd, size):
+            continue
         n += 1
         _announce(f"launch  {cmd}")
     return n
