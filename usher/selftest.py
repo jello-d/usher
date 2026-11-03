@@ -2651,23 +2651,46 @@ def _t_roster(ck):
             try:
                 engine.logline = _said.append
                 _w = []
-                engine._spawn_watched(_w)(["/bin/sh", "-c",
-                                           "echo BOOM >&2; exit 3"])
-                engine._report_quick_deaths(_w, grace=0.6)
+                # _announce PRINTS as well, so redirect or the suite's own
+                # output carries fixture lines.
+                with contextlib.redirect_stdout(io.StringIO()):
+                    engine._spawn_watched(_w)(["/bin/sh", "-c",
+                                               "echo BOOM >&2; exit 3"])
+                    engine._report_quick_deaths(_w, grace=0.6)
             finally:
                 engine.logline = _rl
             ck("a-fast-death-is-logged-with-its-return-code",
                any("DIED rc=3" in m for m in _said))
+
             ck("a-fast-death-relays-its-stderr",
                any("its stderr: BOOM" in m for m in _said))
+            # AND IT MUST REACH STDOUT, because on the enclave side the log
+            # is inside a 0700 home the session user cannot read: only stdout
+            # crosses, via the trigger's relay. Asserted by CAPTURING stdout,
+            # since `logline` alone would satisfy the check above.
+            _out2 = io.StringIO()
+            _said.clear()
+            try:
+                engine.logline = _said.append
+                _w2 = []
+                with contextlib.redirect_stdout(_out2):
+                    engine._spawn_watched(_w2)(
+                        ["/bin/sh", "-c", "echo LOUD >&2; exit 4"])
+                    engine._report_quick_deaths(_w2, grace=0.6)
+            finally:
+                engine.logline = _rl
+            ck("a-fast-death-reaches-stdout-not-only-the-log",
+               "DIED rc=4" in _out2.getvalue()
+               and "its stderr: LOUD" in _out2.getvalue())
             # AND A SURVIVOR SAYS NOTHING, or every login would log a line
             # per app that started perfectly well.
             _said.clear()
             try:
                 engine.logline = _said.append
                 _w = []
-                engine._spawn_watched(_w)(["/bin/sh", "-c", "sleep 30"])
-                engine._report_quick_deaths(_w, grace=0.4)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    engine._spawn_watched(_w)(["/bin/sh", "-c", "sleep 30"])
+                    engine._report_quick_deaths(_w, grace=0.4)
             finally:
                 engine.logline = _rl
             ck("a-surviving-app-is-not-reported", _said == [])
