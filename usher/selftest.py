@@ -1597,6 +1597,42 @@ def _t_slots(ck):
         w._try_place(V(4))
         ck("slot-still-refused-while-the-holder-lives", 4 not in seated)
 
+        # AND IT SAYS SO ONCE, NOT PER EVENT. _try_place runs from every map
+        # AND every rename, and a browser renames constantly, so an
+        # unconditional line here turned one standing condition into 126 rows
+        # in an hour on manifold (seven windows over one key). The refusal
+        # must still be SAID, since silently not placing is this repo's
+        # recurring failure, so the assertion is EXACTLY ONE rather than none.
+        # BOTH SPELLINGS ARE CAPTURED, since watch.py imports logline BY NAME
+        # and holds its own reference: patching engine's alone leaves the
+        # daemon's copy writing into the real log, which is the stale-copy
+        # hazard the package split is careful about. Restored to whatever the
+        # area quieting installed rather than to the real function.
+        from . import watch as _wslot
+        _rl_e, _rl_w = engine.logline, _wslot.logline
+        _slog = []
+        engine.logline = _wslot.logline = _slog.append
+        try:
+            w.slot_said.clear()
+            w._try_place(V(4))
+            _n1 = len([m for m in _slog if "slot taken" in m])
+            for _ in range(5):
+                w._try_place(V(4))
+            _n2 = len([m for m in _slog if "slot taken" in m])
+            ck("slot-refusal-is-said-at-all", _n1 == 1)
+            ck("slot-refusal-is-said-once-not-per-event", _n2 == _n1)
+            # A NEW WINDOW REUSING THE vid MUST BE SAID AGAIN, or quietening
+            # it becomes a permanent silence as view ids are recycled.
+            w._on_event({"event": "view-unmapped", "view": {"id": 4}})
+            w.place_sock.live = {3, 4}
+            w.deadline[4] = _t.time() + PLACE_GRACE
+            w.identified.add(4)
+            w._try_place(V(4))
+            ck("slot-refusal-is-said-again-for-a-new-window",
+               len([m for m in _slog if "slot taken" in m]) == _n2 + 1)
+        finally:
+            engine.logline, _wslot.logline = _rl_e, _rl_w
+
         # AND A DEAD HOLDER IS DROPPED EVEN WHERE THE PLACEMENT CANNOT GO ON,
         # or the ledger keeps asserting a window we have just proved is gone,
         # which is the asserted-vs-actual drift that caused this in the first

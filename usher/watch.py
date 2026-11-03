@@ -491,6 +491,10 @@ class Watcher:
         # taskbar is invisible. Worst for an app_id-keyed app, where
         # kkey(app, "") matches EVERY window of that app whatever its title.
         self.slot_held = {}
+        # (vid, slot key) pairs we have already SAID were refused, so the
+        # standing condition is reported once per window instead of on every
+        # rename. Discarded with the rest of a view's state on unmap.
+        self.slot_said = set()
         # THE OUTPUT SET AS OF THE LAST POLL, or None before the first one.
         # None is not the empty set: the first poll must not read "everything
         # arrived" as a display change. See _poll_outputs.
@@ -887,7 +891,19 @@ class Watcher:
             holder = self.slot_held.get(skey)
         own = live_holder(holder, vid, self._live_ids())
         if own == "held":
-            logline(f"slot taken, left in place: {app} | {title[:34]}")
+            # ONCE PER WINDOW, NOT PER EVENT. This runs from every map and
+            # every rename, and a browser renames constantly, so logging it
+            # here unconditionally turns one standing condition into a line a
+            # second: measured on manifold 2026-11-03, 126 rows in one hour
+            # from seven windows sharing one key, which is most of what the
+            # log said all day. watch.log's whole value is being readable
+            # afterwards, so a repeating line costs more than it reports.
+            with self.lock:
+                _first = (vid, skey) not in self.slot_said
+                if _first:
+                    self.slot_said.add((vid, skey))
+            if _first:
+                logline(f"slot taken, left in place: {app} | {title[:34]}")
             return
         if own == "stale":
             # The holder is GONE and its unmap never reached us. Drop it only
@@ -1706,6 +1722,12 @@ class Watcher:
                 for _k in [k for k, _vid in self.slot_held.items()
                            if _vid == v["id"]]:
                     self.slot_held.pop(_k, None)
+                # and forget having SAID it was refused, or a new window
+                # reusing this vid would be refused silently. Same reason the
+                # rest of this block exists: a per-view set that only grows
+                # is a leak in a process that runs for weeks.
+                self.slot_said = {p for p in self.slot_said
+                                  if p[0] != v["id"]}
             # and the identity chrome resolved for it once and remembered. A
             # cache that only ever grows is a leak in a process that runs for
             # weeks, and this is the one moment we know the view is gone.
