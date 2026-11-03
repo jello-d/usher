@@ -2643,6 +2643,26 @@ def _t_roster(ck):
             # backwards first, and the two checks below caught it at once.
             ck("an-injected-spawn-is-not-replaced-by-the-watcher",
                spawned == [["true"]])
+            # AN INJECTED SPAWN MUST ALSO LEAVE THE SESSION POLICY DISARMED,
+            # or the suite would start shelling out to systemd-run. The flag
+            # is a module global precisely because the two launch sites are
+            # shared with the owner's restore, so its default matters.
+            ck("an-injected-spawn-leaves-the-session-policy-off",
+               engine._SESSION_LAUNCH is False)
+            # AND THE OWNER'S PATH IS UNCHANGED: app_spawn with nothing armed
+            # is the direct child it has always been, which is the half that
+            # must not regress on a working restore.
+            _popen = engine.subprocess.Popen
+            _calls = []
+            try:
+                engine.subprocess.Popen = (
+                    lambda *a, **k: _calls.append(a[0]) or _popen(
+                        ["/bin/true"], **k))
+                engine.app_spawn(["/bin/true"])
+            finally:
+                engine.subprocess.Popen = _popen
+            ck("app-spawn-is-direct-when-nothing-is-armed",
+               _calls == [["/bin/true"]])
             # AND A FAST DEATH IS REPORTED WITH ITS STDERR, which is the
             # whole point: four enclave apps died in under 0.3s with nothing
             # in the journal, and DEVNULL'd stderr left no way to see why.
