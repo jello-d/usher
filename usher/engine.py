@@ -1924,12 +1924,10 @@ class ChromePlugin(WindowPlugin):
                 time.sleep(CHROME_STAGGER)
             argv = ([exe] + CHROME_FLAGS
                     + ([f"--profile-directory={prof}"] if prof else []))
-            subprocess.Popen(argv, start_new_session=True,
-                             stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL)
-            n += 1
             _announce("launch  " + " ".join(
                 [os.path.basename(exe)] + argv[1:]))
+            app_spawn(argv, _SPAWN_WATCH)
+            n += 1
         return n
 
 
@@ -3224,9 +3222,7 @@ def desktop_relaunch_missing(saved, live, spawn=None):
             continue
         _announce(f"launch  {' '.join(argv)}")
         if spawn is None:
-            subprocess.Popen(argv, start_new_session=True,
-                             stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL)
+            app_spawn(argv, _SPAWN_WATCH)
         else:
             spawn(argv)
         n += 1
@@ -3442,6 +3438,14 @@ def roster_launch(apps, live, spawn=None):
     saved = [{"app_id": a} for a in missing]
     seen = [{"app-id": a, "pid": -1} for a in live if a]
     n = 0
+    # ARMED BEFORE THE PLUGINS RUN, because ChromePlugin starts the browser
+    # and that is the app this exists for: arming after the loop covered
+    # three of the four and left the main one launching the old way.
+    global _SESSION_LAUNCH, _SPAWN_WATCH
+    watch = [] if spawn is None else None
+    if watch is not None:
+        _SESSION_LAUNCH = True
+        _SPAWN_WATCH = _spawn_watched(watch)
     for p in plugins():
         try:
             n += p.relaunch_missing(saved, seen)
@@ -3460,15 +3464,101 @@ def roster_launch(apps, live, spawn=None):
     # has never happened there.
     # AN INJECTED SPAWN ALWAYS WINS, which is what keeps the suite from
     # launching anything real: watching is only for the production path.
-    watch = [] if spawn is None else None
     try:
-        n += desktop_relaunch_missing(
-            saved, seen, spawn if spawn is not None else _spawn_watched(watch))
+        n += desktop_relaunch_missing(saved, seen, spawn)
     except Exception as e:                                     # noqa: BLE001
         logline(f"relaunch (desktop default) error: {e}")
     if watch:
         _report_quick_deaths(watch)
     return n
+
+
+# ARMED ONLY FOR THIS ACCOUNT'S OWN RESUME. A module flag rather than an
+# argument because the two launch sites are SHARED with the owner's restore
+# (ChromePlugin's browser start and the registry default), and threading a
+# launcher through a plugin's documented `relaunch_missing` signature to say
+# one thing would be a worse trade. Safe as a global because `_source-resume`
+# is a ONE-SHOT process: it is set once, before anything launches, and the
+# daemon never sets it.
+_SESSION_LAUNCH = False
+# The stderr-keeping spawn, when one is armed. Same reasoning as the flag
+# above: the two launch sites are shared with the owner's restore, so the
+# enclave-only behaviour is armed here rather than threaded through a
+# plugin's signature.
+_SPAWN_WATCH = None
+
+
+def _session_env():
+    """The environment a launched app should get, with XDG_RUNTIME_DIR
+    DERIVED when we were not told one.
+
+    `sudo` strips the caller's environment (measured: five variants of the
+    trigger produced byte-identical app stderr), so an app started from one
+    has no runtime dir and therefore no way to reach its own user bus. The
+    spec DEFINES that path per uid, so this is a derivation and not a guess,
+    and it is only filled in when the directory actually exists.
+    """
+    env = dict(os.environ)
+    if not env.get("XDG_RUNTIME_DIR"):
+        cand = toplevels.standard_runtime_dir()
+        if os.path.isdir(cand):
+            env["XDG_RUNTIME_DIR"] = cand
+    return env
+
+
+def _session_spawn(argv):
+    """Start argv inside THIS account's own systemd user session.
+
+    (ok, detail). The point is the ENVIRONMENT: a transient unit is started
+    by the account's own user manager and inherits that manager's
+    environment, which is the session the account really has. An app started
+    as a bare child of a `sudo` inherits almost nothing instead, and dies:
+    measured on manifold, Chrome and Slack both chose the X11 ozone backend,
+    found no X display, and exited in under 0.3s.
+
+    SO THE ENVIRONMENT IS INHERITED RATHER THAN LISTED, which is the whole
+    reason for this shape. Enumerating the variables an app needs would be a
+    copy of another component's facts maintained here, and the copy nobody
+    looks at is the one that drifts.
+
+    SYNCHRONOUS ON PURPOSE: `systemd-run` registers the unit and returns, so
+    its exit status says whether the app was STARTED, which a bare spawn
+    cannot tell us at all. A failure here is reported and falls back.
+    """
+    runner = shutil.which("systemd-run")
+    if not runner:
+        return False, "systemd-run is not installed"
+    try:
+        r = subprocess.run(
+            [runner, "--user", "--quiet", "--collect", "--"] + list(argv),
+            capture_output=True, text=True, timeout=20, env=_session_env())
+    except Exception as e:                                     # noqa: BLE001
+        return False, f"systemd-run could not run: {e}"
+    if r.returncode != 0:
+        return False, (f"systemd-run rc={r.returncode}: "
+                       f"{(r.stderr or '').strip()[:140]}")
+    return True, "started in this account's own session"
+
+
+def app_spawn(argv, watch=None):
+    """THE one place an app is started, so a launch policy has one home.
+
+    Direct and unchanged for the owner's restore, where this process already
+    has a full session environment and the current behaviour works. Routed
+    through the account's own session manager for a sudo'd enclave resume,
+    where it does not and does not.
+    """
+    if _SESSION_LAUNCH:
+        ok, why = _session_spawn(argv)
+        _announce(f"  via session: {why}")
+        if ok:
+            return
+    if watch is None:
+        subprocess.Popen(argv, start_new_session=True,
+                         stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+        return
+    watch(argv)
 
 
 def _spawn_watched(watch):
