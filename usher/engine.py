@@ -3258,6 +3258,11 @@ def desktop_relaunch_missing(saved, live, spawn=None):
 # mapping is the integrator's vocabulary, not usher's.
 SOURCE_TRIGGER_HOOK = config_path("source-trigger")
 SOURCE_ACTIONS = ("capture", "resume")
+# How many lines of the far side's own report to relay. Two per app, so this
+# is "forty apps", which is far past any real roster; the point is that the
+# bound exists rather than that it is tight, since a truncated report reads
+# as work that did not happen.
+SOURCE_RELAY_LINES = 80
 
 
 def source_trigger_plan(rows):
@@ -3316,14 +3321,27 @@ def source_trigger(sources, action, run=None, hook=None):
         # both are already in the owner's store. A title would be that
         # account's content and is redacted at the source.
         #
-        # BOUNDED, because this runs at every login and every logoff: a few
-        # lines each, truncated, so a chatty or wedged provider cannot turn
-        # the log into the problem. stderr is relayed too when it said
-        # something despite succeeding, which is the "worked, with a
-        # complaint" case a bare rc hides.
-        for _stream, _txt in (("", r.stdout), ("stderr: ", r.stderr)):
-            for _ln in (_txt or "").strip().splitlines()[:4]:
+        # THE TWO STREAMS NEED DIFFERENT CAPS, and one cap for both HID HALF
+        # OF A REAL RESUME: the far side prints two lines per app, so a
+        # four-app roster emits eight and a cap of four relayed the first two
+        # apps. Measured on manifold 2026-11-03, where the log read as two
+        # launches while four windows came back, which is the shape that
+        # invites a hunt for a mystery there is none of.
+        #
+        # So stdout is capped at what the far side can legitimately say, which
+        # the ROSTER bounds (two lines per app, and an account runs tens of
+        # apps at most), while stderr stays tight because nothing bounds it: a
+        # traceback or a chatty provider must not turn the log into the
+        # problem. stderr is relayed at all because "worked, with a complaint"
+        # is a case a bare rc hides.
+        for _stream, _txt, _cap in (("", r.stdout, SOURCE_RELAY_LINES),
+                                    ("stderr: ", r.stderr, 4)):
+            _lines = (_txt or "").strip().splitlines()
+            for _ln in _lines[:_cap]:
                 logline(f"  {src} {action}: {_stream}{_ln.strip()[:150]}")
+            if len(_lines) > _cap:
+                logline(f"  {src} {action}: {_stream}... and "
+                        f"{len(_lines) - _cap} more line(s)")
         n += 1
     return n
 

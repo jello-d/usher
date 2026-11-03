@@ -3355,6 +3355,49 @@ def _t_relaunch(ck):
                any("recorded 2 app(s)" in m for m in _said3))
             ck("source-trigger-names-the-source-and-action-on-the-relay",
                any(m.strip().startswith("titan resume:") for m in _said3))
+            # A FOUR-APP RESUME IS EIGHT LINES, and a cap of four relayed the
+            # first two apps: the log then read as two launches while four
+            # windows came back. The roster bounds stdout, so the cap has to
+            # be above anything a real one can say.
+            _said4 = []
+            engine.logline = _said4.append
+            _apps4 = ["app%d" % i for i in range(4)]
+            _rep4 = "\n".join("launch %s\nvia session: started" % a
+                              for a in _apps4)
+
+            def _sr_many(argv, **_k):
+                class R:
+                    returncode = 0
+                    stderr = ""
+                    stdout = _rep4
+                return R()
+
+            engine.source_trigger(["titan"], "resume", run=_sr_many, hook=_hk)
+            ck("source-trigger-relays-every-app-of-a-real-roster",
+               all(any(a in m for m in _said4) for a in _apps4))
+            ck("source-trigger-relays-no-truncation-note-when-it-fits",
+               not any("more line(s)" in m for m in _said4))
+            # AND SAYS SO WHEN IT DOES TRUNCATE, because a report cut off
+            # without a word is the fault above wearing a bigger number.
+            _said5 = []
+            engine.logline = _said5.append
+            _over = engine.SOURCE_RELAY_LINES + 3
+
+            def _sr_flood(argv, **_k):
+                class R:
+                    returncode = 0
+                    stderr = ""
+                    stdout = "\n".join("line %d" % i for i in range(_over))
+                return R()
+
+            engine.source_trigger(["titan"], "resume", run=_sr_flood,
+                                  hook=_hk)
+            ck("source-trigger-caps-a-flood",
+               sum(1 for m in _said5 if "line " in m)
+               == engine.SOURCE_RELAY_LINES)
+            ck("source-trigger-says-how-much-it-dropped",
+               any("and 3 more line(s)" in m for m in _said5))
+            engine.logline = _said3.append
             # EXACTLY THREE WORDS, and the argv length is the check rather
             # than a scan of its contents: a scan can be satisfied by content
             # that merely looks harmless, where a fixed arity cannot carry a
