@@ -3503,14 +3503,26 @@ def _report_quick_deaths(watch, grace=3.0, lines=4, width=150):
         rc = proc.poll()
         try:
             if rc is not None:
-                logline(f"relaunch DIED rc={rc} within {grace:g}s: "
-                        f"{' '.join(argv)[:120]}")
+                # _announce, NOT logline, and this is the whole reason it
+                # matters: on the enclave side `logline` writes into THAT
+                # ACCOUNT'S state dir, inside a 0700 home the session user
+                # cannot open. A death reported only there is reported
+                # nowhere a reader can reach. Only STDOUT crosses, because
+                # the trigger relays it.
+                #
+                # MADE THIS EXACT MISTAKE ONE COMMIT AFTER FIXING IT. The
+                # relay exists because the far side's log is unreadable, and
+                # then the first diagnostic added to the far side used the
+                # log. Anything the enclave verbs want a human to see must
+                # be announced.
+                _announce(f"relaunch DIED rc={rc} within {grace:g}s: "
+                          f"{' '.join(argv)[:120]}")
                 with open(path, errors="replace") as fh:
                     tail = [ln.strip() for ln in fh if ln.strip()][-lines:]
                 for ln in tail:
-                    logline(f"  its stderr: {ln[:width]}")
+                    _announce(f"  its stderr: {ln[:width]}")
                 if not tail:
-                    logline("  its stderr: (nothing; it said nothing at all)")
+                    _announce("  its stderr: (nothing at all)")
         finally:
             with contextlib.suppress(OSError):
                 os.unlink(path)
