@@ -3441,6 +3441,116 @@ def _t_relaunch(ck):
             ck("source-trigger-hands-over-no-content",
                len(_asked_sr[0]) == 3
                and _asked_sr[0][2] in engine.SOURCE_ACTIONS)
+
+            # ---- WHICH WINDOW IS WHICH, across the boundary ----------------
+            # Several windows of one app share one key on the owner's side,
+            # because the handle lives in the app's own state inside a home
+            # the owner may not read. The source reports a DIGEST of each
+            # live title plus an opaque id, and the owner hashes the title it
+            # already reads off the compositor. Nothing readable crosses.
+            _T1 = "Quarterly Revenue Plan - Google Chrome"
+            _T2 = "Offer Letter - Google Chrome"
+            _rows_w = [
+                {"app_id": "google-chrome", "title": _T1},
+                {"app_id": "google-chrome", "title": _T2},
+                {"app_id": "kitty", "title": _T1},    # same title, not chrome
+                {"app_id": "google-chrome", "title": ""},
+                {"app_id": "google-chrome", "title": "Unrecorded - Google "
+                                                     "Chrome"},
+            ]
+            _ids_w = {_T1: "chrome:win:11", _T2: "chrome:win:22"}
+            _lines_w = engine.source_window_lines(
+                _rows_w, resolve=_ids_w.get,
+                chrome_test=lambda a: a == "google-chrome")
+            ck("source-window-reports-one-line-per-resolved-window",
+               len(_lines_w) == 2)
+            ck("source-window-line-is-three-words",
+               all(len(ln.split()) == 3
+                   and ln.split()[0] == engine.SOURCE_WINDOW_WORD
+                   for ln in _lines_w))
+            # THE PRIVACY PROPERTY, and it gets its own check because it is
+            # the whole reason this shape was chosen over shipping titles: a
+            # readable title must never appear in anything that crosses, and
+            # the relay LOGS what crosses into the owner's watch.log.
+            ck("source-window-discloses-no-title",
+               not any(w in " ".join(_lines_w)
+                       for w in ("Quarterly", "Revenue", "Offer", "Letter")))
+            # AND THE APP GATE IS LOAD-BEARING: the resolver joins against
+            # ONE app's recorded state, so a terminal wearing a browser's
+            # title must not be handed to it. A coincidence here is a wrong
+            # slot that sticks for the life of the view.
+            ck("source-window-skips-an-app-the-resolver-does-not-own",
+               len([ln for ln in _lines_w if "chrome:win:11" in ln]) == 1)
+            ck("source-window-skips-what-it-cannot-resolve",
+               not any("Unrecorded" in ln for ln in _lines_w))
+            # THE PARSE IS LENIENT, because this shares a channel with prose.
+            # GUARDED, so a parser that RAISES on a short line is reported by
+            # name here rather than aborting whichever area happens to reach
+            # it first: `len(parts) == 3` is both the shape filter and the
+            # index bound, and the two are left fused deliberately.
+            _parsed_w, _mal_w = {}, None
+            try:
+                _parsed_w = engine.parse_source_windows(
+                    "usher: recorded 2 app(s) for this account: a b\n"
+                    + "\n".join(_lines_w)
+                    + "\nwindow not-three\nvia session: started in its own\n")
+            except Exception as _e_w:                      # noqa: BLE001
+                _mal_w = _e_w
+            ck("source-window-parse-survives-a-malformed-line",
+               _mal_w is None)
+            ck("source-window-parse-keeps-only-the-shape",
+               _parsed_w == {engine.title_fingerprint(_T1): "chrome:win:11",
+                             engine.title_fingerprint(_T2): "chrome:win:22"})
+            ck("source-window-parse-ignores-prose-on-the-same-channel",
+               len(_parsed_w) == 2)
+            # A FINGERPRINT IS THE SAME ON BOTH SIDES OR THE WHOLE DESIGN IS
+            # DEAD, so it is asserted as a function of the title alone.
+            ck("fingerprint-is-stable",
+               engine.title_fingerprint(_T1) == engine.title_fingerprint(_T1))
+            ck("fingerprint-separates-two-titles",
+               engine.title_fingerprint(_T1) != engine.title_fingerprint(_T2))
+            ck("fingerprint-is-fixed-width",
+               len(engine.title_fingerprint(_T1)) == engine.FINGERPRINT_LEN
+               and len(engine.title_fingerprint("")) ==
+               engine.FINGERPRINT_LEN)
+            # THE JOIN RATE IS REPORTED, NOT ASSUMED. Both sides hash a live
+            # title each, and whether those strings agree in practice is a
+            # measurement; 0 of N must read differently from no windows.
+            _v1 = {"app-id": "google-chrome", "title": _T1,
+                   "source": "titan", "pid": -1}
+            _v2 = {"app-id": "google-chrome", "title": "Drifted - Google "
+                                                       "Chrome",
+                   "source": "titan", "pid": -1}
+            _rep_w = engine.source_window_report([_v1, _v2],
+                                                 {"titan": _parsed_w})
+            ck("source-window-report-counts-the-join",
+               _rep_w == ["titan: 1 of 2 window(s) identified "
+                          "(2 reported)"])
+            ck("source-window-report-says-zero-of-n-rather-than-nothing",
+               engine.source_window_report([_v2], {"titan": _parsed_w})
+               == ["titan: 0 of 1 window(s) identified (2 reported)"])
+            ck("source-window-report-is-empty-with-no-sources",
+               engine.source_window_report([_v1, _v2], {}) == [])
+            # AND THE TRIGGER COLLECTS IT, which the resolver's own checks say
+            # nothing about: a caller that never passes `windows` gets the
+            # old behaviour and one that does must be filled in.
+            _got_w = {}
+
+            def _sr_win(argv, **_k):
+                class R:
+                    returncode = 0
+                    stderr = ""
+                    stdout = "usher: recorded 1 app(s)\n" + "\n".join(
+                        _lines_w)
+                return R()
+
+            engine.source_trigger(["titan"], "capture", run=_sr_win,
+                                  hook=_hk, windows=_got_w)
+            ck("source-trigger-collects-the-window-map",
+               _got_w.get("titan") == _parsed_w)
+            ck("source-trigger-without-the-out-param-still-works",
+               engine.source_trigger(["titan"], "capture", run=_sr_win,
+                                     hook=_hk) == 1)
             # AN ACTION OUTSIDE THE CLOSED SET IS A PROGRAMMING ERROR, not
             # something to pass through: the far side validates nothing, so
             # this side is where it has to stop.

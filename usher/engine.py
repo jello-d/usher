@@ -44,8 +44,9 @@ from datetime import date
 # ChromePlugin, chrome_profiles_for, and the selftest fixtures.
 from .chrome import (CHROME_FLAGS, CHROME_STAGGER, browser_pids,
                      chrome_bind_windows, chrome_profile_map, chrome_slot,
-                     chrome_window_tabs, is_chrome, is_chrome_slot,
-                     recorded_window_ids, session_history, window_slot)
+                     chrome_window_for, chrome_window_tabs, is_chrome,
+                     is_chrome_slot, recorded_window_ids, session_history,
+                     window_slot)
 
 # usher.toplevels is the other leaf, and is imported QUALIFIED rather than by
 # name so a test can stub `toplevels.list_toplevels` and have the engine see
@@ -3263,6 +3264,98 @@ SOURCE_ACTIONS = ("capture", "resume")
 # bound exists rather than that it is tight, since a truncated report reads
 # as work that did not happen.
 SOURCE_RELAY_LINES = 80
+# The line prefix a source uses to report one of its own windows, and how
+# much of the digest to carry. 16 hex is 64 bits, which is far past collision
+# risk over the handful of windows one account has open.
+SOURCE_WINDOW_WORD = "window"
+FINGERPRINT_LEN = 16
+
+
+def title_fingerprint(title):
+    """An OPAQUE, stable handle for a window title. PURE.
+
+    This is how the owner and another account agree on WHICH window they are
+    both looking at without a readable title crossing the boundary: each side
+    hashes the LIVE title it can already see for itself. The owner reads it
+    off the compositor, the source off its own toplevel list, and neither
+    learns anything from the other that it did not already have.
+
+    HASHING THE LIVE TITLE ON BOTH SIDES is what makes this work where
+    hashing a RECORDED one would not: Chrome writes a title at navigation
+    time, so its session file disagrees with the screen for hours at a
+    stretch (measured, 2026-10-09). Both sides read the same live string
+    instead, so the only staleness left is the interval between the two
+    reads.
+    """
+    return hashlib.sha256(
+        (title or "").encode("utf-8", "replace")).hexdigest()[:FINGERPRINT_LEN]
+
+
+def source_window_lines(rows, resolve=None, chrome_test=None):
+    """`window <fingerprint> <identity>` for each of THIS account's windows
+    that it can resolve to a per-window identity. PURE given its two seams.
+
+    WHY THE SOURCE HAS TO ANSWER THIS AT ALL: several windows of one app
+    share one key on the owner's side, because the handle that tells them
+    apart lives in the app's own state and that state is inside a home the
+    owner may not read. This account CAN read it, so it is the only thing
+    that can say which window is which, and it says so in terms (a digest
+    and an opaque id) that disclose nothing.
+
+    GATED ON THE APP, because the resolver joins against ONE app's recorded
+    state: handing it a terminal's title would match by coincidence or not at
+    all, and a coincidence here is a wrong slot that sticks.
+    """
+    res = chrome_window_for if resolve is None else resolve
+    is_br = is_chrome if chrome_test is None else chrome_test
+    out = []
+    for r in rows:
+        title = r.get("title") or ""
+        if not title or not is_br(r.get("app_id") or ""):
+            continue
+        try:
+            ident = res(title)
+        except Exception:                                  # noqa: BLE001
+            ident = None
+        if ident:
+            out.append(f"{SOURCE_WINDOW_WORD} {title_fingerprint(title)} "
+                       f"{ident}")
+    return out
+
+
+def parse_source_windows(text):
+    """{fingerprint: identity} out of a source's own report. PURE.
+
+    LENIENT BY DESIGN, because this shares a channel with prose a human
+    reads: anything that is not exactly the three-word shape is somebody
+    else's line and is skipped rather than being an error.
+    """
+    out = {}
+    for ln in (text or "").splitlines():
+        parts = ln.split()
+        if len(parts) == 3 and parts[0] == SOURCE_WINDOW_WORD:
+            out[parts[1]] = parts[2]
+    return out
+
+
+def source_window_report(views, windows):
+    """How many of this source's windows the owner can now tell apart. PURE.
+
+    A MEASUREMENT RATHER THAN A SILENT CAPABILITY, because the join rate is
+    the whole question: the two sides hash a live title each, and whether
+    those strings agree in practice is not something to assume. It is
+    reported per source so a rate of zero cannot read as "no such windows".
+    """
+    out = []
+    for src in sorted(windows):
+        fps = windows[src]
+        mine = [v for v in views if source_of(v) == src
+                and is_chrome(app_of(v))]
+        hit = sum(1 for v in mine
+                  if title_fingerprint(v.get("title") or "") in fps)
+        out.append(f"{src}: {hit} of {len(mine)} window(s) identified "
+                   f"({len(fps)} reported)")
+    return out
 
 
 def source_trigger_plan(rows):
@@ -3275,13 +3368,19 @@ def source_trigger_plan(rows):
     return sorted({s for s in (source_of(w) for w in rows) if s})
 
 
-def source_trigger(sources, action, run=None, hook=None):
+def source_trigger(sources, action, run=None, hook=None, windows=None):
     """Ask each source to capture or resume ITSELF. Returns how many accepted.
 
     NEVER FATAL AND NEVER SILENT. A missing hook is reported only when there
     is something it would have been asked, so a box with no other accounts
     gains no new line at every login, and a box with them never loses the
     reason nothing came back.
+
+    `windows`, when given, is FILLED IN with {source: {fingerprint: identity}}
+    from each report. An out-parameter rather than a second return value
+    because the int return is what two callers read and what every check
+    asserts on, and widening that for data most callers do not want is the
+    shape this tree bans two copies of.
     """
     if action not in SOURCE_ACTIONS:
         raise ValueError(f"source_trigger: no such action {action!r}")
@@ -3334,6 +3433,10 @@ def source_trigger(sources, action, run=None, hook=None):
         # traceback or a chatty provider must not turn the log into the
         # problem. stderr is relayed at all because "worked, with a complaint"
         # is a case a bare rc hides.
+        if windows is not None:
+            _w = parse_source_windows(r.stdout)
+            if _w:
+                windows[src] = _w
         for _stream, _txt, _cap in (("", r.stdout, SOURCE_RELAY_LINES),
                                     ("stderr: ", r.stderr, 4)):
             _lines = (_txt or "").strip().splitlines()
@@ -3688,6 +3791,11 @@ def do_source_capture():
     save_roster(apps)
     print(f"usher: recorded {len(apps)} app(s) for this account"
           + (": " + " ".join(apps) if apps else ""))
+    # AND WHICH WINDOW IS WHICH, for the apps where that is answerable here
+    # and nowhere else. Printed rather than stored, because the owner cannot
+    # read this account's files and the report is what already crosses.
+    for _ln in source_window_lines(rows):
+        print(_ln)
     return EXIT_OK
 
 
@@ -4274,8 +4382,15 @@ def do_wind_down():
     # cannot be reached is logged and the machine still goes down. `usher
     # cleanly` must never be the reason a box will not reboot.
     try:
-        source_trigger(source_trigger_plan(
-            ipc().list_views(filter_mapped_toplevel=True)), "capture")
+        _lv = ipc().list_views(filter_mapped_toplevel=True)
+        _win = {}
+        source_trigger(source_trigger_plan(_lv), "capture", windows=_win)
+        # AND SAY WHETHER THE TWO SIDES AGREED, from the one place that holds
+        # both: the source hashed the titles IT saw, and whether those are the
+        # strings the compositor reports here is a measurement rather than an
+        # assumption. A rate reported per source cannot read as "no windows".
+        for _r in source_window_report(_lv, _win):
+            _announce(f"usher: window identity, {_r}")
     except Exception as e:
         print(f"usher: could not ask other accounts to capture: {e}",
               file=sys.stderr)
