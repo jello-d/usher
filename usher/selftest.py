@@ -2457,6 +2457,20 @@ def _t_roster(ck):
        "engine.chrome_elimination_pool(" in _watch)
     ck("elimination-does-not-build-its-own-list",
        "if chrome.is_chrome(app_of(v))]" not in _watch)
+    # AND THE WIND-DOWN REPORT MUST REACH THE LOG, not only stdout. The power
+    # menu runs `usher cleanly <verb>; systemctl <verb>` through /bin/sh, so
+    # this process's stdout goes NOWHERE: on that path the log is the only
+    # copy, which is `_announce`'s own stated reason for existing.
+    # `captured 0 window(s)` is the signature of the failure the step
+    # ordering exists to prevent, so it is the one line that must survive.
+    _eng = (_wd / "engine.py").read_text()
+    _ww = _eng[_eng.index("def _wind_down_wait("):]
+    _ww = _ww[:_ww.index("\ndef ")]
+    ck("the-wind-down-outcomes-are-announced-not-just-printed",
+       'print("usher:' not in _ww and 'print(f"usher:' not in _ww
+       and _ww.count("_announce(") >= 5)
+    ck("the-wind-down-logs-the-capture-count",
+       "wind-down captured %d window(s)" in _eng)
 
     # WHAT doctor SAYS ABOUT THE SEAM, as a pure table. The lines matter as
     # much as the mechanism: the symptom of a missing hook is "my work apps

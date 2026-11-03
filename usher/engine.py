@@ -4006,9 +4006,9 @@ def _wind_down_wait(pids):
     learning nothing while a human waits to reboot. Its own session is what
     winds it down."""
     if not pids:
-        print("usher: nothing asked to quit; session captured")
+        _announce("usher: nothing asked to quit; session captured")
         return 0
-    print(f"usher: asked {len(pids)} process(es) to quit")
+    _announce(f"usher: asked {len(pids)} process(es) to quit")
     foreign = set()
     end = time.time() + WIND_DOWN_TIMEOUT
     while time.time() < end:
@@ -4028,20 +4028,21 @@ def _wind_down_wait(pids):
             break
         time.sleep(0.2)
     if foreign:
-        print(f"usher: {len(foreign)} process(es) belong to another user and "
+        _announce(f"usher: {len(foreign)} process(es) belong to another "
+                  f"user and "
               f"cannot be stopped from here, so they were NOT waited for "
               f"({' '.join(str(p) for p in sorted(foreign))}); that account's "
               f"own session is what winds them down")
     if pids:
-        print(f"usher: {len(pids)} still running after "
+        _announce(f"usher: {len(pids)} still running after "
               f"{WIND_DOWN_TIMEOUT:g}s; going ahead anyway")
     elif foreign:
         # NOT "all exited cleanly", which would be the same overclaim one
         # level up: everything we could reach went, and something we could
         # not reach is still there.
-        print("usher: everything this session owns exited cleanly")
+        _announce("usher: everything this session owns exited cleanly")
     else:
-        print("usher: all exited cleanly")
+        _announce("usher: all exited cleanly")
     return 0
 
 
@@ -4068,9 +4069,14 @@ def do_wind_down():
     machine that will not shut down."""
     try:
         do_capture()
+        # THE COUNT, IN THE LOG, because "captured 0 window(s)" is the exact
+        # signature of the failure this ordering exists to prevent and the
+        # power menu discards this process's stdout entirely.
+        _announce("usher: wind-down captured %d window(s) with the session "
+                  "still intact"
+                  % len((load_snapshot() or {}).get("windows", [])))
     except Exception as e:
-        print(f"usher: capture failed, winding down anyway: {e}",
-              file=sys.stderr)
+        _announce(f"usher: CAPTURE FAILED, winding down anyway: {e}")
     # STEP 1 NOW REACHES ACROSS ACCOUNTS, and the order is the same feature it
     # has always been, one account over. An enclave captured AFTER its apps
     # are killed records an empty desk, and the next login then restores
