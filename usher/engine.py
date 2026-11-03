@@ -3306,6 +3306,27 @@ def source_trigger(sources, action, run=None, hook=None):
                     f"{r.returncode}): {(r.stderr or '').strip()[:160]}")
             continue
         _announce(f"asked {src} to {action}")
+        # AND RELAY WHAT IT SAID, which is not a nicety: the far side writes
+        # its own watch.log inside a home THIS user cannot read, so dropping
+        # its stdout on success leaves no record here at all of what happened.
+        # "asked titan to resume" with nothing after it is indistinguishable
+        # from a resume that found no roster, refused every app, or launched
+        # something that died, and those are exactly the cases somebody reads
+        # this log to tell apart.
+        #
+        # SAFE TO RELAY, checked rather than assumed: the far side prints
+        # APP-IDS and desktop `Exec=` commands and never a window title, and
+        # both are already in the owner's store. A title would be that
+        # account's content and is redacted at the source.
+        #
+        # BOUNDED, because this runs at every login and every logoff: a few
+        # lines each, truncated, so a chatty or wedged provider cannot turn
+        # the log into the problem. stderr is relayed too when it said
+        # something despite succeeding, which is the "worked, with a
+        # complaint" case a bare rc hides.
+        for _stream, _txt in (("", r.stdout), ("stderr: ", r.stderr)):
+            for _ln in (_txt or "").strip().splitlines()[:4]:
+                logline(f"  {src} {action}: {_stream}{_ln.strip()[:150]}")
         n += 1
     return n
 

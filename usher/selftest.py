@@ -3233,6 +3233,7 @@ def _t_relaunch(ck):
         class R:
             returncode = 0
             stderr = ""
+            stdout = "recorded 2 app(s) for this account: a b"
         return R()
 
     _rsrh, _rl3 = engine.SOURCE_TRIGGER_HOOK, engine.logline
@@ -3253,6 +3254,15 @@ def _t_relaunch(ck):
             ck("source-trigger-passes-the-source-and-the-action",
                _asked_sr == [[_hk, "titan", "resume"]])
             ck("source-trigger-counts-what-accepted", _n_sr == 1)
+            # THE FAR SIDE'S OWN WORDS REACH THIS LOG, which is the only
+            # record the session user can read: the enclave writes its own
+            # watch.log inside a home this user cannot open, so a bare
+            # "asked titan to resume" is indistinguishable from a resume
+            # that found no roster or refused every app.
+            ck("source-trigger-relays-what-the-far-side-said",
+               any("recorded 2 app(s)" in m for m in _said3))
+            ck("source-trigger-names-the-source-and-action-on-the-relay",
+               any(m.strip().startswith("titan resume:") for m in _said3))
             # EXACTLY THREE WORDS, and the argv length is the check rather
             # than a scan of its contents: a scan can be satisfied by content
             # that merely looks harmless, where a fixed arity cannot carry a
@@ -3277,6 +3287,7 @@ def _t_relaunch(ck):
                 class R:
                     returncode = 3
                     stderr = "nope"
+                    stdout = ""
                 return R()
             _said3.clear()
             ck("source-trigger-a-refusal-is-not-counted",
