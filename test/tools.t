@@ -47,6 +47,13 @@ _compile_group plugins   1 "$HERE/share/plugins"/*.py
 # directory it sits in). py_compile does not care about the suffix, so they are
 # syntax-checked here like everything else; test/providers.t runs them.
 _compile_group providers 1 "$HERE/share/providers"/*
+# THE TEST HELPERS TOO, which nothing compiled until now. `no-provider-
+# vocabulary` takes a BARE NAME because it is EXECUTED, so no `*.py` selector
+# reaches it, and this suite's own history records exactly that gap:
+# `harness_lib` and the pre-commit hook were syntax-checked by nothing for
+# months. A bare glob with the `-f` guard above skips the directories and the
+# `*.t` files the shell sweep already covers.
+_compile_group helpers   1 "$HERE/test"/no-provider-vocabulary
 _sh=0
 for _f in "$HERE/setup.sh" "$HERE/indicator/setup.sh" "$HERE/test/run" \
           "$HERE/test/harness_lib" "$HERE/.githooks/pre-commit" \
@@ -242,6 +249,25 @@ for name, val in KNOBS:
             bad.append(f"{name}: code says {want}, {label} says {m.group(1)}")
 assert not bad, "; ".join(bad)
 PYEOF
+
+# usher NAMES NO PROVIDER, NO ENCLAVE AND NO ACCOUNT, and that is an
+# ARCHITECTURAL claim rather than a style one: the source NAME arrives from a
+# hook an integrator wires, the account behind it is that integrator's
+# vocabulary, and the set of sources is DERIVED FROM THE WINDOWS usher can see
+# rather than from any list. Nothing in this package may know that `titan`
+# means `jello-titan`, or that severance exists at all.
+#
+# A DECISION RECORDED ONLY IN PROSE SILENTLY DOES NOT HAPPEN, which is why
+# this is a check: until now the claim rested on nobody having typed one.
+#
+# COMMENTS AND DOCSTRINGS ARE EXEMPT BY CONSTRUCTION, decided by AST rather
+# than by a line filter, because this tree's prose quotes measurements
+# constantly and those name the real enclave on purpose. Only CODE counts.
+# selftest.py is excluded too: a FIXTURE has to name one to test the
+# mechanism at all.
+_vocab=$(PYTHONPATH="$HERE" python3 "$HERE/test/no-provider-vocabulary" \
+         "$HERE") || fail "provider-vocabulary check: $_vocab"
+[ "$_vocab" -ge 6 ] || fail "only $_vocab module(s) scanned for vocabulary"
 
 # THE WAYLAND OPCODES ARE RE-DERIVED FROM THE PROTOCOL XMLs, because an opcode
 # is DECLARATION ORDER and a wrong one does not fail: it decodes a different
