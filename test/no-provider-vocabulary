@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""Fail if any EXECUTABLE line of usher names a provider, enclave or account.
+
+usher learns a source NAME from a hook an integrator wires, and the account
+behind that name is the integrator's vocabulary. Nothing here may know that
+`titan` means `jello-titan`, or that severance exists at all: the set of
+sources is derived from the WINDOWS usher can see, never from a list.
+
+COMMENTS AND DOCSTRINGS ARE EXEMPT BY CONSTRUCTION, and that is why this is
+an AST pass rather than a grep. This tree's prose quotes live measurements
+constantly and those name the real enclave on purpose; what would be a
+defect is the vocabulary reaching CODE. selftest.py is excluded for the same
+reason one step further: a fixture has to name one to test the mechanism.
+
+Prints the number of modules scanned, so a run that scanned nothing cannot
+pass by finding nothing.
+"""
+import ast
+import glob
+import os
+import sys
+import tokenize
+
+WORDS = ("titan", "severance", "jello")
+
+
+def code_only(path):
+    """The file with every comment and docstring blanked, lines preserved."""
+    src = open(path, encoding="utf-8").read()
+    lines = src.splitlines()
+    cuts = {}
+    with open(path, "rb") as fh:
+        for tok in tokenize.tokenize(fh.readline):
+            if tok.type == tokenize.COMMENT:
+                cuts.setdefault(tok.start[0], tok.start[1])
+    spans = []
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                 ast.AsyncFunctionDef)):
+            continue
+        body = getattr(node, "body", [])
+        if (body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            spans.append((body[0].lineno, body[0].end_lineno))
+    out = []
+    for i, line in enumerate(lines, 1):
+        if any(a <= i <= b for a, b in spans):
+            out.append("")
+        elif i in cuts:
+            out.append(line[:cuts[i]])
+        else:
+            out.append(line)
+    return out
+
+
+def main():
+    here = sys.argv[1] if len(sys.argv) > 1 else "."
+    mods = [f for f in sorted(glob.glob(os.path.join(here, "usher", "*.py")))
+            if os.path.basename(f) != "selftest.py"]
+    bad = []
+    for f in mods:
+        for i, line in enumerate(code_only(f), 1):
+            for w in WORDS:
+                if w in line.lower():
+                    bad.append("%s:%d names %r in CODE: %s"
+                               % (os.path.basename(f), i, w,
+                                  line.strip()[:50]))
+    if bad:
+        print("; ".join(bad), file=sys.stderr)
+        return 1
+    print(len(mods))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
