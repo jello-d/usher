@@ -2638,6 +2638,41 @@ def _t_roster(ck):
             # not reach back through it. One enclave triggering another is a
             # loop, and nothing on this side is the owner.
             ck("roster-launch-never-asks-another-source", asked == [])
+            # AN INJECTED SPAWN MUST WIN over the stderr-watching one, or the
+            # suite would launch for real. This is the condition I got
+            # backwards first, and the two checks below caught it at once.
+            ck("an-injected-spawn-is-not-replaced-by-the-watcher",
+               spawned == [["true"]])
+            # AND A FAST DEATH IS REPORTED WITH ITS STDERR, which is the
+            # whole point: four enclave apps died in under 0.3s with nothing
+            # in the journal, and DEVNULL'd stderr left no way to see why.
+            _said = []
+            _rl = engine.logline
+            try:
+                engine.logline = _said.append
+                _w = []
+                engine._spawn_watched(_w)(["/bin/sh", "-c",
+                                           "echo BOOM >&2; exit 3"])
+                engine._report_quick_deaths(_w, grace=0.6)
+            finally:
+                engine.logline = _rl
+            ck("a-fast-death-is-logged-with-its-return-code",
+               any("DIED rc=3" in m for m in _said))
+            ck("a-fast-death-relays-its-stderr",
+               any("its stderr: BOOM" in m for m in _said))
+            # AND A SURVIVOR SAYS NOTHING, or every login would log a line
+            # per app that started perfectly well.
+            _said.clear()
+            try:
+                engine.logline = _said.append
+                _w = []
+                engine._spawn_watched(_w)(["/bin/sh", "-c", "sleep 30"])
+                engine._report_quick_deaths(_w, grace=0.4)
+            finally:
+                engine.logline = _rl
+            ck("a-surviving-app-is-not-reported", _said == [])
+            for _pr, _pa, _ in _w:
+                _pr.kill()
             ck("roster-launch-spawns-through-the-registry",
                n == 1 and spawned == [["true"]])
             ck("roster-launch-starts-nothing-already-live",

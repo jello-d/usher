@@ -20,6 +20,7 @@ or `term:latch <host>:<session>`, which is also how it is brought back), kitty
 by the shell's CWD from /proc (`kitty:<cwd>`, respawned as a shell there). See
 WindowPlugin, plugins(), identity() and learn().
 """
+import contextlib
 import fnmatch
 import glob
 import hashlib
@@ -3446,11 +3447,73 @@ def roster_launch(apps, live, spawn=None):
             n += p.relaunch_missing(saved, seen)
         except Exception as e:                                 # noqa: BLE001
             logline(f"relaunch ({getattr(p, 'name', '?')}) error: {e}")
+    # A RELAUNCHED APP'S STDERR IS KEPT, BRIEFLY, which is the one thing that
+    # makes an instant death diagnosable. `desktop_relaunch_missing` sends it
+    # to DEVNULL, so an app that starts and exits in 100ms leaves NOTHING
+    # anywhere: measured on manifold, four enclave apps died in 0.05 to 0.27
+    # seconds with not one line in the journal, and the only way to see it at
+    # all was polling /proc from outside.
+    #
+    # THIS SIDE IS WHERE IT MATTERS, because the enclave's apps are started
+    # from a sudo with almost no session environment, where the owner's are
+    # started by a daemon that has one. So the failure is plausible here and
+    # has never happened there.
+    # AN INJECTED SPAWN ALWAYS WINS, which is what keeps the suite from
+    # launching anything real: watching is only for the production path.
+    watch = [] if spawn is None else None
     try:
-        n += desktop_relaunch_missing(saved, seen, spawn)
+        n += desktop_relaunch_missing(
+            saved, seen, spawn if spawn is not None else _spawn_watched(watch))
     except Exception as e:                                     # noqa: BLE001
         logline(f"relaunch (desktop default) error: {e}")
+    if watch:
+        _report_quick_deaths(watch)
     return n
+
+
+def _spawn_watched(watch):
+    """A spawn that keeps each child's stderr in a temp file for a moment.
+
+    Returns a callable of the shape `desktop_relaunch_missing` expects, and
+    records (proc, path, argv) so the caller can report whatever died fast.
+    """
+    import tempfile
+
+    def _spawn(argv):
+        fh = tempfile.NamedTemporaryFile(
+            prefix="usher-relaunch-", suffix=".err", delete=False)
+        proc = subprocess.Popen(argv, start_new_session=True,
+                                stdout=subprocess.DEVNULL, stderr=fh)
+        fh.close()
+        watch.append((proc, fh.name, argv))
+    return _spawn
+
+
+def _report_quick_deaths(watch, grace=3.0, lines=4, width=150):
+    """Log the stderr of anything that exited within `grace` seconds.
+
+    ONE BOUNDED WAIT FOR THE WHOLE SET, not one per app, so a login costs a
+    few seconds once rather than a few per app. An app still RUNNING is the
+    normal case and says nothing: its file is removed and its stderr goes
+    nowhere from then on, which is the pre-existing behaviour and the reason
+    this cannot grow without bound.
+    """
+    time.sleep(grace)
+    for proc, path, argv in watch:
+        rc = proc.poll()
+        try:
+            if rc is not None:
+                logline(f"relaunch DIED rc={rc} within {grace:g}s: "
+                        f"{' '.join(argv)[:120]}")
+                with open(path, errors="replace") as fh:
+                    tail = [ln.strip() for ln in fh if ln.strip()][-lines:]
+                for ln in tail:
+                    logline(f"  its stderr: {ln[:width]}")
+                if not tail:
+                    logline("  its stderr: (nothing; it said nothing at all)")
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(path)
 
 
 def do_source_capture():
