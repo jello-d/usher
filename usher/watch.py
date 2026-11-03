@@ -1160,9 +1160,11 @@ class Watcher:
         # in the plugin: a plugin is handed ONE view and cannot see what the
         # other titles already account for. Done before the placement loop so
         # a view it claims is placeable on this very pass.
+        # OURS ONLY: the ids come from the OWNER's session files, so a
+        # foreign chrome view is not a candidate for any of them. One got
+        # handed an owner id here, live, with its title as the label.
         _claimed = chrome.claim_by_elimination(
-            [(v.get("id"), v.get("title") or "") for v in views
-             if chrome.is_chrome(app_of(v))])
+            engine.chrome_elimination_pool(views))
         if _claimed is not None:
             logline("chrome: the one unmatched window is settled by "
                     "elimination over the recorded ids")

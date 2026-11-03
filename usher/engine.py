@@ -1349,6 +1349,35 @@ def source_of(v):
     return window_origin(pview(v).get("pid"))[0] or ""
 
 
+def chrome_elimination_pool(views):
+    """The chrome views `claim_by_elimination` may consider: OURS ONLY.
+
+    THE ID SET IT MATCHES AGAINST IS THE OWNER'S, read out of the owner's own
+    session files, so the VIEW set has to be the owner's too. A foreign
+    chrome view is not a candidate for any of those ids, and offering it one
+    is how it gets handed somebody else's slot.
+
+    PRODUCT, LIVE on manifold 2026-11-02, found while testing the enclave
+    restore. The call site filtered on `is_chrome` alone, so a work account's
+    Chrome view sat in the pool, and one second after a capture the log read
+
+        chrome: the one unmatched window is settled by elimination
+
+    leaving `google-chrome\0chrome:win:327657740` in the owner's store with
+    the WORK window's title as its label and no `source` field, under an id
+    the owner's current session does not record. `window_slot` then caches
+    that pairing for the view's life, so it is a sticky wrong slot and a
+    disclosure in one.
+
+    THE SAME SHAPE AS `d5798da` ONE LEVEL OUT. That fix stopped elimination
+    consulting the unreliable TITLES for its own preconditions; this stops it
+    considering windows that were never its to pair. A mechanism that forces
+    a pairing must have the right candidates before the forcing is sound.
+    """
+    return [(v.get("id"), v.get("title") or "") for v in views
+            if is_chrome(app_of(v)) and not source_of(v)]
+
+
 def log_title(v):
     """The title a LOG LINE or a REPORT may carry for this view.
 

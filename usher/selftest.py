@@ -2315,6 +2315,27 @@ def _t_roster(ck):
     account in its own home. Everything here pins the cases where getting it
     wrong would either lose a desk or let the owner start something.
     """
+    # ELIMINATION'S POOL IS THE OWNER'S VIEWS ONLY.
+    #
+    # PRODUCT, LIVE: the call site filtered on `is_chrome` alone, so a work
+    # account's Chrome view was a candidate for an id out of the OWNER's
+    # session files, and one second after a capture the owner's store held
+    # `chrome:win:<owner id>` labelled with the WORK window's title and no
+    # `source` field. `window_slot` caches that for the view's life, so it is
+    # a sticky wrong slot and a disclosure at once.
+    _ours = _trv("google-chrome", "mine", pid=os.getpid())
+    _theirs = dict(_trv("google-chrome", "theirs", pid=os.getpid()))
+    _theirs["source"] = "titan"
+    _pool = engine.chrome_elimination_pool([_ours, _theirs])
+    ck("elimination-pool-keeps-our-own-chrome-view",
+       any(t == "mine" for _v, t in _pool))
+    ck("elimination-pool-excludes-a-foreign-chrome-view",
+       not any(t == "theirs" for _v, t in _pool))
+    # AND IT STILL EXCLUDES NON-CHROME, or the pool would offer owner session
+    # ids to windows that were never in a session file at all.
+    ck("elimination-pool-excludes-non-chrome",
+       engine.chrome_elimination_pool([_trv("kitty", "term")]) == [])
+
     # A SOURCE NAME IS HALF A KEY, and needs the app-id as the other half.
     #
     # FOUND LIVE on manifold as a `'\x00titan'` entry sitting beside the five
@@ -2427,6 +2448,15 @@ def _t_roster(ck):
     ck("the-log-sites-do-call-the-redactor",
        _watch.count("engine.log_title(") >= 3
        and _doc.count("engine.log_title(") >= 1)
+    # AND THE ELIMINATION POOL IS ACTUALLY USED, because the pool function's
+    # own checks say nothing about whether the caller consults it: a planted
+    # bypass restoring the old inline expression passed every one of them.
+    # Same lesson `entry_output` already carries, matched against the exact
+    # pre-fix pattern with a vacuity guard so an emptied scan cannot pass.
+    ck("elimination-is-fed-from-the-pool",
+       "engine.chrome_elimination_pool(" in _watch)
+    ck("elimination-does-not-build-its-own-list",
+       "if chrome.is_chrome(app_of(v))]" not in _watch)
 
     # WHAT doctor SAYS ABOUT THE SEAM, as a pure table. The lines matter as
     # much as the mechanism: the symptom of a missing hook is "my work apps
