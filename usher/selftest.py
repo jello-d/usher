@@ -2315,6 +2315,29 @@ def _t_roster(ck):
     account in its own home. Everything here pins the cases where getting it
     wrong would either lose a desk or let the owner start something.
     """
+    # A SOURCE NAME IS HALF A KEY, and needs the app-id as the other half.
+    #
+    # FOUND LIVE on manifold as a `'\x00titan'` entry sitting beside the five
+    # legitimate source keys: an app-id-less foreign window keyed on the
+    # source ALONE, which matches every handle-less window of that whole
+    # account and would drag the next one onto the last one's geometry. Fifth
+    # instance of a rule scoped to one category meeting something outside it:
+    # `is_unique` has refused an empty app-id since the `'\0'` wildcard fix,
+    # and the source branch runs FIRST and never asked it.
+    _fw = {"app_id": "", "title": "SOMETHING", "source": "titan", "pid": -1}
+    ck("a-source-key-needs-an-app-id",
+       not engine.resolution(_fw).is_ready
+       and "no app-id" in (engine.resolution(_fw).why or ""))
+    ck("a-source-key-with-an-app-id-is-still-ready",
+       engine.resolution({"app_id": "slack", "title": "x",
+                          "source": "titan", "pid": -1}).key == "titan")
+    # AND THE GATE BOTH SIDES READ MUST AGREE, which is the whole reason the
+    # fix went into `resolution` rather than into the keying branch: a store
+    # written under a key the matcher never looks up is the fault that
+    # predicate exists to prevent.
+    ck("an-app-id-less-foreign-window-is-not-learned",
+       engine.unidentified(_fw))
+
     # PURE, so the decision needs no compositor and no other account.
     ck("roster-plan-is-the-difference",
        engine.roster_plan(["a", "b", "c"], ["b"]) == ["a", "c"])

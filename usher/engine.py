@@ -1469,6 +1469,26 @@ def resolution(v):
         # and leaves the rest where they open, and doctor reports the
         # collision: the same honest degradation an app_id-only app has always
         # had, rather than a guess.
+        #
+        # BUT A SOURCE NAMES THE ACCOUNT, NOT THE WINDOW, so it is only half
+        # a key and needs the app-id as the other half. With no app-id the key
+        # degenerates to `\0<source>`, which matches EVERY handle-less window
+        # of that whole account and would drag the next one onto whatever
+        # geometry the last one had.
+        #
+        # FIFTH INSTANCE OF ONE SHAPE: a rule scoped to one category, met by
+        # something outside it. `is_unique` has refused an empty app-id since
+        # `d9dbc9f` killed the `'\0'` wildcard, and the source branch above
+        # runs FIRST and never consulted it. Found on manifold as a live
+        # `'\x00titan'` entry beside the five legitimate source keys, by
+        # sweeping the store by SHAPE after a content filter had twice missed
+        # things.
+        if not v["app"]:
+            return Resolution.never(
+                f"this window belongs to the {src} source and reports no "
+                "app-id, so the source name is the only handle and keying on "
+                "it alone would match every handle-less window of that "
+                "account")
         return Resolution.ready(src)
     if other is not None:
         # FOREIGN AND UNNAMED: no provider is wired, or it could not answer.
