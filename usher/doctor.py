@@ -262,9 +262,26 @@ def collision_fix(ident, source=""):
     SOURCE alone, so several windows of one of its apps legitimately share one
     key.
 
-    A TERMINAL CAN BE NAMED, which makes it title-keyed and gives it a slot
-    of its own. For an ordinary app a plugin is the answer, which is what the
-    README's tiers describe.
+    A TERMINAL SHARING A CWD KEY HAS NO REMEDY TODAY, and this used to say
+    "name one: settitle" on the belief that a named window becomes
+    title-keyed. MEASURED ON MANIFOLD 2026-11-03 AND IT IS FALSE, in the
+    direction that makes things worse: `MuxPlugin.owns` is `":" in title`,
+    so ANY colon in the name hands the window to it, and with no latch
+    target `_mux_slot` answers `term:resume`, which the real mux
+    terminal already holds. A colon-free name changes nothing at all,
+    since
+    KittyPlugin keys on the cwd either way. Two wrong outcomes and no right
+    one, so it says what is true instead.
+
+    ADVICE THAT MAKES THINGS WORSE COSTS MORE THAN THE MISSING FEATURE,
+    which is why this is a wording change rather than a held fix: narrowing
+    MuxPlugin to require actual mux evidence would remove the harm, and
+    making a named terminal genuinely title-keyed is what would make the
+    remedy real. Both are identity surgery in the most-burned code here and
+    neither is needed to stop misdirecting a reader.
+
+    For an ordinary app a plugin is the answer, which is what the README's
+    tiers describe.
 
     A CHROME SLOT IS NEITHER, and must NOT say "write a plugin": a SessionID
     names exactly ONE window, so two live views holding one is usher having
@@ -278,7 +295,8 @@ def collision_fix(ident, source=""):
     if is_chrome_slot(ident):
         return "usher mis-resolved these; usher reload clears it"
     if ident.startswith("kitty:"):
-        return "name one: settitle"
+        return ("usher keys a terminal on its shell's directory, so two in "
+                "one directory share a slot; move one, or open it elsewhere")
     return "a plugin can tell them apart; see README"
 
 

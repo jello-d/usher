@@ -557,7 +557,25 @@ def _t_resolution(ck):
        "mis-resolved" in _cfix("chrome:win:123"))
     ck("collision-chrome-does-not-say-plugin",
        "plugin" not in _cfix("chrome:win:123"))
-    ck("collision-kitty-names-settitle", "settitle" in _cfix("kitty:/w"))
+    # AND IT MUST NOT NAME settitle, which it did on the belief that a named
+    # window becomes title-keyed. Measured false and in the harmful
+    # direction: any colon in the name hands the window to MuxPlugin, whose
+    # `owns` is title-only, and with no latch target `_mux_slot` answers
+    # `term:resume`, the real mux terminal's key. The check asserts
+    # the
+    # ABSENCE because a reader following that advice was worse off than one
+    # given none, and a wording change is the whole fix.
+    ck("collision-kitty-does-not-name-settitle",
+       "settitle" not in _cfix("kitty:/w"))
+    ck("collision-kitty-explains-the-cwd-key",
+       "directory" in _cfix("kitty:/w"))
+    # THE MECHANISM BEHIND THAT, pinned so the advice cannot drift back in
+    # while it stays true: a colon-titled kitty with no mux in its tree is
+    # handed the key a real `mux resume` terminal holds.
+    ck("a-colon-in-a-title-alone-makes-it-a-mux-terminal",
+       engine.is_mux_term("kitty", "work:titan"))
+    ck("and-with-no-latch-target-that-key-is-term-resume",
+       engine._mux_slot(None) == "term:resume")
     ck("collision-other-says-plugin", "plugin" in _cfix("some window title"))
     ck("collision-remedies-are-three-distinct",
        len({_cfix("chrome:win:123"), _cfix("kitty:/w"),
