@@ -95,9 +95,22 @@ fi
 # root inside a REAL user's home, so that is the half worth proving.
 U=$T/uhome
 mkdir -p "$T/stub" "$U/.config/wayfire" "$U/.config/hwdp/hooks/changed.d"
-printf '#!/bin/sh\necho "tester:x:1000:1000::%s:/bin/sh"\n' "$U" \
-  >"$T/stub/getent"
+# THE REAL UID, not a literal 1000: `_login_reload` derives the caller's
+# runtime dir as /run/user/<uid>, and using this box's own uid is what makes
+# the "there IS a session" branch reachable when one exists.
+printf '#!/bin/sh\necho "tester:x:%s:%s::%s:/bin/sh"\n' \
+  "$(id -u)" "$(id -g)" "$U" >"$T/stub/getent"
 chmod +x "$T/stub/getent"
+
+# A SUDO STUB, and it is not optional: `_login_reload` shells `sudo -u` at the
+# sudo CALLER, so with real sudo on PATH this suite would prompt for a
+# password and HANG, or escalate. It records the argv instead, which is also
+# the only way to assert the one thing the invocation must get right.
+SUDOLOG=$T/sudo.argv
+: >"$SUDOLOG"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"%s"\nexit 0\n' "$SUDOLOG" \
+  >"$T/stub/sudo"
+chmod +x "$T/stub/sudo"
 
 # A STUB VENV, since no test may run pip. Its console scripts carry the
 # shebang a REAL venv bakes, because that absolute path is the thing
@@ -179,14 +192,68 @@ _uhk=$H/.config/hwdp/hooks/changed.d/40-usher
 { [ ! -e "$_uhk" ] && [ ! -L "$_uhk" ]; } \
   || fail "a system install wrote a per-user hwdp hook"
 [ ! -e "$H/.local" ] || fail "a system install wrote into the caller's ~/.local"
-# AND IT DID NOT TRY TO RELOAD ROOT'S DAEMON, which is the other per-user step
-# and the one that leaves no file behind to assert on: it is visible only in
-# what install SAID.
+# AND IT DID NOT RUN THE USER-MODE RELOAD, which as root would act on
+# /root. That path's messages name no user ("reloaded the running daemon");
+# `_login_reload`'s name the sudo caller, so the two are distinguishable by
+# construction rather than by luck.
 case $_o in
-  *"reloaded the running daemon"*|*"could not reload the daemon"*|\
-  *"no daemon running"*)
-    fail "a system install reached for the caller's daemon: $_o" ;;
+  *"reloaded the running daemon"*|*"could not reload the daemon"*)
+    fail "a system install ran the user-mode reload as root: $_o" ;;
 esac
+
+# --- IT RELOADS THE SUDO CALLER'S DAEMON, AND NAMES THE RUNTIME DIR ---------
+# THE INVOCATION IS THE WHOLE FINDING. Measured with real sudo on both boxes
+# 2026-11-04: `sudo -u USER usher reload` exits 2 with "no daemon is running",
+# because the supervisor's lock lives under XDG_RUNTIME_DIR and sudo's
+# `env_reset` strips it, so the lookup falls back to the state dir. Naming it
+# works. An edit dropping that `env` would restore the silent failure with no
+# file to assert on, which is why this reads the ARGV.
+if [ -d "/run/user/$(id -u)" ]; then
+  [ -s "$SUDOLOG" ] || fail "a system install never reloaded the caller's\
+ daemon"
+  grep -q -- "XDG_RUNTIME_DIR=/run/user/$(id -u)" "$SUDOLOG" \
+    || fail "the reload did not name the caller's runtime dir: $(cat \
+      "$SUDOLOG")"
+  grep -q -- "-u tester" "$SUDOLOG" \
+    || fail "the reload did not target the sudo caller: $(cat "$SUDOLOG")"
+  grep -q -- "-u root" "$SUDOLOG" \
+    && fail "the reload targeted root: $(cat "$SUDOLOG")"
+  echo "  (the caller's daemon was reloaded, naming its runtime dir)"
+else
+  echo "  (no /run/user/$(id -u) here, so the reload branch is unreachable:\
+ skipped)"
+fi
+
+# --- AND THE TWO SKIPS, WHICH NEED NO SESSION -------------------------------
+# NO SUDO CALLER: root installing with no SUDO_USER has nobody's daemon to
+# reload and must say so rather than guessing whose.
+: >"$SUDOLOG"
+_o2=$(env HOME="$H" PATH="$T/stub:$PATH" DESTDIR="$D" \
+  USHER_SKIP_BUILD=1 NO_COLOR=1 sh "$HERE/setup.sh" install --system 2>&1) \
+  || fail "system install with no SUDO_USER: $_o2"
+case $_o2 in
+  *"no sudo caller"*) : ;;
+  *) fail "no SUDO_USER did not say so: $_o2" ;;
+esac
+[ ! -s "$SUDOLOG" ] || fail "it reloaded somebody with no SUDO_USER set"
+
+# NOT LOGGED IN: the runtime dir exists only while a session does, so its
+# absence is the cheap answer to "is there anything to reload" and is NOT a
+# fault. uid 31337 has no /run/user entry on any box.
+: >"$SUDOLOG"
+printf '#!/bin/sh\necho "tester:x:31337:31337::%s:/bin/sh"\n' "$U" \
+  >"$T/stub/getent"
+_o3=$(env HOME="$H" PATH="$T/stub:$PATH" SUDO_USER=tester DESTDIR="$D" \
+  USHER_SKIP_BUILD=1 NO_COLOR=1 sh "$HERE/setup.sh" install --system 2>&1) \
+  || fail "system install for a logged-out caller: $_o3"
+case $_o3 in
+  *"is not logged in"*) : ;;
+  *) fail "a logged-out caller did not read as such: $_o3" ;;
+esac
+[ ! -s "$SUDOLOG" ] || fail "it shelled sudo for a caller with no session"
+# PUT THE WORKING STUB BACK, since the assertions below this still run.
+printf '#!/bin/sh\necho "tester:x:%s:%s::%s:/bin/sh"\n' \
+  "$(id -u)" "$(id -g)" "$U" >"$T/stub/getent"
 
 # --- THE MODE SWITCH ---------------------------------------------------------
 for _a in usher usher-mgr; do
