@@ -3344,6 +3344,11 @@ FINGERPRINT_LEN = 16
 # ask is a sudo subprocess, and a window that can NEVER be identified
 # (incognito) would otherwise make a loop out of asking about it.
 SOURCE_REFRESH_EVERY = 60
+# How long that account's window set must be UNCHANGED before asking. The
+# ask is a capture, which replaces its roster, so asking mid-login would
+# record a partial desk. 10s against a measured restore that reaches its
+# last placement in 2s median and 9s at p90 across both boxes' whole logs.
+SOURCE_SETTLE = 10
 
 
 def title_fingerprint(title):
@@ -3488,30 +3493,37 @@ def rekey_source(kb, src, binding):
     return moved
 
 
-def source_refresh_plan(saved, live, last, now, every=SOURCE_REFRESH_EVERY):
-    """Which sources to ask to identify their windows again. PURE.
+def source_refresh_plan(live, last, now, seen=None,
+                        every=SOURCE_REFRESH_EVERY, settle=SOURCE_SETTLE):
+    """Which sources to ask to identify their windows, and the updated
+    stability state. PURE, returning (sources, seen).
 
     DEMAND-DRIVEN: asked only where a source has a window whose per-window
     identity we do not have, so a desk where everything is identified never
-    asks at all.
+    asks at all and a settled session makes no subprocess.
 
-    AND ONLY WHEN A CAPTURE CANNOT SHRINK THAT ACCOUNT'S ROSTER, which is
+    AND ONLY ONCE THAT ACCOUNT'S WINDOW SET HAS STOPPED CHANGING, which is
     the constraint that shapes this. The ask is a `capture`, and a capture
     REPLACES the roster with what is live, so asking while a login is still
-    bringing windows up would record a partial desk. Normally the next
-    logoff capture repairs that, but a logoff capture can refuse (a source
-    whose display socket has already gone), and then the partial roster is
-    what the NEXT login restores from.
+    bringing windows up records a partial desk. The next logoff capture
+    normally repairs that and CAN REFUSE (a source whose display socket has
+    already gone), and then the partial roster is what the NEXT login
+    restores from.
 
-    So the test is the owner's own expectation: every app it has SAVED for
-    that source must be live. If one never comes back the ask never fires,
-    which is the fail-safe direction (no identities, today's behaviour)
-    rather than a roster the owner quietly made worse.
+    THE FIRST VERSION TESTED THE OWNER'S EXPECTATION INSTEAD, requiring
+    every app SAVED for that source to be live, and it never fired at a
+    login: measured on manifold, 9 of that account's 14 saved apps are Wine
+    installers and dialogs that never come back, so the feature was silently
+    off at exactly the event it exists for. A test that can block forever is
+    the wrong shape for a precondition; `settle` is bounded by construction.
 
-    RATE-LIMITED PER SOURCE, since a window that can never be identified
-    would otherwise make a loop out of asking about it.
+    NOR IS THE REPEAT A SAFETY NET, which is why the bound has to be here:
+    after one successful ask every window is identified, so demand goes
+    false and nothing asks again. There is no second chance to correct a
+    partial roster with.
     """
-    want, have, expect = set(), {}, {}
+    seen = dict(seen or {})
+    want, have = set(), {}
     for w in live:
         src = w.get("source")
         if not src:
@@ -3519,14 +3531,25 @@ def source_refresh_plan(saved, live, last, now, every=SOURCE_REFRESH_EVERY):
         have.setdefault(src, set()).add(w.get("app_id") or "")
         if is_chrome(w.get("app_id") or "") and (w.get("key") or "") == src:
             want.add(src)
-    for w in saved or ():
-        src = w.get("source")
-        if src:
-            expect.setdefault(src, set()).add(w.get("app_id") or "")
-    return sorted(
-        s for s in want
-        if now - last.get(s, 0) >= every
-        and not (expect.get(s, set()) - have.get(s, set())))
+    out = []
+    for src in sorted(want):
+        apps = frozenset(have.get(src, set()))
+        was, since = seen.get(src, (None, now))
+        if apps != was:
+            seen[src] = (apps, now)      # changed: start the clock again
+            continue
+        if now - since < settle:
+            continue
+        if now - last.get(src, 0) < every:
+            continue
+        out.append(src)
+    # A SOURCE WITH NOTHING WANTED KEEPS NO CLOCK, so its windows arriving
+    # later start one fresh rather than inheriting a stale "stable since".
+    for src in list(seen):
+        if src not in want:
+            del seen[src]
+    return out, seen
+
 
 
 # source -> {old identity: new identity}, as last reported and NOT yet

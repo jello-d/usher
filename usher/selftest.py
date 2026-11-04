@@ -864,54 +864,77 @@ def _t_resolution(ck):
                == [9, 9])
 
             # ---- WHEN TO ASK, which is the part with a trap in it --------
-            _lv_un = [{"app_id": "google-chrome", "source": "titan",
-                       "key": "titan"},
-                      {"app_id": "slack", "source": "titan", "key": "titan"}]
-            _sv_all = [{"app_id": "google-chrome", "source": "titan"},
-                       {"app_id": "slack", "source": "titan"}]
-            ck("refresh-asks-when-a-window-is-unidentified",
-               engine.source_refresh_plan(_sv_all, _lv_un, {}, 1000.0)
+            # The ask is a CAPTURE, and a capture REPLACES that account's
+            # roster with what is live, so asking mid-login records a partial
+            # desk. The guard must therefore be a PRECONDITION that cannot
+            # block forever: the first version required every app the owner
+            # had SAVED for that source to be live, and it never fired at a
+            # login, because that account's saved set names Wine installers
+            # and dialogs that do not come back (9 of 14, measured). The
+            # feature was silently off at exactly the event it exists for.
+            _P = engine.source_refresh_plan
+            _un = [{"app_id": "google-chrome", "source": "titan",
+                    "key": "titan"},
+                   {"app_id": "slack", "source": "titan", "key": "titan"}]
+            # THE CLOCK STARTS ON FIRST SIGHT, so nothing is asked for on the
+            # pass that discovers it: that pass is the middle of a login.
+            _r, _seen = _P(_un, {}, 1000.0, {})
+            ck("refresh-does-not-ask-on-first-sight", _r == [])
+            ck("refresh-records-what-it-saw",
+               set(_seen) == {"titan"} and _seen["titan"][1] == 1000.0)
+            # STILL NOT, while the set has been stable for less than settle.
+            ck("refresh-waits-for-the-set-to-settle",
+               _P(_un, {}, 1000.0 + engine.SOURCE_SETTLE - 1, _seen)[0] == [])
+            # AND THEN IT ASKS.
+            ck("refresh-asks-once-the-set-is-stable",
+               _P(_un, {}, 1000.0 + engine.SOURCE_SETTLE, _seen)[0]
                == ["titan"])
-            # IDENTIFIED ALREADY: never asks, so a settled desk makes no
-            # subprocess at all.
-            _lv_id = [dict(_lv_un[0], key="titan:chrome:win:91"), _lv_un[1]]
-            ck("refresh-does-not-ask-when-everything-is-identified",
-               engine.source_refresh_plan(_sv_all, _lv_id, {}, 1000.0) == [])
-            # THE ROSTER GUARD, and it is why this is not just a rate limit.
-            # The ask is a CAPTURE, which REPLACES the roster with what is
-            # live, so asking mid-login would record a partial desk. A logoff
-            # capture normally repairs that and CAN REFUSE, and then the
-            # partial roster is what the next login restores from.
-            ck("refresh-waits-until-a-capture-cannot-shrink-the-roster",
-               engine.source_refresh_plan(_sv_all, [_lv_un[0]], {}, 1000.0)
-               == [])
-            # A SOURCE WITH NOTHING SAVED has nothing to shrink, so the guard
-            # must not block it: that is a first-ever session for an account.
-            ck("refresh-asks-for-a-source-with-no-saved-windows",
-               engine.source_refresh_plan([], _lv_un, {}, 1000.0)
+            # A SET THAT CHANGES RESTARTS THE CLOCK, which is the whole
+            # point: a login is a set that keeps growing.
+            _grown = _un + [{"app_id": "zoom", "source": "titan",
+                             "key": "titan"}]
+            _r2, _seen2 = _P(_grown, {}, 1000.0 + engine.SOURCE_SETTLE,
+                             _seen)
+            ck("refresh-a-changed-set-restarts-the-clock", _r2 == [])
+            ck("refresh-asks-after-the-new-set-settles",
+               _P(_grown, {}, 1000.0 + 2 * engine.SOURCE_SETTLE,
+                  _seen2)[0] == ["titan"])
+            # THE REGRESSION THE OLD GUARD WAS: an app that is gone for good
+            # must not hold the ask off, because nothing will ever bring it
+            # back. There is no `saved` argument now, and this pins that the
+            # live set ALONE decides.
+            ck("refresh-is-not-blocked-by-an-app-that-never-returns",
+               _P(_un, {}, 1000.0 + engine.SOURCE_SETTLE, _seen)[0]
                == ["titan"])
             # RATE LIMITED, or a window that can NEVER be identified
             # (incognito) makes a loop out of asking about it.
             ck("refresh-is-rate-limited",
-               engine.source_refresh_plan(
-                   _sv_all, _lv_un, {"titan": 1000.0}, 1000.0) == [])
+               _P(_un, {"titan": 1000.0}, 1000.0 + engine.SOURCE_SETTLE,
+                  _seen)[0] == [])
             ck("refresh-asks-again-after-the-interval",
-               engine.source_refresh_plan(
-                   _sv_all, _lv_un, {"titan": 1000.0},
-                   1000.0 + engine.SOURCE_REFRESH_EVERY) == ["titan"])
+               _P(_un, {"titan": 1000.0},
+                  1000.0 + engine.SOURCE_REFRESH_EVERY
+                  + engine.SOURCE_SETTLE, _seen)[0] == ["titan"])
+            # IDENTIFIED ALREADY: never asks, so a settled desk makes no
+            # subprocess at all, AND the clock is dropped so a later window
+            # starts a fresh one rather than inheriting a stale "stable
+            # since" and being asked for immediately.
+            _id = [dict(_un[0], key="titan:chrome:win:91"), _un[1]]
+            _r3, _seen3 = _P(_id, {}, 2000.0, _seen)
+            ck("refresh-does-not-ask-when-everything-is-identified",
+               _r3 == [])
+            ck("refresh-drops-the-clock-when-nothing-is-wanted",
+               "titan" not in _seen3)
             # A NON-CHROME WINDOW NEVER TRIGGERS IT, since the report has
             # nothing to say about one and asking would be a subprocess per
             # interval forever.
             ck("refresh-is-not-triggered-by-a-non-chrome-window",
-               engine.source_refresh_plan(
-                   [{"app_id": "slack", "source": "titan"}],
-                   [{"app_id": "slack", "source": "titan", "key": "titan"}],
-                   {}, 1000.0) == [])
+               _P([{"app_id": "slack", "source": "titan", "key": "titan"}],
+                  {}, 1000.0, {})[0] == [])
             # AND THE OWNER'S OWN WINDOWS NEVER DO, or every desk would ask.
             ck("refresh-is-not-triggered-by-our-own-window",
-               engine.source_refresh_plan(
-                   [], [{"app_id": "google-chrome", "key": "chrome:win:1"}],
-                   {}, 1000.0) == [])
+               _P([{"app_id": "google-chrome", "key": "chrome:win:1"}],
+                  {}, 1000.0, {})[0] == [])
 
             # THE DRAIN: applying a binding is a one-shot edit to the store,
             # so one left behind would be re-applied on every pass.
@@ -1093,8 +1116,15 @@ def _t_resolution(ck):
             _wo = _word.Watcher(launch=False)
             _wo.place_sock = _OrdSock()
             _wo.kb, _wo.groups = {}, {}
-            _wo.saved = {"windows": []}      # nothing expected: guard passes
+            _wo.saved = {"windows": []}
             _wo.src_asked = {}
+            # ALREADY STABLE, or the guard correctly declines on the pass
+            # that first SEES the window: the ask waits for a login to stop
+            # bringing windows up. The app set must be exactly what the plan
+            # computes, or this silently presents a CHANGED set and the
+            # clock restarts.
+            _wo.src_seen = {"titan": (frozenset({"google-chrome"}),
+                                      time.time() - 10 * engine.SOURCE_SETTLE)}
             _wo.st["dirty"] = True
             _wo.st["last"] = 0
             _ord_saved, _ord_persisted = [], []
