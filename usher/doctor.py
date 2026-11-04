@@ -250,7 +250,7 @@ def _doctor_contracts(out, snap=None):
     return rc
 
 
-def collision_fix(ident, source=""):
+def collision_fix(ident, source="", per_window=0):
     """What to tell a reader whose windows share one store key. FOUR cases,
     and they must stay distinct: handing the wrong one out sends somebody to
     fix the wrong thing.
@@ -290,6 +290,16 @@ def collision_fix(ident, source=""):
     or when either window closes. Measured on manifold 2026-10-13, where this
     state sat live for two days and the advice would have been useless."""
     if source:
+        if per_window:
+            # NOT A COLLISION AT ALL, AND THIS REPORT CANNOT SEE WHY. The
+            # per-window map is filled by the refresh and lives in the
+            # DAEMON's memory, so a one-shot verb resolves every one of this
+            # source's windows to the source-alone key and counts them as
+            # sharing a slot. The store's own per-window slots are the
+            # evidence a verb CAN read.
+            return (f"{per_window} per-window slot(s) are stored for this "
+                    f"source, so they are told apart where the map lives; "
+                    f"this one-shot report cannot see it")
         return (f"usher cannot tell the {source} source's windows apart: "
                 f"that account's app state is in a home it may not read")
     if is_chrome_slot(ident):
@@ -393,6 +403,16 @@ def _doctor_relaunch(out, snap, live):
                   else _ident or f"{_app} (by app-id)")
         # "1 keep" read as a typo; phrase it so the count never needs a
         # plural, which is the cheapest fix and reads better at every n.
+        _pw = engine.source_per_window_slots(kb, _app, _csrc)
+        if _pw:
+            # A DIFFERENT TAG, because COLLISION names a FAULT and invites a
+            # reader to act. Reporting one that is not happening is worse
+            # than reporting nothing, which is this file's standing rule
+            # about a diagnostic that cannot see what it is diagnosing.
+            out(f"  NOT RESOLVED HERE {_shown[:40]:40}  {n} live windows"
+                f" share this key IN THIS REPORT"
+                f" ({collision_fix(_ident, _csrc, _pw)})")
+            continue
         out(f"  COLLISION  {_shown[:40]:40}  {n} live windows share this"
             f" key; 1 gets the remembered place, {n - 1} stay where they"
             f" opened ({collision_fix(_ident, _csrc)})")
