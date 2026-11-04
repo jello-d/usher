@@ -1615,7 +1615,9 @@ class Watcher:
 
     def _poll_sources(self, snap):
         """Ask a source to identify its own windows when we cannot, and apply
-        what it says about its restarted browser.
+        what it says about its restarted browser. Returns whether anything
+        it reported CHANGED what a snapshot would now stamp, so the caller
+        knows to take one again.
 
         THE PLAN DECIDES, and it is pure and checked: demand-driven, rate
         limited, and only where a capture cannot shrink that account's
@@ -1636,20 +1638,26 @@ class Watcher:
                 snap["windows"], self.src_asked, time.time())
         except Exception as e:                             # noqa: BLE001
             logline(f"could not plan a source refresh: {e}")
-            return
+            return False
+        changed = False
         for src in plan:
             self.src_asked[src] = time.time()
+            before = dict(engine._SOURCE_WINDOWS.get(src) or {})
             try:
                 engine.source_trigger([src], "capture")
             except Exception as e:                         # noqa: BLE001
                 logline(f"could not ask {src} to identify its windows: {e}")
                 continue
+            if (engine._SOURCE_WINDOWS.get(src) or {}) != before:
+                changed = True
             with self.lock:
                 n = engine.rekey_source(self.kb, src,
                                         engine.take_source_rekey(src))
             if n:
+                changed = True
                 logline(f"{src}: re-keyed {n} window slot(s) onto that "
                         f"account's restarted browser")
+        return changed
 
     def _capture_once(self, cap):
         """One snapshot: learn from it, save the knowledge, roll the history if
@@ -1658,10 +1666,18 @@ class Watcher:
         if self._in_transition() or self._profile_drift():
             return        # st["dirty"] stays set, so the next tick retries
         snap = snapshot(cap)
-        # BEFORE THE LEARN IN THE SAME PASS, so a window identified here is
-        # learned under its per-window key rather than its source's, and the
-        # slots a re-key moved are in place for the placer's next look.
-        self._poll_sources(snap)
+        # AND RE-TAKE IT IF THE REFRESH LEARNED ANYTHING, which is not an
+        # optimisation: `snapshot` STAMPS each window's key, so the rows above
+        # were stamped before the refresh could fill the cache they read.
+        # Learning from them records the source-alone key and the per-window
+        # identities arrive one capture LATE, which in a quiet session is the
+        # event-driven-capture trap this file already records twice: nothing
+        # dirties the store, so "next capture" can be never.
+        #
+        # ONE EXTRA SNAPSHOT, and only on the pass where a refresh actually
+        # changed something, which the rate limit bounds to once a minute.
+        if self._poll_sources(snap):
+            snap = snapshot(cap)
         hold = self._held(snap["windows"])
         # WHEN THE HOLD LIFTS, COME BACK. Capture is event-driven, so a window
         # held through the pass that recorded it gets no second look until

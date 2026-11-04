@@ -34,6 +34,8 @@ those are constants and functions that are never rebound.
 """
 import ast
 import contextlib
+import glob
+import hashlib
 import inspect
 import io
 import json
@@ -1044,6 +1046,103 @@ def _t_resolution(ck):
                    hist=lambda: {"P": ["cur", "prev"]},
                    tabs=lambda f: {"cur": {91: frozenset({"x"})},
                                    "prev": {11: frozenset({"y"})}}[f]) == [])
+
+            # ---- THE ORDERING, which only a whole PASS can show ----------
+            # `snapshot` STAMPS each window's key, so a refresh that runs
+            # after it is built fills a cache the rows were already stamped
+            # against: `learn` then records the source-alone key and the
+            # per-window identity arrives one capture LATE. In a quiet
+            # session nothing dirties the store, so "next capture" can be
+            # never, which is the event-driven trap this file records twice.
+            #
+            # A CHECK ON EITHER TICK ALONE PASSES, so this drives one real
+            # `_capture_once` and asserts on what the STORE holds after it.
+            # Found live on manifold: the daemon asked, got six windows, and
+            # the store still read 0 per-window keys.
+            #
+            # PATCHED ON `watch`'s OWN NAMES, not engine's. watch.py does
+            # `from .engine import save_knowledge, persist, snapshot`, so it
+            # holds its own references and patching engine's globals leaves
+            # the daemon's copies live. Getting that wrong wrote `{}` over a
+            # REAL profile store and put eight fixture rows in the history
+            # ring, which is the stale-copy hazard the package split records
+            # and the third time this suite has written into real state.
+            from . import watch as _word
+            _TW = "Confidential Plan - Google Chrome"
+
+            class _OrdSock:
+                def list_outputs(self):
+                    return [{"name": "DP-1",
+                             "geometry": {"x": 0, "y": 0, "width": 100,
+                                          "height": 100},
+                             "workspace": {"x": 0, "y": 0, "grid_width": 1,
+                                           "grid_height": 1}}]
+
+                def list_views(self, filter_mapped_toplevel=False):
+                    # AN OUTPUT AND A GEOMETRY, or `place_of` answers "null"
+                    # and `unreadable_placement` refuses to learn the row:
+                    # the first version of this fixture had neither, and the
+                    # check failed for its own reason while the product was
+                    # correct. _trv builds the minimum a plugin needs, which
+                    # is less than a capture does.
+                    return [dict(_trv("google-chrome", _TW, pid=1, vid=301),
+                                 **{"output-name": "DP-1",
+                                    "geometry": {"x": 0, "y": 0,
+                                                 "width": 10, "height": 10}})]
+
+            _wo = _word.Watcher(launch=False)
+            _wo.place_sock = _OrdSock()
+            _wo.kb, _wo.groups = {}, {}
+            _wo.saved = {"windows": []}      # nothing expected: guard passes
+            _wo.src_asked = {}
+            _wo.st["dirty"] = True
+            _wo.st["last"] = 0
+            _ord_saved, _ord_persisted = [], []
+            _r_sk, _r_pe = _word.save_knowledge, _word.persist
+            _r_tr = engine.source_trigger
+
+            def _ord_trigger(sources, action, **_k):
+                for s in sources:
+                    engine.set_source_windows(
+                        s, {engine.title_fingerprint(_TW): "chrome:win:77"})
+                return len(sources)
+
+            try:
+                _word.save_knowledge = lambda kb, prof: _ord_saved.append(
+                    dict(kb))
+                _word.persist = lambda *_a, **_k: _ord_persisted.append(1)
+                engine.source_trigger = _ord_trigger
+                engine._SOURCE_WINDOWS.clear()
+                engine._SOURCE_SLOT.clear()
+                # AND THE PANEL MAP, because `entry_output` resolves by PANEL
+                # before falling back to the connector name, and another area
+                # leaves a stub cached. A leaked SOFT-dependency cache is how
+                # this check first failed against correct code.
+                engine._PANELS.update({"map": {}, "at": time.time()})
+                # THE PRECONDITION, so this cannot pass vacuously: with the
+                # cache empty the window stamps the source-alone key.
+                ck("ordering-fixture-starts-with-no-identity",
+                   engine.snapshot(_OrdSock())["windows"][0].get("key")
+                   == "titan")
+                _wo._capture_once(_OrdSock())
+            finally:
+                _word.save_knowledge, _word.persist = _r_sk, _r_pe
+                engine.source_trigger = _r_tr
+                engine._SOURCE_WINDOWS.clear()
+                engine._SOURCE_SLOT.clear()
+            _PWK = engine.kkey("google-chrome", "titan:chrome:win:77")
+            ck("a-refresh-is-spent-on-the-SAME-capture-pass",
+               sorted(_wo.kb) == [_PWK])
+            ck("the-ordering-pass-did-not-store-the-source-alone-key",
+               engine.kkey("google-chrome", "titan") not in _wo.kb)
+            # AND IT REACHED THE SAVE, or the two above could pass over a
+            # pass that returned early and learned nothing at all.
+            ck("the-ordering-pass-saved-what-it-learned",
+               len(_ord_saved) == 1 and sorted(_ord_saved[0]) == [_PWK])
+            # AND THE STUBS WERE USED, which is what proves this touched no
+            # real state: both are patched on watch's own names.
+            ck("the-ordering-pass-wrote-no-real-state",
+               len(_ord_persisted) == 1)
         finally:
             engine.SOURCE_HOOK = _rsh4
             engine._SOURCE_CACHE.clear()
@@ -6134,6 +6233,29 @@ def selftest():
     # has now bitten this fleet twice (the greeter regression run, and
     # planting the Resolution guard removal), so it is fixed here rather than
     # in each caller.
+    # THE REAL STATE IS A CANARY, because the suite CAN write it and did.
+    # watch.py imports `save_knowledge` and `persist` BY NAME, so an area
+    # that drives the daemon and patches only engine's globals leaves the
+    # real ones live: one such check wrote `{}` over a live profile store and
+    # eight fixture rows into the history ring. The existing watch.log probe
+    # is the same idea; this covers the store and the ring, which nothing
+    # watched. A DIGEST rather than an mtime, so a rewrite with identical
+    # content is correctly not a finding.
+    def _state_sig():
+        out = []
+        for pat in ("knowledge-*.json", "current.json", "history/*.json",
+                    "milestones/*.json"):
+            for f in sorted(glob.glob(os.path.join(engine.STATE, pat))):
+                try:
+                    with open(f, "rb") as fh:
+                        out.append((os.path.basename(f),
+                                    hashlib.sha256(fh.read()).hexdigest()))
+                except OSError:
+                    out.append((os.path.basename(f), "gone"))
+        return out
+
+    _state_before = _state_sig()
+
     for area in (_t_registry, _t_resolution, _t_lock,
                  _t_toplevels, _t_roster,
                  _t_lifecycle, _t_desktop, _t_slots, _t_verify,
@@ -6149,6 +6271,16 @@ def selftest():
             ck(f"{area.__name__}-RAISED-{type(e).__name__}", False)
             print(f"selftest: {area.__name__} raised {type(e).__name__}: {e}",
                   file=sys.stderr)
+    # NAMED, so a leak is a check rather than something a reader has to
+    # notice. It runs after every area, because any of them could be the one.
+    _state_after = _state_sig()
+    if _state_before != _state_after:
+        _moved = sorted({n for n, _h in set(_state_before) ^ set(_state_after)})
+        ck("the-suite-wrote-no-real-usher-state", False)
+        print("selftest: the suite CHANGED real state: %s"
+              % ", ".join(_moved[:6]), file=sys.stderr)
+    else:
+        ck("the-suite-wrote-no-real-usher-state", True)
     if fails:
         print("selftest FAIL: " + ", ".join(fails), file=sys.stderr)
         return 1
