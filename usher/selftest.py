@@ -3305,6 +3305,61 @@ def _t_roster(ck):
     ck("the-log-sites-do-call-the-redactor",
        _watch.count("engine.log_title(") >= 3
        and _doc.count("engine.log_title(") >= 1)
+
+    # AND THE REPORTS, WHICH THIS CHECK USED TO MISS ENTIRELY: it scanned
+    # watch.py and doctor.py and never engine.py, where `_restore_report`
+    # lives, so `usher restore --dry-run` printed SIX of the work account's
+    # window titles in full on manifold (2026-11-04) with every other
+    # redaction check green. Driven BEHAVIOURALLY rather than by grepping a
+    # literal, because a pattern scan is what went stale: it asks what the
+    # report PRINTS, which cannot be satisfied by code that merely mentions
+    # the helper.
+    _secret = "ACQUISITION-TERMS-DO-NOT-LEAK"
+
+    def _report_of(row):
+        _b = io.StringIO()
+        with contextlib.redirect_stdout(_b):
+            engine._restore_report([], [row], [row], [], [], {}, True, 0)
+        return _b.getvalue()
+
+    # NAMED, which is this fleet today.
+    _named = {"app-id": "google-chrome", "title": _secret, "pid": 1,
+              "id": 301, "source": "titan"}
+    _out = _report_of(_named)
+    ck("the-dry-run-report-redacts-a-foreign-title", _secret not in _out)
+    ck("the-dry-run-report-still-names-the-source", "[titan]" in _out)
+    # AND UNNAMED, which is any box with no provider wired and is the half
+    # `log_title` itself was missing: pid 1 is root's, so the uid says foreign
+    # while no hook can supply a name.
+    _out2 = _report_of({"app-id": "google-chrome", "title": _secret,
+                        "pid": 1, "id": 303})
+    ck("the-dry-run-report-redacts-an-UNNAMED-foreign-title",
+       _secret not in _out2)
+    ck("the-dry-run-report-says-whose-when-it-cannot-name-it",
+       "[uid 0]" in _out2)
+    # THE CONTROL, or the check above passes for a report that prints nothing
+    # at all: OUR OWN title must still come through, since the whole value of
+    # these reports is being readable.
+    _ol = _trv("signal", _secret, pid=os.getpid(), vid=302)
+    _buf2 = io.StringIO()
+    with contextlib.redirect_stdout(_buf2):
+        engine._restore_report([], [_ol], [_ol], [], [], {}, True, 0)
+    ck("the-dry-run-report-keeps-our-own-title",
+       _secret in _buf2.getvalue())
+
+    # AND doctor's SECOND site, which parses a LIVE title to print what a
+    # terminal is SHOWING. Redacted, the parse finds no colon, so a foreign
+    # terminal's session and host are never narrated. LATENT when fixed (that
+    # account's terminals are titled `terminal`), so the invariant is what is
+    # pinned rather than an observed line.
+    _ft = {"app_id": "kitty", "title": "work:main[somehost]", "pid": 1}
+    ck("a-redacted-title-cannot-be-read-as-a-mux-banner",
+       not engine.is_mux_term("kitty", engine.log_title(_ft)))
+    ck("the-same-banner-IS-read-for-our-own-window",
+       engine.is_mux_term("kitty", engine.log_title(
+           dict(_ft, pid=os.getpid()))))
+    ck("doctor-does-not-parse-a-raw-live-title",
+       'lv.get("title") or ""' not in _doc)
     # AND THE ELIMINATION POOL IS ACTUALLY USED, because the pool function's
     # own checks say nothing about whether the caller consults it: a planted
     # bypass restoring the old inline expression passed every one of them.

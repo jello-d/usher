@@ -409,7 +409,13 @@ def _doctor_placement(out, kb, live, outs):
         # say it here. Without this, `term:resume` on a screen full of mux
         # terminals is unmatchable to the thing a human is looking at.
         shows = ""
-        t = lv.get("title") or ""
+        # THROUGH `log_title` TOO, which is not merely tidiness: this parses a
+        # LIVE title and prints what it finds, so a foreign mux terminal would
+        # have its session and host described here. Redacted, the parse finds
+        # no colon and `shows` stays empty, which is the right answer for a
+        # window whose content is not ours to narrate. LATENT rather than
+        # live: that account's terminals are titled `terminal` today.
+        t = engine.log_title(lv)
         if is_mux_term(app_of(lv), t):
             sess, host = mux_session_of(t), mux_host_of(t)
             shows = f"  [showing {sess}@{host or LOCAL_HOST}]" if sess else ""
