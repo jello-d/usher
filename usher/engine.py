@@ -2232,6 +2232,29 @@ def kkey(app_id, title):
     return f"{app_id}\x00{title}"
 
 
+def source_per_window_slots(kb, app, src):
+    """How many PER-WINDOW slots the store holds for this source's app. PURE.
+
+    EXISTS SO A REPORT CAN TELL ITS OWN BLINDNESS FROM A REAL COLLISION.
+    `_SOURCE_WINDOWS` is module state filled by the refresh, so it belongs to
+    the DAEMON's process; a one-shot verb starts empty, every one of that
+    source's windows then falls back to the source-alone key, and doctor read
+    that as several windows sharing a slot. Measured on manifold 2026-11-04:
+    seven of one account's Chrome windows resolved to ONE key in a verb and to
+    SEVEN distinct keys once the cache was filled in the same process.
+
+    The store is the evidence a verb CAN see: per-window slots exist only
+    because the account reported per-window identities, so a non-zero count
+    says those windows are told apart somewhere even though not here. Zero is
+    a real collision, which is the terminal case (only chrome-shaped
+    identities pass `parse_source_windows`, so a foreign kitty has none).
+    """
+    if not src:
+        return 0
+    pre = kkey(app, src + ":")
+    return sum(1 for k in kb if k.startswith(pre))
+
+
 # Bump when the key scheme changes. Schema 2 moved Chrome off per-page-title
 # keys onto the normalized active-tab URL; schema 3 moved kitty off per-title
 # keys onto mux:<session> / kitty:<cwd>; schema 4 QUALIFIED the mux key with the

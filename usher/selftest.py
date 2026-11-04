@@ -552,9 +552,70 @@ def _t_resolution(ck):
     ck("collision-fix-names-a-source",
        "titan" in _cfix("titan", "titan")
        and "plugin" not in _cfix("titan", "titan"))
-    ck("collision-fix-four-cases-are-pairwise-distinct",
-       len({_cfix("titan", "titan"), _cfix("chrome:win:1"),
-            _cfix("kitty:/tmp"), _cfix("whatever")}) == 4)
+    ck("collision-fix-five-cases-are-pairwise-distinct",
+       len({_cfix("titan", "titan"), _cfix("titan", "titan", 6),
+            _cfix("chrome:win:1"), _cfix("kitty:/tmp"),
+            _cfix("whatever")}) == 5)
+
+    # THE FIFTH CASE: not a collision at all, but THIS REPORT's blindness.
+    # `_SOURCE_WINDOWS` is filled by the refresh and so belongs to the
+    # DAEMON's process; a one-shot verb resolves every one of a source's
+    # windows to the source-alone key and counted them as sharing a slot.
+    # Measured on manifold 2026-11-04: seven of one account's Chrome windows
+    # gave ONE key in a verb and SEVEN distinct keys once the cache was
+    # filled in the same process. So doctor was naming a FAULT that was not
+    # happening, which this file rates as worse than naming nothing.
+    ck("collision-per-window-slots-say-it-is-not-a-collision",
+       "cannot see" in _cfix("titan", "titan", 6)
+       and "6" in _cfix("titan", "titan", 6))
+    ck("collision-per-window-does-not-claim-usher-cannot-tell",
+       "cannot tell" not in _cfix("titan", "titan", 6))
+    # AND THE GENUINE FOREIGN COLLISION SURVIVES, which is the terminal case:
+    # only chrome-shaped identities pass `parse_source_windows`, so a foreign
+    # kitty has no per-window slot and really does share one key.
+    ck("collision-no-per-window-slots-is-still-a-collision",
+       "cannot tell" in _cfix("titan", "titan", 0))
+
+    # THE COUNT ITSELF, pure, so every cell is reachable with no daemon.
+    _pwkb = {engine.kkey("google-chrome", "titan"): {},
+             engine.kkey("google-chrome", "titan:chrome:win:11"): {},
+             engine.kkey("google-chrome", "titan:chrome:win:22"): {},
+             engine.kkey("google-chrome", "other:chrome:win:33"): {},
+             engine.kkey("kitty", "titan"): {},
+             engine.kkey("google-chrome", "chrome:win:44"): {}}
+    ck("per-window-slots-counts-only-this-source",
+       engine.source_per_window_slots(_pwkb, "google-chrome", "titan") == 2)
+    ck("per-window-slots-ignores-the-source-alone-key",
+       engine.source_per_window_slots(_pwkb, "kitty", "titan") == 0)
+    ck("per-window-slots-ignores-another-sources-keys",
+       engine.source_per_window_slots(_pwkb, "google-chrome", "other") == 1)
+    # AN OWNER WINDOW HAS NO SOURCE, and BOTH SPELLINGS OF "none" have to be
+    # passed. `""` is what `source_of` answers and is correct by arithmetic
+    # even with the guard gone (no identity begins with a colon), so a plant
+    # removing the guard was INVISIBLE to a check that passed only `""`.
+    # `None` is what a bare `.get("source")` answers and raises TypeError on
+    # `None + ":"` without it. So the guard is load-bearing and the usual
+    # uncatchable-plant signal would have had it DELETED: that signal reads
+    # "dead code" and here it read "the fixture is too narrow".
+    ck("per-window-slots-is-zero-for-the-owner",
+       engine.source_per_window_slots(_pwkb, "google-chrome", "") == 0)
+    # GUARDED, so the guard's removal is a NAMED failure rather than a raise
+    # that aborts the area: the sentinel is this file's own idiom for it.
+    try:
+        _pwn = engine.source_per_window_slots(_pwkb, "google-chrome", None)
+    except Exception:                                   # noqa: BLE001
+        _pwn = "RAISED"
+    ck("per-window-slots-survives-a-None-source", _pwn == 0)
+
+    # AND THE WIRING, because the pure helper's checks say nothing about
+    # whether doctor consults it or about the TAG: COLLISION names a fault
+    # and invites a reader to act, so the blind case must not wear it.
+    import pathlib as _pl
+    _dsrc = (_pl.Path(engine.__file__).parent / "doctor.py").read_text()
+    ck("doctor-asks-for-the-per-window-count",
+       "source_per_window_slots(kb," in _dsrc)
+    ck("doctor-does-not-call-the-blind-case-a-collision",
+       "NOT RESOLVED HERE" in _dsrc)
     ck("collision-chrome-blames-usher",
        "mis-resolved" in _cfix("chrome:win:123"))
     ck("collision-chrome-does-not-say-plugin",
