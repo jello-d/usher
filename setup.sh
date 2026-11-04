@@ -485,6 +485,14 @@ _mode_switch() {
       "just removed; it works until its next respawn. Restart it from the" \
       "session that owns it: 'usher stop', then log out and in, or re-run" \
       "the compositor autostart." >&2
+    # AND `_login_reload` MUST NOT TOUCH IT, which is why this is recorded
+    # rather than only printed. A reload makes the supervisor re-exec its own
+    # original argv, and for this daemon that argv is the path just removed:
+    # the one case where reloading is WORSE than leaving it stale, because it
+    # would exec a file that is gone and take placement out until the next
+    # login. The comment above says so; the reload was added two lines later
+    # without reading it.
+    _STALE_USER_DAEMON=1
     break
   done
 }
@@ -605,6 +613,19 @@ _reload_daemon() {
 # NEVER FATAL, the same policy as `_reload_daemon`: a failed reload leaves the
 # OLD daemon running, which is the state we were already in.
 _login_reload() {
+  # THE ONE DAEMON A RELOAD MUST NOT TOUCH. `_mode_switch` has just removed
+  # the copy it is running from, so a re-exec of its own argv would hit a
+  # path that no longer exists and kill it: strictly worse than stale, and
+  # the NOTE it already printed is the correct remedy. Reachable on the FIRST
+  # system install on a box that was user-mode with a daemon up, which is
+  # exactly the transition both of this fleet's boxes made BEFORE this
+  # function existed, so a live run could not have found it.
+  if [ -n "${_STALE_USER_DAEMON:-}" ]; then
+    echo "$PKG: not reloading: that daemon runs the copy just removed, so a" \
+      "reload would re-exec a path that is gone. The NOTE above is the fix." \
+      >&2
+    return 0
+  fi
   _lu=${SUDO_USER:-}
   if [ -z "$_lu" ] || [ "$_lu" = root ]; then
     echo "$PKG: no sudo caller, so no daemon was reloaded: run" \
