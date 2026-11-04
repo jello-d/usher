@@ -538,6 +538,10 @@ class Watcher:
         # when each source was last asked to identify its windows, so the ask
         # is rate limited and a never-identifiable window cannot make a loop
         self.src_asked = {}
+        # {source: (its app set, when that set last changed)}: the ask waits
+        # for a login to stop bringing windows up, since a capture REPLACES
+        # that account's roster with what is live
+        self.src_seen = {}
         self.place_sock = None
 
     def run(self):
@@ -1623,19 +1627,21 @@ class Watcher:
         limited, and only where a capture cannot shrink that account's
         roster. See `engine.source_refresh_plan`.
 
-        COMPARED AGAINST `self.saved`, the snapshot read in run() before the
-        capture loop could overwrite it. Reading `current.json` here instead
-        would compare the live set against ITSELF and the roster guard would
-        be vacuous from the first capture onwards.
+        IT WAITS FOR THE WINDOW SET TO SETTLE rather than for the owner's
+        expectation to be met. The first version compared against
+        `self.saved` and required every app saved for that source to be
+        live, and it NEVER FIRED at a login: that account's saved set names
+        installers and dialogs that do not come back. See
+        `engine.source_refresh_plan`.
 
         NEVER FATAL. This is a sudo subprocess on the capture thread, and
         every outcome of it is optional: without it the windows keep the
         source-alone key, which is where they were before any of this.
         """
         try:
-            plan = engine.source_refresh_plan(
-                (self.saved or {}).get("windows") or [],
-                snap["windows"], self.src_asked, time.time())
+            plan, self.src_seen = engine.source_refresh_plan(
+                snap["windows"], self.src_asked, time.time(),
+                self.src_seen)
         except Exception as e:                             # noqa: BLE001
             logline(f"could not plan a source refresh: {e}")
             return False
