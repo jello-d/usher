@@ -3338,7 +3338,12 @@ SOURCE_RELAY_LINES = 80
 # much of the digest to carry. 16 hex is 64 bits, which is far past collision
 # risk over the handful of windows one account has open.
 SOURCE_WINDOW_WORD = "window"
+SOURCE_REKEY_WORD = "rekey"
 FINGERPRINT_LEN = 16
+# How often, at most, to ask one source to identify its windows again. The
+# ask is a sudo subprocess, and a window that can NEVER be identified
+# (incognito) would otherwise make a loop out of asking about it.
+SOURCE_REFRESH_EVERY = 60
 
 
 def title_fingerprint(title):
@@ -3391,6 +3396,150 @@ def source_window_lines(rows, resolve=None, chrome_test=None):
             out.append(f"{SOURCE_WINDOW_WORD} {title_fingerprint(title)} "
                        f"{ident}")
     return out
+
+
+def source_rekey_lines(hist=None, tabs=None, bind=None):
+    """`rekey <old> <new>` for THIS account's own browser restart.
+
+    A SessionID is per browser RUN, so every per-window key the owner stored
+    for this account before a restart names a dead id. The owner cannot do
+    the join that fixes that: it needs this account's two session files, and
+    they are in a home it may not read. So the account does it, with exactly
+    the machinery `rekey_chrome` uses on the owner's own store, and reports
+    the binding as a pair of opaque ids.
+
+    THE PAIRS ARE REPORTED UNFILTERED, because only the owner knows which of
+    its stored keys are stale. Reporting more than it needs costs a line;
+    guessing on this side would need the owner's store.
+
+    NOTHING BINDS UNLESS THE TAB SETS AGREE, which is `chrome_bind_windows`'s
+    own more-than-half rule, and not binding is the safe outcome: the slot
+    stays where it is and ages out on the TTL.
+    """
+    _hist = session_history if hist is None else hist
+    _tabs = chrome_window_tabs if tabs is None else tabs
+    _bind = chrome_bind_windows if bind is None else bind
+    cur, prev = {}, {}
+    for files in (_hist() or {}).values():
+        if not files:
+            continue
+        cur.update(_tabs(files[0]))
+        for f in files[1:]:
+            for w, urls in _tabs(f).items():
+                prev.setdefault(w, urls)     # the newest previous file wins
+    # NO EMPTY-SIDE GUARD HERE, deliberately: `chrome_bind_windows` already
+    # answers {} when either side is empty (measured), so one would be dead
+    # code, which a planted regression removing it demonstrated by changing
+    # nothing. `rekey_chrome` keeps its own because there the early return
+    # also skips building a dict over the whole store.
+    return [f"{SOURCE_REKEY_WORD} {chrome_slot(old)} {chrome_slot(new)}"
+            for old, new in sorted(_bind(cur, prev).items())]
+
+
+def parse_source_rekey(text):
+    """{old identity: new identity} out of a source's report. PURE.
+
+    BOTH SIDES VALIDATED, for the same reason the window map's identity is:
+    these rewrite store KEYS, so a source that reported anything else would
+    be editing the owner's store in a shape the owner never chose.
+    """
+    out = {}
+    for ln in (text or "").splitlines():
+        parts = ln.split()
+        if (len(parts) == 3 and parts[0] == SOURCE_REKEY_WORD
+                and is_chrome_slot(parts[1]) and is_chrome_slot(parts[2])
+                and parts[1] != parts[2]):
+            out[parts[1]] = parts[2]
+    return out
+
+
+def rekey_source(kb, src, binding):
+    """Move `src`'s per-window slots onto the ids its browser has NOW, and
+    return how many moved.
+
+    THE SAME THREE CONSERVATISMS AS `rekey_chrome`, because this rewrites
+    the store too: a slot the current session already knows is left alone
+    (its own answer is at least as good), a second run is a no-op, and a
+    pair that does not match anything stored changes nothing.
+
+    AND ONLY THIS SOURCE'S KEYS, which the prefix decides. A source
+    reporting a binding can move its own windows' slots and can never touch
+    the owner's or another account's.
+    """
+    if not binding:
+        return 0
+    moved = 0
+    for k in list(kb):
+        app, _, ident = k.partition("\x00")
+        if not ident.startswith(src + ":"):
+            continue
+        new = binding.get(ident[len(src) + 1:])
+        if not new:
+            continue
+        newkey = kkey(app, f"{src}:{new}")
+        if newkey in kb:
+            continue
+        e = kb.pop(k)
+        # "title" in a kb entry is the KEY-title, i.e. the identity, which
+        # is the trap this file keeps falling into. It moves with the key.
+        e["title"] = f"{src}:{new}"
+        kb[newkey] = e
+        moved += 1
+    return moved
+
+
+def source_refresh_plan(saved, live, last, now, every=SOURCE_REFRESH_EVERY):
+    """Which sources to ask to identify their windows again. PURE.
+
+    DEMAND-DRIVEN: asked only where a source has a window whose per-window
+    identity we do not have, so a desk where everything is identified never
+    asks at all.
+
+    AND ONLY WHEN A CAPTURE CANNOT SHRINK THAT ACCOUNT'S ROSTER, which is
+    the constraint that shapes this. The ask is a `capture`, and a capture
+    REPLACES the roster with what is live, so asking while a login is still
+    bringing windows up would record a partial desk. Normally the next
+    logoff capture repairs that, but a logoff capture can refuse (a source
+    whose display socket has already gone), and then the partial roster is
+    what the NEXT login restores from.
+
+    So the test is the owner's own expectation: every app it has SAVED for
+    that source must be live. If one never comes back the ask never fires,
+    which is the fail-safe direction (no identities, today's behaviour)
+    rather than a roster the owner quietly made worse.
+
+    RATE-LIMITED PER SOURCE, since a window that can never be identified
+    would otherwise make a loop out of asking about it.
+    """
+    want, have, expect = set(), {}, {}
+    for w in live:
+        src = w.get("source")
+        if not src:
+            continue
+        have.setdefault(src, set()).add(w.get("app_id") or "")
+        if is_chrome(w.get("app_id") or "") and (w.get("key") or "") == src:
+            want.add(src)
+    for w in saved or ():
+        src = w.get("source")
+        if src:
+            expect.setdefault(src, set()).add(w.get("app_id") or "")
+    return sorted(
+        s for s in want
+        if now - last.get(s, 0) >= every
+        and not (expect.get(s, set()) - have.get(s, set())))
+
+
+# source -> {old identity: new identity}, as last reported and NOT yet
+# applied. The worker owns the store, so the trigger records the binding
+# here and the worker drains it.
+_SOURCE_REKEY = {}
+
+
+def take_source_rekey(src):
+    """The binding `src` last reported, removing it. Draining rather than
+    reading, because applying it is a one-shot edit to the store and a
+    binding left behind would be re-applied on every pass."""
+    return _SOURCE_REKEY.pop(src, {})
 
 
 def parse_source_windows(text):
@@ -3561,6 +3710,12 @@ def source_trigger(sources, action, run=None, hook=None, windows=None):
             set_source_windows(src, _w)
             if windows is not None:
                 windows[src] = _w
+        _rk = parse_source_rekey(r.stdout)
+        if _rk:
+            # LEFT FOR THE WORKER, which owns the store. Merged rather than
+            # replaced, so a binding reported while the previous one is still
+            # undrained is not lost.
+            _SOURCE_REKEY.setdefault(src, {}).update(_rk)
         for _stream, _txt, _cap in (("", r.stdout, SOURCE_RELAY_LINES),
                                     ("stderr: ", r.stderr, 4)):
             _lines = (_txt or "").strip().splitlines()
@@ -3920,6 +4075,18 @@ def do_source_capture():
     # read this account's files and the report is what already crosses.
     for _ln in source_window_lines(rows):
         print(_ln)
+    # AND HOW THIS ACCOUNT'S OWN IDS MOVED ACROSS ITS LAST BROWSER RESTART,
+    # which is what makes the per-window keys survive a login: they name the
+    # previous run's ids, and only this side can do the join that rebinds
+    # them.
+    try:
+        for _ln in source_rekey_lines():
+            print(_ln)
+    except Exception as _e:                                # noqa: BLE001
+        # NEVER FATAL: the roster above is the part a restore cannot do
+        # without, and a session-file problem here must not cost it.
+        print(f"usher: could not bind this account's window ids: {_e}",
+              file=sys.stderr)
     return EXIT_OK
 
 

@@ -535,6 +535,9 @@ class Watcher:
         #                        a quiet session still comes back to learn it
         self.saved = None      # the snapshot the RELAUNCH works from, read in
         #                        run() before the capture loop can overwrite it
+        # when each source was last asked to identify its windows, so the ask
+        # is rate limited and a never-identifiable window cannot make a loop
+        self.src_asked = {}
         self.place_sock = None
 
     def run(self):
@@ -1610,6 +1613,44 @@ class Watcher:
         self._adopt_profile(cur, "noticed, no hook")
         return False
 
+    def _poll_sources(self, snap):
+        """Ask a source to identify its own windows when we cannot, and apply
+        what it says about its restarted browser.
+
+        THE PLAN DECIDES, and it is pure and checked: demand-driven, rate
+        limited, and only where a capture cannot shrink that account's
+        roster. See `engine.source_refresh_plan`.
+
+        COMPARED AGAINST `self.saved`, the snapshot read in run() before the
+        capture loop could overwrite it. Reading `current.json` here instead
+        would compare the live set against ITSELF and the roster guard would
+        be vacuous from the first capture onwards.
+
+        NEVER FATAL. This is a sudo subprocess on the capture thread, and
+        every outcome of it is optional: without it the windows keep the
+        source-alone key, which is where they were before any of this.
+        """
+        try:
+            plan = engine.source_refresh_plan(
+                (self.saved or {}).get("windows") or [],
+                snap["windows"], self.src_asked, time.time())
+        except Exception as e:                             # noqa: BLE001
+            logline(f"could not plan a source refresh: {e}")
+            return
+        for src in plan:
+            self.src_asked[src] = time.time()
+            try:
+                engine.source_trigger([src], "capture")
+            except Exception as e:                         # noqa: BLE001
+                logline(f"could not ask {src} to identify its windows: {e}")
+                continue
+            with self.lock:
+                n = engine.rekey_source(self.kb, src,
+                                        engine.take_source_rekey(src))
+            if n:
+                logline(f"{src}: re-keyed {n} window slot(s) onto that "
+                        f"account's restarted browser")
+
     def _capture_once(self, cap):
         """One snapshot: learn from it, save the knowledge, roll the history if
         this was a layout change rather than a tab flip. The SNAPSHOT is always
@@ -1617,6 +1658,10 @@ class Watcher:
         if self._in_transition() or self._profile_drift():
             return        # st["dirty"] stays set, so the next tick retries
         snap = snapshot(cap)
+        # BEFORE THE LEARN IN THE SAME PASS, so a window identified here is
+        # learned under its per-window key rather than its source's, and the
+        # slots a re-key moved are in place for the placer's next look.
+        self._poll_sources(snap)
         hold = self._held(snap["windows"])
         # WHEN THE HOLD LIFTS, COME BACK. Capture is event-driven, so a window
         # held through the pass that recorded it gets no second look until
