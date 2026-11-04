@@ -255,6 +255,72 @@ esac
 printf '#!/bin/sh\necho "tester:x:%s:%s::%s:/bin/sh"\n' \
   "$(id -u)" "$(id -g)" "$U" >"$T/stub/getent"
 
+# --- THE ONE DAEMON A RELOAD MUST NOT TOUCH ---------------------------------
+# `_mode_switch` has just removed the copy this daemon is running from, so a
+# reload would make its supervisor re-exec its OWN argv at a path that is
+# gone and kill it: strictly worse than leaving it stale, and the NOTE the
+# switch already prints is the right remedy. The reload was added without
+# reading the comment two lines above it that says exactly this.
+#
+# LATENT RATHER THAN OBSERVED, which is why it needs a fixture: it is
+# reachable on the FIRST system install on a box that was user-mode with a
+# daemon up, and both of this fleet's boxes made that transition BEFORE the
+# reload existed, so no live run could have found it.
+#
+# A REAL PROCESS, because the detector reads /proc: a script AT the path the
+# switch is about to remove, so its argv names that path. Removing a running
+# script's file is fine on Linux, which is the whole shape of the hazard.
+#
+# NOT `cp $(command -v sleep)` TO THAT NAME, which was the first attempt and
+# cannot work: coreutils here is a MULTI-CALL binary that dispatches on
+# argv[0], so a copy under another name exits at once with "coreutils:
+# unknown program 'python3'". The fake simply was not there to be found.
+#
+# AND IT LOOPS RATHER THAN `exec sleep`, because an exec REPLACES the argv
+# and the path would vanish from the cmdline the detector reads: the process
+# must keep naming its own path for its whole life.
+mkdir -p "$U/.local/share/usher/venv/bin"
+printf '#!/bin/sh\nwhile :; do sleep 1; done\n' \
+  >"$U/.local/share/usher/venv/bin/python3"
+chmod +x "$U/.local/share/usher/venv/bin/python3"
+"$U/.local/share/usher/venv/bin/python3" 300 &
+_fake=$!
+# WAIT FOR THE EXEC, or this fixture proves nothing. The shell FORKS first and
+# `/proc/<pid>/cmdline` reads as the PARENT's until the child execs, so the
+# detector walked /proc and matched nothing: the install reloaded and the
+# check reported a bug that was really this race. Measured directly, the
+# window is under 200ms. Same shape as the baseline traps this package
+# records: a fixture has to let the state settle before acting on it.
+_i=0
+while [ "$_i" -lt 50 ]; do
+  case $(tr '\0' ' ' < "/proc/$_fake/cmdline" 2>/dev/null) in
+    *"$U/.local/share/usher/venv"*) break ;;
+  esac
+  _i=$((_i + 1))
+  sleep 0.1
+done
+[ "$_i" -lt 50 ] || { kill "$_fake" 2>/dev/null
+  fail "fixture: the fake daemon never exec'd, so the detector cannot see it"
+}
+: >"$SUDOLOG"
+_o4=$(env HOME="$H" PATH="$T/stub:$PATH" SUDO_USER=tester DESTDIR="$D" \
+  USHER_SKIP_BUILD=1 NO_COLOR=1 sh "$HERE/setup.sh" install --system 2>&1) \
+  || { kill "$_fake" 2>/dev/null; fail "system install with a stale daemon:\
+ $_o4"; }
+kill "$_fake" 2>/dev/null || :
+wait "$_fake" 2>/dev/null || :
+case $_o4 in
+  *"still RUNNING the copy just removed"*) : ;;
+  *) fail "the switch did not notice the stale daemon: $_o4" ;;
+esac
+[ ! -s "$SUDOLOG" ] \
+  || fail "it reloaded the daemon running the copy it had just removed: \
+$(cat "$SUDOLOG")"
+case $_o4 in
+  *"not reloading"*) : ;;
+  *) fail "it declined silently instead of saying why: $_o4" ;;
+esac
+
 # --- THE MODE SWITCH ---------------------------------------------------------
 for _a in usher usher-mgr; do
   { [ ! -e "$U/.local/bin/$_a" ] && [ ! -L "$U/.local/bin/$_a" ]; } \
