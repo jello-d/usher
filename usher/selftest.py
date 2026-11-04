@@ -1470,11 +1470,21 @@ def _t_resolution(ck):
         engine.learn(_kb, _groups, [_fw], time.time())
         ck("foreign-is-never-learned", not _kb)
         # AND THE POSITIVE CONTROL, or the check above passes for any reason
-        # at all: the SAME row with OUR pid is learned.
-        _kb2, _g2 = {}, {}
-        _ow = dict(_fw, pid=os.getpid(), id=92)
-        engine.learn(_kb2, _g2, [_ow], time.time())
-        ck("foreign-check-has-a-working-control", bool(_kb2))
+        # at all. IT ASSERTS THE REASON RATHER THAN THE OUTCOME, because a
+        # CHROME row's readiness is a question about the HOST: its identity
+        # joins the title against the live session files, so the same row
+        # learns on a box whose Chrome happens to have recorded a window of
+        # that title and does not on a box whose Chrome has not. Measured
+        # 2026-11-04: it learned on manifestor off a stale session file and
+        # was correctly Pending on manifold, so asserting `bool(_kb2)` made
+        # this a check on the host. What the gate owes is that OUR pid is not
+        # refused FOR BEING SOMEBODY ELSE'S, which is host-free whatever
+        # chrome then answers. The learn-level control is the unowned-app
+        # pair below, where resolution needs no host state at all.
+        _ow = _trv("google-chrome", "Settings - Appearance",
+                   pid=os.getpid(), vid=92)
+        ck("foreign-check-has-a-working-control",
+           "uid 0" not in (engine.resolution(_ow).why or ""))
 
         # ---- AND THE HEADLINE: TWO of one account's windows, TWO slots ----
         # Seven of titan's Chrome windows shared ONE key on manifold, so one
