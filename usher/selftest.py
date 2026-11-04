@@ -753,6 +753,297 @@ def _t_resolution(ck):
             ck("a-kept-foreign-key-carries-no-title",
                not any(w in _js.get("key", "")
                        for w in ("Quarterly", "Plan", "Chrome")))
+
+            # ---- THE RE-KEY ACROSS THAT ACCOUNT'S BROWSER RESTART --------
+            # A SessionID is per browser RUN, so at a login every per-window
+            # key stored for that account names a dead id. Only the account
+            # can do the join, since it needs its own two session files, so
+            # it reports the binding and the owner applies it.
+            _rk_txt = ("usher: recorded 1 app(s)\n"
+                       "rekey chrome:win:11 chrome:win:91\n"
+                       "rekey chrome:win:22 chrome:win:92\n"
+                       "window abc123 chrome:win:91\n")
+            ck("source-rekey-parses-the-pairs",
+               engine.parse_source_rekey(_rk_txt)
+               == {"chrome:win:11": "chrome:win:91",
+                   "chrome:win:22": "chrome:win:92"})
+            ck("source-rekey-ignores-the-window-lines",
+               "abc123" not in str(engine.parse_source_rekey(_rk_txt)))
+            # BOTH SIDES VALIDATED, because these rewrite store KEYS: a
+            # source reporting anything else would be editing the owner's
+            # store in a shape the owner never chose.
+            ck("source-rekey-refuses-a-title-on-either-side",
+               engine.parse_source_rekey(
+                   "rekey Some-Page chrome:win:91\n"
+                   "rekey chrome:win:11 Some-Other-Page\n") == {})
+            ck("source-rekey-refuses-a-pair-that-does-not-move",
+               engine.parse_source_rekey(
+                   "rekey chrome:win:11 chrome:win:11") == {})
+
+            def _e_rk(ident, src, ws):
+                e = {"app_id": "google-chrome", "title": ident,
+                     "workspace": ws}
+                if src:
+                    e["source"] = src
+                return e
+
+            _rkb = {
+                engine.kkey("google-chrome", "titan:chrome:win:11"):
+                    _e_rk("titan:chrome:win:11", "titan", [1, 0]),
+                engine.kkey("google-chrome", "titan:chrome:win:22"):
+                    _e_rk("titan:chrome:win:22", "titan", [2, 0]),
+                engine.kkey("google-chrome", "chrome:win:11"):
+                    _e_rk("chrome:win:11", "", [0, 0]),
+                engine.kkey("google-chrome", "other:chrome:win:11"):
+                    _e_rk("other:chrome:win:11", "other", [0, 1]),
+            }
+            _n_rk = engine.rekey_source(
+                _rkb, "titan", {"chrome:win:11": "chrome:win:91",
+                                "chrome:win:22": "chrome:win:92"})
+            ck("rekey-source-moves-this-sources-slots", _n_rk == 2)
+            ck("rekey-source-keys-them-on-the-new-ids",
+               engine.kkey("google-chrome", "titan:chrome:win:91") in _rkb
+               and engine.kkey("google-chrome",
+                               "titan:chrome:win:92") in _rkb)
+            ck("rekey-source-carries-the-geometry-across",
+               _rkb[engine.kkey("google-chrome",
+                                "titan:chrome:win:91")]["workspace"]
+               == [1, 0])
+            # THE KEY-TITLE IS THE IDENTITY and has to move with the key,
+            # which is the trap this file keeps falling into.
+            ck("rekey-source-moves-the-key-title-too",
+               _rkb[engine.kkey("google-chrome",
+                                "titan:chrome:win:91")]["title"]
+               == "titan:chrome:win:91")
+            ck("rekey-source-leaves-the-OWNERS-slot-alone",
+               engine.kkey("google-chrome", "chrome:win:11") in _rkb)
+            ck("rekey-source-leaves-ANOTHER-sources-slot-alone",
+               engine.kkey("google-chrome", "other:chrome:win:11") in _rkb)
+            # ...AND THAT NEEDS ITS OWN FIXTURE, because in the one above the
+            # already-known guard masks it: `titan:chrome:win:11` moves
+            # first, so the new key exists by the time the other source's row
+            # is reached and it is skipped for the WRONG reason. A plant
+            # removing the prefix test changed nothing at all until this.
+            # Note "other" and "titan" are the same length deliberately, so
+            # the slice lands exactly on a binding key.
+            _rkb3 = {
+                engine.kkey("google-chrome", "other:chrome:win:11"):
+                    _e_rk("other:chrome:win:11", "other", [0, 1]),
+                engine.kkey("google-chrome", "chrome:win:11"):
+                    _e_rk("chrome:win:11", "", [0, 0]),
+            }
+            _n_rk3 = engine.rekey_source(
+                _rkb3, "titan", {"chrome:win:11": "chrome:win:91"})
+            ck("rekey-source-moves-nothing-that-is-not-its-own",
+               _n_rk3 == 0)
+            ck("rekey-source-left-both-foreign-and-owner-keys-intact",
+               sorted(_rkb3) == sorted([
+                   engine.kkey("google-chrome", "other:chrome:win:11"),
+                   engine.kkey("google-chrome", "chrome:win:11")]))
+            ck("rekey-source-is-a-no-op-the-second-time",
+               engine.rekey_source(
+                   _rkb, "titan",
+                   {"chrome:win:11": "chrome:win:91"}) == 0)
+            ck("rekey-source-with-no-binding-changes-nothing",
+               engine.rekey_source(_rkb, "titan", {}) == 0)
+            # AND A SLOT THE CURRENT SESSION ALREADY KNOWS IS LEFT ALONE:
+            # the store's own answer for it is at least as good as a guess.
+            _rkb2 = {
+                engine.kkey("google-chrome", "titan:chrome:win:11"):
+                    _e_rk("titan:chrome:win:11", "titan", [1, 0]),
+                engine.kkey("google-chrome", "titan:chrome:win:91"):
+                    _e_rk("titan:chrome:win:91", "titan", [9, 9]),
+            }
+            engine.rekey_source(_rkb2, "titan",
+                                {"chrome:win:11": "chrome:win:91"})
+            ck("rekey-source-does-not-overwrite-a-known-slot",
+               _rkb2[engine.kkey("google-chrome",
+                                 "titan:chrome:win:91")]["workspace"]
+               == [9, 9])
+
+            # ---- WHEN TO ASK, which is the part with a trap in it --------
+            _lv_un = [{"app_id": "google-chrome", "source": "titan",
+                       "key": "titan"},
+                      {"app_id": "slack", "source": "titan", "key": "titan"}]
+            _sv_all = [{"app_id": "google-chrome", "source": "titan"},
+                       {"app_id": "slack", "source": "titan"}]
+            ck("refresh-asks-when-a-window-is-unidentified",
+               engine.source_refresh_plan(_sv_all, _lv_un, {}, 1000.0)
+               == ["titan"])
+            # IDENTIFIED ALREADY: never asks, so a settled desk makes no
+            # subprocess at all.
+            _lv_id = [dict(_lv_un[0], key="titan:chrome:win:91"), _lv_un[1]]
+            ck("refresh-does-not-ask-when-everything-is-identified",
+               engine.source_refresh_plan(_sv_all, _lv_id, {}, 1000.0) == [])
+            # THE ROSTER GUARD, and it is why this is not just a rate limit.
+            # The ask is a CAPTURE, which REPLACES the roster with what is
+            # live, so asking mid-login would record a partial desk. A logoff
+            # capture normally repairs that and CAN REFUSE, and then the
+            # partial roster is what the next login restores from.
+            ck("refresh-waits-until-a-capture-cannot-shrink-the-roster",
+               engine.source_refresh_plan(_sv_all, [_lv_un[0]], {}, 1000.0)
+               == [])
+            # A SOURCE WITH NOTHING SAVED has nothing to shrink, so the guard
+            # must not block it: that is a first-ever session for an account.
+            ck("refresh-asks-for-a-source-with-no-saved-windows",
+               engine.source_refresh_plan([], _lv_un, {}, 1000.0)
+               == ["titan"])
+            # RATE LIMITED, or a window that can NEVER be identified
+            # (incognito) makes a loop out of asking about it.
+            ck("refresh-is-rate-limited",
+               engine.source_refresh_plan(
+                   _sv_all, _lv_un, {"titan": 1000.0}, 1000.0) == [])
+            ck("refresh-asks-again-after-the-interval",
+               engine.source_refresh_plan(
+                   _sv_all, _lv_un, {"titan": 1000.0},
+                   1000.0 + engine.SOURCE_REFRESH_EVERY) == ["titan"])
+            # A NON-CHROME WINDOW NEVER TRIGGERS IT, since the report has
+            # nothing to say about one and asking would be a subprocess per
+            # interval forever.
+            ck("refresh-is-not-triggered-by-a-non-chrome-window",
+               engine.source_refresh_plan(
+                   [{"app_id": "slack", "source": "titan"}],
+                   [{"app_id": "slack", "source": "titan", "key": "titan"}],
+                   {}, 1000.0) == [])
+            # AND THE OWNER'S OWN WINDOWS NEVER DO, or every desk would ask.
+            ck("refresh-is-not-triggered-by-our-own-window",
+               engine.source_refresh_plan(
+                   [], [{"app_id": "google-chrome", "key": "chrome:win:1"}],
+                   {}, 1000.0) == [])
+
+            # THE DRAIN: applying a binding is a one-shot edit to the store,
+            # so one left behind would be re-applied on every pass.
+            engine._SOURCE_REKEY["titan"] = {"a": "b"}
+            ck("take-source-rekey-returns-it",
+               engine.take_source_rekey("titan") == {"a": "b"})
+            ck("take-source-rekey-drains-it",
+               engine.take_source_rekey("titan") == {})
+
+            # AND THE TRIGGER RECORDS IT FOR THE WORKER, which owns the
+            # store. The WIRING, which the parser's own checks say nothing
+            # about: that is the hole which passed the whole suite last time.
+            def _sr_rk(_argv, **_k):
+                class R:
+                    returncode = 0
+                    stderr = ""
+                    stdout = _rk_txt
+                return R()
+
+            engine._SOURCE_REKEY.clear()
+            # _announce PRINTS as well as logging, and the area quieting only
+            # covers logline, so without this the suite's own stdout carries
+            # "asked titan to capture".
+            _ra_rk = engine._announce
+            engine._announce = lambda *_a, **_k: None
+            try:
+                engine.source_trigger(["titan"], "capture", run=_sr_rk,
+                                      hook=_hk4)
+            finally:
+                engine._announce = _ra_rk
+            ck("source-trigger-records-the-rekey-for-the-worker",
+               engine.take_source_rekey("titan")
+               == {"chrome:win:11": "chrome:win:91",
+                   "chrome:win:22": "chrome:win:92"})
+            engine._SOURCE_REKEY.clear()
+
+            # ---- AND THE ENCLAVE SIDE PRODUCES THE PAIRS -----------------
+            # Driven through its three seams, so no session file and no
+            # second account are needed. The shape is what the owner parses.
+            _fake_hist = {"P": ["cur", "prev"]}
+            _fake_tabs = {"cur": {91: frozenset({"u1", "u2"}),
+                                  92: frozenset({"u3", "u4"})},
+                          "prev": {11: frozenset({"u1", "u2"}),
+                                   22: frozenset({"u3", "u4"})}}
+            _lines_rk = engine.source_rekey_lines(
+                hist=lambda: _fake_hist, tabs=lambda f: _fake_tabs[f])
+            ck("source-rekey-lines-pair-old-to-new",
+               engine.parse_source_rekey("\n".join(_lines_rk))
+               == {"chrome:win:11": "chrome:win:91",
+                   "chrome:win:22": "chrome:win:92"})
+            ck("source-rekey-lines-are-the-shape-the-owner-parses",
+               all(len(ln.split()) == 3
+                   and ln.split()[0] == engine.SOURCE_REKEY_WORD
+                   for ln in _lines_rk))
+            # NO PREVIOUS FILE MEANS NO BINDING, which is a first run rather
+            # than an error: there is nothing to rebind from.
+            ck("source-rekey-lines-need-a-previous-session",
+               engine.source_rekey_lines(
+                   hist=lambda: {"P": ["cur"]},
+                   tabs=lambda f: _fake_tabs[f]) == [])
+            ck("source-rekey-lines-tolerate-an-empty-history",
+               engine.source_rekey_lines(hist=lambda: {},
+                                         tabs=lambda _f: {}) == [])
+            # AND NOTHING BINDS WHEN THE TAB SETS DISAGREE, which is
+            # chrome_bind_windows own rule and the reason a wrong pair does
+            # not quietly move somebody's slot.
+            # AND THE VERB PRINTS THEM, which the lines function's own
+            # checks say nothing about: removing the print loop from
+            # do_source_capture passed the entire suite. THIRD INSTANCE of
+            # this hole, after entry_output and the window-map cache.
+            def _raiser(*_a, **_k):
+                raise RuntimeError("session files are unreadable")
+
+            _rt = engine.toplevels.list_toplevels
+            _rsl = engine.source_rekey_lines
+            _rsw = engine.source_window_lines
+            _rsr = engine.save_roster
+            _cap_out = io.StringIO()
+            try:
+                engine.toplevels.list_toplevels = lambda: (
+                    [{"app_id": "google-chrome", "title": "T"}], "")
+                engine.source_rekey_lines = lambda: [
+                    "rekey chrome:win:11 chrome:win:91"]
+                engine.source_window_lines = lambda _r: []
+                engine.save_roster = lambda *_a, **_k: None
+                with contextlib.redirect_stdout(_cap_out):
+                    _rc_cap = engine.do_source_capture()
+            finally:
+                engine.toplevels.list_toplevels = _rt
+                engine.source_rekey_lines = _rsl
+                engine.source_window_lines = _rsw
+                engine.save_roster = _rsr
+            ck("source-capture-succeeds", _rc_cap == engine.EXIT_OK)
+            ck("source-capture-prints-the-rekey-pairs",
+               engine.parse_source_rekey(_cap_out.getvalue())
+               == {"chrome:win:11": "chrome:win:91"})
+            # AND A FAILURE THERE IS NOT FATAL: the roster is the part a
+            # restore cannot do without, and a session-file problem must not
+            # cost it.
+            _cap_out2, _cap_exc = io.StringIO(), None
+            try:
+                engine.toplevels.list_toplevels = lambda: (
+                    [{"app_id": "google-chrome", "title": "T"}], "")
+                engine.source_rekey_lines = _raiser
+                engine.source_window_lines = lambda _r: []
+                engine.save_roster = lambda *_a, **_k: None
+                # STDERR TOO: the non-fatal path reports there by design,
+                # and the suite's own output is not the place for it.
+                # GUARDED, so narrowing that `except` is reported BY NAME
+                # here rather than aborting whichever area reaches it first.
+                _rc_cap2 = None
+                with contextlib.redirect_stdout(_cap_out2), \
+                        contextlib.redirect_stderr(io.StringIO()) as _ce2:
+                    try:
+                        _rc_cap2 = engine.do_source_capture()
+                    except Exception as _e_cap:            # noqa: BLE001
+                        _cap_exc = _e_cap
+            finally:
+                engine.toplevels.list_toplevels = _rt
+                engine.source_rekey_lines = _rsl
+                engine.source_window_lines = _rsw
+                engine.save_roster = _rsr
+            ck("source-capture-survives-a-rekey-failure",
+               _cap_exc is None and _rc_cap2 == engine.EXIT_OK)
+            ck("source-capture-still-records-the-roster-then",
+               "recorded 1 app" in _cap_out2.getvalue())
+            ck("source-capture-says-why-it-could-not-bind",
+               _cap_exc is None and "could not bind" in _ce2.getvalue())
+
+            ck("source-rekey-lines-refuse-unrelated-windows",
+               engine.source_rekey_lines(
+                   hist=lambda: {"P": ["cur", "prev"]},
+                   tabs=lambda f: {"cur": {91: frozenset({"x"})},
+                                   "prev": {11: frozenset({"y"})}}[f]) == [])
         finally:
             engine.SOURCE_HOOK = _rsh4
             engine._SOURCE_CACHE.clear()
