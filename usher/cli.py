@@ -555,7 +555,13 @@ def _dispatch(verb, args):
         engine.do_stop()
     elif verb == "launch":
         n = engine.launch_missing()
-        print(f"{PROG}: launched {n} terminal(s)")
+        # APP(S), because that is what the count now is: `relaunch_missing`
+        # reports WHICH apps it started, so the unit is apps rather than
+        # windows. The old wording said "terminal(s)" and was already wrong
+        # in a second way, since this launches the browser and registry apps
+        # too. Nothing in the notes or docs quoted it, checked before
+        # rewording.
+        print(f"{PROG}: started {n} app(s)")
     elif verb == "exclude":       # show the never-place rules as loaded
         for ar, tr in engine.EXCLUDE_RULES:
             print(f"{ar.pattern} :: {tr.pattern}")

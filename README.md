@@ -138,9 +138,14 @@ top-level `PLUGIN` object. See [`share/plugins/example.py`](
 share/plugins/example.py). Each plugin claims an app's windows (`owns`) and may
 implement `resolve` / `relaunch_command` /
 `relaunch_missing` / `wind_down`, each taking a normalized view (`v["app"]`,
+
 `v["title"]`, `v["pid"]`, `v["id"]`). `v["id"]` is the compositor's view id,
 stable for exactly one window's lifetime and `None` for a window replayed from
 the store, so it is what to cache a hard-won identity against.
+`relaunch_missing` returns the **app-ids it started**, which is how usher knows
+whether to let the registry default start an app a plugin claims but did not
+actually launch; a count still works and is read as "I may have started
+anything I own".
 
 **Any app comes back, plugin or not.** A window whose app no plugin claims is
 still relaunched at session start, from the freedesktop registry: usher joins

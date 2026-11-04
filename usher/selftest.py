@@ -969,6 +969,181 @@ def _t_resolution(ck):
                engine.take_source_rekey("titan")
                == {"chrome:win:11": "chrome:win:91",
                    "chrome:win:22": "chrome:win:92"})
+
+            # ---- AN OWNED APP WHOSE PLUGIN CANNOT ACT ON A ROSTER ---------
+            # THE BUG: the account's terminal was in its roster, counted
+            # missing, and started by NOBODY. KittyPlugin owns kitty so the
+            # registry default skipped it, and KittyPlugin acts from a
+            # recorded `cmd` that a roster row (an app-id and nothing else)
+            # does not carry, so it no-opped. Slack beside it came back
+            # because no plugin claims slack, which is the contrast that
+            # named the mechanism.
+            #
+            # DRIVEN THROUGH THE REAL `roster_launch`, because the fix is the
+            # interaction between the plugin loop and the default, and each
+            # half in isolation looks correct. The spawn is injected, so
+            # nothing is started.
+            _rl_got = []
+            _rl_entries = {"kitty": {"exec": "kitty", "type": "Application"},
+                           "slack": {"exec": "/usr/bin/slack",
+                                     "type": "Application"}}
+            _r_de, _r_an = engine.desktop_entries, engine._announce
+            try:
+                engine.desktop_entries = lambda *_a, **_k: _rl_entries
+                engine._announce = lambda *_a, **_k: None
+                _n_rl = engine.roster_launch(["kitty", "slack"], [],
+                                             spawn=_rl_got.append)
+            finally:
+                engine.desktop_entries = _r_de
+                engine._announce = _r_an
+            _rl_started = {a for argv in _rl_got for a in argv[:1]}
+            ck("roster-starts-an-owned-app-its-plugin-could-not",
+               "kitty" in _rl_started)
+            ck("roster-still-starts-an-unowned-app",
+               "/usr/bin/slack" in _rl_started)
+            ck("roster-counts-both", _n_rl == 2)
+            # AND NOTHING IS STARTED TWICE, which is the expensive direction:
+            # two browsers against one profile is the singleton fight.
+            ck("roster-starts-each-app-once",
+               len(_rl_got) == len({tuple(a) for a in _rl_got}))
+
+            # THE POLICY ITSELF, pure, so every cell is reachable. `started`
+            # is keyed by plugin object, which is how roster_launch collects
+            # it.
+            _kp = next((p for p in engine.plugins()
+                        if p.owns({"app": "kitty", "title": "",
+                                   "pid": -1})), None)
+            ck("roster-claimed-finds-the-kitty-plugin", _kp is not None)
+            # THE REGISTRY IS PASSED, which these checks must do or they
+            # test a key MISS rather than the policy: `started` is keyed by
+            # plugin object, and a fixture handing a different instance
+            # reads as "reported nothing" and keeps the claim, so every cell
+            # below would pass for the same wrong reason.
+            _reg = list(engine.plugins())
+            ck("roster-claimed-an-unowned-app-is-never-claimed",
+               engine.roster_claimed(["slack"], {}, _reg) == set())
+            ck("roster-claimed-an-owner-that-reported-nothing-keeps-its-claim",
+               engine.roster_claimed(["kitty"], {_kp: 0}, _reg) == {"kitty"})
+            ck("roster-claimed-an-owner-that-started-it-keeps-its-claim",
+               engine.roster_claimed(["kitty"], {_kp: {"kitty"}}, _reg)
+               == {"kitty"})
+            ck("roster-claimed-an-owner-that-declined-releases-it",
+               engine.roster_claimed(["kitty"], {_kp: set()}, _reg) == set())
+            # A RAISE IS NOT A DECLINE: the plugin may have started some of
+            # its apps before failing, so its claim stays whole.
+            ck("roster-claimed-an-owner-that-raised-keeps-its-claim",
+               engine.roster_claimed(["kitty"], {_kp: None}, _reg)
+               == {"kitty"})
+            # AND A FIXTURE THAT HANDS THE WRONG OBJECT IS THE TRAP ITSELF,
+            # pinned so the checks above cannot quietly become vacuous.
+            ck("roster-claimed-a-stranger-key-is-not-mistaken-for-a-decline",
+               engine.roster_claimed(["kitty"], {object(): set()}, _reg)
+               == {"kitty"})
+
+            # THE TWO READERS OF EITHER CONTRACT.
+            ck("launched-apps-reads-a-set",
+               engine.launched_apps({"a", "b"}) == {"a", "b"})
+            ck("launched-apps-reads-a-list",
+               engine.launched_apps(["a"]) == {"a"})
+            ck("launched-apps-calls-a-count-unknown",
+               engine.launched_apps(2) is None
+               and engine.launched_apps(0) is None)
+            ck("launched-count-counts-either-contract",
+               engine.launched_count({"a", "b"}) == 2
+               and engine.launched_count(3) == 3
+               and engine.launched_count(0) == 0)
+            # GARBAGE IS ZERO, NOT A RAISE: this runs on the login path and a
+            # third-party plugin returning nonsense must not stop the rest.
+            ck("launched-count-survives-garbage",
+               engine.launched_count("two") == 0
+               and engine.launched_count(None) == 0)
+
+            # ---- THE THREE THINGS PLANTING FOUND, all of them WIRING -----
+            # The pure policy had checks and the places that CALL it did
+            # not, which is the fourth instance of that hole in this file.
+
+            # 1. A PLUGIN THAT RAISES KEEPS ITS CLAIM. It may have started
+            # some of its apps before failing, so letting the default in
+            # would double-launch. Driven through the real `roster_launch`,
+            # since the plant was in its except arm and the pure function
+            # cannot see it.
+            class _Boom:
+                name = "boom"
+
+                def owns(self, v):
+                    return v["app"] == "kitty"
+
+                def relaunch_missing(self, saved, live):
+                    raise RuntimeError("plugin exploded mid-launch")
+
+            _bg, _r_pl = [], engine.plugins
+            _r_de2, _r_an2, _r_lg = (engine.desktop_entries,
+                                     engine._announce, engine.logline)
+            try:
+                engine.plugins = lambda: [_Boom()]
+                engine.desktop_entries = lambda *_a, **_k: {
+                    "kitty": {"exec": "kitty", "type": "Application"}}
+                engine._announce = lambda *_a, **_k: None
+                engine.logline = lambda *_a, **_k: None
+                engine.roster_launch(["kitty"], [], spawn=_bg.append)
+                # THE PRECONDITION: with the SAME plugin declining rather
+                # than raising, the default DOES start it. Without this the
+                # check above passes for any reason that stops the launch.
+                _bg2 = []
+                _Boom.relaunch_missing = (
+                    lambda self, saved, live: set())
+                engine.roster_launch(["kitty"], [], spawn=_bg2.append)
+            finally:
+                engine.plugins = _r_pl
+                engine.desktop_entries = _r_de2
+                engine._announce = _r_an2
+                engine.logline = _r_lg
+            ck("roster-a-plugin-that-raised-is-not-second-guessed",
+               _bg == [])
+            ck("roster-raise-check-has-a-working-control",
+               _bg2 == [["kitty"]])
+
+            # 2. THE RESTORE PATH MUST NOT GET THE ROSTER'S POLICY. There a
+            # plugin owning an app really is what starts it, from a recorded
+            # command per window, so bypassing the claim would have the
+            # default spawn a BARE kitty at $HOME for a saved terminal whose
+            # cwd is unreadable, where today it spawns nothing. Asserted on
+            # the SOURCE, because driving `launch_missing` for real spawns
+            # real apps: this suite has opened 16 terminals on a live desktop
+            # once already.
+            import inspect as _isp
+            _lm_src = _isp.getsource(engine.launch_missing)
+            _rl_src = _isp.getsource(engine.roster_launch)
+            ck("restore-calls-the-default-at-all",
+               "desktop_relaunch_missing(" in _lm_src)
+            ck("restore-does-not-pass-the-roster-policy",
+               "claimed=" not in _lm_src)
+            ck("roster-does-pass-the-roster-policy",
+               "claimed=roster_claimed(" in _rl_src)
+
+            # 3. CHROME REPORTS EVERY SPELLING IT CLAIMED. XWayland says
+            # `Google-chrome` and native Wayland says `google-chrome`, and
+            # BOTH are in a real store, so reporting one spelling leaves the
+            # default free to start the browser again under the other.
+            _chp = next((p for p in engine.plugins()
+                         if p.owns({"app": "google-chrome", "title": "",
+                                    "pid": -1})), None)
+            ck("chrome-plugin-is-findable", _chp is not None)
+            _r_cs, _r_an3 = engine.chrome_profiles_for, engine._announce
+            _r_sp = engine.app_spawn
+            try:
+                engine.chrome_profiles_for = lambda _s: ["Default"]
+                engine._announce = lambda *_a, **_k: None
+                engine.app_spawn = lambda *_a, **_k: None
+                _both = _chp.relaunch_missing(
+                    [{"app_id": "Google-chrome"},
+                     {"app_id": "google-chrome"}], [])
+            finally:
+                engine.chrome_profiles_for = _r_cs
+                engine._announce = _r_an3
+                engine.app_spawn = _r_sp
+            ck("chrome-reports-both-spellings-it-claimed",
+               _both == {"Google-chrome", "google-chrome"})
             engine._SOURCE_REKEY.clear()
 
             # ---- AND THE ENCLAVE SIDE PRODUCES THE PAIRS -----------------
@@ -1797,6 +1972,11 @@ def _t_desktop(ck):
         "noexec": {"type": "Application"},
         "dup-a": {"exec": "/bin/sh", "startupwmclass": "twice"},
         "dup-b": {"exec": "/bin/sh", "startupwmclass": "twice"},
+        # A PLUGIN-OWNED APP THAT DOES HAVE AN ENTRY, which the owned-app
+        # cells need: /usr/share/applications/kitty.desktop is real, and
+        # without a row here those checks would pass because the entry was
+        # MISSING rather than because the claim was honoured.
+        "kitty": {"exec": "kitty", "type": "Application"},
     }
 
     def go(app):
@@ -1847,7 +2027,7 @@ def _t_desktop(ck):
         ck("desktop-off-switch-stops-it",
            desktop_relaunch_missing(
                [{"id": 1, "app_id": "calibre-gui", "title": "t", "pid": -1}],
-               [], spawn=_got.append) == 0 and _got == [])
+               [], spawn=_got.append) == set() and _got == [])
     finally:
         if _env is None:
             os.environ.pop("USHER_NO_DEFAULT_RELAUNCH", None)
@@ -1869,18 +2049,35 @@ def _t_desktop(ck):
         n = desktop_relaunch_missing([W("calibre-gui")], [],
                                      spawn=got.append)
         ck("desktop-pass-launches-a-missing-app",
-           n == 1 and got == [["calibre"]])
+           n == {"calibre-gui"} and got == [["calibre"]])
         # ALREADY RUNNING: its windows are its own business
         got = []
         n = desktop_relaunch_missing([W("calibre-gui")],
                                      [_trv("calibre-gui", "t")],
                                      spawn=got.append)
-        ck("desktop-pass-skips-a-live-app", n == 0 and got == [])
+        ck("desktop-pass-skips-a-live-app", n == set() and got == [])
         # AN OWNED APP IS NEVER TOUCHED HERE, which is what makes a specific
         # plugin an override rather than a competitor.
         got = []
         n = desktop_relaunch_missing([W("kitty")], [], spawn=got.append)
-        ck("desktop-pass-skips-an-owned-app", n == 0 and got == [])
+        ck("desktop-pass-skips-an-owned-app", n == set() and got == [])
+        # ...UNLESS THE CALLER SAYS THE OWNER DID NOT START IT, which is the
+        # roster path: an app-id-only row gives a plugin keyed on a recorded
+        # command nothing to act on, and its claim would then be the only
+        # thing stopping the app from coming back. Measured on manifold: an
+        # account's terminal was in its roster and started by nobody.
+        got = []
+        n = desktop_relaunch_missing([W("kitty")], [], spawn=got.append,
+                                     claimed=set())
+        ck("desktop-pass-starts-an-owned-app-the-owner-declined",
+           n == {"kitty"} and got == [["kitty"]])
+        # AND AN EXPLICIT CLAIM IS STILL HONOURED, or the bypass would
+        # double-launch whatever the plugin really did start.
+        got = []
+        n = desktop_relaunch_missing([W("kitty")], [], spawn=got.append,
+                                     claimed={"kitty"})
+        ck("desktop-pass-honours-an-explicit-claim",
+           n == set() and got == [])
             # ANOTHER ACCOUNT'S SAVED WINDOW IS NOT OURS TO START. The entry
         # carries an app-id and nothing else, so resolving it in OUR registry
         # and running it would open a second, PERSONAL copy of somebody's
@@ -1889,7 +2086,8 @@ def _t_desktop(ck):
         got = []
         n = desktop_relaunch_missing([dict(W("calibre-gui"), owner=997)], [],
                                      spawn=got.append)
-        ck("desktop-pass-skips-another-accounts-app", n == 0 and got == [])
+        ck("desktop-pass-skips-another-accounts-app",
+           n == set() and got == [])
         # ONE INVOCATION PER APP, not per window: all six chrome windows
         # report one pid and a desktop entry describes an APP.
         got = []
@@ -1897,11 +2095,11 @@ def _t_desktop(ck):
                                       W("calibre-gui", "b")], [],
                                      spawn=got.append)
         ck("desktop-pass-is-per-app-not-per-window",
-           n == 1 and got == [["calibre"]])
+           n == {"calibre-gui"} and got == [["calibre"]])
         # a refusal is silent-but-logged, never a crash, and never a spawn
         got = []
         n = desktop_relaunch_missing([W("nm-applet")], [], spawn=got.append)
-        ck("desktop-pass-honours-a-refusal", n == 0 and got == [])
+        ck("desktop-pass-honours-a-refusal", n == set() and got == [])
     finally:
         engine.desktop_entries = _re
         engine.logline = _rl
@@ -3892,8 +4090,13 @@ def _t_relaunch(ck):
             n_mux = mux_relaunch_missing([_tmw(), _tmw(cmd="L latch box")], [])
             n_kit = kitty_relaunch_missing(
                 [{"app_id": "kitty", "key": "kitty:/tmp", "title": ""}], [])
-        ck("relaunch-mux-runs", n_mux == 2)
-        ck("relaunch-kitty-runs", n_kit == 1)
+        # THE RETURN NAMES THE APP, and the per-window count lives in
+        # the spawn tally below. mux reopened TWO terminals and both are
+        # kitty windows, so one app-id is the honest answer: the unit of
+        # this contract is "which apps did you start", which is the only
+        # question the registry default can act on.
+        ck("relaunch-mux-runs", n_mux == {"kitty"})
+        ck("relaunch-kitty-runs", n_kit == {"kitty"})
         ck("relaunch-spawned", len(_spawned) == 3)
         ck("relaunch-announced",
            len(_logged) == 3 and all(m.startswith("launch") for m in _logged))
@@ -3941,7 +4144,7 @@ def _t_relaunch(ck):
         engine._announce = _ann.append
         ck("relaunch-does-not-count-a-refused-spawn",
            engine.mux_relaunch_missing(
-               [_tmw()], []) == 0 and not _ann)
+               [_tmw()], []) == set() and not _ann)
     finally:
         engine.spawn_term, engine._announce = _rst, _ran2
 
@@ -4344,7 +4547,7 @@ def _t_chrome(ck):
 
     # chrome relaunch: only when the last session had Chrome and none is up
     _ch = ps["chrome"]
-    ck("chrome-no-saved", _ch.relaunch_missing([], []) == 0)
+    ck("chrome-no-saved", _ch.relaunch_missing([], []) == set())
     # PER USER ON BOTH SIDES. Another account's browser answers neither
     # question for us, and the second half is the quiet direction: without it
     # a personal Chrome simply would not come back on any login where the work
@@ -4352,7 +4555,7 @@ def _t_chrome(ck):
     if os.getuid() != 0:
         ck("chrome-skips-another-accounts-saved-window",
            _ch.relaunch_missing([{"app_id": "google-chrome", "owner": 997}],
-                                []) == 0)
+                                []) == set())
         # THE LIVE SIDE, WITHOUT EVER LAUNCHING A BROWSER. relaunch_missing
         # spawns internally, so the seam is the executable lookup: it is
         # reached only if BOTH guards passed, and answering None stops it
@@ -4384,7 +4587,7 @@ def _t_chrome(ck):
             engine.shutil = _rsh
     ck("chrome-already-live",
        _ch.relaunch_missing([{"app_id": "google-chrome"}],
-                            [_tv("google-chrome", "x")]) == 0)
+                            [_tv("google-chrome", "x")]) == set())
 
     # WIND-DOWN FINDS THE BROWSER, in both of the framings /proc/<pid>/cmdline
     # actually comes in. These are real captures: Chrome rewrites its own argv
