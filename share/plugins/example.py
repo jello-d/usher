@@ -91,7 +91,17 @@ class SpotifyPlugin:
     #       return None
     #
     #   def relaunch_missing(self, saved, live):
-    #       return 0     # respawn this app's saved-but-absent windows; count
+    #       # Respawn this app's saved-but-absent windows, and return WHICH
+    #       # app-ids you started. usher uses that to decide whether the
+    #       # freedesktop default should start an app you claim but did not
+    #       # actually launch: a roster of app-ids gives a plugin keyed on a
+    #       # recorded command nothing to act on, and without this its claim
+    #       # would be the only thing keeping the app shut.
+    #       # A count still works and is read as "I may have started anything
+    #       # I own", which is what usher did before this and costs the
+    #       # default its chance. Returning nothing you did not start is the
+    #       # whole contract.
+    #       return set()
     #
     #   def wind_down(self, live):
     #       # Ask this app to exit CLEANLY at session end, and return the pids

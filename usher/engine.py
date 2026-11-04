@@ -1082,7 +1082,10 @@ class WindowPlugin:
         return Resolution.ready(v["title"])
 
     def relaunch_missing(self, saved, live):
-        return 0          # respawn this app's saved-but-absent windows; count
+        # respawn this app's saved-but-absent windows; return WHICH app-ids
+        # were started. A count still works (see launched_apps) and costs
+        # the registry default its chance to start what this plugin did not.
+        return set()
 
     def relaunch_command(self, v):
         """The command that brings THIS window back, read from the live window
@@ -1661,6 +1664,91 @@ def unidentified(v):
     return not resolution(v).is_ready
 
 
+def launched_apps(result):
+    """The app-ids a plugin says it STARTED, or None if it answered the old
+    count-only contract. PURE.
+
+    `relaunch_missing` used to return a count. It returns a set of app-ids
+    now, because a count cannot answer the only question the registry
+    default needs to ask: did the owning plugin actually start this app, or
+    merely claim it? A plugin that still returns a number is read as None
+    here, which the callers treat as "may have started anything it owns",
+    i.e. exactly the old behaviour. So an unmigrated plugin keeps working
+    with an unchanged outcome and this is additive rather than breaking.
+
+    THE DEGRADATION RUNS TOWARDS NOT LAUNCHING, which is the cheap failure.
+    Reading an unknown answer as "it started nothing" would have the default
+    start the app a second time, and for a browser that is two processes
+    against one profile: the singleton fight, a ProcessSingleton error, and
+    a window the human has to close."""
+    if isinstance(result, (set, frozenset, list, tuple)):
+        return {str(a) for a in result if a}
+    return None
+
+
+def launched_count(result):
+    """How many a plugin started, under either contract. PURE.
+
+    Keeps every count this package already prints byte-identical, which is
+    what makes the change invisible in `watch.log`."""
+    apps = launched_apps(result)
+    if apps is not None:
+        return len(apps)
+    try:
+        return int(result or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def roster_claimed(missing, started, registry=None):
+    """Which of these app-ids the registry default must NOT start. PURE.
+
+    THE ROSTER PATH ASKS A DIFFERENT QUESTION FROM A RESTORE. On a restore
+    the default skips any app a plugin CLAIMS, which is right: the plugin
+    has a recorded command per window and would double-launch. A roster row
+    is an app-id and NOTHING else, so a plugin keyed on a recorded command
+    finds nothing and no-ops, and the claim then stops the one mechanism
+    that could have started the app. Measured on manifold: an account's
+    terminal was in its roster, counted missing, and started by nobody,
+    while slack beside it came back because no plugin claims slack.
+
+    So here the test is what a plugin DID, not what it owns. An app whose
+    owner reported starting it is skipped; one whose owner reported a set
+    NOT containing it is the default's to start; and an owner that reported
+    nothing intelligible keeps its whole claim, which is the old behaviour
+    and the safe direction.
+    """
+    # THE CALLER'S OWN REGISTRY SNAPSHOT, not a fresh `plugins()` call.
+    # `started` is keyed by plugin OBJECT, so resolving the owner from a
+    # second call would compare different objects the moment the registry is
+    # rebuilt (a plugin reload between the two). It would fail SAFE, since a
+    # key miss reads as "reported nothing" and keeps the claim, which is
+    # exactly why a check could pass over it: measured, a fixture handing a
+    # fresh instance proved nothing at all.
+    pl = list(plugins()) if registry is None else list(registry)
+    out = set()
+    for app in missing:
+        v = pview({"app-id": app, "title": "", "pid": -1})
+        p = next((q for q in pl if _owns(q, v)), None)
+        if p is None:
+            continue              # unclaimed: the default has always had it
+        apps = launched_apps(started.get(p))
+        if apps is None or app in apps:
+            out.add(app)
+    return out
+
+
+def _owns(p, v):
+    """Does this plugin claim this view? Never raises: a plugin that throws
+    from `owns` must not decide a launch, and treating it as "does not own"
+    hands the app to the registry default, which is the direction that still
+    starts something."""
+    try:
+        return bool(p.owns(v))
+    except Exception:                                      # noqa: BLE001
+        return False
+
+
 def is_owned(app):
     """True if some plugin claims this app-id, so its windows never drop to an
     app_id-only key (the old FORCE_TITLE_APPS rule, now plugin-driven). By app
@@ -1953,17 +2041,18 @@ class ChromePlugin(WindowPlugin):
         # that ours is up. Without the second test a personal Chrome would
         # simply not come back on any login where the work one was already
         # running, which is the quiet direction.
-        if not any(is_chrome(w.get("app_id")) and w.get("owner") is None
-                   for w in saved):
-            return 0
+        _mine = {w.get("app_id") for w in saved
+                 if is_chrome(w.get("app_id")) and w.get("owner") is None}
+        if not _mine:
+            return set()
         if any(is_chrome(pview(v)["app"])
                and foreign_owner(pview(v).get("pid")) is None for v in live):
-            return 0
+            return set()
         exe = next((shutil.which(c) for c in
                     ("google-chrome", "google-chrome-stable", "chromium",
                      "chromium-browser") if shutil.which(c)), None)
         if not exe:
-            return 0
+            return set()
         n = 0
         for prof in chrome_profiles_for(saved):
             if n:
@@ -1981,7 +2070,12 @@ class ChromePlugin(WindowPlugin):
                 [os.path.basename(exe)] + argv[1:]))
             app_spawn(argv, _SPAWN_WATCH)
             n += 1
-        return n
+        # THE APP-IDS AS THE SAVED ROWS SPELL THEM, not a literal: XWayland
+        # reports `Google-chrome` where native Wayland reports
+        # `google-chrome` and BOTH are in a real store, so returning one
+        # spelling would leave the registry default free to start the
+        # browser a second time under the other.
+        return _mine if n else set()
 
 
 class MuxPlugin(WindowPlugin):
@@ -3055,7 +3149,10 @@ def mux_relaunch_missing(saved, live):
             continue
         n += 1
         _announce(f"launch  {cmd}")
-    return n
+    # THIS PLUGIN'S OWN APP, which is what it just put on screen. Not read
+    # from the saved rows because `mux_candidates` yields commands rather
+    # than rows, and a terminal this reopens is a kitty by construction.
+    return {"kitty"} if n else set()
 
 
 def _spawn_kitty(cwd, size=None):
@@ -3097,7 +3194,7 @@ def kitty_relaunch_missing(saved, live):
         _spawn_kitty(cwd, sizes.get(f"kitty:{cwd}"))
         n += 1
         _announce(f"launch  kitty {cwd}")
-    return n
+    return {"kitty"} if n else set()
 
 
 # --- the DEFAULT relaunch: any app, from the freedesktop registry ---------
@@ -3252,7 +3349,7 @@ def desktop_launch_for(app, entries):
     return argv, None
 
 
-def desktop_relaunch_missing(saved, live, spawn=None):
+def desktop_relaunch_missing(saved, live, spawn=None, claimed=None):
     """Start any saved app that no plugin claims and that is not running.
 
     PER APP, NOT PER WINDOW, which falls out of the measurement rather than
@@ -3265,11 +3362,20 @@ def desktop_relaunch_missing(saved, live, spawn=None):
     # it, and usher/exclude drops the window end to end); this is the blunt
     # one, for a box where the whole idea is unwanted.
     if os.environ.get("USHER_NO_DEFAULT_RELAUNCH") == "1":
-        return 0
+        return set()
     want = {}
     for w in saved:
         app = w.get("app_id") or ""
-        if not app or is_owned(app) or is_transient(w):
+        if not app or is_transient(w):
+            continue
+        # WHOSE APP IS IT. With no `claimed` set this is a RESTORE, where any
+        # app a plugin owns is the plugin's to start: it has a recorded
+        # command per window and starting it here too would double-launch.
+        # With one, the caller has asked each plugin what it actually DID,
+        # so the test is that answer rather than the claim. See
+        # roster_claimed, and the terminal an owned-but-inactive plugin left
+        # unstarted.
+        if app in claimed if claimed is not None else is_owned(app):
             continue
         # NOT OURS, NOT OURS TO START. The saved entry carries an app-id and
         # nothing else, so resolving it in OUR desktop registry and running it
@@ -3280,10 +3386,10 @@ def desktop_relaunch_missing(saved, live, spawn=None):
             continue
         want.setdefault(app, w)
     if not want:
-        return 0
+        return set()
     have = {app_of(v) for v in live}
     entries = desktop_entries()
-    n = 0
+    started = set()
     for app, w in sorted(want.items()):
         if app in have:
             continue            # already running; its windows are its own
@@ -3296,8 +3402,8 @@ def desktop_relaunch_missing(saved, live, spawn=None):
             app_spawn(argv, _SPAWN_WATCH)
         else:
             spawn(argv)
-        n += 1
-    return n
+        started.add(app)
+    return started
 
 
 # THE SOURCE SEAM. usher can PLACE another account's window (the IPC is
@@ -3869,11 +3975,21 @@ def roster_launch(apps, live, spawn=None):
     if watch is not None:
         _SESSION_LAUNCH = True
         _SPAWN_WATCH = _spawn_watched(watch)
-    for p in plugins():
+    # ONE SNAPSHOT OF THE REGISTRY, used for both the loop and the claim,
+    # so `started`'s keys and the owner lookup cannot be different objects.
+    pl = list(plugins())
+    started = {}
+    for p in pl:
         try:
-            n += p.relaunch_missing(saved, seen)
+            started[p] = p.relaunch_missing(saved, seen)
+            n += launched_count(started[p])
         except Exception as e:                                 # noqa: BLE001
             logline(f"relaunch ({getattr(p, 'name', '?')}) error: {e}")
+            # A RAISE IS NOT "IT STARTED NOTHING". The plugin may have
+            # launched some of its apps before failing, so its claim is left
+            # whole and the default does not touch them: the same safe
+            # direction `launched_apps` takes for the old contract.
+            started[p] = None
     # A RELAUNCHED APP'S STDERR IS KEPT, BRIEFLY, which is the one thing that
     # makes an instant death diagnosable. `desktop_relaunch_missing` sends it
     # to DEVNULL, so an app that starts and exits in 100ms leaves NOTHING
@@ -3888,7 +4004,13 @@ def roster_launch(apps, live, spawn=None):
     # AN INJECTED SPAWN ALWAYS WINS, which is what keeps the suite from
     # launching anything real: watching is only for the production path.
     try:
-        n += desktop_relaunch_missing(saved, seen, spawn)
+        # THE DEFAULT GETS WHAT THE PLUGINS DID NOT START. A roster row is an
+        # app-id and nothing else, so a plugin keyed on a recorded command
+        # no-ops and its CLAIM would otherwise be the only thing standing
+        # between the app and the one mechanism that can start it.
+        n += launched_count(desktop_relaunch_missing(
+            saved, seen, spawn,
+            claimed=roster_claimed(missing, started, pl)))
     except Exception as e:                                     # noqa: BLE001
         logline(f"relaunch (desktop default) error: {e}")
     if watch:
@@ -4163,14 +4285,19 @@ def launch_missing(snap=None):
     n = 0
     for p in plugins():
         try:
-            n += p.relaunch_missing(saved, live)
+            n += launched_count(p.relaunch_missing(saved, live))
         except Exception as e:
             logline(f"relaunch ({getattr(p, 'name', '?')}) error: {e}")
     # THEN THE DEFAULT, for everything no plugin claimed. Last, so a specific
     # plugin always wins: it has already handled its own app by here, and
     # desktop_relaunch_missing skips every is_owned app anyway.
     try:
-        n += desktop_relaunch_missing(saved, live)
+        # NO `claimed` HERE, DELIBERATELY: this is a restore, where a
+        # plugin owning an app really is the thing that starts it, from a
+        # recorded command per window. Passing the roster's policy would
+        # have the default spawn a BARE kitty at $HOME for a saved terminal
+        # whose cwd is unreadable, where today it spawns nothing.
+        n += launched_count(desktop_relaunch_missing(saved, live))
     except Exception as e:
         logline(f"relaunch (desktop default) error: {e}")
     # AND ANOTHER ACCOUNT IS ASKED TO START ITS OWN. Last, because it is the
