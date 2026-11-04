@@ -1447,7 +1447,27 @@ def log_title(v):
     for.
     """
     src = source_of(v)
-    return f"[{src}]" if src else (v.get("title") or "")
+    if src:
+        return f"[{src}]"
+    # A FOREIGN WINDOW NOBODY CAN NAME IS STILL FOREIGN, which this missed
+    # until 2026-11-04. `snapshot` redacts on `_own is not None or _src`, the
+    # uid OR the name, and this asked only the name, so the two predicates
+    # disagreed about the same window: with no provider wired `source_of` is
+    # "" for a window the uid plainly says is somebody else's, and the raw
+    # title was printed. Sixth instance in this package of a gate scoped to
+    # one category meeting something outside it, and the disagreement class
+    # this file names as the start of every silent failure here.
+    #
+    # THE uid IS FINE AS A LABEL where it is banned as a KEY: a key must
+    # identify what its data describes and an allocation cannot, but a log
+    # line only has to be honest, and it is the reading usher can always make
+    # for itself. `snapshot` keeps the same number for the same reason.
+    own = v.get("owner") if isinstance(v, dict) else None
+    if own is None:
+        own = foreign_owner(pview(v).get("pid"))
+    if own is not None:
+        return f"[uid {own}]"
+    return v.get("title") or ""
 
 
 def foreign_owner(pid, uid_of=None, me=None):
@@ -4598,8 +4618,14 @@ def _restore_report(pairs, live, unlive, unlayout, unplaceable, outs, dry,
           f"unplaceable {len(unplaceable)}  "
           f"{'acted ' + str(acted) if not dry else ''}")
     for lv in unlive:
+        # THROUGH `log_title`, because this is the one row here that renders a
+        # LIVE view's own title. The matched rows are app-id plus geometry and
+        # UNMATCHED-LAYOUT is a stored entry's KEY-title, which for another
+        # account is already its source name; this row was the exception the
+        # 2026-11-02 audit missed, and it printed six of the work account's
+        # window titles in full on manifold.
         print(f"  UNMATCHED-LIVE   {app_of(lv)[:20]:20} | "
-              f"{lv.get('title','')[:42]}")
+              f"{log_title(lv)[:42]}")
     listed, gone = _unlayout_split(unlayout)
     for e in listed:
         print(f"  UNMATCHED-LAYOUT {e['app_id'][:20]:20} | {e['title'][:42]}")
