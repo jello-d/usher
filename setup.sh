@@ -527,6 +527,7 @@ do_install() {
     # shellcheck disable=SC2088
     echo "$PKG:   ln -sfn $_payt/share/hooks/hwdp-changed" \
       "~/.config/hwdp/hooks/changed.d/40-usher" >&2
+    _login_reload
     return 0
   fi
   _system_leftover && warn "a system install ($_sysbin) shadows this one:" \
@@ -567,6 +568,70 @@ _reload_daemon() {
   2) echo "$PKG: no daemon running; the session will start the new code" ;;
   *) echo "$PKG: WARNING could not reload the daemon, so it is still" \
        "running the OLD code. Run 'usher reload' by hand." >&2
+     echo "$_out" | sed 's/^/  /' >&2 ;;
+  esac
+}
+
+# _login_reload: reload the SUDO CALLER's daemon after a SYSTEM install.
+#
+# WHY THIS EXISTS. A system install returns before `_reload_daemon` because as
+# root every per-user step would act on /root, so since the machine-wide
+# switch EVERY provision has left the running daemon on the old code until
+# somebody reloaded by hand. Measured 2026-11-04: both boxes stale after the
+# same provision, and four hand reloads in one day.
+#
+# THE INVOCATION IS MEASURED, not guessed, and the obvious one does NOT work:
+#
+#     sudo -u USER usher reload                    rc=2, "no daemon running"
+#     sudo -u USER env XDG_RUNTIME_DIR=DIR reload  rc=0, reloaded
+#
+# The supervisor's lock lives under XDG_RUNTIME_DIR and sudo's `env_reset`
+# strips it, so the lookup falls back to the state dir and finds no daemon.
+# Confirmed with real sudo on both boxes; this fleet's sudoers has no
+# `env_keep` for it either. `/run/user/<uid>` is a DERIVATION rather than a
+# guess: the XDG spec defines that path per uid, which is the same reading
+# the enclave relaunch already makes for `systemd-run --user`.
+#
+# NOT `sudo -i -u`, which would also carry a runtime dir and is untested
+# here, because `-i` runs the user's LOGIN SHELL and would source their rc
+# files from inside an installer. Explicit beats implicit on a privileged
+# path.
+#
+# ONLY THE SUDO CALLER, like `_mode_switch`: a box can have several logged-in
+# users and root has no business reaching into sessions nobody asked about.
+# Each of those keeps the detector it already had, since `daemon_code_age`
+# reports stale in both `check` and `doctor`.
+#
+# NEVER FATAL, the same policy as `_reload_daemon`: a failed reload leaves the
+# OLD daemon running, which is the state we were already in.
+_login_reload() {
+  _lu=${SUDO_USER:-}
+  if [ -z "$_lu" ] || [ "$_lu" = root ]; then
+    echo "$PKG: no sudo caller, so no daemon was reloaded: run" \
+      "'usher reload', or a login picks up the new code" >&2
+    return 0
+  fi
+  _luid=$(getent passwd "$_lu" | cut -d: -f3)
+  if [ -z "$_luid" ]; then
+    echo "$PKG: cannot resolve $_lu, so no daemon was reloaded" >&2
+    return 0
+  fi
+  # NO SESSION, NO DAEMON. The runtime dir exists only while the user is
+  # logged in, so its absence is the cheap answer to "is there anything to
+  # reload" and is not a fault.
+  if [ ! -d "/run/user/$_luid" ]; then
+    echo "$PKG: $_lu is not logged in, so there is no daemon to reload"
+    return 0
+  fi
+  _rc=0
+  _out=$(sudo -u "$_lu" env "XDG_RUNTIME_DIR=/run/user/$_luid" \
+    "$_bin/usher" reload 2>&1) || _rc=$?
+  case $_rc in
+  0) echo "$PKG: reloaded $_lu's running daemon onto this payload" ;;
+  2) echo "$PKG: $_lu has no daemon running; the session starts the new" \
+       "code" ;;
+  *) echo "$PKG: WARNING could not reload $_lu's daemon, so it is still" \
+       "running the OLD code. As $_lu, run 'usher reload'." >&2
      echo "$_out" | sed 's/^/  /' >&2 ;;
   esac
 }
