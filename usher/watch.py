@@ -1732,6 +1732,9 @@ class Watcher:
             # cache that only ever grows is a leak in a process that runs for
             # weeks, and this is the one moment we know the view is gone.
             chrome.forget_window(v["id"])
+            # and the identity another ACCOUNT reported for it, cached for
+            # the life of the view for the same reason chrome's is.
+            engine.forget_source_window(v["id"])
             with self.lock:
                 self.pending.pop(v["id"], None)
                 # The retry budget is PER MAP, so it goes with the window.

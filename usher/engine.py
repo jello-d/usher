@@ -466,6 +466,20 @@ def surface_of(w, surfaces):
     return ""
 
 
+def source_ident(source, ident):
+    """The per-window identity `ident` names, if it belongs to `source`. PURE.
+
+    A per-window key is `<source>:<identity>`, so the source name is a
+    PREFIX of it and not a coincidence. ONE DEFINITION, read by both
+    `match_keys` and `entry_matches`, because an arbitrary identity reaching
+    either of them becomes a key that is not this account's: the first cut
+    of this gate tested only `ident != source` and so offered `slack\0ident`
+    to a titan window, which the pre-existing
+    `match-keys-foreign-gets-only-its-source` check caught at once.
+    """
+    return ident if ident and ident.startswith(source + ":") else ""
+
+
 def match_keys(app, ident, source="", ident_first=False):
     """The store keys a window may match, most specific first.
 
@@ -486,6 +500,14 @@ def match_keys(app, ident, source="", ident_first=False):
     disagreement is latent (it shows only where BOTH keys exist for one app)
     and worth unifying on its own, not inside this change."""
     if source:
+        # MOST SPECIFIC FIRST, the same rule as the owner's own pair: a
+        # per-window key when that account could say which window this is,
+        # and the source-alone key as the fallback. The fallback is what
+        # every entry carried before per-window identities existed and what
+        # a window with no per-window handle still uses, so keeping it is
+        # what makes this additive rather than a migration.
+        if source_ident(source, ident):
+            return (kkey(app, ident), kkey(app, source))
         return (kkey(app, source),)
     return ((kkey(app, ident), kkey(app, "")) if ident_first
             else (kkey(app, ""), kkey(app, ident)))
@@ -501,7 +523,15 @@ def entry_matches(e, app, ident, source=""):
     if e.get("app_id") != app:
         return False
     if source:
-        return e.get("source") == source
+        if e.get("source") != source:
+            return False
+        # AND A PER-WINDOW ENTRY CLAIMS ONLY ITS OWN WINDOW, exactly as an
+        # owner's per-title entry does. An entry stored under the source
+        # ALONE is that account's app_id-only key and claims any of its
+        # windows, which is what the shape meant before this.
+        et = e.get("title") or ""
+        return et == source or (bool(source_ident(source, ident))
+                                and et == ident)
     return bool(e.get("appid_only")) or e.get("title") == ident
 
 
@@ -878,13 +908,22 @@ def snapshot(sock):
             # and enough for a future restore to ask the OWNING account to
             # start that app. Position and size are not content.
             #
-            # `key` AND `cmd` GO TOO. `key` is `identity()`, which for an
-            # unidentifiable window falls back to the raw title, so leaving it
-            # would reinstate the leak under another field name; `cmd` is read
-            # from a process tree usher may not run anything from anyway.
-            w["title"] = ""
-            w["key"] = ""
+            # `cmd` GOES TOO, read from a process tree usher may not run
+            # anything from anyway.
+            #
+            # `key` IS KEPT ONLY WHEN IT IS OPAQUE BY CONSTRUCTION, which is
+            # exactly when the window RESOLVED. `identity()` falls back to the
+            # raw title for a window that did not, so keeping it unconditional
+            # would reinstate the leak under another field name; the foreign
+            # branch of `resolution` never reaches a title fallback, so a
+            # ready key is the source name plus at most a validated opaque
+            # identity. The distinction matters because learn() reads this
+            # field and the live title it would otherwise need is blanked
+            # one line below.
             w["cmd"] = None
+            if not resolution(pview(v)).is_ready:
+                w["key"] = ""
+            w["title"] = ""
         windows.append(w)
     return {
         "version": SNAPSHOT_VERSION,
@@ -1520,7 +1559,20 @@ def resolution(v):
                 "app-id, so the source name is the only handle and keying on "
                 "it alone would match every handle-less window of that "
                 "account")
-        return Resolution.ready(src)
+        # AND A PER-WINDOW PART WHEN THE SOURCE COULD NAME ONE. The paragraph
+        # above said there is no such handle, and that was true of what the
+        # OWNER can see: the account's own app state is behind its uid wall.
+        # The account itself can read it, so it reports a digest of each live
+        # window title beside an opaque identity and the owner joins on the
+        # title it already has. Measured 6 of 6 on manifold 2026-11-03.
+        #
+        # THE SOURCE STAYS THE FIRST COMPONENT, so the key still names the
+        # account that owns the window and can never collide with the owner's
+        # own `chrome:win:<id>`. The source ALONE remains the fallback, which
+        # is every entry stored before this and every window whose account
+        # cannot say which one it is, so nothing relearns.
+        _per = source_window_identity(src, v)
+        return Resolution.ready(f"{src}:{_per}" if _per else src)
     if other is not None:
         # FOREIGN AND UNNAMED: no provider is wired, or it could not answer.
         # NOT keyable, because the only thing usher has is the uid and a uid
@@ -2385,7 +2437,16 @@ def upsert(kb, windows, when):
         # than inside `is_unique`, whose question really is about the app.
         _src_w = source_of(w)
         if _src_w:
-            kb[kkey(app, _src_w)] = kb_entry(w, _src_w, False, when)
+            # THE RESOLVED KEY, NOT THE BARE SOURCE, so a per-window identity
+            # the account reported is what gets stored. `w["key"]` is what
+            # `snapshot` stamped while the window was live, which is the only
+            # moment it could be computed: the title this joins on is redacted
+            # in this very row, so re-deriving here would answer the
+            # source-alone key for every window.
+            _k_w = w.get("key") or _src_w
+            if _k_w != _src_w and not _k_w.startswith(_src_w + ":"):
+                _k_w = _src_w      # not this source's: never cross-file it
+            kb[kkey(app, _k_w)] = kb_entry(w, _k_w, False, when)
         elif is_unique(app, counts):
             kb[kkey(app, "")] = kb_entry(w, w["title"], True, when)
         elif key:
@@ -2483,7 +2544,16 @@ def _learn_stamp(kb, groups, windows, counts, when, hold=()):
         # than inside `is_unique`, whose question really is about the app.
         _src_w = source_of(w)
         if _src_w:
-            kb[kkey(app, _src_w)] = kb_entry(w, _src_w, False, when)
+            # THE RESOLVED KEY, NOT THE BARE SOURCE, so a per-window identity
+            # the account reported is what gets stored. `w["key"]` is what
+            # `snapshot` stamped while the window was live, which is the only
+            # moment it could be computed: the title this joins on is redacted
+            # in this very row, so re-deriving here would answer the
+            # source-alone key for every window.
+            _k_w = w.get("key") or _src_w
+            if _k_w != _src_w and not _k_w.startswith(_src_w + ":"):
+                _k_w = _src_w      # not this source's: never cross-file it
+            kb[kkey(app, _k_w)] = kb_entry(w, _k_w, False, when)
         elif is_unique(app, counts):
             kb[kkey(app, "")] = kb_entry(w, w["title"], True, when)
         elif key:
@@ -3329,13 +3399,63 @@ def parse_source_windows(text):
     LENIENT BY DESIGN, because this shares a channel with prose a human
     reads: anything that is not exactly the three-word shape is somebody
     else's line and is skipped rather than being an error.
+
+    AND THE IDENTITY SHAPE IS VALIDATED HERE, which is what makes the
+    opacity OURS rather than the far side's to honour. These identities
+    become store keys and reach `watch.log`, so a source that reported a
+    window TITLE instead of a slot would reinstate the very leak the digest
+    exists to avoid. Enforcing the shape on arrival means a buggy or hostile
+    source can withhold an identity and can never inject one.
     """
     out = {}
     for ln in (text or "").splitlines():
         parts = ln.split()
-        if len(parts) == 3 and parts[0] == SOURCE_WINDOW_WORD:
+        if (len(parts) == 3 and parts[0] == SOURCE_WINDOW_WORD
+                and is_chrome_slot(parts[2])):
             out[parts[1]] = parts[2]
     return out
+
+
+# source -> {fingerprint: identity}, as last reported. Filled only by an
+# explicit trigger: `resolution` must stay cheap enough for every event, so
+# it reads this and never asks the far side itself.
+_SOURCE_WINDOWS = {}
+# (source, view id) -> identity, resolved ONCE for the life of that view.
+# Same reason chrome's own `_slot_cache` exists: a title changes constantly
+# and the window behind it does not, so re-deriving per event would make the
+# key as volatile as the string. Dropped on view-unmapped.
+_SOURCE_SLOT = {}
+
+
+def set_source_windows(src, mapping):
+    """Record what a source last said about its own windows."""
+    _SOURCE_WINDOWS[src] = dict(mapping or {})
+
+
+def forget_source_window(vid):
+    """Drop a view's remembered identity. Called on view-unmapped, because a
+    cache that only grows is a leak in a process that runs for weeks."""
+    for k in [k for k in _SOURCE_SLOT if k[1] == vid]:
+        del _SOURCE_SLOT[k]
+
+
+def source_window_identity(src, v):
+    """Which of `src`'s windows this view is, or None.
+
+    STICKY ON SUCCESS, never on failure: a window the source has not
+    reported yet is retried, and one it has is answered the same way for the
+    life of the view even after its title moves on.
+    """
+    vid = v.get("id")
+    if vid is not None and (src, vid) in _SOURCE_SLOT:
+        return _SOURCE_SLOT[(src, vid)]
+    fps = _SOURCE_WINDOWS.get(src) or {}
+    if not fps:
+        return None
+    ident = fps.get(title_fingerprint(v.get("title") or ""))
+    if ident and vid is not None:
+        _SOURCE_SLOT[(src, vid)] = ident
+    return ident
 
 
 def source_window_report(views, windows):
@@ -3433,9 +3553,13 @@ def source_trigger(sources, action, run=None, hook=None, windows=None):
         # traceback or a chatty provider must not turn the log into the
         # problem. stderr is relayed at all because "worked, with a complaint"
         # is a case a bare rc hides.
-        if windows is not None:
-            _w = parse_source_windows(r.stdout)
-            if _w:
+        _w = parse_source_windows(r.stdout)
+        if _w:
+            # RECORDED WHETHER OR NOT THE CALLER ASKED, because the cache is
+            # what `resolution` reads and the caller's interest in the map is
+            # a separate question from the daemon needing it.
+            set_source_windows(src, _w)
+            if windows is not None:
                 windows[src] = _w
         for _stream, _txt, _cap in (("", r.stdout, SOURCE_RELAY_LINES),
                                     ("stderr: ", r.stderr, 4)):

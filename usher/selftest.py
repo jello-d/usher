@@ -660,6 +660,88 @@ def _t_resolution(ck):
             engine.SOURCE_HOOK = _rsh3
             engine._SOURCE_CACHE.clear()
 
+        # ---- THE JOIN, AND ITS STICKINESS -----------------------------
+        # The owner hashes the live title and looks it up in what the account
+        # last reported. Driven with a NAMED source so the window resolves,
+        # which is the only arrangement where a per-window part can appear.
+        _rsh4 = engine.SOURCE_HOOK
+        _hookd = tempfile.mkdtemp(prefix="usher-wsrc-", dir="/var/tmp")
+        try:
+            _hk4 = os.path.join(_hookd, "window-source")
+            with open(_hk4, "w") as f:
+                f.write("#!/bin/sh\nprintf titan\n")
+            os.chmod(_hk4, 0o755)
+            engine.SOURCE_HOOK = _hk4
+            engine._SOURCE_CACHE.clear()
+            engine._SOURCE_WINDOWS.clear()
+            engine._SOURCE_SLOT.clear()
+            _TT = "Quarterly Plan - Google Chrome"
+            _jv = _trv("google-chrome", _TT, pid=1, vid=201)
+            # NO MAP YET: today's behaviour exactly, the source alone.
+            ck("foreign-with-no-report-keys-on-its-source",
+               engine.resolution(_jv).key == "titan")
+            engine.set_source_windows(
+                "titan", {engine.title_fingerprint(_TT): "chrome:win:11"})
+            ck("foreign-with-a-report-keys-per-window",
+               engine.resolution(_jv).key == "titan:chrome:win:11")
+            # STICKY, because a title changes constantly and the window
+            # behind it does not: re-deriving per event would make the key as
+            # volatile as the string, which is the churn this design exists
+            # to avoid. Same reason chrome's own slot cache exists.
+            _jv2 = _trv("google-chrome", "Something Else Entirely",
+                        pid=1, vid=201)
+            ck("a-joined-identity-survives-a-title-change",
+               engine.resolution(_jv2).key == "titan:chrome:win:11")
+            # AND IS DROPPED WITH THE VIEW, or a cache that only grows is a
+            # leak in a process that runs for weeks and a recycled view id
+            # inherits somebody else's identity.
+            engine.forget_source_window(201)
+            ck("a-joined-identity-is-dropped-on-unmap",
+               engine.resolution(_jv2).key == "titan")
+            # A WINDOW THE ACCOUNT DID NOT REPORT falls back rather than
+            # guessing, which is what keeps a partial report safe.
+            ck("an-unreported-window-falls-back-to-its-source",
+               engine.resolution(
+                   _trv("google-chrome", "Never Reported", pid=1,
+                        vid=202)).key == "titan")
+
+            # AND THE SNAPSHOT KEEPS AN OPAQUE KEY while still redacting a
+            # title-shaped one. This is the privacy boundary meeting the new
+            # field: learn() reads `key`, and the title it joins on is
+            # blanked in the same row, so blanking the key unconditionally
+            # would make the per-window identity unreachable.
+            engine._SOURCE_SLOT.clear()
+            engine.set_source_windows(
+                "titan", {engine.title_fingerprint(_TT): "chrome:win:11"})
+
+            class _JoinSock:
+                @staticmethod
+                def list_outputs():
+                    return [{"name": "eDP-1",
+                             "geometry": {"x": 0, "y": 0, "width": 100,
+                                          "height": 100},
+                             "workspace": {"x": 0, "y": 0, "grid_width": 1,
+                                           "grid_height": 1}}]
+
+                @staticmethod
+                def list_views(**_kw):
+                    return [_trv("google-chrome", _TT, pid=1, vid=201)]
+
+            _js = engine.snapshot(_JoinSock)["windows"][0]
+            ck("snapshot-keeps-a-resolved-foreign-key",
+               _js.get("key") == "titan:chrome:win:11")
+            ck("snapshot-still-redacts-the-resolved-windows-title",
+               _js.get("title") == "")
+            ck("a-kept-foreign-key-carries-no-title",
+               not any(w in _js.get("key", "")
+                       for w in ("Quarterly", "Plan", "Chrome")))
+        finally:
+            engine.SOURCE_HOOK = _rsh4
+            engine._SOURCE_CACHE.clear()
+            engine._SOURCE_WINDOWS.clear()
+            engine._SOURCE_SLOT.clear()
+            shutil.rmtree(_hookd, ignore_errors=True)
+
     # match_keys / entry_matches: ONE definition for the five places that ask
     # which stored keys a window may match. A FOREIGN WINDOW MATCHES EXACTLY
     # ONE, its own source's: the app_id-only key means "every window of this
@@ -701,6 +783,55 @@ def _t_resolution(ck):
            {"app_id": "slack", "title": "titan", "appid_only": False},
            "slack", "anything", "titan"))
 
+    # ---- A PER-WINDOW KEY FOR ANOTHER ACCOUNT'S WINDOWS ------------------
+    # `<source>:<identity>`, so the source name is a PREFIX and the key can
+    # never collide with the owner's own `chrome:win:<id>`. The gate is what
+    # stops an arbitrary identity becoming a key that is not this account's.
+    _PW = "titan:chrome:win:11"
+    ck("source-ident-accepts-this-sources-own-key",
+       engine.source_ident("titan", _PW) == _PW)
+    ck("source-ident-refuses-another-sources-key",
+       not engine.source_ident("titan", "other:chrome:win:11"))
+    ck("source-ident-refuses-an-owner-shaped-key",
+       not engine.source_ident("titan", "chrome:win:11"))
+    ck("source-ident-refuses-the-bare-source",
+       not engine.source_ident("titan", "titan"))
+    ck("match-keys-foreign-gets-the-window-then-the-source",
+       engine.match_keys("google-chrome", _PW, "titan")
+       == (engine.kkey("google-chrome", _PW),
+           engine.kkey("google-chrome", "titan")))
+    ck("match-keys-foreign-still-never-offers-the-appid-only-key",
+       engine.kkey("google-chrome", "")
+       not in engine.match_keys("google-chrome", _PW, "titan"))
+    # THE FALLBACK IS WHAT MAKES THIS ADDITIVE: an entry stored under the
+    # source alone is that account's app_id-only key and still claims any of
+    # its windows, so nothing relearns.
+    _pw_e = {"app_id": "google-chrome", "title": _PW, "appid_only": False,
+             "source": "titan"}
+    _sa_e = {"app_id": "google-chrome", "title": "titan",
+             "appid_only": False, "source": "titan"}
+    ck("entry-matches-a-per-window-entry-claims-its-own-window",
+       engine.entry_matches(_pw_e, "google-chrome", _PW, "titan"))
+    ck("entry-matches-a-per-window-entry-refuses-another-window",
+       not engine.entry_matches(_pw_e, "google-chrome",
+                                "titan:chrome:win:22", "titan"))
+    ck("entry-matches-a-source-alone-entry-still-claims-any-of-its-windows",
+       engine.entry_matches(_sa_e, "google-chrome", _PW, "titan"))
+
+    # THE IDENTITY SHAPE IS VALIDATED ON ARRIVAL, which is what makes the
+    # opacity ours rather than the far side's to honour: these become store
+    # keys and reach watch.log, so a source reporting a window TITLE would
+    # reinstate the leak the digest exists to avoid.
+    _fp = engine.title_fingerprint("Offer Letter - Google Chrome")
+    ck("source-window-parse-accepts-a-slot-shaped-identity",
+       engine.parse_source_windows("window %s chrome:win:11" % _fp)
+       == {_fp: "chrome:win:11"})
+    ck("source-window-parse-REFUSES-a-title-as-an-identity",
+       engine.parse_source_windows(
+           "window %s Offer-Letter-Google-Chrome" % _fp) == {})
+    ck("source-window-parse-refuses-an-arbitrary-word",
+       engine.parse_source_windows("window %s titan" % _fp) == {})
+
     # ...AND END TO END ON A REAL FOREIGN PID, needing no stub and no second
     # account: pid 1 is root's, so a view carrying it is genuinely somebody
     # else's on any box this is not run as root on.
@@ -731,6 +862,50 @@ def _t_resolution(ck):
         _ow = dict(_fw, pid=os.getpid(), id=92)
         engine.learn(_kb2, _g2, [_ow], time.time())
         ck("foreign-check-has-a-working-control", bool(_kb2))
+
+        # ---- AND THE HEADLINE: TWO of one account's windows, TWO slots ----
+        # Seven of titan's Chrome windows shared ONE key on manifold, so one
+        # was placed and six landed where Chrome opened them. A fixture with
+        # ONE window would pass whatever the code did, so there are two, and
+        # the assertion is that the store gained TWO distinct keys.
+        #
+        # THE ROWS CARRY `key` ALREADY STAMPED, which is what snapshot() does
+        # while the window is live: the title this identity joins on is
+        # redacted in the row, so learn() must read the stamp rather than
+        # re-derive. That is the whole reason the stamp is kept.
+        _t0 = time.time()
+        _kb3, _g3 = {}, {}
+        _w1 = {"app_id": "google-chrome", "title": "", "source": "titan",
+               "key": "titan:chrome:win:11", "pid": 1, "id": 101,
+               "output": "eDP-1", "workspace": [1, 0], "pos": [10, 10],
+               "size": [100, 100]}
+        _w2 = dict(_w1, key="titan:chrome:win:22", id=102,
+                   workspace=[2, 0], pos=[20, 20])
+        engine.learn(_kb3, _g3, [_w1, _w2], _t0)
+        _tk = sorted(k for k in _kb3 if "titan" in k)
+        ck("two-foreign-windows-get-two-slots", len(_tk) == 2)
+        ck("each-foreign-slot-names-its-own-window",
+           _tk == sorted([engine.kkey("google-chrome", "titan:chrome:win:11"),
+                          engine.kkey("google-chrome",
+                                      "titan:chrome:win:22")]))
+        ck("foreign-slots-keep-their-own-geometry",
+           {tuple(_kb3[k]["workspace"]) for k in _tk} == {(1, 0), (2, 0)})
+        ck("a-foreign-slot-carries-its-source-field",
+           all(_kb3[k].get("source") == "titan" for k in _tk))
+        # AND A KEY THAT IS NOT THIS SOURCE'S IS NEVER STORED, which is the
+        # guard in learn: a stamp naming another account, or an owner-shaped
+        # one, falls back to the source-alone key rather than cross-filing.
+        _kb4, _g4 = {}, {}
+        engine.learn(_kb4, _g4,
+                     [dict(_w1, key="chrome:win:99", id=103)], _t0)
+        ck("a-foreign-window-never-takes-an-owner-shaped-key",
+           list(_kb4) == [engine.kkey("google-chrome", "titan")])
+        # AND WITH NO PER-WINDOW STAMP IT IS TODAY'S BEHAVIOUR EXACTLY, so a
+        # window whose account cannot say which one it is does not regress.
+        _kb5, _g5 = {}, {}
+        engine.learn(_kb5, _g5, [dict(_w1, key="", id=104)], _t0)
+        ck("a-foreign-window-with-no-stamp-keys-on-its-source",
+           list(_kb5) == [engine.kkey("google-chrome", "titan")])
 
         # AND AGAIN WITH AN UNOWNED, SINGLE-WINDOW APP, which is a DIFFERENT
         # PATH THROUGH learn and the one that was actually broken. The check
@@ -3548,6 +3723,26 @@ def _t_relaunch(ck):
                                   hook=_hk, windows=_got_w)
             ck("source-trigger-collects-the-window-map",
                _got_w.get("titan") == _parsed_w)
+            # AND IT FILLS THE CACHE `resolution` READS, which the resolver's
+            # own checks say nothing about: a planted trigger that collected
+            # for its caller and recorded nothing passed the ENTIRE suite,
+            # while in production the daemon would never learn a single
+            # identity and every window would keep the source-alone key.
+            # ASSERTED THROUGH THE CONSUMER rather than by reading the dict,
+            # because comparing the cache to what was parsed would pass just
+            # as happily if something else had filled it.
+            engine._SOURCE_WINDOWS.clear()
+            engine._SOURCE_SLOT.clear()
+            ck("the-cache-starts-empty-so-the-next-check-is-not-vacuous",
+               engine.source_window_identity(
+                   "titan", {"title": _T1, "id": 301}) is None)
+            engine.source_trigger(["titan"], "capture", run=_sr_win,
+                                  hook=_hk)
+            ck("source-trigger-fills-the-cache-resolution-reads",
+               engine.source_window_identity(
+                   "titan", {"title": _T1, "id": 302}) == "chrome:win:11")
+            engine._SOURCE_WINDOWS.clear()
+            engine._SOURCE_SLOT.clear()
             ck("source-trigger-without-the-out-param-still-works",
                engine.source_trigger(["titan"], "capture", run=_sr_win,
                                      hook=_hk) == 1)
