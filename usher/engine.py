@@ -4827,6 +4827,51 @@ def _wind_down_wait(pids):
     return 0
 
 
+def retain_logoff(dest=None):
+    """Keep the snapshot AND the store from the last clean logoff. Returns the
+    files written.
+
+    WHY, MEASURED 2026-11-05: Signal came back on the wrong workspace after a
+    reboot, and the question "what did the store say just before the logoff?"
+    was UNANSWERABLE. The store said ws[2,0] at 15:02 (a prediction proves
+    it) and ws[0,0] when the daemon loaded it at 15:35, the window was at
+    ws[2,0] at 15:34:11 (the ring proves it), and `do_capture` demonstrably
+    learns. So a slot was not updated from the window's last position, and
+    which pass did it cannot be recovered.
+
+    THE FORENSIC RECORD CANNOT SPAN A SESSION BOUNDARY, which is the gap this
+    closes. The history ring is 20 files and covered SEVEN AND A HALF MINUTES
+    on that box; the milestones are daily and do not roll. There is nothing in
+    between, and a logout/login is precisely where this package's failures
+    live: four of the incidents in its notes are "what did this look like
+    before the login", asked after the ring had rolled.
+
+    ONE GENERATION, overwritten each logoff, so it is bounded: two files, and
+    it answers the only question that needs the pair (the store and the screen
+    at the same instant, before anything tore down).
+
+    NO NEW DISCLOSURE SURFACE, which has to be said because a copy of a
+    redaction has been the leak three times here. Both sources are ALREADY
+    redacted at the point they are written: `snapshot()` blanks a foreign
+    window's title and `learn()` its label. This copies them as they are and
+    adds nothing, which `test/selftest` asserts rather than assumes.
+    """
+    d = dest or os.path.join(STATE, "logoff")
+    os.makedirs(d, exist_ok=True)
+    wrote = []
+    snap = os.path.join(STATE, "current.json")
+    if os.path.exists(snap):
+        shutil.copy2(snap, os.path.join(d, "current.json"))
+        wrote.append(os.path.join(d, "current.json"))
+    # THE STORE THAT IS LOADED, by name, so the pair describes ONE desk. A
+    # glob would copy every profile and the question is about this one.
+    kbf = kb_path()
+    if os.path.exists(kbf):
+        shutil.copy2(kbf, os.path.join(d, os.path.basename(kbf)))
+        wrote.append(os.path.join(d, os.path.basename(kbf)))
+    return wrote
+
+
 def do_wind_down():
     """Bring the session to a clean stop: capture, stand down, let go.
 
@@ -4856,6 +4901,13 @@ def do_wind_down():
         _announce("usher: wind-down captured %d window(s) with the session "
                   "still intact"
                   % len((load_snapshot() or {}).get("windows", [])))
+        # AND KEPT, because the ring cannot reach back this far from the next
+        # login. Inside the same `try` deliberately: this is a diagnostic
+        # convenience and must never be the reason a machine will not go down.
+        _kept = retain_logoff()
+        _announce("usher: kept the pre-logoff snapshot and store (%d file(s)) "
+                  "so the next login can be compared against it"
+                  % len(_kept))
     except Exception as e:
         _announce(f"usher: CAPTURE FAILED, winding down anyway: {e}")
     # STEP 1 NOW REACHES ACROSS ACCOUNTS, and the order is the same feature it
