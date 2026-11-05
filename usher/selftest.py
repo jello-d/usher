@@ -3479,6 +3479,81 @@ def _t_roster(ck):
        [r[0] for r in _seam([], False, [], "")] == ["WARN", ""]
        and _seam([], False, [], "no roster") == [])
 
+    # ---- THE PRE-LOGOFF PAIR, which closes a FORENSIC gap -------------
+    # MEASURED 2026-11-05: Signal came back on the wrong workspace and the
+    # question "what did the store say just before the logoff?" could not be
+    # answered. The history ring is 20 files and covered SEVEN AND A HALF
+    # MINUTES on that box, and the milestones are daily, so nothing spans a
+    # session boundary, which is exactly where this package's failures live.
+    _rs = engine.STATE
+    try:
+        with tempfile.TemporaryDirectory() as _d:
+            engine.STATE = _d
+            # A FOREIGN WINDOW IN THE FIXTURE, because the invariant that
+            # matters is not that the copy exists but that it adds no
+            # disclosure: `snapshot()` blanks a foreign title and `learn()`
+            # its label, and this must copy them AS THEY ARE. A copy of a
+            # redaction has been the leak three times here.
+            json.dump({"time": 1, "windows": [
+                {"app_id": "google-chrome", "title": "", "source": "titan",
+                 "key": "titan:chrome:win:1", "workspace": [1, 0]},
+                {"app_id": "signal", "title": "Signal", "workspace": [2, 0]}]},
+                open(os.path.join(_d, "current.json"), "w"))
+            _kbf = engine.kb_path()
+            json.dump({engine.kkey("signal", ""): {"workspace": [2, 0]}},
+                      open(_kbf, "w"))
+
+            _dst = os.path.join(_d, "logoff")
+            _w1 = engine.retain_logoff(_dst)
+            ck("logoff-retains-the-snapshot",
+               os.path.exists(os.path.join(_dst, "current.json")))
+            ck("logoff-retains-the-loaded-store",
+               os.path.exists(os.path.join(_dst,
+                                           os.path.basename(_kbf))))
+            ck("logoff-retains-exactly-the-pair", len(_w1) == 2)
+            # ONE GENERATION, so it is bounded: a second logoff overwrites
+            # rather than accumulating a file per session forever.
+            _w2 = engine.retain_logoff(_dst)
+            ck("logoff-keeps-one-generation",
+               len(os.listdir(_dst)) == 2 and len(_w2) == 2)
+            # THE REDACTION SURVIVES THE COPY, asserted rather than assumed.
+            _got = json.load(open(os.path.join(_dst, "current.json")))
+            _fw = [w for w in _got["windows"] if w.get("source")]
+            ck("logoff-copy-has-a-foreign-window-at-all", len(_fw) == 1)
+            ck("logoff-copy-carries-no-foreign-title",
+               all(not w.get("title") for w in _fw))
+            ck("logoff-copy-keeps-our-own-title",
+               any(w.get("title") == "Signal" for w in _got["windows"]))
+
+        # NOTHING TO COPY IS NOT A FAILURE: a wind-down whose capture refused
+        # has no snapshot, and this must not raise on the path whose whole
+        # doctrine is that usher is never the reason a machine will not go
+        # down.
+        with tempfile.TemporaryDirectory() as _d2:
+            engine.STATE = _d2
+            try:
+                _w3 = engine.retain_logoff(os.path.join(_d2, "logoff"))
+                _ok = _w3 == []
+            except Exception:                           # noqa: BLE001
+                _ok = False
+            ck("logoff-with-nothing-to-copy-is-not-a-failure", _ok)
+    finally:
+        engine.STATE = _rs
+
+    # AND THE WIRING, because the helper's own checks say nothing about
+    # whether wind-down calls it: the fourth instance of that hole here.
+    _wd = inspect.getsource(engine.do_wind_down)
+    ck("wind-down-retains-the-pair", "retain_logoff()" in _wd)
+    # INSIDE THE CAPTURE'S `try`, so a retention failure can never strand
+    # somebody at a machine that will not shut down. GUARDED, because a plant
+    # that removes the call turns a bare `.index()` into a ValueError that
+    # aborts the area: a named failure beats a raise, which is this file's own
+    # rule and which I broke writing the check for it.
+    _i_ret = _wd.find("retain_logoff()")
+    _i_exc = _wd.find("except Exception")
+    ck("wind-down-retention-cannot-stop-a-reboot",
+       _i_ret >= 0 and _i_exc >= 0 and _i_ret < _i_exc)
+
     # THE VERBS, with the wayland client and the spawn both stubbed.
     real_list = toplevels.list_toplevels
     real_state = engine.STATE
