@@ -46,6 +46,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections import Counter
 from datetime import date
@@ -833,6 +834,16 @@ def _t_resolution(ck):
             ck("a-kept-foreign-key-carries-no-title",
                not any(w in _js.get("key", "")
                        for w in ("Quarterly", "Plan", "Chrome")))
+            # AND THE COMPOSITOR'S IDENTIFIER IS RECORDED, which is what lets
+            # the DAEMON relay this window's pid: the refresh runs off a
+            # snapshot rather than a live view list, so without the field the
+            # pid has no handle the far side can join on and the relay works
+            # at logoff and never during a session.
+            ck("snapshot-records-the-compositors-identifier",
+               _js.get("identifier") == _TL1)
+            ck("the-recorded-identifier-is-what-the-pid-relay-reads",
+               engine.source_pid_lines([_js], "titan")
+               == ["pid %s %d" % (_TL1, _js["pid"])])
 
             # ---- THE RE-KEY ACROSS THAT ACCOUNT'S BROWSER RESTART --------
             # A SessionID is per browser RUN, so at a login every per-window
@@ -1288,7 +1299,7 @@ def _t_resolution(ck):
                     [{"app_id": "google-chrome", "title": "T"}], "")
                 engine.source_rekey_lines = lambda: [
                     "rekey %s %s" % (_D11, _D91)]
-                engine.source_window_lines = lambda _r: []
+                engine.source_window_lines = lambda _r, *_a, **_k: []
                 engine.save_roster = lambda *_a, **_k: None
                 with contextlib.redirect_stdout(_cap_out):
                     _rc_cap = engine.do_source_capture()
@@ -1309,7 +1320,7 @@ def _t_resolution(ck):
                 engine.toplevels.list_toplevels = lambda: (
                     [{"app_id": "google-chrome", "title": "T"}], "")
                 engine.source_rekey_lines = _raiser
-                engine.source_window_lines = lambda _r: []
+                engine.source_window_lines = lambda _r, *_a, **_k: []
                 engine.save_roster = lambda *_a, **_k: None
                 # STDERR TOO: the non-fatal path reports there by design,
                 # and the suite's own output is not the place for it.
@@ -1403,7 +1414,10 @@ def _t_resolution(ck):
             _r_sk, _r_pe = _word.save_knowledge, _word.persist
             _r_tr = engine.source_trigger
 
+            _ord_views = []
+
             def _ord_trigger(sources, action, **_k):
+                _ord_views.append(_k.get("views"))
                 for s in sources:
                     engine.set_source_windows(
                         s, {_TL2: engine.identity_digest("chrome:win:77")})
@@ -1437,6 +1451,16 @@ def _t_resolution(ck):
                 "titan:" + engine.identity_digest("chrome:win:77"))
             ck("a-refresh-is-spent-on-the-SAME-capture-pass",
                sorted(_wo.kb) == [_PWK])
+            # AND THE REFRESH SENDS THE PIDS WITH THE QUESTION. The WIRING,
+            # which `source_pid_lines` own checks say nothing about: the
+            # snapshot rows carry both halves, and that is the only reason
+            # the relay can happen on the capture thread without a second
+            # round trip to the compositor. Asserted as the LINES the far
+            # side would receive, not as the argument, because passing the
+            # wrong row shape is the way this fails.
+            ck("the-refresh-relays-this-sources-pids",
+               _ord_views and engine.source_pid_lines(
+                   _ord_views[-1] or [], "titan") == ["pid %s 1" % _TL2])
             ck("the-ordering-pass-did-not-store-the-source-alone-key",
                engine.kkey("google-chrome", "titan") not in _wo.kb)
             # AND IT REACHED THE SAVE, or the two above could pass over a
@@ -3735,6 +3759,113 @@ def _t_roster(ck):
             ck("capture-a-smaller-desk-replaces-the-roster",
                engine.load_roster()[0] == ["slack"])
 
+            # ---- THE RELAYED PIDS REACH THE REPORTER --------------------
+            # The WIRING, which `parse_source_pids` own checks say nothing
+            # about: a capture that parses stdin and then never passes the
+            # map would leave every /proc-derived identity computed against
+            # -1, with the whole relay inert and every pure check passing.
+            _TLP = "abcdef0123456789"
+            _got_pids = []
+            _r_swl, _r_rs = engine.source_window_lines, engine._read_stdin
+            try:
+                toplevels.list_toplevels = lambda *a, **k: (
+                    [{"app_id": "kitty", "title": "t",
+                      "identifier": _TLP}], "")
+                engine._read_stdin = lambda *_a: (
+                    "pid %s %d\n" % (_TLP, os.getpid()))
+
+                def _swl(rows_, pids=None, **_k):
+                    _got_pids.append(dict(pids or {}))
+                    return []
+
+                engine.source_window_lines = _swl
+                _capture_out(engine.do_source_capture)
+            finally:
+                engine.source_window_lines = _r_swl
+                engine._read_stdin = _r_rs
+            ck("capture-passes-the-relayed-pids-to-the-reporter",
+               _got_pids == [{_TLP: os.getpid()}])
+            # AND A PID THAT IS NOT OURS IS REFUSED AND SAID OUT LOUD.
+            # COUNTED rather than per window, because the state that causes
+            # it (a proxy, or a pid namespace) causes it for every window at
+            # once, and saying nothing would leave a silently reduced
+            # capture: this package's most repeated failure shape.
+            _got_pids.clear()
+            _buf_p = io.StringIO()
+            try:
+                engine._read_stdin = lambda *_a: (
+                    "pid %s 1\npid %s %d\n"
+                    % (_TLP, "99" + _TLP[2:], os.getpid()))
+                engine.source_window_lines = _swl
+                with contextlib.redirect_stderr(_buf_p):
+                    _capture_out(engine.do_source_capture)
+            finally:
+                engine.source_window_lines = _r_swl
+                engine._read_stdin = _r_rs
+            ck("capture-drops-a-pid-that-is-not-this-accounts",
+               _got_pids == [{"99" + _TLP[2:]: os.getpid()}])
+            ck("capture-says-how-many-relayed-pids-it-refused",
+               "1 of 2 relayed pid(s)" in _buf_p.getvalue())
+            # AND SAYS NOTHING WHEN THEY ARE ALL OURS, or a line fires at
+            # every capture on a working box and then gets ignored.
+            _buf_q = io.StringIO()
+            try:
+                engine._read_stdin = lambda *_a: (
+                    "pid %s %d\n" % (_TLP, os.getpid()))
+                engine.source_window_lines = _swl
+                with contextlib.redirect_stderr(_buf_q):
+                    _capture_out(engine.do_source_capture)
+            finally:
+                engine.source_window_lines = _r_swl
+                engine._read_stdin = _r_rs
+            ck("capture-is-quiet-when-every-relayed-pid-is-ours",
+               "relayed pid(s)" not in _buf_q.getvalue())
+            toplevels.list_toplevels = lambda *a, **k: ([rows[1]], "")
+
+            # ---- AND THE READ CANNOT BLOCK ------------------------------
+            # A plain read() returns at once on the relay's closed pipe and
+            # HANGS FOR EVER on an inherited one nobody will close, which is
+            # what a miswired shim or a hand-run from a pipeline gives it.
+            # The owner's own 30s timeout would mask that as a refused
+            # trigger with no cause; from a terminal there is no bound.
+            # DRIVEN ON A THREAD, because the thing under test is whether
+            # it RETURNS: called inline, a blocking implementation hangs the
+            # whole suite and reports nothing, which is a plant caught in the
+            # one way a check cannot see. Measured: restoring the plain
+            # `read()` ran the suite past 400 seconds with no verdict.
+            _rd, _wr = os.pipe()
+            _r_in = sys.stdin
+            _res_in = {}
+
+            def _rd_call():
+                try:
+                    _res_in["txt"] = engine._read_stdin(0.3)
+                except Exception as _e:                    # noqa: BLE001
+                    _res_in["err"] = _e
+
+            try:
+                os.write(_wr, b"pid %s 7\n" % _TLP.encode())
+                sys.stdin = os.fdopen(_rd, "r")
+                _th = threading.Thread(target=_rd_call, daemon=True)
+                _t0 = time.time()
+                _th.start()
+                _th.join(5.0)
+                _el = time.time() - _t0
+                _alive = _th.is_alive()      # the writer stays OPEN
+            finally:
+                sys.stdin = _r_in
+                try:
+                    os.close(_wr)            # releases a blocked reader
+                except OSError:
+                    pass
+            ck("read-stdin-returns-on-an-open-pipe-rather-than-blocking",
+               not _alive)
+            ck("read-stdin-keeps-what-was-already-written",
+               engine.parse_source_pids(_res_in.get("txt") or "")
+               == {_TLP: 7})
+            ck("read-stdin-waited-for-the-deadline-it-was-given",
+               _alive or 0.25 <= _el < 3.0)
+
         with tempfile.TemporaryDirectory() as d:
             engine.STATE = d
             spawned = []
@@ -4619,9 +4750,18 @@ def _t_relaunch(ck):
                 {"app_id": "google-chrome", "title": _T1},   # NO identifier
             ]
             _ids_w = {_T1: "chrome:win:11", _T2: "chrome:win:22"}
-            _lines_w = engine.source_window_lines(
-                _rows_w, resolve=_ids_w.get,
-                chrome_test=lambda a: a == "google-chrome")
+            # THE SEAM IS `_single_id` NOW, which takes a VIEW rather than a
+            # title: that is what makes this generic, since a terminal's
+            # identity is its cwd or its mux command and neither is in any
+            # window protocol. The stub stands in for it and keeps the app
+            # gate, which in production is structural (a plugin is only ever
+            # asked about windows it owns).
+            def _res_w(v):
+                if v.get("app-id") != "google-chrome":
+                    return None
+                return _ids_w.get(v.get("title") or "")
+
+            _lines_w = engine.source_window_lines(_rows_w, resolve=_res_w)
             ck("source-window-reports-one-line-per-resolved-window",
                len(_lines_w) == 2)
             # A ROW WITH NO IDENTIFIER IS SKIPPED, not guessed at: the last
@@ -4788,6 +4928,132 @@ def _t_relaunch(ck):
                engine.source_trigger(["titan"], "capture", run=_sr_ok,
                                      hook=_hk) == 1
                and _asked_sr[-1] == [_hk, "titan", "capture"])
+
+            # ---- THE PID RELAY ------------------------------------------
+            # THE ONE FACT THE ACCOUNT CANNOT HAVE. Its only window protocol
+            # carries no pid, so it cannot map one of its OWN toplevels to
+            # one of its OWN processes, and a terminal's identity (a cwd, a
+            # mux command) lives nowhere else.
+            _pv_a = dict(_trv("kitty", "x", pid=4242, vid=11, tlid=_TL1),
+                         **{"source": "titan"})
+            _pv_b = dict(_trv("kitty", "y", pid=4243, vid=12, tlid=_TL2),
+                         **{"source": "other"})
+            _pv_c = _trv("kitty", "mine", pid=4244, vid=13)   # the OWNER's
+            _pv_d = dict(_trv("kitty", "z", pid=0, vid=14, tlid="99aabbccdd11"),
+                         **{"source": "titan"})               # no usable pid
+            _pv_e = dict(_trv("kitty", "w", pid=4245, vid=15),
+                         **{"source": "titan"})                # no identifier
+            _pl = engine.source_pid_lines(
+                [_pv_a, _pv_b, _pv_c, _pv_d, _pv_e], "titan")
+            ck("source-pid-lines-name-this-sources-windows-only",
+               _pl == ["pid %s 4242" % _TL1])
+            ck("source-pid-line-is-three-words",
+               all(len(ln.split()) == 3
+                   and ln.split()[0] == engine.SOURCE_PID_WORD
+                   for ln in _pl))
+            # A SNAPSHOT ROW IS THE OTHER SHAPE, and it is the one the DAEMON
+            # has: the refresh runs off a snapshot rather than a live view
+            # list, so reading only `security-context` would make the relay
+            # work at logoff and never during a session.
+            ck("source-pid-lines-read-a-snapshot-rows-identifier",
+               engine.source_pid_lines(
+                   [{"app_id": "kitty", "title": "x", "pid": 4242,
+                     "source": "titan", "identifier": _TL1}], "titan")
+               == ["pid %s 4242" % _TL1])
+            # ARRIVAL IS VALIDATED IN THIS DIRECTION TOO, because these pids
+            # are about to be used to read /proc.
+            ck("parse-source-pids-keeps-the-shape",
+               engine.parse_source_pids(
+                   "usher: prose\npid %s 4242\npid %s 7\n" % (_TL1, _TL2))
+               == {_TL1: 4242, _TL2: 7})
+            ck("parse-source-pids-refuses-a-non-numeric-pid",
+               engine.parse_source_pids("pid %s notanumber" % _TL1) == {})
+            ck("parse-source-pids-refuses-a-non-positive-pid",
+               engine.parse_source_pids("pid %s 0" % _TL1) == {}
+               and engine.parse_source_pids("pid %s -3" % _TL1) == {})
+            ck("parse-source-pids-refuses-a-junk-identifier",
+               engine.parse_source_pids("pid not-hex 4242") == {})
+            ck("parse-source-pids-ignores-prose-on-the-same-channel",
+               engine.parse_source_pids(
+                   "placed kitty eDP-1 | [titan]\n"
+                   "pid line too long here") == {})
+            # IS IT OURS. A proxy or a pid namespace between the app and the
+            # compositor turns every relayed pid foreign, and the account
+            # must refuse loudly rather than read somebody else's process.
+            ck("own-pid-says-yes-to-our-own-process",
+               engine.own_pid(os.getpid()))
+            ck("own-pid-says-no-to-root",
+               engine.own_pid(os.getpid(), uid=os.geteuid() + 1) is False)
+            ck("own-pid-says-no-to-a-dead-pid",
+               engine.own_pid(4000000) is False)
+            # AND THE REPORTER REFUSES A PID THAT IS NOT OURS, which is what
+            # makes the check above load-bearing rather than decorative.
+            _seen_res = []
+
+            def _res_pid(v):
+                _seen_res.append(v.get("pid"))
+                return "kitty:/home/x"
+
+            _rows_p = [{"app_id": "kitty", "title": "t",
+                        "identifier": _TL1}]
+            ck("source-window-lines-resolve-a-pid-that-is-ours",
+               len(engine.source_window_lines(
+                   _rows_p, {_TL1: os.getpid()}, resolve=_res_pid)) == 1)
+            _seen_res.clear()
+            ck("source-window-lines-refuse-a-pid-that-is-not-ours",
+               engine.source_window_lines(
+                   _rows_p, {_TL1: os.getpid()}, resolve=_res_pid,
+                   uid=os.geteuid() + 1) == []
+               and not _seen_res)
+            # AND THE PID REACHES THE RESOLVER, or every /proc-derived
+            # identity is computed against -1 and the whole relay is inert
+            # while every check above still passes.
+            _seen_res.clear()
+            engine.source_window_lines(_rows_p, {_TL1: os.getpid()},
+                                       resolve=_res_pid)
+            ck("source-window-lines-hand-the-relayed-pid-to-the-resolver",
+               _seen_res == [os.getpid()])
+            # THE DEFAULT SEAM IS THE REAL DISPATCH, which is what makes this
+            # generic: an app NO plugin owns reports nothing, because one
+            # window of it is already fully keyed by app-id plus the account
+            # name and a title-derived part would move with the title.
+            ck("source-window-lines-report-nothing-for-an-unowned-app",
+               engine.source_window_lines(
+                   [{"app_id": "spotify", "title": "Some Song",
+                     "identifier": _TL1}]) == [])
+            # AND THE TRIGGER SENDS THEM ON STDIN, not in the argv: the
+            # arity is exactly three words, which is what lets the
+            # integrator's sudoers rule name a FIXED command with no
+            # wildcard, and a wildcard there is execution as the account.
+            _sent_in = []
+
+            def _sr_in(argv, **kw):
+                _sent_in.append((list(argv), kw.get("input")))
+
+                class R:
+                    returncode = 0
+                    stderr = ""
+                    stdout = ""
+                return R()
+
+            engine.source_trigger(["titan"], "capture", run=_sr_in,
+                                  hook=_hk, views=[_pv_a, _pv_b])
+            ck("source-trigger-sends-the-pids-on-stdin",
+               _sent_in[-1][1] == "pid %s 4242\n" % _TL1)
+            ck("source-trigger-keeps-the-argv-at-three-words",
+               _sent_in[-1][0] == [_hk, "titan", "capture"])
+            # A CLOSED STDIN EVEN WITH NOTHING TO SAY, or a far side that
+            # reads stdin inherits OURS and blocks the capture loop.
+            _sent_in.clear()
+            engine.source_trigger(["titan"], "capture", run=_sr_in,
+                                  hook=_hk, views=[])
+            ck("source-trigger-closes-stdin-with-no-pids-to-send",
+               _sent_in[-1][1] == "")
+            _sent_in.clear()
+            engine.source_trigger(["titan"], "capture", run=_sr_in,
+                                  hook=_hk)
+            ck("source-trigger-without-views-still-closes-stdin",
+               _sent_in[-1][1] == "")
 
             # A REFUSAL IS REPORTED AND NOT COUNTED.
             def _sr_no(argv, **_k):
