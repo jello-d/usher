@@ -2232,6 +2232,18 @@ def kkey(app_id, title):
     return f"{app_id}\x00{title}"
 
 
+def matched_key(kb, app, ident, src=""):
+    """The store key this window matches, or the fallback it would take. PURE.
+
+    ONE DEFINITION, because three places were choosing it independently (the
+    placer's slot ledger, doctor's collision count, and now the learn gate)
+    and this package's silent failures all start with two sites disagreeing
+    about what a window's key is.
+    """
+    ks = match_keys(app, ident, src)
+    return next((k for k in ks if kb.get(k)), ks[-1])
+
+
 def source_per_window_slots(kb, app, src):
     """How many PER-WINDOW slots the store holds for this source's app. PURE.
 
