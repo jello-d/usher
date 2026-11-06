@@ -34,8 +34,6 @@ those are constants and functions that are never rebound.
 """
 import ast
 import contextlib
-import glob
-import hashlib
 import inspect
 import io
 import json
@@ -174,6 +172,23 @@ def _tmw(cmd=None, key="term:resume", size=None):
 def _tv(app, title="", pid=-1):
     """A NORMALIZED view, shaped as a plugin hook receives one (see pview)."""
     return {"app": app, "title": title, "pid": pid}
+
+def _under_root(path, root):
+    """Is `path` inside `root`? PURE.
+
+    A COMPONENT TEST, not a string prefix: `<root>-other/x` starts with the
+    root's characters and is a different directory.
+    """
+    a, b = os.path.abspath(path), os.path.abspath(root)
+    return a.startswith(b + os.sep)
+
+
+def _raise_it(*_a, **_k):
+    """A seam that fails. Named, so a check asserting a
+    plugin's raise costs one row rather than the run can say
+    so in one word."""
+    raise RuntimeError("this seam is broken")
+
 
 def _trv(app, title="", pid=-1, vid=None, tlid=None):
     """A RAW view, shaped as the compositor reports one. Not interchangeable
@@ -1128,6 +1143,25 @@ def _t_resolution(ck):
             ck("roster-claimed-an-owner-that-started-it-keeps-its-claim",
                engine.roster_claimed(["kitty"], {_kp: {"kitty"}}, _reg)
                == {"kitty"})
+            # A NON-OWNER THAT STARTED IT COUNTS, which is a PRODUCT bug the
+            # end-to-end terminal check found: the owner of a bare
+            # `{kitty, "", -1}` view is always KittyPlugin, because MuxPlugin
+            # claims a kitty by its TITLE, so the plugin that actually put
+            # two mux terminals back was never the one asked and the default
+            # went on to start a THIRD kitty as a bare shell at $HOME.
+            _mp = next((p for p in engine.plugins()
+                        if getattr(p, "name", "") == "mux"), None)
+            ck("roster-claimed-finds-the-mux-plugin", _mp is not None)
+            ck("roster-claimed-counts-a-NON-owners-report",
+               engine.roster_claimed(
+                   ["kitty"], {_mp: {"kitty"}, _kp: set()}, _reg)
+               == {"kitty"})
+            # AND THE OWNER DECLINING IS STILL THE DEFAULT'S CHANCE when
+            # nobody else started it, or the terminal bug comes straight
+            # back for every app with one plugin.
+            ck("roster-claimed-nobody-started-it-leaves-it-to-the-default",
+               engine.roster_claimed(
+                   ["kitty"], {_mp: set(), _kp: set()}, _reg) == set())
             ck("roster-claimed-an-owner-that-declined-releases-it",
                engine.roster_claimed(["kitty"], {_kp: set()}, _reg) == set())
             # A RAISE IS NOT A DECLINE: the plugin may have started some of
@@ -3440,6 +3474,40 @@ def _t_roster(ck):
     ck("roster-plan-ignores-blanks",
        engine.roster_plan(["a", ""], ["", "z"]) == ["a"])
 
+    # ---- THE PER-WINDOW ROWS, which is what brings a TERMINAL back ------
+    # THE BUG THE USER REPORTED: an app-id alone resolves to a bare shell at
+    # $HOME, so the account's terminals came back having forgotten both their
+    # directory and the mux session they were showing. A row carries the
+    # subset of a snapshot row the relaunchers already read.
+    ck("roster-saved-prefers-a-window-row-over-an-app-id",
+       engine.roster_saved(
+           ["kitty", "slack"], [],
+           [{"app_id": "kitty", "key": "term:resume",
+             "cmd": "mux resume"}])
+       == [{"app_id": "kitty", "key": "term:resume", "cmd": "mux resume"},
+           {"app_id": "slack"}])
+    # TWO ROWS FOR ONE APP STAY TWO, which is the whole point for terminals:
+    # the relaunchers count per COMMAND, so collapsing them to one app-id
+    # would bring back one of two windows.
+    ck("roster-saved-keeps-one-row-per-window",
+       len(engine.roster_saved(
+           ["kitty"], ["kitty"],
+           [{"app_id": "kitty", "key": "term:resume", "cmd": "mux resume"},
+            {"app_id": "kitty", "key": "term:latch b:s",
+             "cmd": "mux latch b:s"}])) == 2)
+    # AND A WINDOW ROW IS NOT FILTERED BY LIVENESS while an app-id row is:
+    # "kitty is running" cannot answer "which of my two terminals is up", and
+    # the relaunchers ask the sharper question themselves.
+    ck("roster-saved-app-id-rows-drop-when-the-app-is-up",
+       engine.roster_saved(["slack"], ["slack"], []) == [])
+    ck("roster-saved-window-rows-survive-their-app-being-up",
+       engine.roster_saved(
+           ["kitty"], ["kitty"],
+           [{"app_id": "kitty", "key": "term:resume", "cmd": "mux resume"}])
+       == [{"app_id": "kitty", "key": "term:resume", "cmd": "mux resume"}])
+    ck("roster-saved-with-nothing-to-do-is-empty",
+       engine.roster_saved([], [], []) == [])
+
     with tempfile.TemporaryDirectory() as d:
         p = os.path.join(d, "state", "roster.json")
         ck("roster-round-trips-sorted-and-deduped",
@@ -3483,6 +3551,133 @@ def _t_roster(ck):
             '{"version": 1, "apps": ["b", "", "a", 7, "a", null]}')
         ck("roster-normalises-what-it-reads-off-disk",
            engine.load_roster(raw) == (["a", "b"], ""))
+
+        # ---- AND THE PER-WINDOW ROWS, ON DISK ----------------------------
+        wp = os.path.join(d, "win.json")
+        _wsaved = engine.save_roster(
+            ["kitty", "slack"], path=wp,
+            windows=[{"app_id": "kitty", "key": "term:latch b:s",
+                      "cmd": "mux latch b:s"},
+                     {"app_id": "kitty", "key": "kitty:/tmp", "cmd": None},
+                     {"app_id": "slack", "key": ""}])   # no key, no row
+        ck("roster-still-writes-the-app-list", _wsaved == ["kitty", "slack"])
+        ck("roster-writes-a-row-per-describable-window",
+           engine.roster_windows(wp)
+           == [{"app_id": "kitty", "key": "term:latch b:s",
+                "cmd": "mux latch b:s"},
+               {"app_id": "kitty", "key": "kitty:/tmp", "cmd": None}])
+        # ADDITIVE, so no version bump and nothing relearns: a roster written
+        # before this existed reads exactly as it did, and a bump would cost
+        # one login where this account's desk does not come back at all.
+        ck("an-older-roster-has-no-window-rows-and-is-not-an-error",
+           engine.roster_windows(p) == []
+           and engine.load_roster(p)[1] == "")
+        ck("no-window-rows-means-the-key-is-absent-rather-than-empty",
+           "windows" not in json.load(open(p)))
+        # A TITLE MUST NEVER REAPPEAR HERE. It is redacted in the snapshot,
+        # in the log and in every report, and a roster row is one more place
+        # it could come back under another name.
+        # THE COUNT IS PART OF THE ASSERTION, not a separate check: `all()`
+        # over an empty list is True, so a missing `windows` key would pass
+        # this silently and a sentinel fallback was merely redundant with
+        # the row-count check above. A plant removing that sentinel was
+        # UNCATCHABLE, which is this file's own signal for dead code.
+        _wblob = json.load(open(wp)).get("windows") or []
+        ck("a-roster-row-carries-no-title-field",
+           len(_wblob) == 2
+           and all(set(r) == {"app_id", "key", "cmd"} for r in _wblob))
+        # A HAND-WRITTEN FILE, which is the case the filter is for: fed only
+        # its own writer's output it tests nothing, and that exact hole let a
+        # plant through once already.
+        rawin = os.path.join(d, "rawin.json")
+        open(rawin, "w").write(
+            '{"version": 1, "apps": ["kitty"], "windows": ['
+            '"not-a-dict", '
+            '{"app_id": "kitty"}, '                      # no key
+            '{"key": "term:resume"}, '                   # no app_id
+            '{"app_id": "kitty", "key": "k", "cmd": ["a", "b"]}, '
+            '{"app_id": "kitty", "key": "k2", "cmd": ""}, '
+            '{"app_id": "kitty", "key": "term:resume", "cmd": null}]}')
+        ck("roster-windows-normalises-what-it-reads-off-disk",
+           engine.roster_windows(rawin)
+           == [{"app_id": "kitty", "key": "term:resume", "cmd": None}])
+        ck("roster-windows-is-empty-when-the-file-cannot-be-read",
+           engine.roster_windows(bad) == []
+           and engine.roster_windows(os.path.join(d, "none.json")) == [])
+
+    # ---- END TO END: THE ACCOUNT'S TERMINALS COME BACK ------------------
+    # THE USER'S REPORT, driven through the REAL `roster_launch` because the
+    # whole fault was the interaction between a roster row and the plugins:
+    # each half read correctly on its own. BOTH terminal spawns are stubbed,
+    # since this path is what opened 16 real kitty windows on a live desktop
+    # once already.
+    _rt_cmds, _rt_kitty, _rt_desk = [], [], []
+    _r_st, _r_sk2 = engine.spawn_term, engine._spawn_kitty
+    _r_de2, _r_an2 = engine.desktop_entries, engine._announce
+    try:
+        engine.spawn_term = lambda cmd, size=None: (
+            _rt_cmds.append(cmd) or True)
+        engine._spawn_kitty = lambda cwd, size=None: _rt_kitty.append(cwd)
+        engine.desktop_entries = lambda *_a, **_k: {
+            "kitty": {"exec": "kitty", "type": "Application"},
+            "slack": {"exec": "/usr/bin/slack", "type": "Application"}}
+        engine._announce = lambda *_a, **_k: None
+        _n_e2e = engine.roster_launch(
+            ["kitty", "slack"], [], spawn=_rt_desk.append,
+            windows=[{"app_id": "kitty", "key": "term:latch box:work",
+                      "cmd": "mux latch box:work"},
+                     {"app_id": "kitty", "key": "term:resume",
+                      "cmd": "mux resume"}])
+    finally:
+        engine.spawn_term, engine._spawn_kitty = _r_st, _r_sk2
+        engine.desktop_entries, engine._announce = _r_de2, _r_an2
+    ck("a-remembered-mux-latch-comes-back-as-its-own-command",
+       "mux latch box:work" in _rt_cmds)
+    ck("a-remembered-local-mux-comes-back-too",
+       "mux resume" in _rt_cmds)
+    # AND NOT AS A BARE SHELL, which is exactly what it used to do: the
+    # registry default resolved `kitty.desktop` and started a shell at $HOME,
+    # forgetting the directory and the session the window was showing.
+    ck("a-remembered-terminal-is-not-started-from-the-registry",
+       not any(argv and argv[0] == "kitty" for argv in _rt_desk))
+    ck("an-unowned-app-beside-it-still-starts-from-the-registry",
+       any(argv and argv[0] == "/usr/bin/slack" for argv in _rt_desk))
+    ck("roster-launch-counts-the-terminals-and-the-app",
+       _n_e2e == 2)
+    # TWO TERMINALS MEANS TWO SPAWNS, which is the per-COMMAND counting the
+    # app-id path cannot express: one `kitty` app-id would have brought back
+    # one of the two windows.
+    ck("two-remembered-terminals-are-two-spawns", len(_rt_cmds) == 2)
+
+    # AND `source_roster_rows` IS WHERE THE ROWS COME FROM, over this
+    # account's own /proc, through the same seams the identity uses.
+    _srr = engine.source_roster_rows(
+        [{"app_id": "kitty", "title": "t", "identifier": "aabbccdd1122"},
+         {"app_id": "kitty", "title": "u", "identifier": "bbccddee2233"},
+         {"app_id": "kitty", "title": "v", "identifier": "ccddeeff3344"},
+         {"app_id": "kitty", "title": "w"}],          # no identifier
+        resolve=lambda v: {"t": "term:latch b:s", "u": "kitty:/tmp"}.get(
+            v["title"]),
+        cmd_of=lambda v: "mux latch b:s" if v["title"] == "t" else None)
+    ck("source-roster-rows-carry-the-key-and-the-command",
+       _srr == [{"app_id": "kitty", "key": "term:latch b:s",
+                 "cmd": "mux latch b:s"},
+                {"app_id": "kitty", "key": "kitty:/tmp", "cmd": None}])
+    # A KEY IS REQUIRED AND A COMMAND IS NOT: `saved_key` is what every
+    # relauncher reads, so a row without one describes nothing, while a plain
+    # kitty legitimately has no command (it comes back from its cwd).
+    ck("source-roster-rows-skip-a-window-with-no-key", len(_srr) == 2)
+    ck("source-roster-rows-refuse-a-pid-that-is-not-ours",
+       engine.source_roster_rows(
+           [{"app_id": "kitty", "title": "t", "identifier": "aabbccdd1122"}],
+           {"aabbccdd1122": os.getpid()},
+           resolve=lambda _v: "term:resume", cmd_of=lambda _v: "mux resume",
+           uid=os.geteuid() + 1) == [])
+    # AND A RESOLVER THAT RAISES COSTS ONE ROW, not the whole capture.
+    ck("source-roster-rows-survive-a-resolver-that-raises",
+       engine.source_roster_rows(
+           [{"app_id": "kitty", "title": "t", "identifier": "aabbccdd1122"}],
+           resolve=_raise_it, cmd_of=lambda _v: "x") == [])
 
     # WHAT A LOG LINE OR A REPORT MAY SAY ABOUT A FOREIGN WINDOW.
     #
@@ -3820,6 +4015,51 @@ def _t_roster(ck):
                 engine._read_stdin = _r_rs
             ck("capture-is-quiet-when-every-relayed-pid-is-ours",
                "relayed pid(s)" not in _buf_q.getvalue())
+
+            # ---- AND THE ROSTER GETS A ROW PER WINDOW -------------------
+            # The WIRING for the user's own report: without this the roster
+            # is app-ids only, `kitty` resolves to a bare shell at $HOME, and
+            # the terminal comes back having forgotten its session.
+            _r_srr = engine.source_roster_rows
+            try:
+                toplevels.list_toplevels = lambda *a, **k: (
+                    [{"app_id": "kitty", "title": "t",
+                      "identifier": _TLP}], "")
+                engine._read_stdin = lambda *_a: (
+                    "pid %s %d\n" % (_TLP, os.getpid()))
+                engine.source_roster_rows = lambda _r, _p=None, **_k: [
+                    {"app_id": "kitty", "key": "term:latch b:s",
+                     "cmd": "mux latch b:s"}]
+                engine.source_window_lines = lambda _r, *_a, **_k: []
+                _out_w = _capture_out(engine.do_source_capture)
+            finally:
+                engine.source_roster_rows = _r_srr
+                engine.source_window_lines = _r_swl
+                engine._read_stdin = _r_rs
+            ck("capture-writes-the-window-rows-into-the-roster",
+               engine.roster_windows()
+               == [{"app_id": "kitty", "key": "term:latch b:s",
+                    "cmd": "mux latch b:s"}])
+            ck("capture-says-how-many-windows-it-can-bring-back",
+               "1 of 1 window(s)" in _out_w)
+            ck("capture-still-records-the-app-list",
+               engine.load_roster()[0] == ["kitty"])
+            # AND IT IS ASKED WITH THE RELAYED PIDS, or every /proc-derived
+            # command is computed against -1 and the roster carries nothing.
+            _seen_srr = []
+            try:
+                engine._read_stdin = lambda *_a: (
+                    "pid %s %d\n" % (_TLP, os.getpid()))
+                engine.source_roster_rows = lambda _r, _p=None, **_k: (
+                    _seen_srr.append(dict(_p or {})) or [])
+                engine.source_window_lines = lambda _r, *_a, **_k: []
+                _capture_out(engine.do_source_capture)
+            finally:
+                engine.source_roster_rows = _r_srr
+                engine.source_window_lines = _r_swl
+                engine._read_stdin = _r_rs
+            ck("capture-asks-for-the-rows-with-the-relayed-pids",
+               _seen_srr == [{_TLP: os.getpid()}])
             toplevels.list_toplevels = lambda *a, **k: ([rows[1]], "")
 
             # ---- AND THE READ CANNOT BLOCK ------------------------------
@@ -3911,7 +4151,7 @@ def _t_roster(ck):
             try:
                 wanted = []
                 engine.roster_launch = \
-                    lambda apps, live, spawn=None: (
+                    lambda apps, live, spawn=None, **_k: (
                         wanted.append((sorted(apps), sorted(live)))
                         or len(engine.roster_plan(apps, live)))
                 out = _capture_out(engine.do_source_resume)
@@ -3919,6 +4159,53 @@ def _t_roster(ck):
                 engine.roster_launch = real_launch
             ck("resume-passes-the-roster-and-the-live-set",
                wanted == [(["google-chrome", "slack"], ["slack"])])
+
+            # ---- AND IT HANDS OVER THE PER-WINDOW ROWS AND THE PIDS ------
+            # The WIRING, which `roster_windows` and `source_views` own
+            # checks say nothing about: a resume that never reads the rows
+            # brings a terminal back as a bare shell, and one that never
+            # relays the pids counts per APP instead of per COMMAND, so one
+            # of two mux terminals comes back.
+            _rl_kw = []
+            _r_rs2 = engine._read_stdin
+            try:
+                engine.save_roster(
+                    ["kitty"],
+                    windows=[{"app_id": "kitty", "key": "term:resume",
+                              "cmd": "mux resume"}])
+                toplevels.list_toplevels = lambda *a, **k: (
+                    [{"app_id": "kitty", "title": "",
+                      "identifier": "aabbccdd1122"}], "")
+                engine._read_stdin = lambda *_a: (
+                    "pid aabbccdd1122 %d\n" % os.getpid())
+                engine.roster_launch = \
+                    lambda apps, live, spawn=None, **kw: (
+                        _rl_kw.append(kw) or 0)
+                _capture_out(engine.do_source_resume)
+            finally:
+                engine.roster_launch = real_launch
+                engine._read_stdin = _r_rs2
+            ck("resume-hands-over-the-remembered-window-rows",
+               _rl_kw and _rl_kw[-1].get("windows")
+               == [{"app_id": "kitty", "key": "term:resume",
+                    "cmd": "mux resume"}])
+            ck("resume-hands-over-the-live-views-with-their-pids",
+               _rl_kw and [v.get("pid") for v in (_rl_kw[-1].get("seen") or [])]
+               == [os.getpid()])
+            # AND A PID THAT IS NOT OURS NEVER REACHES THE RELAUNCHERS.
+            _rl_kw.clear()
+            try:
+                engine._read_stdin = lambda *_a: "pid aabbccdd1122 1\n"
+                engine.roster_launch = \
+                    lambda apps, live, spawn=None, **kw: (
+                        _rl_kw.append(kw) or 0)
+                _capture_out(engine.do_source_resume)
+            finally:
+                engine.roster_launch = real_launch
+                engine._read_stdin = _r_rs2
+            ck("resume-drops-a-relayed-pid-that-is-not-this-accounts",
+               _rl_kw and [v.get("pid")
+                           for v in (_rl_kw[-1].get("seen") or [])] == [-1])
             ck("resume-names-only-what-is-missing",
                out.rstrip().endswith(": google-chrome")
                and "1 missing app(s)" in out)
@@ -7126,48 +7413,97 @@ def selftest():
     # watch.py imports `save_knowledge` and `persist` BY NAME, so an area
     # that drives the daemon and patches only engine's globals leaves the
     # real ones live: one such check wrote `{}` over a live profile store and
-    # eight fixture rows into the history ring. The existing watch.log probe
-    # is the same idea; this covers the store and the ring, which nothing
-    # watched. A DIGEST rather than an mtime, so a rewrite with identical
-    # content is correctly not a finding.
-    def _state_sig():
-        out = []
-        for pat in ("knowledge-*.json", "current.json", "history/*.json",
-                    "milestones/*.json"):
-            for f in sorted(glob.glob(os.path.join(engine.STATE, pat))):
-                try:
-                    with open(f, "rb") as fh:
-                        out.append((os.path.basename(f),
-                                    hashlib.sha256(fh.read()).hexdigest()))
-                except OSError:
-                    out.append((os.path.basename(f), "gone"))
-        return out
+    # eight fixture rows into the history ring.
+    #
+    # IT WATCHES THIS PROCESS'S WRITES, not the files. The first version
+    # DIGESTED the state files before and after, and that reported a change
+    # the LIVE DAEMON had made: its capture loop rewrites the store and the
+    # ring on its own, so the check fired at random on a busy desk and said
+    # the suite had written state it had not touched. A CANARY THAT CRIES
+    # WOLF GETS SWITCHED OFF, and the fix is to ask the question that was
+    # always meant: did WE write there? Every state file goes through
+    # `write_json`, so one seam answers it exactly, with no timing and
+    # nothing a concurrent daemon can confuse.
+    #
+    # THE REAL ROOT IS CAPTURED HERE, before any area can rebind `STATE`: a
+    # sandboxing area writes under its own temp dir and is correctly
+    # invisible, and the point is only ever the unsandboxed path.
+    _real_state = engine.STATE
+    _leaked = []
+    _real_wj = engine.write_json
+    # AND THE WHOLE LOOP RUNS OVER A SCRATCH STATE DIR, which is the fix
+    # rather than the detector: several areas build a real Watcher, and
+    # `kb_for_profile` legitimately STAMPS a store that does not exist yet
+    # ("a store that does not exist is CURRENT by construction"). On a box
+    # that already has one that writes nothing; on a FRESH one it stamps the
+    # real state dir, so the canary would fail there and nowhere else, which
+    # is a check on the host. Sandboxing the root makes the write harmless
+    # AND leaves the canary sharper, since it still anchors on the REAL root
+    # and so catches anything that reaches it another way (watch.py and
+    # doctor.py import `STATE` BY NAME and hold their own copies).
+    #
+    # NAMED `usher`, because one check asserts exactly that about the state
+    # dir and it should keep asking about the value production uses rather
+    # than being special-cased for the harness.
+    _scratch_root = tempfile.mkdtemp(prefix="usher-selftest-state-")
+    _scratch_state = os.path.join(_scratch_root, "usher")
+    os.makedirs(_scratch_state)
 
-    _state_before = _state_sig()
-
-    for area in (_t_registry, _t_resolution, _t_lock,
-                 _t_toplevels, _t_roster,
-                 _t_lifecycle, _t_desktop, _t_slots, _t_verify,
-                 _t_terminals, _t_cli_split,
-                 _t_launch_source,
-                 _t_relaunch, _t_chrome, _t_learn,
-                 _t_geometry, _t_placement, _t_snapshots, _t_profiles,
-                 _t_migration, _t_watcher, _t_displays, _t_contracts):
+    def _wj_canary(path, blob):
         try:
-            with _quiet_log():
-                area(ck)
-        except Exception as e:
-            ck(f"{area.__name__}-RAISED-{type(e).__name__}", False)
-            print(f"selftest: {area.__name__} raised {type(e).__name__}: {e}",
-                  file=sys.stderr)
+            if _under_root(path, _real_state):
+                _leaked.append(os.path.relpath(path, _real_state))
+        except Exception:                                  # noqa: BLE001
+            pass
+        return _real_wj(path, blob)
+
+    # THE CANARY'S OWN DETECTOR IS PROVEN, which it otherwise could not be:
+    # nothing leaks today, so disabling the test passes the whole suite and a
+    # planted regression against it is UNCATCHABLE. Pulling the predicate out
+    # as a pure function gives it a positive to assert without writing a byte
+    # of real state, which is the one thing it exists to prevent.
+    ck("the-state-canary-fires-on-a-path-under-the-real-root",
+       _under_root(os.path.join(_real_state, "current.json"), _real_state))
+    ck("the-state-canary-fires-on-a-nested-path",
+       _under_root(os.path.join(_real_state, "history", "1.json"),
+                   _real_state))
+    ck("the-state-canary-ignores-a-sandboxed-path",
+       not _under_root("/var/tmp/elsewhere/current.json", _real_state))
+    ck("the-state-canary-ignores-the-root-itself",
+       not _under_root(_real_state, _real_state))
+    # AND A SIBLING WHOSE NAME MERELY STARTS THE SAME WAY IS NOT UNDER IT,
+    # which a bare string prefix would get wrong.
+    ck("the-state-canary-is-not-a-string-prefix",
+       not _under_root(_real_state + "-other/current.json", _real_state))
+
+    engine.write_json = _wj_canary
+    engine.STATE = _scratch_state
+    try:
+        for area in (_t_registry, _t_resolution, _t_lock,
+                     _t_toplevels, _t_roster,
+                     _t_lifecycle, _t_desktop, _t_slots, _t_verify,
+                     _t_terminals, _t_cli_split,
+                     _t_launch_source,
+                     _t_relaunch, _t_chrome, _t_learn,
+                     _t_geometry, _t_placement, _t_snapshots, _t_profiles,
+                     _t_migration, _t_watcher, _t_displays, _t_contracts):
+            try:
+                with _quiet_log():
+                    area(ck)
+            except Exception as e:
+                ck(f"{area.__name__}-RAISED-{type(e).__name__}", False)
+                print(f"selftest: {area.__name__} raised "
+                      f"{type(e).__name__}: {e}", file=sys.stderr)
+    finally:
+        engine.write_json = _real_wj
+        engine.STATE = _real_state
+        shutil.rmtree(_scratch_root, ignore_errors=True)
     # NAMED, so a leak is a check rather than something a reader has to
     # notice. It runs after every area, because any of them could be the one.
-    _state_after = _state_sig()
-    if _state_before != _state_after:
-        _moved = sorted({n for n, _h in set(_state_before) ^ set(_state_after)})
+    if _leaked:
         ck("the-suite-wrote-no-real-usher-state", False)
-        print("selftest: the suite CHANGED real state: %s"
-              % ", ".join(_moved[:6]), file=sys.stderr)
+        print("selftest: the suite WROTE real state: %s"
+              % ", ".join(sorted(set(_leaked))[:6]), file=sys.stderr)
     else:
         ck("the-suite-wrote-no-real-usher-state", True)
     if fails:
