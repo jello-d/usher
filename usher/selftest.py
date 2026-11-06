@@ -2569,6 +2569,87 @@ def _t_slots(ck):
         z.identified.add(9)                            # already had its look
         z._try_place(V(9))
         ck("late-chance-is-only-the-first-look", s3 == [])
+
+        # ---- THE LEARN GATE COVERS A WINDOW THE LEDGER REFUSED ---------
+        # Several windows can share ONE store key. The ledger gives the slot
+        # to one and leaves the rest where they opened, and those are never
+        # placed, so the place-mode clause above released them the moment
+        # place mode ended and the capture loop learned a CASCADE position
+        # into a key the window does not own, OVERWRITING the holder's
+        # geometry. Self-worsening: the next login restores the cascade.
+        #
+        # MEASURED on manifold 2026-11-06 from the pre-logoff pair, which is
+        # the first time this was diagnosable at all. Ten of one account's
+        # Chrome windows shared `google-chrome NUL titan`, one was placed to
+        # ws[0,1] and nine were refused, and the slot went
+        # ws[0,1] pos[128,155] -> ws[2,0] pos[172,150], which is exactly
+        # where one of the refused windows sat. THE FIXTURE USES THOSE
+        # NUMBERS so the check reads as the incident.
+        #
+        # A FOREIGN WINDOW IS THE RIGHT SHAPE and the owner's app is NOT:
+        # two windows of one of the owner's apps are TITLE-keyed, because
+        # `is_unique` needs a count of one, so they would not share a key and
+        # the fixture would not model the bug. A foreign window keys on its
+        # SOURCE ALONE whatever the count, which is why ten of them collided.
+        # The first attempt got this wrong and would have tested nothing.
+        #
+        # SETTLED ON PURPOSE: the damage happens AFTER place mode ends, so a
+        # fixture in place mode passes over the bug entirely.
+        _SK = kkey("google-chrome", "titan")
+        _base = {"app_id": "google-chrome", "title": "titan",
+                 "appid_only": False, "label": "", "output": "DP-1",
+                 "workspace": [0.0, 1.0], "pos": [128.0, 155.0],
+                 "size": [10.0, 10.0], "last_seen": _t.time(),
+                 "source": "titan", "sticky": False, "inverted": False,
+                 "fullscreen": False}
+
+        def _fw(vid, ws, pos):
+            return {"id": vid, "app_id": "google-chrome", "title": "",
+                    "key": "titan", "source": "titan", "owner": 997,
+                    "workspace": ws, "pos": pos, "size": [10.0, 10.0],
+                    "output": "DP-1"}
+
+        _wins = [_fw(1, [0.0, 1.0], [128.0, 155.0]),
+                 _fw(2, [2.0, 0.0], [172.0, 150.0])]
+        g = _settled_watcher()
+        g.kb = {_SK: dict(_base)}
+        ck("gate-fixture-is-really-settled", not g._placing_now())
+        ck("gate-fixture-really-shares-one-key",
+           engine.matched_key(g.kb, "google-chrome", "titan", "titan") == _SK)
+
+        g.slot_held[_SK] = 1
+        _h = g._held(_wins)
+        ck("gate-a-refused-window-is-held-even-when-settled", 2 in _h)
+        ck("gate-the-holder-itself-is-not-held", 1 not in _h)
+        # A HOLDER THAT IS NOT LIVE IS NOT A HOLDER, or a closed window would
+        # freeze its slot forever. The live set is the SNAPSHOT's, which is
+        # what makes this answerable on the capture thread at all:
+        # `_live_ids()` reads the placer's socket, whose one writer is the
+        # placer.
+        g.slot_held[_SK] = 99
+        ck("gate-a-dead-holder-holds-nothing", g._held(_wins) == frozenset())
+        # AND AN UNSHARED KEY IS UNTOUCHED, which is every window on an
+        # ordinary desk: this must not become a general brake on learning.
+        g.slot_held.clear()
+        ck("gate-an-unheld-key-is-not-held", g._held(_wins) == frozenset())
+
+        # THE DAMAGE ITSELF, which only a LEARN pass expresses: a check on
+        # `_held` alone says nothing about what reaches the store.
+        _kb4 = {_SK: dict(_base)}
+        g.slot_held[_SK] = 1
+        engine.learn(_kb4, {}, _wins, _t.time(), hold=g._held(_wins))
+        ck("gate-the-slot-keeps-the-HOLDER-geometry",
+           (_kb4.get(_SK) or {}).get("pos") == [128.0, 155.0])
+        ck("gate-the-slot-did-not-take-the-cascade",
+           (_kb4.get(_SK) or {}).get("workspace") == [0.0, 1.0])
+        # AND THE CONTROL, or both of those pass over a learn that wrote
+        # nothing at all: with no holder the pass DOES reach the store, and
+        # with the measured cascade values.
+        _kb5 = {_SK: dict(_base)}
+        g.slot_held.clear()
+        engine.learn(_kb5, {}, _wins, _t.time(), hold=g._held(_wins))
+        ck("gate-control-a-learn-with-no-holder-does-write",
+           (_kb5.get(_SK) or {}).get("pos") == [172.0, 150.0])
     finally:
         pass
 

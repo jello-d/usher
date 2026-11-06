@@ -391,8 +391,7 @@ def _doctor_relaunch(out, snap, live):
         # asking which keys a window may match, and the reason match_keys
         # exists.
         _src = engine.source_of(lv)
-        _ks = engine.match_keys(_a, identity(lv), _src)
-        _k = next((k for k in _ks if kb.get(k)), _ks[-1])
+        _k = engine.matched_key(kb, _a, identity(lv), _src)
         live_dupes[_k] += 1
     for key, n in live_dupes.items():
         if n < 2:

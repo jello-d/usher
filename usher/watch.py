@@ -890,10 +890,7 @@ class Watcher:
         # THE LEDGER KEY IS THE ONE THAT MATCHED, by the same rule: a
         # foreign window must not take (or be refused by) the owner's
         # app_id-only slot.
-        skey = next((k for k in
-                     engine.match_keys(app, identity(v), _src or "")
-                     if self.kb.get(k)),
-                    engine.match_keys(app, identity(v), _src or "")[-1])
+        skey = engine.matched_key(self.kb, app, identity(v), _src or "")
         with self.lock:
             holder = self.slot_held.get(skey)
         own = live_holder(holder, vid, self._live_ids())
@@ -1414,13 +1411,52 @@ class Watcher:
         A window is released the moment it is placed, or when its grace runs
         out and usher is no longer going to act on it. In settled state nothing
         is placed, so nothing is held."""
-        if not self._placing_now():
-            return frozenset()
         now = time.time()
-        return frozenset(w["id"] for w in windows
-                         if w.get("id") is not None
-                         and w["id"] not in self.placed
-                         and now <= self.deadline.get(w["id"], 0))
+        held = set()
+        if self._placing_now():
+            held |= {w["id"] for w in windows
+                     if w.get("id") is not None
+                     and w["id"] not in self.placed
+                     and now <= self.deadline.get(w["id"], 0)}
+        # AND A WINDOW THE LEDGER REFUSED, IN ANY MODE, which is the half this
+        # was missing. Several windows can share one store key (another
+        # account's app, or two terminals in one directory): the ledger gives
+        # the slot to ONE and leaves the rest where they opened. Those others
+        # are never placed, so the clause above released them the moment place
+        # mode ended, and the capture loop then learned a CASCADE position
+        # into a key the window does not own, overwriting the holder's
+        # geometry. Self-worsening, because the next login restores the
+        # cascade and the pass repeats.
+        #
+        # MEASURED on manifold 2026-11-06 from the pre-logoff pair: ten of one
+        # account's Chrome windows shared `google-chrome NUL titan`, one was
+        # placed to ws[0,1] and nine were refused, and the slot went
+        # ws[0,1] pos[128,155] -> ws[2,0] pos[172,150], which is exactly where
+        # one of the refused windows was sitting.
+        #
+        # SO SUCH A WINDOW HAS NO MEMORY, which is what `doctor` already tells
+        # the user ("1 gets the remembered place, the rest stay where they
+        # opened"). It owns no slot, so there is nowhere its position could
+        # honestly be written.
+        #
+        # THE LIVE SET COMES FROM THE SNAPSHOT, not from `_live_ids()`: that
+        # reads `place_sock`, whose one writer is the PLACER thread, and this
+        # runs on the capture thread. The snapshot in hand IS the live set at
+        # this instant, which is the same evidence `live_holder` wants and
+        # costs no extra round trip.
+        live = {w.get("id") for w in windows if w.get("id") is not None}
+        with self.lock:
+            ledger = dict(self.slot_held)
+        for w in windows:
+            vid = w.get("id")
+            if vid is None or vid in held:
+                continue
+            k = engine.matched_key(self.kb, w.get("app_id") or "",
+                                   w.get("key") or "", w.get("source") or "")
+            h = ledger.get(k)
+            if h is not None and h != vid and h in live:
+                held.add(vid)
+        return frozenset(held)
 
     def _in_transition(self):
         return time.time() < self.transition_until
