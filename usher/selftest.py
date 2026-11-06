@@ -174,11 +174,22 @@ def _tv(app, title="", pid=-1):
     """A NORMALIZED view, shaped as a plugin hook receives one (see pview)."""
     return {"app": app, "title": title, "pid": pid}
 
-def _trv(app, title="", pid=-1, vid=None):
+def _trv(app, title="", pid=-1, vid=None, tlid=None):
     """A RAW view, shaped as the compositor reports one. Not interchangeable
     with _tv: anything reached through pview takes either, but app_of and the
-    matcher read `app-id` and see nothing in a normalized view."""
-    return {"app-id": app, "title": title, "pid": pid, "id": vid}
+    matcher read `app-id` and see nothing in a normalized view.
+
+    `tlid` PUTS THE JOIN KEY ON IT, under `security-context`, which is where
+    the compositor reports it (U-W2 R2). A foreign window's per-window
+    identity is looked up by that identifier now rather than by a hash of its
+    title, so a fixture without one resolves to the source alone: correct
+    behaviour, and silent, so the fixture has to supply it deliberately."""
+    v = {"app-id": app, "title": title, "pid": pid, "id": vid}
+    if tlid is not None:
+        v["security-context"] = {"sandbox-engine": "severance",
+                                 "app-id": "titan", "instance-id": "titan",
+                                 "toplevel-identifier": tlid}
+    return v
 
 
 def _stat_uid(path):
@@ -757,22 +768,26 @@ def _t_resolution(ck):
             engine._SOURCE_WINDOWS.clear()
             engine._SOURCE_SLOT.clear()
             _TT = "Quarterly Plan - Google Chrome"
-            _jv = _trv("google-chrome", _TT, pid=1, vid=201)
+            _TL1 = "aaaa1111bbbb22"       # a wlroots-shaped identifier
+            _jv = _trv("google-chrome", _TT, pid=1, vid=201, tlid=_TL1)
             # NO MAP YET: today's behaviour exactly, the source alone.
             ck("foreign-with-no-report-keys-on-its-source",
                engine.resolution(_jv).key == "titan")
             engine.set_source_windows(
-                "titan", {engine.title_fingerprint(_TT): "chrome:win:11"})
+                "titan", {_TL1: engine.identity_digest("chrome:win:11")})
             ck("foreign-with-a-report-keys-per-window",
-               engine.resolution(_jv).key == "titan:chrome:win:11")
-            # STICKY, because a title changes constantly and the window
-            # behind it does not: re-deriving per event would make the key as
-            # volatile as the string, which is the churn this design exists
-            # to avoid. Same reason chrome's own slot cache exists.
+               engine.resolution(_jv).key
+               == "titan:" + engine.identity_digest("chrome:win:11"))
+            # STICKY, and the join key is no longer in the view at all:
+            # `_jv2` carries a different title AND no identifier, so only the
+            # cache can answer. A report that goes briefly absent (the
+            # account between captures) therefore costs nothing, which is the
+            # same reason chrome's own slot cache exists.
             _jv2 = _trv("google-chrome", "Something Else Entirely",
                         pid=1, vid=201)
             ck("a-joined-identity-survives-a-title-change",
-               engine.resolution(_jv2).key == "titan:chrome:win:11")
+               engine.resolution(_jv2).key
+               == "titan:" + engine.identity_digest("chrome:win:11"))
             # AND IS DROPPED WITH THE VIEW, or a cache that only grows is a
             # leak in a process that runs for weeks and a recycled view id
             # inherits somebody else's identity.
@@ -793,7 +808,7 @@ def _t_resolution(ck):
             # would make the per-window identity unreachable.
             engine._SOURCE_SLOT.clear()
             engine.set_source_windows(
-                "titan", {engine.title_fingerprint(_TT): "chrome:win:11"})
+                "titan", {_TL1: engine.identity_digest("chrome:win:11")})
 
             class _JoinSock:
                 @staticmethod
@@ -806,11 +821,13 @@ def _t_resolution(ck):
 
                 @staticmethod
                 def list_views(**_kw):
-                    return [_trv("google-chrome", _TT, pid=1, vid=201)]
+                    return [_trv("google-chrome", _TT, pid=1, vid=201,
+                                 tlid=_TL1)]
 
             _js = engine.snapshot(_JoinSock)["windows"][0]
             ck("snapshot-keeps-a-resolved-foreign-key",
-               _js.get("key") == "titan:chrome:win:11")
+               _js.get("key")
+               == "titan:" + engine.identity_digest("chrome:win:11"))
             ck("snapshot-still-redacts-the-resolved-windows-title",
                _js.get("title") == "")
             ck("a-kept-foreign-key-carries-no-title",
@@ -822,26 +839,39 @@ def _t_resolution(ck):
             # key stored for that account names a dead id. Only the account
             # can do the join, since it needs its own two session files, so
             # it reports the binding and the owner applies it.
+            # BOTH SIDES ARE DIGESTS, since that is what a per-window key
+            # holds: the account hashes its own identity and the owner never
+            # sees the string, so a re-key is digest to digest.
+            _D11 = engine.identity_digest("chrome:win:11")
+            _D22 = engine.identity_digest("chrome:win:22")
+            _D91 = engine.identity_digest("chrome:win:91")
+            _D92 = engine.identity_digest("chrome:win:92")
             _rk_txt = ("usher: recorded 1 app(s)\n"
-                       "rekey chrome:win:11 chrome:win:91\n"
-                       "rekey chrome:win:22 chrome:win:92\n"
-                       "window abc123 chrome:win:91\n")
+                       "rekey %s %s\n"
+                       "rekey %s %s\n"
+                       "window abc123def456789a %s\n"
+                       % (_D11, _D91, _D22, _D92, _D91))
             ck("source-rekey-parses-the-pairs",
                engine.parse_source_rekey(_rk_txt)
-               == {"chrome:win:11": "chrome:win:91",
-                   "chrome:win:22": "chrome:win:92"})
+               == {_D11: _D91, _D22: _D92})
             ck("source-rekey-ignores-the-window-lines",
-               "abc123" not in str(engine.parse_source_rekey(_rk_txt)))
+               "abc123def456789a" not in str(
+                   engine.parse_source_rekey(_rk_txt)))
             # BOTH SIDES VALIDATED, because these rewrite store KEYS: a
             # source reporting anything else would be editing the owner's
-            # store in a shape the owner never chose.
+            # store in a shape the owner never chose. A readable identity is
+            # exactly what must not arrive, since a mux term's names a work
+            # host and session.
             ck("source-rekey-refuses-a-title-on-either-side",
                engine.parse_source_rekey(
-                   "rekey Some-Page chrome:win:91\n"
-                   "rekey chrome:win:11 Some-Other-Page\n") == {})
-            ck("source-rekey-refuses-a-pair-that-does-not-move",
+                   "rekey Some-Page %s\n"
+                   "rekey %s Some-Other-Page\n" % (_D91, _D11)) == {})
+            ck("source-rekey-refuses-a-readable-identity-on-either-side",
                engine.parse_source_rekey(
-                   "rekey chrome:win:11 chrome:win:11") == {})
+                   "rekey term:latch box:work %s\n"
+                   "rekey %s term:latch box:work\n" % (_D91, _D11)) == {})
+            ck("source-rekey-refuses-a-pair-that-does-not-move",
+               engine.parse_source_rekey("rekey %s %s" % (_D11, _D11)) == {})
 
             def _e_rk(ident, src, ws):
                 e = {"app_id": "google-chrome", "title": ident,
@@ -1028,8 +1058,7 @@ def _t_resolution(ck):
                 engine._announce = _ra_rk
             ck("source-trigger-records-the-rekey-for-the-worker",
                engine.take_source_rekey("titan")
-               == {"chrome:win:11": "chrome:win:91",
-                   "chrome:win:22": "chrome:win:92"})
+               == {_D11: _D91, _D22: _D92})
 
             # ---- AN OWNED APP WHOSE PLUGIN CANNOT ACT ON A ROSTER ---------
             # THE BUG: the account's terminal was in its roster, counted
@@ -1219,8 +1248,13 @@ def _t_resolution(ck):
                 hist=lambda: _fake_hist, tabs=lambda f: _fake_tabs[f])
             ck("source-rekey-lines-pair-old-to-new",
                engine.parse_source_rekey("\n".join(_lines_rk))
-               == {"chrome:win:11": "chrome:win:91",
-                   "chrome:win:22": "chrome:win:92"})
+               == {_D11: _D91, _D22: _D92})
+            # AND THE IDENTITY NEVER CROSSES IN THE CLEAR, which is the
+            # whole reason the pairs are digests: a chrome slot is harmless
+            # and a terminal's identity names a work host and session, so
+            # the rule has to hold for the shape, not per app.
+            ck("source-rekey-lines-carry-no-readable-identity",
+               not any("chrome:win:" in ln for ln in _lines_rk))
             ck("source-rekey-lines-are-the-shape-the-owner-parses",
                all(len(ln.split()) == 3
                    and ln.split()[0] == engine.SOURCE_REKEY_WORD
@@ -1253,7 +1287,7 @@ def _t_resolution(ck):
                 engine.toplevels.list_toplevels = lambda: (
                     [{"app_id": "google-chrome", "title": "T"}], "")
                 engine.source_rekey_lines = lambda: [
-                    "rekey chrome:win:11 chrome:win:91"]
+                    "rekey %s %s" % (_D11, _D91)]
                 engine.source_window_lines = lambda _r: []
                 engine.save_roster = lambda *_a, **_k: None
                 with contextlib.redirect_stdout(_cap_out):
@@ -1266,7 +1300,7 @@ def _t_resolution(ck):
             ck("source-capture-succeeds", _rc_cap == engine.EXIT_OK)
             ck("source-capture-prints-the-rekey-pairs",
                engine.parse_source_rekey(_cap_out.getvalue())
-               == {"chrome:win:11": "chrome:win:91"})
+               == {_D11: _D91})
             # AND A FAILURE THERE IS NOT FATAL: the roster is the part a
             # restore cannot do without, and a session-file problem must not
             # cost it.
@@ -1328,6 +1362,7 @@ def _t_resolution(ck):
             # and the third time this suite has written into real state.
             from . import watch as _word
             _TW = "Confidential Plan - Google Chrome"
+            _TL2 = "cccc3333dddd44"
 
             class _OrdSock:
                 def list_outputs(self):
@@ -1344,7 +1379,8 @@ def _t_resolution(ck):
                     # check failed for its own reason while the product was
                     # correct. _trv builds the minimum a plugin needs, which
                     # is less than a capture does.
-                    return [dict(_trv("google-chrome", _TW, pid=1, vid=301),
+                    return [dict(_trv("google-chrome", _TW, pid=1,
+                                      vid=301, tlid=_TL2),
                                  **{"output-name": "DP-1",
                                     "geometry": {"x": 0, "y": 0,
                                                  "width": 10, "height": 10}})]
@@ -1370,7 +1406,7 @@ def _t_resolution(ck):
             def _ord_trigger(sources, action, **_k):
                 for s in sources:
                     engine.set_source_windows(
-                        s, {engine.title_fingerprint(_TW): "chrome:win:77"})
+                        s, {_TL2: engine.identity_digest("chrome:win:77")})
                 return len(sources)
 
             try:
@@ -1396,7 +1432,9 @@ def _t_resolution(ck):
                 engine.source_trigger = _r_tr
                 engine._SOURCE_WINDOWS.clear()
                 engine._SOURCE_SLOT.clear()
-            _PWK = engine.kkey("google-chrome", "titan:chrome:win:77")
+            _PWK = engine.kkey(
+                "google-chrome",
+                "titan:" + engine.identity_digest("chrome:win:77"))
             ck("a-refresh-is-spent-on-the-SAME-capture-pass",
                sorted(_wo.kb) == [_PWK])
             ck("the-ordering-pass-did-not-store-the-source-alone-key",
@@ -1496,15 +1534,27 @@ def _t_resolution(ck):
     # opacity ours rather than the far side's to honour: these become store
     # keys and reach watch.log, so a source reporting a window TITLE would
     # reinstate the leak the digest exists to avoid.
-    _fp = engine.title_fingerprint("Offer Letter - Google Chrome")
-    ck("source-window-parse-accepts-a-slot-shaped-identity",
-       engine.parse_source_windows("window %s chrome:win:11" % _fp)
-       == {_fp: "chrome:win:11"})
+    _tl = "aaaa1111bbbb22"
+    _dg = engine.identity_digest("chrome:win:11")
+    ck("source-window-parse-accepts-an-identifier-and-a-digest",
+       engine.parse_source_windows("window %s %s" % (_tl, _dg))
+       == {_tl: _dg})
+    # A READABLE IDENTITY IS REFUSED, which is the whole point of the shape
+    # test: a terminal's is `term:latch <host>:<session>` and names a work
+    # host and session, so it must never become a store key or a log line.
+    ck("source-window-parse-REFUSES-a-readable-identity",
+       engine.parse_source_windows(
+           "window %s term:latch somehost:somesession" % _tl) == {})
     ck("source-window-parse-REFUSES-a-title-as-an-identity",
        engine.parse_source_windows(
-           "window %s Offer-Letter-Google-Chrome" % _fp) == {})
+           "window %s Offer-Letter-Google-Chrome" % _tl) == {})
+    # AND A NON-IDENTIFIER JOIN KEY IS REFUSED TOO, because the key is now
+    # the compositor's handle and a source inventing one would claim a window
+    # it does not own.
+    ck("source-window-parse-refuses-a-junk-join-key",
+       engine.parse_source_windows("window not-hex-at-all %s" % _dg) == {})
     ck("source-window-parse-refuses-an-arbitrary-word",
-       engine.parse_source_windows("window %s titan" % _fp) == {})
+       engine.parse_source_windows("window %s titan" % _tl) == {})
 
     # ...AND END TO END ON A REAL FOREIGN PID, needing no stub and no second
     # account: pid 1 is root's, so a view carrying it is genuinely somebody
@@ -4548,19 +4598,36 @@ def _t_relaunch(ck):
             # already reads off the compositor. Nothing readable crosses.
             _T1 = "Quarterly Revenue Plan - Google Chrome"
             _T2 = "Offer Letter - Google Chrome"
+            _TL1 = "aaaa1111bbbb22"
+            _TL2 = "cccc3333dddd44"
+            # EVERY ROW CARRIES THE COMPOSITOR'S IDENTIFIER, which is the
+            # join key now. A row WITHOUT one is skipped, and that has its
+            # own check below: a source that cannot name which window it is
+            # looking at must report nothing rather than guess.
             _rows_w = [
-                {"app_id": "google-chrome", "title": _T1},
-                {"app_id": "google-chrome", "title": _T2},
-                {"app_id": "kitty", "title": _T1},    # same title, not chrome
-                {"app_id": "google-chrome", "title": ""},
+                {"app_id": "google-chrome", "title": _T1,
+                 "identifier": _TL1},
+                {"app_id": "google-chrome", "title": _T2,
+                 "identifier": _TL2},
+                {"app_id": "kitty", "title": _T1,     # same title, not chrome
+                 "identifier": "eeee5555ffff66"},
+                {"app_id": "google-chrome", "title": "",
+                 "identifier": "1111aaaa2222bb"},
                 {"app_id": "google-chrome", "title": "Unrecorded - Google "
-                                                     "Chrome"},
+                                                     "Chrome",
+                 "identifier": "3333cccc4444dd"},
+                {"app_id": "google-chrome", "title": _T1},   # NO identifier
             ]
             _ids_w = {_T1: "chrome:win:11", _T2: "chrome:win:22"}
             _lines_w = engine.source_window_lines(
                 _rows_w, resolve=_ids_w.get,
                 chrome_test=lambda a: a == "google-chrome")
             ck("source-window-reports-one-line-per-resolved-window",
+               len(_lines_w) == 2)
+            # A ROW WITH NO IDENTIFIER IS SKIPPED, not guessed at: the last
+            # fixture row is resolvable and nameless, so without this the
+            # count above would be three.
+            ck("source-window-skips-a-row-with-no-join-key",
                len(_lines_w) == 2)
             ck("source-window-line-is-three-words",
                all(len(ln.split()) == 3
@@ -4578,7 +4645,8 @@ def _t_relaunch(ck):
             # title must not be handed to it. A coincidence here is a wrong
             # slot that sticks for the life of the view.
             ck("source-window-skips-an-app-the-resolver-does-not-own",
-               len([ln for ln in _lines_w if "chrome:win:11" in ln]) == 1)
+               len([ln for ln in _lines_w
+                    if engine.identity_digest("chrome:win:11") in ln]) == 1)
             ck("source-window-skips-what-it-cannot-resolve",
                not any("Unrecorded" in ln for ln in _lines_w))
             # THE PARSE IS LENIENT, because this shares a channel with prose.
@@ -4597,28 +4665,67 @@ def _t_relaunch(ck):
             ck("source-window-parse-survives-a-malformed-line",
                _mal_w is None)
             ck("source-window-parse-keeps-only-the-shape",
-               _parsed_w == {engine.title_fingerprint(_T1): "chrome:win:11",
-                             engine.title_fingerprint(_T2): "chrome:win:22"})
+               _parsed_w == {_TL1: engine.identity_digest("chrome:win:11"),
+                             _TL2: engine.identity_digest("chrome:win:22")})
             ck("source-window-parse-ignores-prose-on-the-same-channel",
                len(_parsed_w) == 2)
-            # A FINGERPRINT IS THE SAME ON BOTH SIDES OR THE WHOLE DESIGN IS
-            # DEAD, so it is asserted as a function of the title alone.
-            ck("fingerprint-is-stable",
-               engine.title_fingerprint(_T1) == engine.title_fingerprint(_T1))
-            ck("fingerprint-separates-two-titles",
-               engine.title_fingerprint(_T1) != engine.title_fingerprint(_T2))
-            ck("fingerprint-is-fixed-width",
-               len(engine.title_fingerprint(_T1)) == engine.FINGERPRINT_LEN
-               and len(engine.title_fingerprint("")) ==
-               engine.FINGERPRINT_LEN)
-            # THE JOIN RATE IS REPORTED, NOT ASSUMED. Both sides hash a live
-            # title each, and whether those strings agree in practice is a
-            # measurement; 0 of N must read differently from no windows.
+            # THE TITLE IS NOT CONSULTED, asserted BEHAVIOURALLY in both
+            # directions rather than by reading the code, because that is
+            # the whole claim of this protocol and the one a reader will
+            # doubt. The previous version hashed the live title on both
+            # sides, so a title collision was a shared key and a title drift
+            # was a lost join; neither is reachable now.
+            engine._SOURCE_WINDOWS.clear()
+            engine._SOURCE_SLOT.clear()
+            engine.set_source_windows("titan", {
+                _TL1: engine.identity_digest("chrome:win:11"),
+                _TL2: engine.identity_digest("chrome:win:22")})
+            _SAME = "Inbox - Google Chrome"
+            ck("two-windows-wearing-ONE-title-get-different-identities",
+               engine.source_window_identity(
+                   "titan", {"title": _SAME, "id": 401}, _TL1)
+               != engine.source_window_identity(
+                   "titan", {"title": _SAME, "id": 402}, _TL2))
+            ck("one-window-under-TWO-titles-gets-one-identity",
+               engine.source_window_identity(
+                   "titan", {"title": "Before", "id": 403}, _TL1)
+               == engine.source_window_identity(
+                   "titan", {"title": "After", "id": 404}, _TL1))
+            engine._SOURCE_WINDOWS.clear()
+            engine._SOURCE_SLOT.clear()
+
+            # THE DIGEST NO LONGER CARRIES THE JOIN, so what it owes is
+            # only opacity and distinctness: the compositor's identifier is
+            # what both sides agree on, which is why these assert the hash
+            # and not any agreement between the two ends.
+            ck("digest-is-stable",
+               engine.identity_digest("term:resume")
+               == engine.identity_digest("term:resume"))
+            ck("digest-separates-two-identities",
+               engine.identity_digest("term:resume")
+               != engine.identity_digest("term:latch h:s"))
+            ck("digest-is-fixed-width",
+               len(engine.identity_digest("x")) == engine.DIGEST_LEN
+               and len(engine.identity_digest("")) == engine.DIGEST_LEN)
+            # AND IT HIDES THE THING IT IS HASHING, asserted rather than
+            # assumed: a mux latch identity names a work host and session.
+            ck("digest-hides-a-readable-identity",
+               "somehost" not in
+               engine.identity_digest("term:latch somehost:plan"))
+            # THE JOIN RATE IS REPORTED, NOT ASSUMED. The two ends read the
+            # identifier independently through two different protocols, so
+            # whether they agree is a measurement; 0 of N must read
+            # differently from no windows. `_v2` carries an identifier the
+            # account never reported, which is the honest miss: a window it
+            # could not name, rather than one it named differently.
             _v1 = {"app-id": "google-chrome", "title": _T1,
-                   "source": "titan", "pid": -1}
+                   "source": "titan", "pid": -1,
+                   "security-context": {"toplevel-identifier": _TL1}}
             _v2 = {"app-id": "google-chrome", "title": "Drifted - Google "
                                                        "Chrome",
-                   "source": "titan", "pid": -1}
+                   "source": "titan", "pid": -1,
+                   "security-context": {
+                       "toplevel-identifier": "9999eeee8888dd"}}
             _rep_w = engine.source_window_report([_v1, _v2],
                                                  {"titan": _parsed_w})
             ck("source-window-report-counts-the-join",
@@ -4658,12 +4765,13 @@ def _t_relaunch(ck):
             engine._SOURCE_SLOT.clear()
             ck("the-cache-starts-empty-so-the-next-check-is-not-vacuous",
                engine.source_window_identity(
-                   "titan", {"title": _T1, "id": 301}) is None)
+                   "titan", {"title": _T1, "id": 301}, _TL1) is None)
             engine.source_trigger(["titan"], "capture", run=_sr_win,
                                   hook=_hk)
             ck("source-trigger-fills-the-cache-resolution-reads",
                engine.source_window_identity(
-                   "titan", {"title": _T1, "id": 302}) == "chrome:win:11")
+                   "titan", {"title": _T1, "id": 302}, _TL1)
+               == engine.identity_digest("chrome:win:11"))
             engine._SOURCE_WINDOWS.clear()
             engine._SOURCE_SLOT.clear()
             ck("source-trigger-without-the-out-param-still-works",

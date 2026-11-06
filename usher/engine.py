@@ -921,7 +921,7 @@ def snapshot(sock):
             # field and the live title it would otherwise need is blanked
             # one line below.
             w["cmd"] = None
-            if not resolution(pview(v)).is_ready:
+            if not resolution(v).is_ready:
                 w["key"] = ""
             w["title"] = ""
         windows.append(w)
@@ -1224,8 +1224,15 @@ def _owner(v):
 def identity(v):
     """The kb KEY-title for a window: the single chokepoint every keying site
     routes through (upsert, learn, match, place). An owning plugin's identity()
-    wins (Chrome's URL, mux's session, kitty's cwd); otherwise the raw title."""
-    r = resolution(pview(v))
+    wins (Chrome's URL, mux's session, kitty's cwd); otherwise the raw title.
+
+    THE RAW VIEW GOES STRAIGHT THROUGH, which is load-bearing rather than
+    tidy: `resolution` reads the recorded source and the toplevel identifier
+    BEFORE normalising, because `pview` keeps only the four fields a plugin
+    reads. Handing it a pre-normalised view loses both, silently, and for a
+    foreign window that means the source-alone key instead of its per-window
+    one. `_resolution_raw_inputs` in selftest pins that nothing does."""
+    r = resolution(v)
     return r.key if r.key else pview(v)["title"]
 
 
@@ -1525,6 +1532,10 @@ def resolution(v):
     # dangerous direction. A live view never carries the field, so nothing
     # changes for one.
     _rec_src = source_of(v)
+    # THE JOIN KEY, TAKEN ON THE WAY PAST, for the same reason the recorded
+    # source is: `pview` keeps only the four fields a plugin reads, so
+    # anything else has to be read from the raw view before it normalises.
+    _tlid = toplevel_identifier_of(v)
     v = pview(v)
     # ANOTHER ACCOUNT'S WINDOW IS NOT OURS TO IDENTIFY, asked BEFORE any
     # plugin because no plugin can answer for it: the app's own state lives in
@@ -1594,7 +1605,7 @@ def resolution(v):
         # own `chrome:win:<id>`. The source ALONE remains the fallback, which
         # is every entry stored before this and every window whose account
         # cannot say which one it is, so nothing relearns.
-        _per = source_window_identity(src, v)
+        _per = source_window_identity(src, v, _tlid)
         return Resolution.ready(f"{src}:{_per}" if _per else src)
     if other is not None:
         # FOREIGN AND UNNAMED: no provider is wired, or it could not answer.
@@ -1655,9 +1666,10 @@ def _single_id(v):
     # because the app_id-only branch above them had to be gated anyway, so a
     # second answer here was unreachable. A planted regression removing it
     # changed nothing, which is this file's own signal for dead code.
-    v = pview(v)
-    if _owner(v) is None:
+    if _owner(pview(v)) is None:
         return None       # unowned: the title-grouping path, as before
+    # THE RAW VIEW, not the normalised one `_owner` was asked about: see
+    # identity() for why that distinction is not cosmetic.
     r = resolution(v)
     return r.key if r.is_ready else None
 
@@ -3125,7 +3137,7 @@ def live_keys(live):
     same place."""
     out = set()
     for v in live:
-        k = identity(pview(v))
+        k = identity(v)
         if k:
             out.add(k)
     return out
@@ -3500,7 +3512,7 @@ SOURCE_RELAY_LINES = 80
 # risk over the handful of windows one account has open.
 SOURCE_WINDOW_WORD = "window"
 SOURCE_REKEY_WORD = "rekey"
-FINGERPRINT_LEN = 16
+DIGEST_LEN = 16
 # How often, at most, to ask one source to identify its windows again. The
 # ask is a sudo subprocess, and a window that can NEVER be identified
 # (incognito) would otherwise make a loop out of asking about it.
@@ -3512,28 +3524,75 @@ SOURCE_REFRESH_EVERY = 60
 SOURCE_SETTLE = 10
 
 
-def title_fingerprint(title):
-    """An OPAQUE, stable handle for a window title. PURE.
+def identity_digest(ident):
+    """An OPAQUE, stable handle for a window IDENTITY. PURE.
 
-    This is how the owner and another account agree on WHICH window they are
-    both looking at without a readable title crossing the boundary: each side
-    hashes the LIVE title it can already see for itself. The owner reads it
-    off the compositor, the source off its own toplevel list, and neither
-    learns anything from the other that it did not already have.
+    REPLACES A TITLE FINGERPRINT, and the difference is the whole point. The
+    first version had both sides hash the LIVE TITLE, because that was the
+    only string they could both see. It worked and it was a heuristic: a
+    title is not a window identity, two windows can wear one, and the join
+    held only for the interval between the two reads.
 
-    HASHING THE LIVE TITLE ON BOTH SIDES is what makes this work where
-    hashing a RECORDED one would not: Chrome writes a title at navigation
-    time, so its session file disagrees with the screen for hours at a
-    stretch (measured, 2026-10-09). Both sides read the same live string
-    instead, so the only staleness left is the interval between the two
-    reads.
+    The join key is the compositor's own `toplevel-identifier` now, so this
+    no longer carries the join at all: it exists ONLY to keep the identity
+    itself unreadable. That matters most for a terminal, whose identity is
+    `term:latch <host>:<session>` and therefore names a work host and a work
+    session; a digest of it discloses nothing while still telling two
+    windows apart.
     """
     return hashlib.sha256(
-        (title or "").encode("utf-8", "replace")).hexdigest()[:FINGERPRINT_LEN]
+        (ident or "").encode("utf-8", "replace")).hexdigest()[:DIGEST_LEN]
+
+
+def is_digest(s):
+    """Is this the shape `identity_digest` produces? PURE.
+
+    THE OWNER'S SIDE OF THE OPACITY. A source could otherwise report a
+    readable identity (a cwd, a session name, a title) and the owner would
+    store it as a key and print it in `watch.log`. Checking the SHAPE on
+    arrival means a buggy or hostile source can WITHHOLD an identity and can
+    never INJECT one, and it carries no per-app knowledge, which is what the
+    old `is_chrome_slot` test did carry.
+    """
+    return (isinstance(s, str) and len(s) == DIGEST_LEN
+            and all(c in "0123456789abcdef" for c in s))
+
+
+def is_toplevel_identifier(s):
+    """Is this a plausible wlroots foreign-toplevel identifier? PURE.
+
+    Hex, and bounded rather than fixed: the LENGTH is wlroots' choice (14
+    characters on this fleet today) and pinning it would make a future
+    release read as a hostile report.
+    """
+    return (isinstance(s, str) and 8 <= len(s) <= 64
+            and all(c in "0123456789abcdef" for c in s))
+
+
+def toplevel_identifier_of(v):
+    """This view's INSTANCE toplevel-identifier, or None. PURE.
+
+    THE JOIN KEY, and it is the compositor's answer rather than anybody's
+    inference. A sandboxed window sits on TWO foreign-toplevel lists and
+    wlroots mints a different identifier for each; the account sees only the
+    INSTANCE one, which is why `wayfire-mods` put exactly that one on the
+    view description (U-W2 R2). MEASURED on manifold 2026-11-06, both sides
+    read independently: 17 of 17 identifiers agreed.
+
+    READ FROM THE RAW VIEW, before `pview` normalises, which is the same
+    reason `resolution` reads the recorded source first: pview keeps only the
+    four fields a plugin reads, so anything else has to be taken on the way
+    past.
+    """
+    if not isinstance(v, dict):
+        return None
+    sc = v.get("security-context") or {}
+    tl = sc.get("toplevel-identifier")
+    return tl if is_toplevel_identifier(tl) else None
 
 
 def source_window_lines(rows, resolve=None, chrome_test=None):
-    """`window <fingerprint> <identity>` for each of THIS account's windows
+    """`window <identifier> <digest>` for each of THIS account's windows
     that it can resolve to a per-window identity. PURE given its two seams.
 
     WHY THE SOURCE HAS TO ANSWER THIS AT ALL: several windows of one app
@@ -3551,6 +3610,12 @@ def source_window_lines(rows, resolve=None, chrome_test=None):
     is_br = is_chrome if chrome_test is None else chrome_test
     out = []
     for r in rows:
+        # THE JOIN KEY IS THE COMPOSITOR'S, not a hash of a title: both sides
+        # read the same `toplevel-identifier` for the same window, so there is
+        # nothing left to agree about and nothing to go stale between reads.
+        tlid = r.get("identifier")
+        if not is_toplevel_identifier(tlid):
+            continue
         title = r.get("title") or ""
         if not title or not is_br(r.get("app_id") or ""):
             continue
@@ -3559,8 +3624,8 @@ def source_window_lines(rows, resolve=None, chrome_test=None):
         except Exception:                                  # noqa: BLE001
             ident = None
         if ident:
-            out.append(f"{SOURCE_WINDOW_WORD} {title_fingerprint(title)} "
-                       f"{ident}")
+            out.append(f"{SOURCE_WINDOW_WORD} {tlid} "
+                       f"{identity_digest(ident)}")
     return out
 
 
@@ -3598,7 +3663,13 @@ def source_rekey_lines(hist=None, tabs=None, bind=None):
     # code, which a planted regression removing it demonstrated by changing
     # nothing. `rekey_chrome` keeps its own because there the early return
     # also skips building a dict over the whole store.
-    return [f"{SOURCE_REKEY_WORD} {chrome_slot(old)} {chrome_slot(new)}"
+    # DIGESTS ON BOTH SIDES, because these rewrite store KEYS and the keys
+    # are digests now. The pair is still exactly as opaque as it was: a
+    # SessionID disclosed nothing either, but hashing it keeps ONE shape
+    # crossing the boundary rather than two, so the owner's validator carries
+    # no per-app knowledge at all.
+    return [f"{SOURCE_REKEY_WORD} {identity_digest(chrome_slot(old))} "
+            f"{identity_digest(chrome_slot(new))}"
             for old, new in sorted(_bind(cur, prev).items())]
 
 
@@ -3613,7 +3684,7 @@ def parse_source_rekey(text):
     for ln in (text or "").splitlines():
         parts = ln.split()
         if (len(parts) == 3 and parts[0] == SOURCE_REKEY_WORD
-                and is_chrome_slot(parts[1]) and is_chrome_slot(parts[2])
+                and is_digest(parts[1]) and is_digest(parts[2])
                 and parts[1] != parts[2]):
             out[parts[1]] = parts[2]
     return out
@@ -3727,7 +3798,7 @@ def take_source_rekey(src):
 
 
 def parse_source_windows(text):
-    """{fingerprint: identity} out of a source's own report. PURE.
+    """{identifier: digest} out of a source's own report. PURE.
 
     LENIENT BY DESIGN, because this shares a channel with prose a human
     reads: anything that is not exactly the three-word shape is somebody
@@ -3744,18 +3815,19 @@ def parse_source_windows(text):
     for ln in (text or "").splitlines():
         parts = ln.split()
         if (len(parts) == 3 and parts[0] == SOURCE_WINDOW_WORD
-                and is_chrome_slot(parts[2])):
+                and is_toplevel_identifier(parts[1])
+                and is_digest(parts[2])):
             out[parts[1]] = parts[2]
     return out
 
 
-# source -> {fingerprint: identity}, as last reported. Filled only by an
+# source -> {identifier: digest}, as last reported. Filled only by an
 # explicit trigger: `resolution` must stay cheap enough for every event, so
 # it reads this and never asks the far side itself.
 _SOURCE_WINDOWS = {}
-# (source, view id) -> identity, resolved ONCE for the life of that view.
-# Same reason chrome's own `_slot_cache` exists: a title changes constantly
-# and the window behind it does not, so re-deriving per event would make the
+# (source, view id) -> digest, resolved ONCE for the life of that view.
+# Same reason chrome's own `_slot_cache` exists: a report can go briefly
+# absent between an account's captures, and asking again per event would make
 # key as volatile as the string. Dropped on view-unmapped.
 _SOURCE_SLOT = {}
 
@@ -3772,12 +3844,17 @@ def forget_source_window(vid):
         del _SOURCE_SLOT[k]
 
 
-def source_window_identity(src, v):
+def source_window_identity(src, v, tlid=None):
     """Which of `src`'s windows this view is, or None.
+
+    JOINED ON `tlid`, the compositor's own instance toplevel-identifier,
+    which both ends read for themselves. The title is not consulted and must
+    not be: it is not a window identity, two windows can wear one, and the
+    join would hold only for the interval between the two reads.
 
     STICKY ON SUCCESS, never on failure: a window the source has not
     reported yet is retried, and one it has is answered the same way for the
-    life of the view even after its title moves on.
+    life of the view, so a report that goes briefly absent costs nothing.
     """
     vid = v.get("id")
     if vid is not None and (src, vid) in _SOURCE_SLOT:
@@ -3785,7 +3862,7 @@ def source_window_identity(src, v):
     fps = _SOURCE_WINDOWS.get(src) or {}
     if not fps:
         return None
-    ident = fps.get(title_fingerprint(v.get("title") or ""))
+    ident = fps.get(tlid) if tlid else None
     if ident and vid is not None:
         _SOURCE_SLOT[(src, vid)] = ident
     return ident
@@ -3795,9 +3872,14 @@ def source_window_report(views, windows):
     """How many of this source's windows the owner can now tell apart. PURE.
 
     A MEASUREMENT RATHER THAN A SILENT CAPABILITY, because the join rate is
-    the whole question: the two sides hash a live title each, and whether
-    those strings agree in practice is not something to assume. It is
-    reported per source so a rate of zero cannot read as "no such windows".
+    the whole question. It is reported per source so a rate of zero cannot
+    read as "no such windows".
+
+    IT STILL EARNS ITS KEEP NOW THAT THE JOIN IS THE COMPOSITOR'S OWN
+    IDENTIFIER rather than two hashes of a live title. 17 of 17 agreed when
+    that was measured on one box on one day, and the two ends read the field
+    independently through two different protocols: a rate that drops is the
+    only thing that would say so.
     """
     out = []
     for src in sorted(windows):
@@ -3805,7 +3887,7 @@ def source_window_report(views, windows):
         mine = [v for v in views if source_of(v) == src
                 and is_chrome(app_of(v))]
         hit = sum(1 for v in mine
-                  if title_fingerprint(v.get("title") or "") in fps)
+                  if (toplevel_identifier_of(v) or "") in fps)
         out.append(f"{src}: {hit} of {len(mine)} window(s) identified "
                    f"({len(fps)} reported)")
     return out
@@ -3829,7 +3911,7 @@ def source_trigger(sources, action, run=None, hook=None, windows=None):
     gains no new line at every login, and a box with them never loses the
     reason nothing came back.
 
-    `windows`, when given, is FILLED IN with {source: {fingerprint: identity}}
+    `windows`, when given, is FILLED IN with {source: {identifier: digest}}
     from each report. An out-parameter rather than a second return value
     because the int return is what two callers read and what every check
     asserts on, and widening that for data most callers do not want is the
