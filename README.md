@@ -355,6 +355,26 @@ resolves to a terminal on the far side, so the session user could have
 arbitrary code run as the other account, which is the one thing the account
 boundary exists to prevent.
 
+**The argv is exactly three words, and the hook must pass stdin through.**
+One line per window of that source goes on the child's standard input:
+
+```
+pid <toplevel-identifier> <pid>
+```
+
+That is the one fact the other account cannot get for itself:
+`ext_foreign_toplevel_list_v1` is the only window protocol a sandboxed client
+is given and it carries no pid, so the account cannot map one of its own
+windows to one of its own processes, and a terminal's identity (its directory,
+its session) lives nowhere else. The compositor reports a view's pid from the
+client socket's peer credentials, so the session user has it already.
+
+It travels on stdin rather than in the argument list **because the fixed arity
+is what lets a sudoers grant name one command with no wildcard**, and a
+wildcard there is execution as the account. A hook that `exec`s preserves
+stdin and needs no change; one that drops it costs the account the windows it
+needed a pid to describe and nothing else.
+
 No mechanism is named here: reach that account however suits you, and which
 system account a source name means is yours to decide too.
 
@@ -372,14 +392,28 @@ take an argument:
   socket in the session user's `0700` runtime directory, so this side can
   neither read a position nor act on one. Placement stays the session user's
   not as a restriction but as the only split there is.
+  It also records, per window, *how to bring that one back*: the identity
+  and the command, read from this account's own `/proc` with the relayed pid.
+  An app-id alone is enough for most apps and not for a terminal, which would
+  otherwise come back as a bare shell in your home directory having forgotten
+  both its directory and the session it was showing.
+
 - **`usher-mgr _source-resume`** starts the remembered apps that are not
   running, resolving each app-id against *this* account's own desktop
-  registry.
+  registry, and brings each remembered window back by its own command. Pass
+  it the same `pid` lines and it can count what is already up per *command*
+  rather than per app, which is the difference between restoring one of two
+  terminals and restoring both.
 
 The authority sits on the side that cannot be forged: the record of what an
 account had open is written *by* that account, in a home the session user can
 neither read nor write. So a caller supplies a trigger and never content, and
-cannot introduce an app the human did not run there.
+cannot introduce an app the human did not run there. A relayed pid is not
+content either, and the account **checks that each one is its own process**
+before reading anything from it: the pid comes from the Wayland connection's
+peer, so a proxy or a pid namespace between an app and the compositor would
+make it somebody else's, and checking turns either change into a loud refusal
+rather than a confidently wrong answer.
 
 Two rules that are easy to get backwards, both of them refusals:
 

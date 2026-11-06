@@ -547,6 +547,21 @@ resolves to a terminal on the far side, so the session user could have
 arbitrary code run as the other account, which is the one thing the account
 boundary exists to prevent.
 .IP
+THE ARGV IS EXACTLY THREE WORDS AND THE HOOK MUST PASS STDIN THROUGH. usher
+writes one
+.BI "pid " "<toplevel-identifier> <pid>"
+line per window of that source on the child's standard input. That is the one
+fact the account cannot get for itself, since
+.I ext_foreign_toplevel_list_v1
+is the only window protocol a sandboxed client gets and it carries no pid, so
+the account cannot map one of its own windows to one of its own processes, and
+a terminal's identity lives nowhere else. It travels on stdin rather than in
+the argument list BECAUSE the fixed arity is what lets a sudoers grant name
+one command with no wildcard. A hook that
+.BR exec s
+preserves stdin and needs no change; one that drops it costs the account only
+the windows it needed a pid to describe.
+.IP
 usher names no mechanism. Whether the integrator reaches that account by sudo,
 by a transient unit, or by dropping a request in a shared directory is its
 business, and so is which system account a source name means. Without this
@@ -563,6 +578,14 @@ and read by
 .BR "usher-mgr _source-resume" .
 Present only on an account reached through the seam above; the session user's
 own layout is the store, not this.
+.IP
+It also carries, per window, the identity and the COMMAND that brings that one
+back, read from this account's own /proc with the relayed pid. An app-id alone
+is enough for most apps and not for a terminal, which would otherwise come
+back as a bare shell in the home directory having forgotten both its directory
+and the session it was showing. No title and no geometry: a title is this
+account's content and is redacted everywhere else, and geometry belongs to the
+session user.
 .SH ENVIRONMENT
 Every knob usher reads, with its default. All are read ONCE at import, so a
 running daemon keeps the values it started with: change one and restart it

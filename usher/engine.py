@@ -1770,15 +1770,30 @@ def roster_claimed(missing, started, registry=None):
     # exactly why a check could pass over it: measured, a fixture handing a
     # fresh instance proved nothing at all.
     pl = list(plugins()) if registry is None else list(registry)
+    # WHAT ANY PLUGIN SAYS IT STARTED, not only what the app's own owner did.
+    # The owner is resolved from a bare `{app, "", -1}` view, and for kitty
+    # that is always KittyPlugin: MuxPlugin claims a kitty by its TITLE, so
+    # it never owns the bare view even when it is the plugin that put the
+    # window back. Measured: two mux terminals relaunched from their recorded
+    # commands, MuxPlugin reporting `{"kitty"}`, KittyPlugin correctly
+    # reporting nothing, and the default then starting a THIRD kitty as a
+    # bare shell at $HOME. Asking the owner alone cannot express that.
+    _did = set()
+    for _r in started.values():
+        _a = launched_apps(_r)
+        if _a:
+            _did |= _a
     out = set()
     for app in missing:
+        if app in _did:
+            out.add(app)          # somebody started it; one is enough
+            continue
         v = pview({"app-id": app, "title": "", "pid": -1})
         p = next((q for q in pl if _owns(q, v)), None)
         if p is None:
             continue              # unclaimed: the default has always had it
-        apps = launched_apps(started.get(p))
-        if apps is None or app in apps:
-            out.add(app)
+        if launched_apps(started.get(p)) is None:
+            out.add(app)          # no intelligible answer: keep the claim
     return out
 
 
@@ -3686,6 +3701,36 @@ def own_pid(pid, uid=None):
     return proc_uid(pid) == (os.geteuid() if uid is None else uid)
 
 
+def source_views(rows, pids=None, uid=None):
+    """(identifier, view) for each of THIS account's windows usher may read.
+    PURE given /proc. One definition, because two sites ask the same question
+    about the same rows and every silent failure in this package starts with
+    two of them disagreeing.
+
+    A VIEW IS WHAT THE PLUGINS TAKE, so the account runs the REAL dispatch
+    rather than a second implementation of it: `_single_id` for the identity,
+    `relaunch_command_for` for the command, both over this account's own
+    /proc.
+    """
+    pm = pids or {}
+    for r in rows:
+        # THE JOIN KEY IS THE COMPOSITOR'S, not a hash of a title: both sides
+        # read the same `toplevel-identifier` for the same window, so there is
+        # nothing left to agree about and nothing to go stale between reads.
+        tlid = r.get("identifier")
+        if not is_toplevel_identifier(tlid):
+            continue
+        pid = pm.get(tlid, -1)
+        if pid > 0 and not own_pid(pid, uid):
+            # NOT OURS, SO NOT READ. Reported by the caller as a count rather
+            # than per window, because the state that produces it produces it
+            # for every window at once.
+            continue
+        yield tlid, {"app-id": r.get("app_id") or "",
+                     "title": r.get("title") or "",
+                     "pid": pid, "id": None}
+
+
 def source_window_lines(rows, pids=None, resolve=None, uid=None):
     """`window <identifier> <digest>` for each of THIS account's windows
     that it can resolve to a per-window identity. PURE given its one seam.
@@ -3714,30 +3759,55 @@ def source_window_lines(rows, pids=None, resolve=None, uid=None):
     per-window part would be a key that moves whenever the title does.
     """
     res = _single_id if resolve is None else resolve
-    pm = pids or {}
     out = []
-    for r in rows:
-        # THE JOIN KEY IS THE COMPOSITOR'S, not a hash of a title: both sides
-        # read the same `toplevel-identifier` for the same window, so there is
-        # nothing left to agree about and nothing to go stale between reads.
-        tlid = r.get("identifier")
-        if not is_toplevel_identifier(tlid):
-            continue
-        pid = pm.get(tlid, -1)
-        if pid > 0 and not own_pid(pid, uid):
-            # NOT OURS, SO NOT READ. Reported by the caller as a count rather
-            # than per window, because the state that produces it produces it
-            # for every window at once.
-            continue
+    for tlid, v in source_views(rows, pids, uid):
         try:
-            ident = res({"app-id": r.get("app_id") or "",
-                         "title": r.get("title") or "",
-                         "pid": pid, "id": None})
+            ident = res(v)
         except Exception:                                  # noqa: BLE001
             ident = None
         if ident:
             out.append(f"{SOURCE_WINDOW_WORD} {tlid} "
                        f"{identity_digest(ident)}")
+    return out
+
+
+def source_roster_rows(rows, pids=None, resolve=None, cmd_of=None,
+                       uid=None):
+    """[{"app_id", "key", "cmd"}] for each of THIS account's windows it can
+    describe. PURE given its two seams.
+
+    THE OTHER HALF OF THE RELAY, and the one the user asked for: an app-id
+    alone resolves to a bare shell at $HOME, so a terminal came back having
+    forgotten its directory and the mux session it was showing.
+
+    ASKED OF THE LIVE WINDOW, which is the only moment it can be:
+    `_single_id` reads the shell's cwd and `relaunch_command_for` the process
+    tree, and by the time anything replays this the process is gone. Same
+    reason the owner's own snapshot stamps both at capture.
+
+    THE SHAPE IS A SNAPSHOT ROW'S, deliberately, so `mux_candidates` and
+    `kitty_candidates` read it with no translation: they ask `saved_key(w)`
+    and `mux_cmd_of_saved(w)`, and giving them anything else would be a
+    second description of the same fact.
+    """
+    res = _single_id if resolve is None else resolve
+    cmd = relaunch_command_for if cmd_of is None else cmd_of
+    out = []
+    for _tlid, v in source_views(rows, pids, uid):
+        try:
+            key = res(v)
+        except Exception:                                  # noqa: BLE001
+            key = None
+        if not key:
+            # NO KEY, NO ROW. `saved_key` is what every relauncher reads, so
+            # a row without one describes nothing and the app-id list already
+            # covers the generic case.
+            continue
+        try:
+            c = cmd(v)
+        except Exception:                                  # noqa: BLE001
+            c = None
+        out.append({"app_id": v["app-id"], "key": key, "cmd": c})
     return out
 
 
@@ -4158,15 +4228,63 @@ def roster_path():
     return os.path.join(STATE, "roster.json")
 
 
-def save_roster(apps, when=None, path=None):
-    """Record which apps this account has open. Returns what was written."""
+def save_roster(apps, when=None, path=None, windows=None):
+    """Record which apps this account has open. Returns what was written.
+
+    `windows` is one row per window THIS ACCOUNT CAN DESCRIBE:
+    `{"app_id", "key", "cmd"}`, which is exactly the subset of a snapshot row
+    that the relaunchers read (`saved_key`, `mux_cmd_of_saved`), so the
+    account's resume runs the SAME code the owner's does over the same shape.
+
+    AN APP-ID ALONE IS NOT ENOUGH FOR A TERMINAL, which is why this exists:
+    `kitty` resolves to a bare shell at $HOME, so the window came back having
+    forgotten both its directory and the mux session it was showing.
+
+    ADDITIVE, SO NO VERSION BUMP AND NOTHING RELEARNS. A roster without the
+    field reads exactly as it did, and a bump would cost one login where this
+    account's desk does not come back at all.
+
+    NO TITLE AND NO GEOMETRY. A title is this account's content and is
+    redacted everywhere else, so it must not reappear here; geometry is the
+    OWNER's job and sending it back would be a second copy of the slot.
+    """
     kept = sorted({a for a in apps if a})
+    rows = [{"app_id": w.get("app_id") or "",
+             "key": w.get("key") or "",
+             "cmd": w.get("cmd") or None}
+            for w in (windows or [])
+            if (w.get("app_id") or "") and (w.get("key") or "")]
     p = roster_path() if path is None else path
     os.makedirs(os.path.dirname(p), exist_ok=True)
-    write_json(p, json.dumps({"version": ROSTER_VERSION,
-                              "when": time.time() if when is None else when,
-                              "apps": kept}, indent=2))
+    blob = {"version": ROSTER_VERSION,
+            "when": time.time() if when is None else when,
+            "apps": kept}
+    if rows:
+        blob["windows"] = rows
+    write_json(p, json.dumps(blob, indent=2))
     return kept
+
+
+def read_roster(path=None):
+    """(blob, why) from this account's roster file. ONE PARSE, read by both
+    `load_roster` and `roster_windows`, so the two cannot come to disagree
+    about whether a file is readable."""
+    p = roster_path() if path is None else path
+    try:
+        with open(p) as f:
+            blob = json.load(f)
+    except FileNotFoundError:
+        return None, (f"no roster at {p}, so this account has never been "
+                      "captured: nothing can be brought back yet")
+    except (OSError, ValueError) as e:
+        return None, f"cannot read the roster at {p}: {e}"
+    if not isinstance(blob, dict):
+        return None, f"the roster at {p} is not an object"
+    got = blob.get("version")
+    if got != ROSTER_VERSION:
+        return None, (f"the roster at {p} is version {got!r} and this usher "
+                      f"writes {ROSTER_VERSION}")
+    return blob, ""
 
 
 def load_roster(path=None):
@@ -4176,25 +4294,41 @@ def load_roster(path=None):
     was captured and had nothing open; why != "" means it could not be read at
     all, and the caller must not start anything on the strength of that.
     """
-    p = roster_path() if path is None else path
-    try:
-        with open(p) as f:
-            blob = json.load(f)
-    except FileNotFoundError:
-        return [], (f"no roster at {p}, so this account has never been "
-                    "captured: nothing can be brought back yet")
-    except (OSError, ValueError) as e:
-        return [], f"cannot read the roster at {p}: {e}"
-    if not isinstance(blob, dict):
-        return [], f"the roster at {p} is not an object"
-    got = blob.get("version")
-    if got != ROSTER_VERSION:
-        return [], (f"the roster at {p} is version {got!r} and this usher "
-                    f"writes {ROSTER_VERSION}")
+    blob, why = read_roster(path)
+    if why:
+        return [], why
     apps = blob.get("apps")
     if not isinstance(apps, list):
+        p = roster_path() if path is None else path
         return [], f"the roster at {p} carries no app list"
     return sorted({a for a in apps if isinstance(a, str) and a}), ""
+
+
+def roster_windows(path=None):
+    """The per-window rows, each `{"app_id", "key", "cmd"}`. [] when the roster
+    has none, which is every roster written before this existed.
+
+    NORMALISED ON THE WAY OUT rather than trusted, and the fixture for it is a
+    HAND-WRITTEN file rather than a round trip: a filter only ever fed its own
+    writer's output is tested by nothing, which this suite has been caught by
+    once already.
+    """
+    blob, why = read_roster(path)
+    if why or not isinstance(blob.get("windows"), list):
+        return []
+    out = []
+    for r in blob["windows"]:
+        if not isinstance(r, dict):
+            continue
+        app, key, cmd = r.get("app_id"), r.get("key"), r.get("cmd")
+        if not isinstance(app, str) or not app:
+            continue
+        if not isinstance(key, str) or not key:
+            continue
+        if cmd is not None and (not isinstance(cmd, str) or not cmd):
+            continue
+        out.append({"app_id": app, "key": key, "cmd": cmd})
+    return out
 
 
 def roster_plan(saved, live):
@@ -4203,7 +4337,27 @@ def roster_plan(saved, live):
     return sorted({a for a in saved if a} - {a for a in live if a})
 
 
-def roster_launch(apps, live, spawn=None):
+def roster_saved(apps, live, windows=None):
+    """The saved rows to hand the relaunchers. PURE.
+
+    TWO KINDS, AND THE PER-WINDOW ONES WIN. A row describing a window (an
+    app-id, its identity and its command) is strictly better than an app-id
+    on its own, so an app with rows contributes those and nothing else; an
+    app with none falls back to the app-id row that is all this ever had.
+
+    THE APP-ID ROWS ARE STILL FILTERED BY LIVENESS and the per-window rows
+    are NOT, deliberately: "is this app up" is the only question an app-id
+    can answer, where a window row lets the relaunchers ask the sharper one
+    they are built for ("how many windows was I running THIS command in, and
+    how many are up?"), which they do against the live views themselves.
+    """
+    rows = [dict(r) for r in (windows or []) if r.get("app_id")]
+    named = {r["app_id"] for r in rows}
+    return rows + [{"app_id": a} for a in roster_plan(apps, live)
+                   if a not in named]
+
+
+def roster_launch(apps, live, spawn=None, windows=None, seen=None):
     """Start each remembered app of this account's that is not running.
 
     THROUGH THE SAME MACHINERY THE OWNER USES, so the standing invariant holds
@@ -4217,17 +4371,21 @@ def roster_launch(apps, live, spawn=None):
     back through it: one enclave triggering another is a loop, and nothing
     here is the owner.
 
-    A ROSTER ROW IS app_id AND NOTHING ELSE, which the plugins already cope
-    with correctly rather than by accident: chrome reads `owner` (absent, so
-    ours) and falls back to one unnamed launch carrying its restore flags, and
-    the terminal plugins key on a recorded `cmd` a roster does not have, so
-    they find nothing instead of guessing.
+    A ROW CAN NOW CARRY `key` AND `cmd`, which is what brings a TERMINAL
+    back: the app-id alone resolves to a bare shell at $HOME, so the window
+    returned having forgotten its directory and its mux session. See
+    `roster_saved` for how the two kinds of row combine.
+
+    AND `seen` IS THE LIVE VIEWS WITH THEIR PIDS when the caller has them,
+    because that is what lets `mux_candidates` count per COMMAND rather than
+    per app: two mux terminals and one of them up is a shortfall of one
+    SPECIFIC command, and an app-id can only say "kitty is running".
     """
-    missing = roster_plan(apps, live)
-    if not missing:
+    saved = roster_saved(apps, live, windows)
+    if not saved:
         return 0
-    saved = [{"app_id": a} for a in missing]
-    seen = [{"app-id": a, "pid": -1} for a in live if a]
+    if seen is None:
+        seen = [{"app-id": a, "pid": -1} for a in live if a]
     n = 0
     # ARMED BEFORE THE PLUGINS RUN, because ChromePlugin starts the browser
     # and that is the app this exists for: arming after the loop covered
@@ -4266,13 +4424,20 @@ def roster_launch(apps, live, spawn=None):
     # AN INJECTED SPAWN ALWAYS WINS, which is what keeps the suite from
     # launching anything real: watching is only for the production path.
     try:
-        # THE DEFAULT GETS WHAT THE PLUGINS DID NOT START. A roster row is an
-        # app-id and nothing else, so a plugin keyed on a recorded command
-        # no-ops and its CLAIM would otherwise be the only thing standing
-        # between the app and the one mechanism that can start it.
+        # THE DEFAULT GETS WHAT THE PLUGINS DID NOT START. A plugin keyed on
+        # a recorded command no-ops over an app-id-only row, and its CLAIM
+        # would otherwise be the only thing standing between the app and the
+        # one mechanism that can start it.
+        #
+        # ASKED ABOUT WHAT WE HANDED THE PLUGINS, not about a separately
+        # computed "missing" list: the two can differ now that a per-window
+        # row bypasses the liveness filter, and the question is about the
+        # rows the loop above actually saw.
         n += launched_count(desktop_relaunch_missing(
             saved, seen, spawn,
-            claimed=roster_claimed(missing, started, pl)))
+            claimed=roster_claimed(
+                sorted({r["app_id"] for r in saved if r.get("app_id")}),
+                started, pl)))
     except Exception as e:                                     # noqa: BLE001
         logline(f"relaunch (desktop default) error: {e}")
     if watch:
@@ -4509,31 +4674,13 @@ def do_source_capture():
     # an app the human really did close stops coming back at the next capture.
     # Only the all-zero case is refused, and refusing costs at most one
     # unwanted window, where accepting costs the whole restore.
-    if not apps:
-        had, _why = load_roster()
-        if had:
-            print(f"usher: this account shows no windows, and its roster "
-                  f"remembers {len(had)} app(s), so it is NOT being "
-                  f"overwritten: {' '.join(had)}", file=sys.stderr)
-            print(f"usher: capture while the session is still intact, "
-                  "before anything is torn down.", file=sys.stderr)
-            return EXIT_CANNOT
-    save_roster(apps)
-    print(f"usher: recorded {len(apps)} app(s) for this account"
-          + (": " + " ".join(apps) if apps else ""))
-    # AND WHICH WINDOW IS WHICH, for the apps where that is answerable here
-    # and nowhere else. Printed rather than stored, because the owner cannot
-    # read this account's files and the report is what already crosses.
-    #
-    # THE PIDS ARRIVE ON STDIN, which is the one fact this side cannot get for
-    # itself: `ext_foreign_toplevel_list_v1` carries no pid, so without them a
-    # terminal's identity (its cwd, its mux command) is unreachable here
-    # however much privilege this account has over both the window and the
-    # process. See SOURCE_PID_WORD.
+    # THE RELAYED PIDS, READ BEFORE ANYTHING IS SAVED, because the roster
+    # now carries a COMMAND per window and the command is only readable with
+    # the pid. See SOURCE_PID_WORD for why they arrive on stdin.
     #
     # DEGRADES RATHER THAN FAILING: no stdin, a relay that drops it, or an
-    # older owner means an empty map, and then only the apps whose identity
-    # needs no pid are reported, which is exactly where this started.
+    # older owner means an empty map, and then the roster is app-ids only,
+    # which is exactly where this started.
     _pids = parse_source_pids(_read_stdin())
     _mine = {k: v for k, v in _pids.items() if own_pid(v)}
     if len(_mine) != len(_pids):
@@ -4545,6 +4692,30 @@ def do_source_capture():
         print(f"usher: {len(_pids) - len(_mine)} of {len(_pids)} relayed "
               "pid(s) are not this account's processes, so those windows "
               "cannot be identified here", file=sys.stderr)
+    if not apps:
+        had, _why = load_roster()
+        if had:
+            print(f"usher: this account shows no windows, and its roster "
+                  f"remembers {len(had)} app(s), so it is NOT being "
+                  f"overwritten: {' '.join(had)}", file=sys.stderr)
+            print(f"usher: capture while the session is still intact, "
+                  "before anything is torn down.", file=sys.stderr)
+            return EXIT_CANNOT
+    # AND HOW TO BRING EACH WINDOW BACK, which for a terminal is the whole
+    # answer: `kitty` resolves to a bare shell at $HOME and forgets the
+    # session the window was showing. Recorded rather than printed, because
+    # it is THIS account that will run it and the owner must never see or
+    # supply a command.
+    _wrows = source_roster_rows(rows, _mine)
+    save_roster(apps, windows=_wrows)
+    print(f"usher: recorded {len(apps)} app(s) for this account"
+          + (": " + " ".join(apps) if apps else ""))
+    if _wrows:
+        print(f"usher: and how to bring back {len(_wrows)} of "
+              f"{len(rows)} window(s)")
+    # AND WHICH WINDOW IS WHICH, for the apps where that is answerable here
+    # and nowhere else. Printed rather than stored, because the owner cannot
+    # read this account's files and the report is what already crosses.
     for _ln in source_window_lines(rows, _mine):
         print(_ln)
     # AND HOW THIS ACCOUNT'S OWN IDS MOVED ACROSS ITS LAST BROWSER RESTART,
@@ -4581,13 +4752,29 @@ def do_source_resume():
               f"running, so it is not starting any: {lwhy}", file=sys.stderr)
         return EXIT_CANNOT
     live = [r["app_id"] for r in rows if r["app_id"]]
+    # THE PER-WINDOW ROWS, which is what brings a TERMINAL back rather than a
+    # bare shell at $HOME. Absent from a roster written before they existed,
+    # and then this behaves exactly as it did.
+    wins = roster_windows()
+    # AND THE LIVE WINDOWS WITH THEIR PIDS, so the relaunchers can count per
+    # COMMAND: two mux terminals with one of them up is a shortfall of one
+    # SPECIFIC command, and an app-id can only say "kitty is running". The
+    # pids arrive on stdin exactly as they do for a capture; without them
+    # `source_views` yields pid -1 and the counting falls back to per app.
+    _pids = parse_source_pids(_read_stdin())
+    seen = [v for _t, v in source_views(
+        rows, {k: p for k, p in _pids.items() if own_pid(p)})]
     want = roster_plan(apps, live)
-    if not want:
+    if not want and not wins:
         print(f"usher: all {len(apps)} remembered app(s) are already running")
         return EXIT_OK
-    n = roster_launch(apps, live)
-    print(f"usher: asked for {n} of {len(want)} missing app(s): "
-          + " ".join(want))
+    n = roster_launch(apps, live, windows=wins, seen=seen)
+    if not want and not n:
+        print(f"usher: all {len(apps)} remembered app(s) are already running")
+        return EXIT_OK
+    print(f"usher: asked for {n} of {len(want)} missing app(s)"
+          + ((": " + " ".join(want)) if want else "")
+          + (f", from {len(wins)} remembered window(s)" if wins else ""))
     return EXIT_OK if n else EXIT_FAIL
 
 
