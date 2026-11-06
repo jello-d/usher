@@ -1686,7 +1686,12 @@ class Watcher:
             self.src_asked[src] = time.time()
             before = dict(engine._SOURCE_WINDOWS.get(src) or {})
             try:
-                engine.source_trigger([src], "capture")
+                # THE PIDS GO WITH THE QUESTION. The snapshot rows carry
+                # both halves (`pid` and `identifier`), which is the only
+                # reason the refresh can send them from the capture thread
+                # without a second round trip to the compositor.
+                engine.source_trigger([src], "capture",
+                                      views=snap["windows"])
             except Exception as e:                         # noqa: BLE001
                 logline(f"could not ask {src} to identify its windows: {e}")
                 continue

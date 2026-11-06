@@ -27,6 +27,7 @@ import hashlib
 import json
 import os
 import re
+import select
 import shlex
 import shutil
 import signal
@@ -884,6 +885,17 @@ def snapshot(sock):
             # itself, so a row stays meaningful with no provider wired.
             if _src:
                 w["source"] = _src
+            # AND THE COMPOSITOR'S IDENTIFIER FOR IT, which is what lets the
+            # DAEMON relay this window's pid to the account that owns it: the
+            # refresh runs off a snapshot, not off a live view list, so
+            # without this the pid has no handle the far side can join on.
+            # Opaque and random, so it carries nothing, and a replayed row's
+            # is stale by construction (wlroots mints a new one per map),
+            # which costs only a miss because the map it is looked up in
+            # holds the CURRENT report.
+            _tl = toplevel_identifier_of(v)
+            if _tl:
+                w["identifier"] = _tl
             # REDACTED, AND THIS IS A PRIVACY BOUNDARY RATHER THAN TIDINESS.
             # A window belonging to another account is captured so the
             # relaunch paths can SKIP it and so a reader can see one was
@@ -3512,6 +3524,20 @@ SOURCE_RELAY_LINES = 80
 # risk over the handful of windows one account has open.
 SOURCE_WINDOW_WORD = "window"
 SOURCE_REKEY_WORD = "rekey"
+# The line prefix the OWNER uses to tell a source which process one of its
+# windows is. The one fact an account genuinely cannot get for itself:
+# `ext_foreign_toplevel_list_v1` is the only window protocol a sandboxed
+# client is given and its whole argument vocabulary is app_id, identifier,
+# title and toplevel, so there is no pid in it, and an account therefore
+# cannot map one of its OWN toplevels to one of its OWN processes however
+# much privilege it has over both.
+#
+# IT GOES ON STDIN, NOT IN THE ARGV, and that is the security property
+# rather than a preference: the trigger's arity is exactly three words, which
+# is what lets the integrator's sudoers rule name a FIXED command with no
+# wildcard. A variable-length argument list would make the rule wildcarded
+# and a wildcard there is execution as the account.
+SOURCE_PID_WORD = "pid"
 DIGEST_LEN = 16
 # How often, at most, to ask one source to identify its windows again. The
 # ask is a sudo subprocess, and a window that can NEVER be identified
@@ -3591,9 +3617,78 @@ def toplevel_identifier_of(v):
     return tl if is_toplevel_identifier(tl) else None
 
 
-def source_window_lines(rows, resolve=None, chrome_test=None):
+def source_pid_lines(views, src):
+    """`pid <identifier> <pid>` for each of `src`'s windows. PURE.
+
+    THE OWNER'S HALF OF THE ONE FACT THE ACCOUNT CANNOT HAVE. wayfire reports
+    a view's pid from the client socket's PEER CREDENTIALS, in the same pid
+    namespace, so an enclave window's pid IS one of that account's own
+    processes (measured on manifold 2026-11-06: chrome 8079, slack 8121, two
+    kitty windows one process each, all owned by jello-titan). The account
+    cannot read that from its own protocol, so the owner sends it with the
+    question it was already asking.
+
+    A WINDOW WITH NO IDENTIFIER IS SKIPPED, not reported under some other
+    handle: the identifier is the only thing both ends agree on, so a pair the
+    account cannot join is noise it would have to guess about.
+    """
+    out = []
+    for v in views:
+        if source_of(v) != src:
+            continue
+        # EITHER SHAPE: a live view carries it under `security-context`, a
+        # snapshot row under `identifier`, and the daemon's refresh has the
+        # latter. Same pattern as the recorded source winning over a
+        # re-derived one.
+        tlid = toplevel_identifier_of(v) or v.get("identifier")
+        pid = pview(v).get("pid")
+        if not is_toplevel_identifier(tlid):
+            continue
+        if not isinstance(pid, int) or pid <= 0:
+            continue
+        out.append(f"{SOURCE_PID_WORD} {tlid} {pid}")
+    return out
+
+
+def parse_source_pids(text):
+    """{identifier: pid} out of what the owner sent. PURE.
+
+    LENIENT, like every other line on these channels, because this shares one
+    with prose. Validated on arrival for the same reason the window map's
+    identity is, in the OTHER direction: these pids are about to be used to
+    read /proc, so a non-numeric or non-positive one is somebody else's line.
+    """
+    out = {}
+    for ln in (text or "").splitlines():
+        parts = ln.split()
+        if (len(parts) == 3 and parts[0] == SOURCE_PID_WORD
+                and is_toplevel_identifier(parts[1])
+                and parts[2].isdigit() and int(parts[2]) > 0):
+            out[parts[1]] = int(parts[2])
+    return out
+
+
+def own_pid(pid, uid=None):
+    """Is `pid` one of THIS account's own processes? PURE given /proc.
+
+    ASKED OF EVERY PID THE OWNER SENDS, before anything is read from it, and
+    the request wayfire-mods answered says why: the pid comes from the Wayland
+    connection's peer, so if severance ever puts a PROXY or a pid NAMESPACE
+    between an app and the compositor it becomes the proxy's pid or one this
+    account cannot see. Checking turns either change into a loud refusal
+    instead of a confidently wrong key, and it costs one stat.
+
+    IT IS NOT A SECURITY BOUNDARY AND MUST NOT BE READ AS ONE. The owner owns
+    the display socket this account draws through, so it could MITM the whole
+    GUI; what this prevents is usher reading the wrong process, which is the
+    failure that would actually happen.
+    """
+    return proc_uid(pid) == (os.geteuid() if uid is None else uid)
+
+
+def source_window_lines(rows, pids=None, resolve=None, uid=None):
     """`window <identifier> <digest>` for each of THIS account's windows
-    that it can resolve to a per-window identity. PURE given its two seams.
+    that it can resolve to a per-window identity. PURE given its one seam.
 
     WHY THE SOURCE HAS TO ANSWER THIS AT ALL: several windows of one app
     share one key on the owner's side, because the handle that tells them
@@ -3602,12 +3697,24 @@ def source_window_lines(rows, resolve=None, chrome_test=None):
     that can say which window is which, and it says so in terms (a digest
     and an opaque id) that disclose nothing.
 
-    GATED ON THE APP, because the resolver joins against ONE app's recorded
-    state: handing it a terminal's title would match by coincidence or not at
-    all, and a coincidence here is a wrong slot that sticks.
+    IT RUNS THE REAL DISPATCH, which is what makes it generic. It used to be
+    chrome-only, joining a live TITLE against this account's own session
+    files, and the next app would have needed its own mechanism: a terminal's
+    identity is its cwd or its mux command, both of which live in /proc and
+    neither of which is in any window protocol. With the pid relayed, every
+    field `resolution` reads is available here, so `_single_id` answers for
+    chrome, kitty and mux alike and for anything a future plugin claims.
+
+    GATED ON OWNERSHIP RATHER THAN ON THE APP, which falls out of using
+    `_single_id`: a plugin is only ever asked about windows it owns, so a
+    terminal can no longer be handed to the browser's resolver, and an app NO
+    plugin claims reports nothing at all. That last part is deliberate and is
+    not a gap: one window of an app is already completely keyed by its app-id
+    plus this account's name on the owner's side, and a title-derived
+    per-window part would be a key that moves whenever the title does.
     """
-    res = chrome_window_for if resolve is None else resolve
-    is_br = is_chrome if chrome_test is None else chrome_test
+    res = _single_id if resolve is None else resolve
+    pm = pids or {}
     out = []
     for r in rows:
         # THE JOIN KEY IS THE COMPOSITOR'S, not a hash of a title: both sides
@@ -3616,11 +3723,16 @@ def source_window_lines(rows, resolve=None, chrome_test=None):
         tlid = r.get("identifier")
         if not is_toplevel_identifier(tlid):
             continue
-        title = r.get("title") or ""
-        if not title or not is_br(r.get("app_id") or ""):
+        pid = pm.get(tlid, -1)
+        if pid > 0 and not own_pid(pid, uid):
+            # NOT OURS, SO NOT READ. Reported by the caller as a count rather
+            # than per window, because the state that produces it produces it
+            # for every window at once.
             continue
         try:
-            ident = res(title)
+            ident = res({"app-id": r.get("app_id") or "",
+                         "title": r.get("title") or "",
+                         "pid": pid, "id": None})
         except Exception:                                  # noqa: BLE001
             ident = None
         if ident:
@@ -3903,8 +4015,15 @@ def source_trigger_plan(rows):
     return sorted({s for s in (source_of(w) for w in rows) if s})
 
 
-def source_trigger(sources, action, run=None, hook=None, windows=None):
+def source_trigger(sources, action, run=None, hook=None, windows=None,
+                   views=None):
     """Ask each source to capture or resume ITSELF. Returns how many accepted.
+
+    `views`, when given, is the live view list, and each source is sent
+    `pid <identifier> <pid>` for ITS OWN windows ON STDIN. See
+    SOURCE_PID_WORD for why stdin and not the argv. A source gets only its
+    own rows, which is not a privacy measure (it owns those processes) but
+    keeps the question the account is asked about itself.
 
     NEVER FATAL AND NEVER SILENT. A missing hook is reported only when there
     is something it would have been asked, so a box with no other accounts
@@ -3930,10 +4049,16 @@ def source_trigger(sources, action, run=None, hook=None, windows=None):
         return 0
     n = 0
     for src in sorted(sources):
+        # ONE SOURCE'S ROWS ONLY, and an empty string rather than None so
+        # the child always gets a CLOSED stdin: a child that reads stdin with
+        # nothing attached would inherit ours and block, and this runs from
+        # the capture loop.
+        _in = "" if views is None else "".join(
+            ln + "\n" for ln in source_pid_lines(views, src))
         try:
             r = (subprocess.run if run is None else run)(
                 [path, src, action], capture_output=True, text=True,
-                timeout=30)
+                timeout=30, input=_in)
         except Exception as e:                                 # noqa: BLE001
             logline(f"source-trigger {action} for {src} failed: {e}")
             continue
@@ -4300,6 +4425,50 @@ def _report_quick_deaths(watch, grace=3.0, lines=4, width=150):
                 os.unlink(path)
 
 
+# How long to wait for the owner's relayed pids. A BUDGET RATHER THAN A
+# HEURISTIC: `subprocess.run(input=...)` writes the whole thing and closes
+# before it waits for us, so the data and the EOF are already in the pipe by
+# the time this verb starts, and anything not here in two seconds is not
+# coming.
+STDIN_WAIT = 2.0
+
+
+def _read_stdin(deadline=None):
+    """Everything on stdin, or "" if there is none. Never raises, NEVER
+    BLOCKS INDEFINITELY.
+
+    A TTY IS READ AS NOTHING, which is what keeps the verb usable by hand: a
+    human running it in a terminal must not have it wait for input that is
+    never coming.
+
+    AND THE BOUND IS NOT BELT AND BRACES. A plain `sys.stdin.read()` returns
+    at once on the relay's closed pipe and HANGS FOR EVER on an inherited one
+    that nobody will close, which is what a miswired shim or a hand-run from
+    a pipeline gives it. The owner's own `timeout=30` would mask that as a
+    refused trigger with no cause; from a terminal there is no bound at all.
+    """
+    want = STDIN_WAIT if deadline is None else deadline
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return ""
+        fd = sys.stdin.fileno()
+        end = time.monotonic() + want
+        chunks = []
+        while True:
+            left = end - time.monotonic()
+            if left <= 0:
+                break
+            if not select.select([fd], [], [], left)[0]:
+                break
+            got = os.read(fd, 65536)
+            if not got:
+                break                                  # EOF: the whole thing
+            chunks.append(got)
+        return b"".join(chunks).decode("utf-8", "replace")
+    except Exception:                                      # noqa: BLE001
+        return ""
+
+
 def do_source_capture():
     """Record this account's own open apps. Takes no arguments.
 
@@ -4355,7 +4524,28 @@ def do_source_capture():
     # AND WHICH WINDOW IS WHICH, for the apps where that is answerable here
     # and nowhere else. Printed rather than stored, because the owner cannot
     # read this account's files and the report is what already crosses.
-    for _ln in source_window_lines(rows):
+    #
+    # THE PIDS ARRIVE ON STDIN, which is the one fact this side cannot get for
+    # itself: `ext_foreign_toplevel_list_v1` carries no pid, so without them a
+    # terminal's identity (its cwd, its mux command) is unreachable here
+    # however much privilege this account has over both the window and the
+    # process. See SOURCE_PID_WORD.
+    #
+    # DEGRADES RATHER THAN FAILING: no stdin, a relay that drops it, or an
+    # older owner means an empty map, and then only the apps whose identity
+    # needs no pid are reported, which is exactly where this started.
+    _pids = parse_source_pids(_read_stdin())
+    _mine = {k: v for k, v in _pids.items() if own_pid(v)}
+    if len(_mine) != len(_pids):
+        # LOUD, AND COUNTED RATHER THAN PER WINDOW. The state that causes this
+        # (a Wayland proxy, or a pid namespace between the app and the
+        # compositor) causes it for every window at once, so a line each would
+        # be noise; and saying nothing would leave a silently reduced capture,
+        # which is this package's most repeated failure shape.
+        print(f"usher: {len(_pids) - len(_mine)} of {len(_pids)} relayed "
+              "pid(s) are not this account's processes, so those windows "
+              "cannot be identified here", file=sys.stderr)
+    for _ln in source_window_lines(rows, _mine):
         print(_ln)
     # AND HOW THIS ACCOUNT'S OWN IDS MOVED ACROSS ITS LAST BROWSER RESTART,
     # which is what makes the per-window keys survive a login: they name the
@@ -4446,6 +4636,13 @@ def launch_missing(snap=None):
     # roster and its own live windows, so asking is idempotent and the owner
     # does not need (and must not have) an opinion about the contents.
     try:
+        # NO PIDS WITH A RESUME, because the rows here are the SAVED
+        # snapshot rather than live views: their identifiers name windows
+        # from a previous session (wlroots mints a new one per map) and their
+        # pids are long dead, so relaying them would be relaying nonsense.
+        # Sending the LIVE ones would be meaningful and wants a reason to:
+        # the account's "which of mine are already up" is per COMMAND for a
+        # terminal, which it can only answer by resolving a live window.
         n += source_trigger(source_trigger_plan(saved), "resume")
     except Exception as e:
         logline(f"relaunch (source) error: {e}")
@@ -5020,11 +5217,13 @@ def do_wind_down():
     try:
         _lv = ipc().list_views(filter_mapped_toplevel=True)
         _win = {}
-        source_trigger(source_trigger_plan(_lv), "capture", windows=_win)
+        source_trigger(source_trigger_plan(_lv), "capture", windows=_win,
+                       views=_lv)
         # AND SAY WHETHER THE TWO SIDES AGREED, from the one place that holds
-        # both: the source hashed the titles IT saw, and whether those are the
-        # strings the compositor reports here is a measurement rather than an
-        # assumption. A rate reported per source cannot read as "no windows".
+        # both. The join is the compositor's own identifier now rather than
+        # two hashes of a live title, so a rate below 100% is a real finding
+        # rather than ordinary drift; reported per source so it cannot read
+        # as "no windows".
         for _r in source_window_report(_lv, _win):
             _announce(f"usher: window identity, {_r}")
     except Exception as e:
