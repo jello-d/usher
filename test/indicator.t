@@ -115,5 +115,36 @@ grep -qx -- "$RO" "$T/pip.log" \
 [ -z "$(ls -a "$RO" | grep -E 'egg-info|^build$')" ] \
   || fail "the install wrote build detritus into the source"
 
+# --- THE READER'S OWN TABLE ------------------------------------------------
+# `read_status` is this package's ONE contract with the daemon and it decides
+# whether the tray draws at all: everything it cannot understand reads as
+# `down`, which is deliberately forgiving and therefore deliberately QUIET.
+# Everything above tests the INSTALL; usher's own suite holds the FIELD NAMES
+# from both sides; this is the reader's logic.
+#
+# IT NEEDS A PYTHON WITH PILLOW, which the module imports at top, so the
+# INSTALLED indicator venv is the only interpreter that can import it. The
+# skip is ANNOUNCED, because a test reporting the same thing whether or not
+# half of it ran is the false green this tree exists to refuse.
+_iv=$HOME/.local/share/usher/venv-indicator/bin/python3
+if [ -x "$_iv" ]; then
+  _so=$(cd / && env PYTHONPATH="$HERE/indicator" "$_iv" \
+        -m usher_indicator status-test 2>&1) || {
+    fail "the status reader's own table: $_so"
+  }
+  case $_so in
+    *"status-test OK"*) : ;;
+    *) fail "status-test said nothing recognisable: $_so" ;;
+  esac
+  # THE COUNT IS READ, because a table that silently shrank would still say
+  # OK: the lesson this fleet paid for at 149-to-129 files.
+  _sn=$(printf '%s' "$_so" | sed -n 's/.*OK (\([0-9]*\) checks).*/\1/p')
+  [ -n "$_sn" ] && [ "$_sn" -ge 12 ] \
+    || fail "the status table shrank to ${_sn:-?} checks"
+  _smsg="the status reader ($_sn cells)"
+else
+  _smsg="status reader SKIPPED (no indicator venv)"
+fi
+
 pass "payload venv-indicator, the carry name, the retirement guard, \
-read-only source"
+read-only source, $_smsg"

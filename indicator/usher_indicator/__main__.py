@@ -289,10 +289,113 @@ def _render_test(outdir):
     print(p)
 
 
+def _status_test():
+    """`read_status`'s whole table, which nothing tested.
+
+    IT IS THE ONE CONTRACT THIS PACKAGE HAS WITH THE DAEMON, and it decides
+    whether the tray draws at all: everything it cannot understand reads as
+    `down`, which is deliberately forgiving and therefore deliberately
+    QUIET. `test/indicator.t` tested only the install (the venv, the links,
+    the unit, the read-only source), and usher's own suite now holds the
+    FIELD NAMES from both sides; this is the reader's own logic.
+
+    HERE RATHER THAN IN A NEW FILE, beside `render-test`, because the module
+    imports Pillow at top so any test of it needs this venv anyway, and a
+    verb costs no new glob wiring.
+
+    THE GLOBAL IS THE SEAM: `read_status` reads STATUS_FILE, so pointing it
+    at a planted file is the whole fixture and no monkeypatching of json or
+    os is needed."""
+    import tempfile
+    global STATUS_FILE
+    real, fails, ran = STATUS_FILE, [], 0
+
+    def ck(name, cond):
+        nonlocal ran
+        ran += 1
+        if not cond:
+            fails.append(name)
+
+    def plant(doc, age=0.0):
+        """Write a status file and backdate it by `age` seconds."""
+        with open(STATUS_FILE, "w") as f:
+            if isinstance(doc, str):
+                f.write(doc)
+            else:
+                json.dump(doc, f)
+        if age:
+            t = time.time() - age
+            os.utime(STATUS_FILE, (t, t))
+
+    live = {"mode": "place", "seconds_left": 7, "arc": 0.5,
+            "transposed_at": 0, "recording": True}
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            STATUS_FILE = os.path.join(d, "usher.status")
+            # NO FILE AT ALL: the daemon is not running.
+            ck("absent-is-down", read_status() == ("down", 0.0, None, False))
+            # UNPARSEABLE, which a half-written file really is: the daemon
+            # writes to a .tmp and renames, so this is the belt rather than
+            # the braces, and it must not raise into the draw loop.
+            plant("{not json")
+            ck("unparseable-is-down",
+               read_status() == ("down", 0.0, None, False))
+            # A MODE OUTSIDE THE WHITELIST. This is why `transposed_at` was
+            # added as a FIELD and not as a third `mode` value: a new value
+            # would have BLANKED the tray against an older reader, and this
+            # is the cell that says so.
+            plant(dict(live, mode="transpose"))
+            ck("an-unknown-mode-is-down",
+               read_status() == ("down", 0.0, None, False))
+            plant(dict(live, mode=None))
+            ck("a-missing-mode-is-down",
+               read_status() == ("down", 0.0, None, False))
+            # STALE: the daemon writes every second, so an old file means it
+            # is gone, whatever the file says.
+            plant(live, age=_STALE + 1)
+            ck("a-stale-file-is-down",
+               read_status() == ("down", 0.0, None, False))
+            # AND THE SAME CONTENT FRESH IS NOT DOWN, which is the control:
+            # without it the five cells above would pass over a `read_status`
+            # that answered `down` unconditionally.
+            plant(live)
+            ck("a-fresh-file-is-read",
+               read_status() == ("place", 0.5, 7, False))
+            ck("settled-is-read", (plant(dict(live, mode="settled")) or
+                                   read_status()[0]) == "settled")
+            # THE DWELL IS OURS, computed from the daemon's INSTANT.
+            plant(dict(live, transposed_at=time.time()))
+            ck("a-recent-transpose-reads-as-transposing",
+               read_status()[3] is True)
+            plant(dict(live, transposed_at=time.time() - DWELL - 1))
+            ck("an-old-transpose-does-not", read_status()[3] is False)
+            # A FUTURE INSTANT IS NOT A TRANSPOSE, which is what the `0 <=`
+            # half of the window is for: a clock step must not pin the tray
+            # blue for ever.
+            plant(dict(live, transposed_at=time.time() + 3600))
+            ck("a-future-transpose-does-not", read_status()[3] is False)
+            plant(dict(live, transposed_at="nonsense"))
+            ck("a-garbage-transpose-does-not", read_status()[3] is False)
+            # AND A DAEMON WITH NO SUCH FIELD AT ALL (an older one) is read,
+            # not refused: the field was added additively.
+            plant({"mode": "place", "seconds_left": 1, "arc": 0.1})
+            ck("an-older-daemon-without-the-field-is-read",
+               read_status() == ("place", 0.1, 1, False))
+    finally:
+        STATUS_FILE = real
+    if fails:
+        print("status-test FAIL: " + ", ".join(fails), file=sys.stderr)
+        return 1
+    print(f"status-test OK ({ran} checks)")
+    return 0
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "render-test":
         _render_test(sys.argv[2] if len(sys.argv) > 2 else "/tmp/smi-test")
         return
+    if len(sys.argv) > 1 and sys.argv[1] == "status-test":
+        sys.exit(_status_test())
     asyncio.run(_run())
 
 
