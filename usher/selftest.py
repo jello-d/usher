@@ -7177,7 +7177,11 @@ def _t_displays(ck):
 
             engine.watcher_pid = lambda: 4242
             engine.live_sources = lambda *a, **k: ["titan"]
-            _rc_s = engine.do_save()
+            # CAPTURED, NOT PRINTED: `pid 4242` is this check's own sentinel
+            # and reads from the terminal exactly like the suite asking the
+            # real daemon to capture.
+            with contextlib.redirect_stdout(io.StringIO()):
+                _rc_s = engine.do_save()
             ck("save-hands-over-when-a-daemon-is-running",
                _rc_s == engine.EXIT_OK and not _did
                and os.path.exists(engine.CAPTURE_FILE))
