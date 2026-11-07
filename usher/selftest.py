@@ -4356,6 +4356,16 @@ def _t_cli_split(ck):
     ck("watch-is-the-services", cli.VERBS["watch"][0] == "mgr")
     ck("cleanly-is-the-humans", cli.VERBS["cleanly"][0] == "cli")
     ck("selftest-is-for-both", cli.VERBS["selftest"][0] == "both")
+    # AND `save` MUST GO THROUGH do_save, which is the one thing every
+    # do_save check cannot say: reverting this one line to `do_capture()`
+    # restores the blindness in full and passed the ENTIRE suite. Read from
+    # the dispatch's own source, the same way the verb table above is.
+    _save_body = re.search(
+        r'verb in \("capture", "save"\):\n(.*?)\n    elif', src, re.S)
+    ck("the-save-verb-is-dispatched-at-all", _save_body is not None)
+    ck("save-does-not-capture-straight-from-the-client",
+       _save_body is not None and "do_save" in _save_body.group(1)
+       and "do_capture" not in _save_body.group(1))
     # An internal verb carries no help, so it never appears in usage.
     ck("internal-verbs-are-hidden",
        cli.VERBS["_worker"][1] is None and cli.VERBS["_super"][1] is None)
@@ -6834,6 +6844,160 @@ def _t_displays(ck):
             w.slot_held.clear()
             w.redisplay_ok = set()
             w.kb, w.kb_profile = {}, "DESK"
+
+        # ---- A HAND-ASKED CAPTURE IS THE DAEMON'S, and here is why -------
+        # A one-shot verb resolves another account's windows to the SOURCE
+        # ALONE, because `_SOURCE_WINDOWS` is per process and filled only by
+        # a trigger. Measured 2026-11-06: ten of one account's chrome windows
+        # collapsed onto one key from a `usher save`.
+        ck("capture-plan-hands-over-to-a-running-daemon",
+           engine.capture_plan(True, True) == "ask"
+           and engine.capture_plan(True, False) == "ask")
+        ck("capture-plan-does-it-here-with-nothing-to-be-blind-about",
+           engine.capture_plan(False, False) == "here")
+        ck("capture-plan-REFUSES-rather-than-writing-what-it-cannot-see",
+           engine.capture_plan(False, True) == "refuse")
+        # THE THREE ANSWERS ARE PAIRWISE DISTINCT, which is the assertion this
+        # file needs for every answer set: collapsing two is how the wrong
+        # branch runs while each cell still reads correct on its own.
+        ck("capture-plan-three-answers-are-pairwise-distinct",
+           len({engine.capture_plan(True, True),
+                engine.capture_plan(False, False),
+                engine.capture_plan(False, True)}) == 3)
+        # AND `live_sources` ITSELF, which every check below INJECTS over:
+        # a planted version answering [] always passed the whole suite, and
+        # it is the input the refusal turns on. Given a view list it needs no
+        # compositor.
+        ck("live-sources-names-a-source-with-windows-here",
+           engine.live_sources(
+               [{"app-id": "slack", "source": "titan", "pid": -1},
+                {"app-id": "signal", "pid": -1}]) == ["titan"])
+        ck("live-sources-is-empty-with-only-our-own-windows",
+           engine.live_sources([{"app-id": "signal", "pid": -1}]) == [])
+        # AND AN IPC IT CANNOT REACH IS NOT READ AS "NOBODY ELSE IS HERE",
+        # which would turn the refusal off on exactly the box where no daemon
+        # is running. It is the fail-safe direction that costs a capture.
+        _rip = engine.ipc
+        try:
+            engine.ipc = _raise_it
+            ck("live-sources-with-no-compositor-answers-nothing",
+               engine.live_sources() == [])
+        finally:
+            engine.ipc = _rip
+
+        # AND THE VERB HONOURS THE PLAN, which is the OTHER wiring half: a
+        # `do_save` that captured regardless would pass every cell above.
+        # Driven with both seams injected, so no compositor and no second
+        # account are needed and nothing real is captured.
+        _rwp, _rls = engine.watcher_pid, engine.live_sources
+        _rdc, _rt_cf = engine.do_capture, engine.CAPTURE_FILE
+        _sdir = tempfile.mkdtemp(prefix="usher-save-", dir="/var/tmp")
+        _did = []
+        try:
+            engine.do_capture = lambda: _did.append("here")
+            engine.CAPTURE_FILE = os.path.join(_sdir, "usher.capture")
+            _buf_s = io.StringIO()
+
+            engine.watcher_pid = lambda: 4242
+            engine.live_sources = lambda *a, **k: ["titan"]
+            _rc_s = engine.do_save()
+            ck("save-hands-over-when-a-daemon-is-running",
+               _rc_s == engine.EXIT_OK and not _did
+               and os.path.exists(engine.CAPTURE_FILE))
+            os.remove(engine.CAPTURE_FILE)
+
+            engine.watcher_pid = lambda: None
+            engine.live_sources = lambda *a, **k: []
+            _rc_s = engine.do_save()
+            ck("save-captures-here-with-no-daemon-and-no-other-account",
+               _rc_s == engine.EXIT_OK and _did == ["here"]
+               and not os.path.exists(engine.CAPTURE_FILE))
+            _did.clear()
+
+            engine.live_sources = lambda *a, **k: ["titan"]
+            with contextlib.redirect_stderr(_buf_s):
+                _rc_s = engine.do_save()
+            ck("save-REFUSES-rather-than-collapsing-another-accounts-keys",
+               _rc_s == engine.EXIT_CANNOT and not _did
+               and not os.path.exists(engine.CAPTURE_FILE))
+            # AND IT SAYS WHOSE AND WHAT TO DO, or a refusal is a dead end.
+            ck("save-names-the-source-and-the-remedy",
+               "titan" in _buf_s.getvalue()
+               and "usher-mgr watch" in _buf_s.getvalue())
+        finally:
+            engine.watcher_pid, engine.live_sources = _rwp, _rls
+            engine.do_capture, engine.CAPTURE_FILE = _rdc, _rt_cf
+            shutil.rmtree(_sdir, ignore_errors=True)
+
+        # AND THE WORKER CONSUMES IT, DUE AT ONCE. The WIRING, which the pure
+        # plan says nothing about: a request nothing acts on is a verb that
+        # reports success and captures nothing, which is this file's most
+        # repeated failure shape.
+        _rt_cap = engine.CAPTURE_FILE
+        _wm2 = _word2 = sys.modules[Watcher.__module__]
+        _rw_cap = _wm2.CAPTURE_FILE
+        _rlog2 = engine.logline
+        _cdir = tempfile.mkdtemp(prefix="usher-cap-", dir="/var/tmp")
+        try:
+            engine.CAPTURE_FILE = os.path.join(_cdir, "usher.capture")
+            # PATCHED ON `watch`'s OWN NAME TOO, since it imports the constant
+            # BY VALUE: patching engine's alone leaves the daemon's copy live,
+            # which is the stale-copy hazard the package split records and
+            # which has written real state from this suite once.
+            _wm2.CAPTURE_FILE = engine.CAPTURE_FILE
+            engine.logline = lambda *a, **k: None
+            with open(engine.CAPTURE_FILE, "w") as _f:
+                _f.write("1\n")
+            w.st["dirty"], w.st["last"] = False, _time.time()
+            w._take_capture()
+            ck("a-capture-request-dirties-the-store", w.st["dirty"] is True)
+            ck("a-capture-request-is-due-at-once-with-no-debounce",
+               w.st["last"] == 0)
+            ck("a-capture-request-is-consumed",
+               not os.path.exists(engine.CAPTURE_FILE))
+            # AND THE POLL LOOKS AT IT, which the direct call cannot say:
+            # removing the arm from `_poll_files` left every check above
+            # passing while in production nothing would ever consume a
+            # request. Driven through the real poll, with the OTHER request
+            # files pointed at the same scratch dir so this cannot act on a
+            # live one.
+            # EVERY OTHER KEY IS SEEDED AT ITS CURRENT VALUE, so no other
+            # arm of the poll fires: the chrome arm SAVES THE STORE, and the
+            # exclude/include/plugin arms reload real config. Only the
+            # capture mtime is made to differ.
+            _seen_c = {"inv": _word2.store_mtime(engine.INVERT_STORE),
+                       "exc": _word2.store_mtime(engine.EXCLUDE_FILE),
+                       "inc": _word2.store_mtime(engine.INCLUDE_FILE),
+                       "arm": _word2.store_mtime(engine.ARM_FILE),
+                       "forget": _word2.store_mtime(engine.FORGET_FILE),
+                       "capture": None,
+                       "redisplay": _word2.store_mtime(
+                           engine.REDISPLAY_FILE),
+                       "sweep": _word2.store_mtime(engine.SWEEP_FILE),
+                       "plugins": engine.plugins_sig(),
+                       "chrome": chrome.session_sig()}
+            _took = []
+            _rtc2 = w._take_capture
+            try:
+                w._take_capture = lambda: _took.append(1)
+                with open(engine.CAPTURE_FILE, "w") as _f:
+                    _f.write("2\n")
+                w._poll_files(_seen_c)
+            except Exception as _e:                        # noqa: BLE001
+                _took.append("RAISED-%s" % type(_e).__name__)
+            finally:
+                w._take_capture = _rtc2
+                try:
+                    os.remove(engine.CAPTURE_FILE)
+                except OSError:
+                    pass
+            ck("the-poll-consults-the-capture-request", _took == [1])
+        finally:
+            engine.CAPTURE_FILE = _rt_cap
+            _wm2.CAPTURE_FILE = _rw_cap
+            engine.logline = _rlog2
+            shutil.rmtree(_cdir, ignore_errors=True)
+            w.st["dirty"], w.st["last"] = False, 0
 
         # ---- the drift detector, for a hook that never comes --------------
         _rpid2 = engine.profile_id

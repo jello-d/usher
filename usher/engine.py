@@ -2976,6 +2976,73 @@ def do_capture():
           f"{len(kb)} known -> {STATE}")
 
 
+def capture_plan(running, foreign):
+    """Who should take a hand-asked capture: "ask", "here" or "refuse". PURE.
+
+    THE PROBLEM IS THAT A ONE-SHOT VERB CANNOT SEE ANOTHER ACCOUNT'S WINDOWS
+    INDIVIDUALLY. `_SOURCE_WINDOWS` is per process and filled only by a
+    trigger, so a capture from a shell stamps the SOURCE-ALONE key for every
+    foreign window while the daemon stamps a per-window one. See CAPTURE_FILE.
+
+        running                   ask      it has the map and owns the store
+        no daemon, no foreign     here     nothing to be blind about
+        no daemon, foreign        refuse   it would write what it cannot see
+
+    THE REFUSAL IS THE CHEAP SIDE OF AN ASYMMETRY. Declining costs one
+    command, retried after starting the daemon; proceeding writes a collapsed
+    key for windows whose per-window geometry is the whole point, and after a
+    purge there is nothing left to put it back from. THIS IS NOT a write that
+    can be undone by asking again, which is what decides it.
+
+    AND ASKING IS BETTER THAN MERELY SAFE: it is the FORCED CAPTURE that
+    every store-repair recipe in these notes needs, because capture is
+    event-driven and dropping a key then waiting relearns nothing at all.
+    """
+    if running:
+        return "ask"
+    return "refuse" if foreign else "here"
+
+
+def live_sources(views=None):
+    """The source names with windows on this display right now, sorted. The
+    input to `capture_plan`'s blindness test, and deliberately NOT a count of
+    what we could identify: the question is whether a one-shot verb is about
+    to write about somebody else's window at all."""
+    try:
+        vs = ipc().list_views(filter_mapped_toplevel=True) \
+            if views is None else views
+    except Exception:                                      # noqa: BLE001
+        return []
+    return source_trigger_plan(vs)
+
+
+def do_save():
+    """`usher save`: capture, or ask the daemon to. See capture_plan."""
+    running = watcher_pid()
+    srcs = live_sources()
+    plan = capture_plan(bool(running), bool(srcs))
+    if plan == "refuse":
+        print(f"usher: {', '.join(srcs)} has windows here and no daemon is "
+              "running, so a capture from this shell would record them under "
+              "one shared key instead of one key each", file=sys.stderr)
+        print("usher: start the daemon (`usher-mgr watch`) and ask again; it "
+              "holds the per-window map and owns the store.", file=sys.stderr)
+        return EXIT_CANNOT
+    if plan == "here":
+        do_capture()
+        return EXIT_OK
+    try:
+        os.makedirs(os.path.dirname(CAPTURE_FILE), exist_ok=True)
+        with open(CAPTURE_FILE, "w") as f:
+            f.write(f"{time.time()}\n")
+    except OSError as e:
+        print(f"usher: cannot ask for a capture: {e}", file=sys.stderr)
+        return EXIT_FAIL
+    print(f"usher: asked the running daemon (pid {running}) to capture; it "
+          "owns the store while it runs")
+    return EXIT_OK
+
+
 def app_of(v):
     return v.get("app-id") or v.get("app_id") or ""
 
@@ -6050,6 +6117,20 @@ REDISPLAY_FILE = os.path.join(RUNTIME_DIR, "usher.redisplay")
 # had to claim the profile changed in order to ask for a sweep would be
 # lying to the thing it asks.
 SWEEP_FILE = os.path.join(RUNTIME_DIR, "usher.sweep")
+# AND ONE FOR A CAPTURE ASKED FOR BY HAND, which exists because a one-shot
+# verb is BLIND TO ANOTHER ACCOUNT'S WINDOWS. `_SOURCE_WINDOWS` is filled
+# only by a trigger and lives in the process that was triggered, so `usher
+# save` run from a shell resolves every foreign window to its source ALONE
+# and writes that, where the daemon resolves the same windows per window.
+# Measured 2026-11-06: ten of one account's chrome windows collapsed onto one
+# key, and only the daemon's own next captures put the geometry back.
+#
+# THE DAEMON HAS THE MAP AND OWNS THE STORE, so it does the capture. Same
+# client-asks-service shape as forget, reload, transpose and the redisplay
+# edge, and it also gives every store-repair recipe in these notes the FORCED
+# CAPTURE they need: capture is event-driven, so dropping a key and waiting
+# relearns nothing.
+CAPTURE_FILE = os.path.join(RUNTIME_DIR, "usher.capture")
 
 
 LOG_CAP = 256 * 1024   # rotate watch.log past this; bounds it to ~2x LOG_CAP

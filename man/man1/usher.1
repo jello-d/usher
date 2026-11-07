@@ -36,6 +36,19 @@ reloads a running instance.
 .TP
 .B save | capture
 Snapshot the current layout into the store now.
+.IP
+HANDED TO THE DAEMON WHEN ONE IS RUNNING, because a one-shot verb cannot see
+another account's windows individually: the per-window map is filled by a
+trigger and lives in the process that was triggered, so a capture from a
+shell would record every one of that account's windows under ONE shared key.
+The daemon holds the map and owns the store, so it does the capture, which
+also makes this the forced capture a store repair needs (capture is otherwise
+event-driven, so editing the store and waiting relearns nothing).
+.IP
+With no daemon and another account's windows present it REFUSES rather than
+writing what it cannot see (exit 2, naming the source and the remedy).
+Declining costs one command; proceeding writes a collapsed key over geometry
+there may be nothing left to recover it from.
 .TP
 .B restore " [--dry-run] [--only S] [--from SPEC]"
 Place the stored layout onto the live session. Without
