@@ -3222,13 +3222,17 @@ def mux_session_set():
 
 
 def live_keys(live):
-    """The resolved identities of the windows currently on screen: the ONE
-    definition of "already showing" that every relaunch path tests against, so
-    the question is answered the same way for each. Comparing identities rather
-    than raw state is what keeps the plugins from tripping over each other: a
-    mux-attached window keys mux@... (its owner is the mux plugin), so it can
-    never be mistaken for a kitty:<cwd> window whose shell happens to sit in the
-    same place."""
+    """The resolved identities of the windows currently on screen, as a SET.
+    Comparing identities rather than raw state is what keeps the plugins from
+    tripping over each other: a mux-attached window keys term:..., so it can
+    never be mistaken for a kitty:<cwd> window whose shell happens to sit in
+    the same place.
+
+    A SET, so it answers "is this showing" and not "how many". The relaunch
+    paths need the COUNT (see kitty_candidates and mux_candidates, both of
+    which do their own tallying), so this is doctor's reader now: it used to
+    claim to be the one definition every relaunch path tests against and that
+    stopped being true when the kitty path learned to count."""
     out = set()
     for v in live:
         k = identity(v)
@@ -3326,11 +3330,53 @@ def _spawn_kitty(cwd, size=None):
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def kitty_candidates(saved, livekeys):
-    """The cwds to reopen a plain kitty shell in: every non-mux kitty window in
-    the last snapshot that is not already on screen (`livekeys`, from
-    live_keys). Pure, for the same reason mux_candidates is."""
-    seen, out = set(), []
+def kitty_live_counts(live):
+    """(count per cwd, whether the live side is READABLE) for plain kitty
+    windows. PURE given the plugins.
+
+    THE SECOND HALF IS WHAT MAKES COUNTING SAFE. A live kitty view resolves to
+    `kitty:<cwd>` or to a `term:` slot; anything else means its identity could
+    not be read (a stored row's dead pid, a relay that dropped the pids, a
+    cwd that is not readable yet), and a window we cannot account for must not
+    be assumed absent. See kitty_candidates.
+    """
+    have, ok = Counter(), True
+    for v in live:
+        vv = pview(v)
+        k = identity(v) or ""
+        if k.startswith("kitty:"):
+            have[k[len("kitty:"):]] += 1
+        elif TERM_KEY_RE.match(k):
+            pass                       # a mux terminal: accounted for, not ours
+        elif vv["app"] == "kitty":
+            ok = False                 # a kitty we cannot place in either set
+    return have, ok
+
+
+def kitty_candidates(saved, live):
+    """The cwds to reopen a plain kitty shell in, ONE PER MISSING WINDOW.
+    Pure, for the same reason mux_candidates is.
+
+    COUNTED PER CWD, which is the same question `mux_candidates` asks per
+    command: "how many windows was I running here, and how many are up?". It
+    used to DEDUP, so N windows sharing a cwd came back as ONE, and the
+    enclave is what made that visible: an account's four shells in its own
+    home are four roster rows carrying one key, so a resume started one
+    terminal of four. The owner has always had the same bug and had not met
+    it, because its four terminals sit in four different cwds and commands.
+
+    THE OLD CHECK ENCODED THE BUG, which is the third time in this file: it
+    asserted that two `kitty:/tmp` rows yield ONE cwd. A check that pins a
+    mistaken belief passes right up until the belief is corrected.
+
+    AND THE LIVE SIDE HAS TO BE READABLE BEFORE COUNTING UP, or the asymmetry
+    runs the wrong way. Under-spawning costs a window the human reopens;
+    over-spawning puts four terminals on screen at every resume, and a resume
+    is triggered at every login. So an unreadable live side caps the ask at
+    one per cwd, which is exactly the old behaviour: a dropped pid relay then
+    costs windows rather than duplicating them.
+    """
+    want = Counter()
     for w in saved:
         if w.get("app_id") != "kitty":
             continue
@@ -3338,20 +3384,28 @@ def kitty_candidates(saved, livekeys):
         if not k.startswith("kitty:"):
             continue
         cwd = k[len("kitty:"):]
-        if not cwd or cwd in seen or k in livekeys or not os.path.isdir(cwd):
+        if not cwd or not os.path.isdir(cwd):
             continue
-        seen.add(cwd)
-        out.append(cwd)
+        want[cwd] += 1
+    have, readable = kitty_live_counts(live)
+    out = []
+    for cwd in want:
+        n = max(0, want[cwd] - have[cwd])
+        out.extend([cwd] * (min(n, 1) if not readable else n))
     return out
 
 
 def kitty_relaunch_missing(saved, live):
     """The kitty plugin's relaunch: reopen a non-mux kitty window (identity
     'kitty:<cwd>') that was open at the last snapshot but is not on screen, as a
-    plain shell in that cwd. Deduped by cwd; skips one a live window shows."""
+    plain shell in that cwd.
+
+    ONE PER MISSING WINDOW, counted per cwd: see kitty_candidates for why it
+    used to be one per cwd however many windows were saved, and what the
+    enclave's four shells in one home made of that."""
     n = 0
     sizes = saved_sizes(saved)
-    for cwd in kitty_candidates(saved, live_keys(live)):
+    for cwd in kitty_candidates(saved, live):
         _spawn_kitty(cwd, sizes.get(f"kitty:{cwd}"))
         n += 1
         _announce(f"launch  kitty {cwd}")
@@ -4985,14 +5039,20 @@ def launch_missing(snap=None):
     # roster and its own live windows, so asking is idempotent and the owner
     # does not need (and must not have) an opinion about the contents.
     try:
-        # NO PIDS WITH A RESUME, because the rows here are the SAVED
-        # snapshot rather than live views: their identifiers name windows
-        # from a previous session (wlroots mints a new one per map) and their
-        # pids are long dead, so relaying them would be relaying nonsense.
-        # Sending the LIVE ones would be meaningful and wants a reason to:
-        # the account's "which of mine are already up" is per COMMAND for a
-        # terminal, which it can only answer by resolving a live window.
-        n += source_trigger(source_trigger_plan(saved), "resume")
+        # THE LIVE VIEWS, NOT THE SAVED ROWS, and that distinction is the
+        # whole reason this took a second pass. A saved row's identifier names
+        # a window from a previous session (wlroots mints a new one per map)
+        # and its pid is long dead, so relaying those would be relaying
+        # nonsense; the LIVE ones are what let the account resolve which of
+        # its own windows are already up.
+        #
+        # AND THAT IS NOW REQUIRED RATHER THAN MERELY MEANINGFUL. The
+        # terminal relaunch counts per cwd, so the account has to be able to
+        # READ its live terminals or it would ask for all of them again. See
+        # kitty_candidates: without a readable live side it caps the ask at
+        # one per cwd, which is the old behaviour, so a dropped relay costs
+        # windows rather than duplicating them.
+        n += source_trigger(source_trigger_plan(saved), "resume", views=live)
     except Exception as e:
         logline(f"relaunch (source) error: {e}")
     return n
@@ -5575,6 +5635,24 @@ def do_wind_down():
         # as "no windows".
         for _r in source_window_report(_lv, _win):
             _announce(f"usher: window identity, {_r}")
+        # AND RE-TAKE THE CAPTURE IF THAT TAUGHT US ANYTHING, which is the
+        # same re-take `_capture_once` already does and the one place it was
+        # not applied. This runs in the CLI process, so the per-window map was
+        # EMPTY when the capture above was stamped (the map is filled by a
+        # trigger and lives in the process that was triggered), and `snapshot`
+        # stamps each window's key: measured on manifold, seventeen of one
+        # account's windows stamped ONE key blind against twelve sighted.
+        #
+        # THE ORDER IS STILL THE FEATURE. The first capture happens FIRST,
+        # while the session is certainly intact, so this is a refinement and
+        # never a replacement: the trigger is a sudo subprocess and putting it
+        # ahead of the capture would risk the one thing this sequence exists
+        # to guarantee.
+        if _win:
+            do_capture()
+            _kept = retain_logoff()
+            _announce("usher: re-captured with %d account(s) identified, and "
+                      "kept %d pre-logoff file(s)" % (len(_win), len(_kept)))
     except Exception as e:
         print(f"usher: could not ask other accounts to capture: {e}",
               file=sys.stderr)

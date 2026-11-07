@@ -66,7 +66,8 @@ from .engine import (
     _safe_profile, _single_id, _size_opts, _spec_to_date, _verify_find,
     chrome_profiles_for, config_path, desktop_launch_for,
     desktop_relaunch_missing, entries_from_snapshot, identity, is_mux_term,
-    is_owned, kb_path, kitty_candidates, kitty_relaunch_missing, kkey,
+    is_owned, kb_path, kitty_candidates, kitty_live_counts,
+    kitty_relaunch_missing, kkey,
     launch_missing, learn, live_keys, load_knowledge, lock_plan,
     lock_summoned_session, match, mux_candidates, mux_cmd_of_saved,
     mux_host_of, mux_relaunch_missing, mux_session_of, mux_session_set,
@@ -1255,6 +1256,15 @@ def _t_resolution(ck):
                "claimed=" not in _lm_src)
             ck("roster-does-pass-the-roster-policy",
                "claimed=roster_claimed(" in _rl_src)
+            # AND THE RESUME RELAYS THE LIVE VIEWS, which is now REQUIRED
+            # rather than merely useful: the terminal relaunch counts per
+            # cwd, so the account has to be able to READ its own live
+            # terminals or it would ask for every one of them again. The
+            # SAVED rows cannot serve, since their identifiers name a
+            # previous session and their pids are dead.
+            ck("the-resume-trigger-relays-the-LIVE-views",
+               'source_trigger(source_trigger_plan(saved), "resume", '
+               'views=live)' in _lm_src)
 
             # 3. CHROME REPORTS EVERY SPELLING IT CLAIMED. XWayland says
             # `Google-chrome` and native Wayland says `google-chrome`, and
@@ -3054,12 +3064,60 @@ def _t_terminals(ck):
     def S(key, app="kitty"):
         return {"app_id": app, "key": key, "title": ""}
 
-    ck("kitty-candidates",
+    # COUNTED PER CWD, not deduped. THE OLD CHECK ENCODED THE BUG: it
+    # asserted that two `kitty:/tmp` rows yield ONE cwd, so N windows sharing
+    # a directory came back as one, and the enclave made it visible (four
+    # roster rows, one key, one terminal started of four). Third time a check
+    # in this file has pinned a mistaken belief.
+    def LV(key, app="kitty"):
+        """A LIVE view whose identity resolves to `key` with no /proc read:
+        the title path, which is what an unowned app and a mux banner use."""
+        return {"app-id": app, "title": key, "pid": -1}
+
+    ck("kitty-candidates-counts-per-cwd",
        kitty_candidates([S("kitty:/tmp"), S("kitty:/tmp"),
                          S("kitty:/nonexistent-" + "z" * 12),
-                         S("mux@manifestor:wf")], set()) == ["/tmp"])
+                         S("mux@manifestor:wf")], []) == ["/tmp", "/tmp"])
     ck("kitty-candidates-live",
-       kitty_candidates([S("kitty:/tmp")], {"kitty:/tmp"}) == [])
+       kitty_candidates([S("kitty:/tmp")],
+                        [LV("kitty:/tmp", app="zzz-unowned")]) == [])
+    # ONE OF TWO UP MEANS ONE TO START, which is the whole point and is the
+    # cell neither the old behaviour nor a naive count gets right.
+    ck("kitty-candidates-starts-only-the-shortfall",
+       kitty_candidates([S("kitty:/tmp"), S("kitty:/tmp")],
+                        [LV("kitty:/tmp", app="zzz-unowned")]) == ["/tmp"])
+    ck("kitty-candidates-starts-nothing-when-every-window-is-up",
+       kitty_candidates([S("kitty:/tmp"), S("kitty:/tmp")],
+                        [LV("kitty:/tmp", app="zzz-unowned"),
+                         LV("kitty:/tmp", app="zzz-unowned")]) == [])
+    # AND AN UNREADABLE LIVE SIDE CAPS THE ASK AT ONE PER CWD, which is the
+    # old behaviour: over-spawning puts four terminals on screen at every
+    # login, where under-spawning costs a window the human reopens. A live
+    # KITTY whose identity resolves to neither a cwd nor a term slot is
+    # exactly that state (a dead pid, or a relay that dropped the pids).
+    ck("kitty-candidates-will-not-multiply-against-an-unreadable-live-side",
+       kitty_candidates([S("kitty:/tmp"), S("kitty:/tmp")],
+                        [{"app-id": "kitty", "title": "", "pid": -1}])
+       == ["/tmp"])
+    # AND THE READABILITY TEST ITSELF, both answers.
+    ck("kitty-live-counts-reads-a-cwd-window",
+       kitty_live_counts([LV("kitty:/tmp", app="zzz-unowned")])
+       == (Counter({"/tmp": 1}), True))
+    # A MUX TERMINAL IS A kitty, which is what makes that branch
+    # load-bearing: dropping it sends `term:resume` to the unreadable arm and
+    # caps every cwd at one. The fixture has to say app="kitty" or it tests
+    # nothing (the first version said `zzz-unowned` and the plant passed).
+    ck("kitty-live-counts-accounts-for-a-mux-terminal",
+       kitty_live_counts([LV("term:resume", app="kitty")])
+       == (Counter(), True))
+    # AND A REAL MUX TERMINAL BESIDE A PLAIN ONE STILL COUNTS THE PLAIN ONE,
+    # which is the arrangement every box here actually has.
+    ck("kitty-candidates-counts-past-a-live-mux-terminal",
+       kitty_candidates([S("kitty:/tmp"), S("kitty:/tmp")],
+                        [LV("term:resume", app="kitty")]) == ["/tmp", "/tmp"])
+    ck("kitty-live-counts-says-so-when-a-kitty-cannot-be-read",
+       kitty_live_counts([{"app-id": "kitty", "title": "", "pid": -1}])[1]
+       is False)
 
     # the relaunch command. A latch is REPLAYED (it is the one mux verb that
     # survives in the process tree); anything else was a local mux, and the
@@ -3903,6 +3961,27 @@ def _t_roster(ck):
     _i_exc = _wd.find("except Exception")
     ck("wind-down-retention-cannot-stop-a-reboot",
        _i_ret >= 0 and _i_exc >= 0 and _i_ret < _i_exc)
+    # AND IT RE-CAPTURES ONCE THE SOURCES HAVE REPORTED, which is the fix for
+    # the logoff capture being BLIND: it runs in the CLI process, so the
+    # per-window map is empty when the first capture stamps each window's
+    # key. Measured on manifold: seventeen of one account's windows stamped
+    # ONE key blind, twelve sighted.
+    _i_cap = _wd.find("do_capture()")
+    _i_trg = _wd.find('source_trigger(source_trigger_plan(_lv), "capture"')
+    _i_re = _wd.rfind("do_capture()")
+    ck("wind-down-captures-FIRST-while-the-session-is-certainly-intact",
+       _i_cap >= 0 and _i_trg >= 0 and _i_cap < _i_trg)
+    ck("wind-down-re-captures-after-the-sources-report",
+       _i_re > _i_trg)
+    # AND RETAINS THE PAIR AGAIN, or the kept snapshot is the BLIND one and
+    # the forensic record this exists for describes a desk nobody had.
+    ck("the-re-capture-retains-the-pair-too",
+       _wd.rfind("retain_logoff()") > _i_trg)
+    # CONDITIONAL ON SOMETHING HAVING BEEN LEARNED, so a box with no other
+    # account pays nothing: a second snapshot on every logoff for nothing is
+    # the kind of cost that gets a safety step deleted.
+    ck("the-re-capture-only-fires-when-a-source-reported",
+       "if _win:" in _wd)
 
     # THE VERBS, with the wayland client and the spawn both stubbed.
     real_list = toplevels.list_toplevels
