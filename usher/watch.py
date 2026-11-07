@@ -99,6 +99,13 @@ TITLE_QUIET_FAST = 0.15  # everything else: the title is already stable at map
 # placement reads as failed; 0.6s against a measured sub-second apply.
 PLACE_VERIFY = (0.6, 1.5, 3.0)
 
+# HOW MANY TIMES A FAILED CHROME RE-KEY IS RETRIED before its session
+# signature is adopted anyway. The measured failure is a session file
+# vanishing between being listed and being read, which is a race and so
+# needs one more look rather than persistence; the bound is what stops a
+# deterministic failure from re-reading those files every second for ever.
+REKEY_TRIES = 2
+
 
 # HOW LONG AN OUTPUT CHANGE SUPPRESSES LEARNING.
 #
@@ -543,6 +550,9 @@ class Watcher:
         # for a login to stop bringing windows up, since a capture REPLACES
         # that account's roster with what is live
         self.src_seen = {}
+        # consecutive failed chrome re-keys, so the session signature is
+        # held back and retried rather than adopted over a lost pass
+        self.rekey_tries = 0
         self.place_sock = None
 
     def run(self):
@@ -1357,8 +1367,23 @@ class Watcher:
                 self.st["last"] = 0      # due at once, no debounce wait
         c = chrome.session_sig()
         if c != seen["chrome"]:
-            seen["chrome"] = c
-            self._rekey_chrome()
+            # THE BASELINE IS ADOPTED ON SUCCESS, which is the baseline trap
+            # this package records three times over, met in the one loop
+            # where losing a pass costs a login. Adopting first meant a
+            # re-key that RAISED was never retried: the next poll saw no
+            # change and the pass was simply gone, so every chrome window
+            # keyed fresh and landed at the browser's own cascade.
+            #
+            # BOUNDED, because a deterministic failure must not re-read the
+            # session files every second for ever. The failure is a race, so
+            # one more look is almost always enough; the budget is the same
+            # shape as PLACE_VERIFY's and giving up adopts the sig so the
+            # loop goes quiet until Chrome next writes.
+            if self._rekey_chrome() or self.rekey_tries >= REKEY_TRIES:
+                seen["chrome"] = c
+                self.rekey_tries = 0
+            else:
+                self.rekey_tries += 1
             with self.lock:
                 self.st["recheck"] = True
 
@@ -1414,14 +1439,22 @@ class Watcher:
     def _rekey_chrome(self):
         """Move the chrome slots onto the current session's window ids, and
         say so in the log. Silent and cheap when nothing is stale, which is
-        every call but the ones just after a browser restart."""
+        every call but the ones just after a browser restart.
+
+        TRUE WHEN THE PASS COMPLETED, so the caller can hold its baseline and
+        try again. The measured failure is a session file VANISHING mid-read,
+        which is transient by nature and likeliest at a browser restart,
+        i.e. exactly when the re-key is the thing that saves every chrome
+        window's slot."""
         try:
             with self.lock:
                 moved = rekey_chrome(self.kb)
                 if moved:
                     save_knowledge(self.kb, self.kb_profile)
+            return True
         except Exception as e:
             logline(f"chrome re-key error: {e}")
+            return False
             return
         if moved:
             logline(f"chrome: re-keyed {moved} window slot(s) onto the"
