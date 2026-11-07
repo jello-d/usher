@@ -477,10 +477,26 @@ _mode_switch() {
   # user's session daemon, and a restart from the wrong environment is worse
   # than a stale one (a daemon with no WAYLAND_DISPLAY spawns terminals that
   # die instantly). The remedy is the user's, in their own session.
+  # THE PATTERN IS THE WHOLE TEST, because this runs AFTER the removals above
+  # and those paths are then gone by construction, so anything still naming
+  # one is running a copy that no longer exists. A "did THIS RUN remove one"
+  # gate was tried and is WRONG as well as unnecessary: a stale daemon
+  # survives the removal of its own files and keeps the hazard alive across
+  # every later install, so that version would decline on the first
+  # provision and reload it on the second.
+  #
+  # THE TRAILING SLASH IS THE BOUNDARY, and leaving it off is what made this
+  # fire wrongly on both boxes for days: `share/usher/venv` is a PREFIX of
+  # `share/usher/venv-indicator`, the TRAY's own venv, which is per-user by
+  # design and which this switch deliberately does not remove. So the one
+  # process the scan ever found was the tray, and `_login_reload` declined
+  # on EVERY provision for a process that was never the core. A process runs
+  # something INSIDE a venv, so the slash always follows.
   for _d in /proc/[0-9]*; do
     [ -r "$_d/cmdline" ] || continue
     tr '\0' ' ' < "$_d/cmdline" 2>/dev/null \
-      | grep -q -- "$_lh/.local/\(bin/$PKG-mgr\|share/$PKG/venv\)" || continue
+      | grep -q -- "$_lh/.local/\(bin/$PKG-mgr\|share/$PKG/venv/\)" \
+      || continue
     echo "$PKG: NOTE a daemon (pid ${_d#/proc/}) is still RUNNING the copy" \
       "just removed; it works until its next respawn. Restart it from the" \
       "session that owns it: 'usher stop', then log out and in, or re-run" \

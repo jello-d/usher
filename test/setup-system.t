@@ -321,6 +321,79 @@ case $_o4 in
   *) fail "it declined silently instead of saying why: $_o4" ;;
 esac
 
+# --- A SECOND SYSTEM INSTALL RELOADS, which is what a provision looks like --
+# A CONTROL rather than a detector, and labelled so: it asserts the END STATE
+# the live fault showed up as (both boxes left stale after every provision)
+# without being the thing that catches the cause. The tray check below is the
+# detector. Kept because every provision from here is this shape, and because
+# a control that fails tells you the next check's premise is gone.
+: >"$SUDOLOG"
+_o5=$(env HOME="$H" PATH="$T/stub:$PATH" SUDO_USER=tester DESTDIR="$D" \
+  USHER_SKIP_BUILD=1 NO_COLOR=1 sh "$HERE/setup.sh" install --system 2>&1) \
+  || fail "a second system install: $_o5"
+case $_o5 in
+  *"still RUNNING the copy just removed"*)
+    fail "it scanned for a removed copy it had not removed: $_o5" ;;
+esac
+case $_o5 in
+  *"not reloading"*) fail "it declined the reload with nothing removed: \
+$_o5" ;;
+esac
+if [ -d "/run/user/$(id -u)" ]; then
+  [ -s "$SUDOLOG" ] \
+    || fail "a second system install never reloaded the caller's daemon"
+fi
+
+# --- THE TRAY IS NOT THE CORE, and a prefix match said it was ---------------
+# `share/usher/venv` is a PREFIX of `share/usher/venv-indicator`, the tray's
+# own venv, which is per-user by design and which this switch deliberately
+# does NOT remove. So the one process the scan found on both boxes was the
+# tray, and it declined the reload for a process that was never the core.
+# The trailing slash is the boundary; a process runs something INSIDE a venv.
+#
+# SOMETHING MUST BE REMOVED HERE or this would pass on the guard above
+# instead of on the pattern, which is the whole point of the check.
+mkdir -p "$U/.local/share/usher/venv-indicator/bin"
+printf '#!/bin/sh\nwhile :; do sleep 1; done\n' \
+  >"$U/.local/share/usher/venv-indicator/bin/python3"
+chmod +x "$U/.local/share/usher/venv-indicator/bin/python3"
+"$U/.local/share/usher/venv-indicator/bin/python3" 300 &
+_tray=$!
+_i=0
+while [ "$_i" -lt 50 ]; do
+  case $(tr '\0' ' ' < "/proc/$_tray/cmdline" 2>/dev/null) in
+    *"venv-indicator"*) break ;;
+  esac
+  _i=$((_i + 1))
+  sleep 0.1
+done
+[ "$_i" -lt 50 ] || { kill "$_tray" 2>/dev/null
+  fail "fixture: the fake tray never exec'd, so the scan cannot see it"
+}
+: >"$SUDOLOG"
+printf 'x\n' >"$U/.local/bin/usher-mgr"
+_o6=$(env HOME="$H" PATH="$T/stub:$PATH" SUDO_USER=tester DESTDIR="$D" \
+  USHER_SKIP_BUILD=1 NO_COLOR=1 sh "$HERE/setup.sh" install --system 2>&1) \
+  || { kill "$_tray" 2>/dev/null; fail "system install beside the tray: \
+$_o6"; }
+kill "$_tray" 2>/dev/null || :
+wait "$_tray" 2>/dev/null || :
+case $_o6 in
+  *"removed the user-mode"*) : ;;
+  *) fail "fixture: nothing was removed, so the pattern was never asked: \
+$_o6" ;;
+esac
+case $_o6 in
+  *"still RUNNING the copy just removed"*)
+    fail "it read the TRAY as a daemon on the removed copy: $_o6" ;;
+esac
+case $_o6 in
+  *"not reloading"*) fail "the tray made it decline the reload: $_o6" ;;
+esac
+if [ -d "/run/user/$(id -u)" ]; then
+  [ -s "$SUDOLOG" ] || fail "the tray cost the caller their reload"
+fi
+
 # --- THE MODE SWITCH ---------------------------------------------------------
 for _a in usher usher-mgr; do
   { [ ! -e "$U/.local/bin/$_a" ] && [ ! -L "$U/.local/bin/$_a" ]; } \
