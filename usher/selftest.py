@@ -7225,6 +7225,62 @@ def _t_migration_body(ck):
            and os.path.exists(os.path.join(engine.STATE,
                                            "knowledge.json.pre-profile")))
         ck("legacy-merge-is-once", len(load_knowledge()) == 2)
+
+        # A STORE A HUMAN EDITED. These notes prescribe editing this file by
+        # hand in five separate repair recipes, so "valid JSON that is not a
+        # store" is a state that really happens. Measured per shape with a
+        # dict control before this guard: prune_kb raised in the CAPTURE
+        # loop, matched_key in the PLACER, and save_knowledge then WROTE THE
+        # CORRUPTION BACK, so the daemon went blind and persisted its cause.
+        _corrupt = os.path.join(engine.STATE, "corrupt")
+        os.makedirs(_corrupt, exist_ok=True)
+        _cst = engine.STATE
+        _good = {"app_id": "zzz", "title": "t", "output": "DP-1",
+                 "workspace": [0, 0], "pos": [1, 2], "size": [3, 4],
+                 "appid_only": False, "last_seen": 1.0}
+        try:
+            engine.STATE = _corrupt
+            with _tprofile("corrupt"):
+                for _lbl, _blob in (("null", "null"), ("list", "[1,2,3]"),
+                                    ("string", '"hello"'), ("number", "42"),
+                                    ("not-json", "{nope")):
+                    engine.write_json(kb_path(), _blob)
+                    engine.write_json(schema_path(), KB_SCHEMA)
+                    # GUARDED, because the entry guard's `.items()` is
+                    # deliberately FUSED to the top-level one: that is what
+                    # makes the top-level guard impossible to remove
+                    # quietly, and it means the pre-fix code RAISES out of
+                    # load_knowledge rather than returning a bad value.
+                    # Reported by name here all the same.
+                    try:
+                        _l = load_knowledge()
+                    except Exception:                      # noqa: BLE001
+                        _l = None
+                    # THE TYPE IS THE CLAIM, not emptiness: handing the
+                    # daemon a list or a string is what broke it.
+                    ck(f"a-store-that-is-{_lbl}-loads-as-a-dict",
+                       isinstance(_l, dict))
+                # ONE BAD ENTRY MUST NOT COST THE STORE, which is the more
+                # reachable half since a hand edit touches one ROW, and an
+                # EMPTY object must still be KEPT: that is the boundary
+                # between "not an object" and "an object with nothing in
+                # it", and the matchers already skip the second.
+                engine.write_json(kb_path(), json.dumps({
+                    "zzz\x00good": dict(_good), "zzz\x00s": "x",
+                    "zzz\x00l": [1], "zzz\x00n": None, "zzz\x00num": 7,
+                    "zzz\x00empty": {}}))
+                _l = load_knowledge()
+                ck("a-bad-entry-is-dropped",
+                   sorted(_l) == ["zzz\x00empty", "zzz\x00good"])
+                ck("the-good-entry-survives-a-bad-one",
+                   _l["zzz\x00good"]["pos"] == [1, 2])
+                # AND THE CONTROL: with nothing wrong, nothing is dropped.
+                engine.write_json(kb_path(), json.dumps({
+                    "zzz\x00good": dict(_good), "zzz\x00b": dict(_good)}))
+                ck("a-clean-store-loses-nothing",
+                   len(load_knowledge()) == 2)
+        finally:
+            engine.STATE = _cst
     finally:
         engine.STATE = _st
         shutil.rmtree(_tmp, ignore_errors=True)

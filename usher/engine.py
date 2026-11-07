@@ -2639,6 +2639,21 @@ def load_knowledge(profile=None):
     migrate_stores()      # every profile's store, not just the one we are on
     try:
         kb = json.load(open(kb_path(profile)))
+        # VALID JSON IS NOT A STORE. `null`, a list, a string and a number
+        # all parse, and this function then handed the daemon that value: a
+        # ValueError is raised instead so the ONE branch that already means
+        # "this store cannot be read" handles it, which is the fail-safe
+        # direction (a store we cannot read is no store).
+        #
+        # MEASURED BEFORE FIXING, per shape and with a dict control:
+        # prune_kb raised in the CAPTURE loop, matched_key in the PLACER,
+        # and save_knowledge then WROTE THE CORRUPTION BACK, so the daemon
+        # went blind and persisted the cause. These notes prescribe editing
+        # this file by hand in five separate repair recipes, which is
+        # exactly how a store comes to hold something that is not an object.
+        if not isinstance(kb, dict):
+            raise ValueError(
+                f"the store is a {type(kb).__name__}, not an object")
     except (FileNotFoundError, ValueError):
         # A store that does not exist yet is CURRENT by construction, so stamp
         # it NOW. Without this, the first monitor set to be seen writes an
@@ -2660,6 +2675,27 @@ def load_knowledge(profile=None):
         # fail-safe reading unreadable_placement already takes.
         upsert(kb, snap["windows"], snap["time"], snap.get("outputs"))
         return kb
+    # AND ONE BAD ENTRY MUST NOT COST THE STORE, which is the more reachable
+    # half: a hand edit touches one ROW. Measured with a control, a single
+    # non-dict entry beside good ones raised in prune_kb (so every capture)
+    # and in stale_chrome_titles (so doctor's own TTL note), while the rest
+    # of the store was perfectly readable.
+    #
+    # DROPPED RATHER THAN REFUSED, because the asymmetry runs the other way
+    # from the whole-file case: an entry that is not an object carries no
+    # slot, so nothing that could ever have been placed is lost, where
+    # discarding the whole store would throw away every working slot beside
+    # it. An EMPTY object is kept: it is a well-formed entry with nothing in
+    # it, and the matchers already skip it.
+    #
+    # AND IT SAYS SO, since dropping learned state silently is this
+    # package's recurring failure.
+    bad = [k for k, e in kb.items() if not isinstance(e, dict)]
+    if bad:
+        for k in bad:
+            del kb[k]
+        logline(f"store {profile}: dropped {len(bad)} entr(ies) that are "
+                f"not objects: {', '.join(repr(k) for k in bad[:5])}")
     return kb
 
 
