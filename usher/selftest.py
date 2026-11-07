@@ -590,6 +590,84 @@ def _t_registry(ck):
         ck("exclude-with-no-file-is-no-rules",
            not engine.EXCLUDE_RULES and not engine.EXCLUDE_ERRORS)
 
+        # A RULE THAT CAN FREEZE THE DAEMON IS REFUSED, which is stronger
+        # than flagged on purpose: the system is protected above any
+        # particular rule. CPython's regex engine does not release the GIL,
+        # so a catastrophic backtracker stops capture, placer, status and
+        # the event loop together, and the process that would report it is
+        # the one that stopped. Measured: `^(a+)+$` against a title takes
+        # 0.05s at twenty characters and gives NO ANSWER IN EIGHT SECONDS
+        # at thirty.
+        ck("probe-flags-a-catastrophic-pattern",
+           engine.regex_probe(r"^(a+)+$") > engine.REGEX_PROBE_BUDGET)
+        # THE MARGIN IS THE CLAIM, not the flagging: a check that refuses a
+        # rule somebody legitimately wrote is one that gets switched off.
+        # These are the fleet's own patterns plus what a person writes.
+        _realistic = [r"org.gnome.Loupe", r"^.*$", r"^New Tab$",
+                      r"google-chrome", r"^\[WORK", r"^Settings -.*",
+                      r"kitty|foot|alacritty", r"^(Inbox|Sent) ",
+                      r"[A-Za-z0-9_.-]+", r"^.{0,200}$", r"(?i)slack",
+                      r".*\.(png|jpe?g|gif)$"]
+        _worst = max(engine.regex_probe(p) for p in _realistic)
+        ck("probe-clears-every-realistic-pattern",
+           _worst * 10 < engine.REGEX_PROBE_BUDGET)
+        # AND THE PROBE SET IS NOT EMPTY, or every pattern measures 0 and
+        # the guard passes over nothing.
+        ck("probe-actually-ran", engine.regex_probe(r"^(a+)+$") > 0)
+
+        # THE RULE IS REFUSED AND THE GOOD ONE BESIDE IT SURVIVES, which is
+        # the same rule as one bad line not costing the file.
+        _put(_ex, "zzz-x :: ^(a+)+$\nzzz-x :: ^Secret\n")
+        engine.reload_exclude()
+        ck("a-dangerous-rule-is-refused",
+           len(engine.EXCLUDE_RULES) == 1
+           and len(engine.EXCLUDE_ERRORS) == 1)
+        ck("the-rule-beside-a-refused-one-still-applies",
+           engine.is_transient(_xv))
+        # AND IT SAYS WHY, naming the pattern and the cause, because a
+        # refusal a reader cannot act on is a silent loss with extra steps.
+        # NOT `[0]`, which turned a plant that refuses NOTHING into an
+        # IndexError and aborted the area instead of naming the cell.
+        _why = (engine.EXCLUDE_ERRORS[0][2] if engine.EXCLUDE_ERRORS
+                else "<nothing was refused>")
+        ck("a-refusal-names-the-reason",
+           "freeze" in _why and "(a+)+" in _why)
+        # THE SAME GUARD ON THE APP SIDE, which runs FIRST and so would
+        # freeze on any title at all.
+        _put(_ex, "^(a+)+$ :: ^.*$\n")
+        engine.reload_exclude()
+        ck("a-dangerous-APP-pattern-is-refused-too",
+           not engine.EXCLUDE_RULES and len(engine.EXCLUDE_ERRORS) == 1)
+
+        # AND THE ESCALATION, which is the half that makes a refusal
+        # reachable by somebody who is not reading watch.log. doctor is the
+        # verb these notes say to run FIRST and it reported the rule files
+        # NOT AT ALL until now, so a refused rule would have been a line in
+        # a log and nothing else. A FAIL rather than a WARN because the box
+        # is carrying a fault, and that is what sets doctor's exit code,
+        # which is what a script or a provision can act on.
+        from . import doctor as _drr
+
+        def _contracts():
+            _o = []
+            _c = _drr._doctor_contracts(_o.append, None)
+            return _c, "\n".join(_o)
+
+        _rc_bad, _out_bad = _contracts()
+        _put(_ex, "zzz-x :: ^Secret\n")
+        engine.reload_exclude()
+        _rc_ok, _out_ok = _contracts()
+        ck("doctor-fails-on-a-refused-rule", _rc_bad == 1)
+        ck("doctor-is-clean-when-the-rules-are", _rc_ok == 0)
+        # PAIRWISE, since one message for both states is how a reader comes
+        # to ignore the line: the two must READ differently as well as exit
+        # differently.
+        ck("doctor-reads-differently-either-way", _out_bad != _out_ok)
+        ck("doctor-names-the-refused-rule",
+           "bad rule" in _out_bad and "freeze" in _out_bad)
+        ck("doctor-says-the-rules-are-clean-when-they-are",
+           "rule files load with no errors" in _out_ok)
+
         _put(_in, "zzz-a :: ^Keep\n")
         engine.reload_anchor()
         ck("anchor-reload-applies", engine.is_anchored("zzz-a", "Keep This")

@@ -270,6 +270,29 @@ def _doctor_contracts(out, snap=None):
         rc = 1
     else:
         out(f"  [OK]   `mux resume --list` -> {len(names)} bare name(s)")
+    # THE RULE FILES, which doctor reported NOT AT ALL until a rule could be
+    # refused for being dangerous. A broken rule is already surfaced by
+    # `usher exclude` and by a line in watch.log, and neither is somewhere
+    # anybody looks: this is the verb these notes say to run FIRST, and a
+    # refused rule is a FAULT the system is carrying rather than a note.
+    #
+    # READ THROUGH THE MODULE, never imported by value: reload_exclude and
+    # reload_anchor REBIND these, so a snapshot taken at import would report
+    # a file the daemon has already re-read.
+    for _what, _errs, _path in (
+            ("exclude", engine.EXCLUDE_ERRORS, engine.EXCLUDE_FILE),
+            ("include", engine.ANCHOR_ERRORS, engine.INCLUDE_FILE)):
+        if not _errs:
+            continue
+        rc = 1
+        out(f"  [FAIL] {len(_errs)} bad rule(s) in {_path}")
+        for _n, _text, _msg in _errs:
+            out(f"         line {_n}: {_msg}")
+            out(f"           {_text!r}")
+    if not engine.EXCLUDE_ERRORS and not engine.ANCHOR_ERRORS:
+        out("  [OK]   the rule files load with no errors"
+            f"  ({len(engine.EXCLUDE_RULES)} exclude,"
+            f" {len(engine.ANCHOR_RULES)} include)")
     return rc
 
 

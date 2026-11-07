@@ -150,6 +150,56 @@ EXCLUDE_FILE = os.environ.get(
     "USHER_EXCLUDE_FILE", config_path("exclude"))
 
 
+REGEX_PROBE_LEN = 20       # measured: every catastrophic pattern tried is
+REGEX_PROBE_BUDGET = 0.005  # already 46ms+ here, every realistic one 0.011ms
+
+
+def regex_probe(pattern):
+    """The slowest this pattern runs against a few SHORT adversarial strings,
+    in seconds. PURE, and bounded by construction: we choose the input, so
+    the worst this can cost is one blown-up match on twenty characters.
+
+    WHY IT EXISTS. A rule file is hand-written and its patterns are matched
+    against a title the APPLICATION chose, on every window on every capture.
+    CPython's regex engine does not release the GIL, so a catastrophic
+    backtracker does not raise and does not merely slow a thread: it freezes
+    the whole daemon, capture, placer, status writes and event loop
+    together. Measured with `^(a+)+$` against one title: 0.05s at twenty
+    characters, NO ANSWER IN EIGHT SECONDS at thirty. The symptom is a grey
+    tray and silence, because the process that would report it is the one
+    that stopped.
+
+    AND NO TIMEOUT CAN CATCH IT AFTER THE FACT, which is why this runs at
+    LOAD: `re` has no timeout, a thread cannot bound a GIL-holding spin (the
+    first attempt to measure this printed nothing at all and had to be
+    killed from outside), and a subprocess per match is absurd. The only
+    moment usher controls the input is here.
+
+    MEASURED RATHER THAN PATTERN-MATCHED, so it needs no theory of which
+    constructs are dangerous: at twenty characters the seven catastrophic
+    patterns tried took 46 to 182ms and thirteen realistic ones, the
+    fleet's own among them, took 0.001 to 0.011ms. A budget of 5ms sits
+    450x above the worst real rule and 9x below the fastest bad one.
+
+    PARTIAL, AND SAID SO: a pattern that only explodes on some other shape
+    of input passes this. It is a floor under the failure, not a proof of
+    safety."""
+    n = REGEX_PROBE_LEN
+    rx = re.compile(pattern) if isinstance(pattern, str) else pattern
+    hi = 0.0
+    # EACH PROBE ENDS IN A CHARACTER THAT FORCES THE MATCH TO FAIL, since a
+    # backtracker only explores the whole space when it cannot succeed.
+    for s in ("a" * n + "!", "x" * n + "!", "ab" * (n // 2) + "!",
+              " " * n + "!", "," * n + "!", "0" * n + "!"):
+        t0 = time.monotonic()
+        try:
+            rx.search(s)
+        except Exception:                                  # noqa: BLE001
+            pass
+        hi = max(hi, time.monotonic() - t0)
+    return hi
+
+
 def load_exclude_rules(path=EXCLUDE_FILE):
     """Parse usher/exclude into compiled (app_re, title_re) pairs. Every rule
     is one line, '<app-regex> :: <title-regex>': both fields required, use
@@ -178,9 +228,27 @@ def load_exclude_rules(path=EXCLUDE_FILE):
             continue
         app, title = (s.strip() for s in line.split("::", 1))
         try:
-            rules.append((re.compile(app or ".*"), re.compile(title or ".*")))
+            _ar, _tr = re.compile(app or ".*"), re.compile(title or ".*")
         except re.error as e:
             errors.append((n, line, f"bad regex: {e}"))
+            continue
+        slow = [p.pattern for p in (_ar, _tr)
+                if regex_probe(p) > REGEX_PROBE_BUDGET]
+        if slow:
+            # THE SYSTEM IS PROTECTED ABOVE ANY PARTICULAR RULE, so the rule
+            # is REFUSED rather than merely flagged. See regex_probe: a
+            # pattern this slow on twenty characters freezes the whole
+            # daemon on a title an application chose, and the freeze cannot
+            # report itself.
+            errors.append((n, line, (
+                "REFUSED, it can freeze the daemon: %s took over %.0fms on a"
+                " %d-character probe, so a long window title would never"
+                " finish matching (a nested quantifier like (a+)+ is the"
+                " usual cause)"
+                % (slow[0][:40], REGEX_PROBE_BUDGET * 1000,
+                   REGEX_PROBE_LEN))))
+            continue
+        rules.append((_ar, _tr))
     return rules, errors
 
 

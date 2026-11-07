@@ -628,6 +628,55 @@ _reload_daemon() {
 #
 # NEVER FATAL, the same policy as `_reload_daemon`: a failed reload leaves the
 # OLD daemon running, which is the state we were already in.
+_check_rules() {
+  # THE RULE FILES ARE A FAIL, not a warning, and this is why they are
+  # checked HERE as well as in doctor: a rule can now be REFUSED for being
+  # able to freeze the daemon (see engine.regex_probe), and a refused rule
+  # is a fault the box is carrying. Failing here fails a provision, which is
+  # an escalation nobody has to go looking for, where a line in watch.log is
+  # somewhere nobody looks.
+  #
+  # `usher exclude` AND `usher include` ALREADY EXIT NON-ZERO on any rule
+  # error, so this needs no new contract: it spends one that existed and
+  # that nothing had ever called.
+  _ru=${SUDO_USER:-}
+  if [ "$_MODE" = system ] && { [ -z "$_ru" ] || [ "$_ru" = root ]; }; then
+    # AS ROOT THE FILES WOULD BE /root's, so a check here would pass over an
+    # empty set and report a clean box. Say which it is rather than printing
+    # a green line that means nothing.
+    warn "no sudo caller, so the rule files were not checked (they live in" \
+      "the user's home)"
+    return 0
+  fi
+  # THE COMMAND TO ASK IS THE ONE ON PATH, since this check is about the
+  # user's CONFIG and not about which mode installed the binary. In system
+  # mode `$_bin` is the caller's home and holds nothing.
+  _rbin=$(command -v usher 2>/dev/null) || _rbin=
+  [ -n "$_rbin" ] || _rbin="$_bin/usher"
+  for _rv in exclude include; do
+    _rout= ; _rrc=0
+    if [ -n "$_ru" ] && [ "$_ru" != root ]; then
+      _rout=$(sudo -u "$_ru" "$_rbin" "$_rv" 2>&1) || _rrc=$?
+    else
+      _rout=$("$_rbin" "$_rv" 2>&1) || _rrc=$?
+    fi
+    # ONE IS "ASSESSED AND BAD"; ANYTHING ELSE IS "COULD NOT ASK", and
+    # conflating them is how a check comes to fail on a clean box and then
+    # gets switched off. Measured doing exactly that: run against a
+    # system-mode box the lookup found no command, the shell answered 127,
+    # and this reported two rule files as broken when both were perfect.
+    if [ "$_rrc" -eq 0 ]; then
+      ok "the $_rv rules load with no errors"
+    elif [ "$_rrc" -eq 1 ]; then
+      bad "the $_rv rule file has errors, so those rules are NOT in force"
+      printf '%s\n' "$_rout" | sed 's/^/         /'
+    else
+      warn "could not read the $_rv rules (\`usher $_rv\` exited $_rrc)," \
+        "so they are UNCHECKED rather than clean"
+    fi
+  done
+}
+
 _login_reload() {
   # THE ONE DAEMON A RELOAD MUST NOT TOUCH. `_mode_switch` has just removed
   # the copy it is running from, so a re-exec of its own argv would hit a
@@ -780,6 +829,12 @@ _check_system() {
      && "$VENV/bin/python" -c 'import wayfire' 2>/dev/null; then
     ok "dep wayfire"
   else bad "wayfire not importable in the venv"; fi
+  # THE CALLER'S RULE FILES, which are per-user and so would otherwise fall
+  # under the INFO line below. They are checked anyway, because a refused
+  # rule is the one per-user fault that can stop the DAEMON rather than
+  # merely degrade that user's config, and a provision is where somebody is
+  # looking.
+  _check_rules
   echo "  [INFO] per-user setup is each user's: their hwdp hook, their" \
     "config and their daemon. Run 'setup.sh check' as them."
 }
@@ -846,6 +901,7 @@ print(v, d)' 2>/dev/null) || _age="unknown could not ask"
   fi
   if "$VENV/bin/python" -c 'import wayfire' 2>/dev/null; then ok "dep wayfire"
   else bad "wayfire not importable in the venv"; fi
+  _check_rules
   for _a in $APPS; do
     if [ -x "$_bin/$_a" ]; then ok "$_bin/$_a"
     else bad "$_bin/$_a missing"; fi

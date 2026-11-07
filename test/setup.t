@@ -207,4 +207,40 @@ grep -qx -- "$RO" "$T/pip.log" \
 [ -z "$(ls -a "$RO" | grep -E 'egg-info|^build$')" ] \
   || fail "the install wrote build detritus into the source"
 
-pass "payload + links + hooks + uninstall + venv canary + retirement guard"
+# --- THE RULE FILES ARE A CHECK, and its three outcomes are the point ------
+# A rule can now be REFUSED for being able to freeze the daemon (see
+# engine.regex_probe), and a refused rule is a fault the box is carrying, so
+# `check` fails and a provision fails with it: an escalation nobody has to go
+# looking for, where a line in watch.log is somewhere nobody looks.
+#
+# ONE IS "ASSESSED AND BAD"; ANYTHING ELSE IS "COULD NOT ASK". Conflating the
+# two is how a check comes to fail on a clean box and then gets switched off,
+# and the first cut did exactly that: run on a system-mode box the lookup
+# found no command, the shell answered 127, and two perfect rule files were
+# reported as broken. Driven with a STUB `usher` whose exit code is chosen,
+# which is the only way to reach all three arms with no rule file at all.
+RB=$T/rulebin; mkdir -p "$RB"
+_rule_out() {   # $1 = the code the stub exits with
+  printf '#!/bin/sh\nexit %s\n' "$1" > "$RB/usher"
+  chmod +x "$RB/usher"
+  env HOME="$H" PREFIX="$T/rp" XDG_BIN_HOME="$T/rp/bin" \
+    XDG_DATA_HOME="$T/rp/share" XDG_CONFIG_HOME="$T/rcfg" NO_COLOR=1 \
+    PATH="$RB:$PATH" sh "$HERE/setup.sh" check 2>&1 || :
+}
+_o=$(_rule_out 0)
+printf '%s\n' "$_o" | grep -q "the exclude rules load with no errors" \
+  || fail "a clean rule file did not report clean: $_o"
+_o=$(_rule_out 1)
+printf '%s\n' "$_o" | grep -q "exclude rule file has errors" \
+  || fail "rc 1 from the verb was not reported as a rule FAILURE: $_o"
+_o=$(_rule_out 127)
+printf '%s\n' "$_o" | grep -q "UNCHECKED rather than clean" \
+  || fail "a verb that could not RUN was read as a rule failure: $_o"
+# AND THE THREE READ DIFFERENTLY, since collapsing two is how the wrong one
+# gets acted on.
+[ "$(_rule_out 0)" != "$(_rule_out 1)" ] \
+  && [ "$(_rule_out 1)" != "$(_rule_out 127)" ] \
+  || fail "two of the three rule verdicts are indistinguishable"
+
+pass "payload + links + hooks + uninstall + venv canary + retirement guard\
+ + the rule-file check"
