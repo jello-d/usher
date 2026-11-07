@@ -89,6 +89,15 @@ compares the store against the screen, so when something teaches the store a
 wrong answer the two agree and it reports everything fine. A prediction
 written BEFORE the event cannot have been corrupted by it. Record one, reboot,
 then verify.
+.IP
+A window is paired with its row by app-id AND identity, which is the store's
+own key shape. Where several windows share one key the report says so, and the
+row counts as
+.B ok
+if ANY of them came back at the remembered place: a shared key holds exactly
+one slot and
+.B doctor
+will name the collision.
 .TP
 .B resume
 Start/reload in ADOPT mode (adopt the current layout as baseline; do not

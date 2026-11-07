@@ -63,7 +63,8 @@ from .engine import (
     KB_SCHEMA, MUX_BIN, MUX_RESUME, PLACE_TOL, PLUGIN_DIR, Resolution,
     START_FLOOR, WindowPlugin, _as_resolution, _derived_id,
     _latch_target_in, _migrate_store, _mux_pending_in, _mux_slot,
-    _safe_profile, _single_id, _size_opts, _spec_to_date, _verify_find,
+    _safe_profile, _single_id, _size_opts, _spec_to_date, _verify_deltas,
+    _verify_find,
     chrome_profiles_for, config_path, desktop_launch_for,
     desktop_relaunch_missing, entries_from_snapshot, identity, is_mux_term,
     is_owned, kb_path, kitty_candidates, kitty_live_counts,
@@ -74,6 +75,7 @@ from .engine import (
     pick_socket, place_of, placement_landed, profile_id, pview,
     rekey_chrome, resolution, save_knowledge, saved_sizes, schema_path,
     is_unique, seated_session, target_geometry, unidentified,
+    verify_index, verify_row_name, verify_verdict,
     wayfire_socket)
 
 
@@ -366,21 +368,104 @@ def _t_registry(ck):
     # title survives the restart, and a terminal's key survives while its
     # banner title does not. Getting the ORDER wrong would silently verify
     # the wrong window against the wrong expectation.
-    _lk = {"term:resume": {"key": "term:resume", "title": "a:b"}}
-    _ll = {"a:b": {"key": "term:resume", "title": "a:b"},
-           "Inbox": {"key": "chrome:win:9", "title": "Inbox"}}
-    ck("verify-matches-on-key",
-       _verify_find({"key": "term:resume", "label": "zz"},
-                    _lk, _ll)[1] == "key")
+    # THE ROW'S LABEL HAS TO NAME A DIFFERENT WINDOW FROM ITS KEY, or the
+    # ORDER is not exercised at all and the check passes whichever way round
+    # the two lookups go. Caught by planting the label-first order against an
+    # earlier fixture whose label matched nothing: it fell through to the key
+    # either way, so this check had never tested the thing it is named for.
+    _vrow = {"app_id": "kitty", "key": "term:resume", "label": "Inbox"}
+    _vlive = [{"app_id": "kitty", "key": "term:resume", "title": "a:b"},
+              {"app_id": "google-chrome", "key": "chrome:win:9",
+               "title": "Inbox"}]
+    _lk, _ll = verify_index(_vlive)
+    _vhit, _vhow = _verify_find(_vrow, _lk, _ll)
+    ck("verify-matches-on-key", _vhow == "key")
+    ck("verify-matches-on-key-not-on-a-rival-label",
+       _vhit[0]["key"] == "term:resume")
     ck("verify-falls-back-to-label",
-       _verify_find({"key": "chrome:win:1", "label": "Inbox"},
-                    _lk, _ll)[1] == "label")
+       _verify_find({"app_id": "google-chrome", "key": "chrome:win:1",
+                     "label": "Inbox"}, _lk, _ll)[1] == "label")
     ck("verify-reports-no-match",
-       _verify_find({"key": "nope", "label": "nope"}, _lk, _ll) == (None, None))
+       _verify_find({"app_id": "kitty", "key": "nope", "label": "nope"},
+                    _lk, _ll) == (None, None))
     # A row with no slot must NOT be matched by an empty label, which would
     # pair it with whatever window happens to have a blank title.
     ck("verify-ignores-an-empty-label",
        _verify_find({"key": None, "label": ""}, _lk, _ll) == (None, None))
+
+    # THE APP IS HALF THE KEY. Three of one account's apps share the
+    # source-alone identity, so an index on the identity alone hands every
+    # one of those rows the same window and reports the rows whose app it is
+    # not as WRONG against their own correct expectation. Live on manifold
+    # 2026-11-06 over a store with no drift: 24 ok, 2 wrong, both false.
+    _vsrc = [{"app_id": "slack", "key": "titan", "title": "",
+              "workspace": [1, 0], "pos": [376, 48], "size": [2473, 1684]},
+             {"app_id": "chrome-aaa-Default", "key": "titan", "title": "",
+              "workspace": [1, 0], "pos": [11, 129], "size": [2755, 1509]}]
+    _sk, _sl = verify_index(_vsrc)
+    ck("verify-index-separates-two-apps-on-one-identity", len(_sk) == 2)
+    ck("verify-index-finds-the-row-its-own-app",
+       _verify_find({"app_id": "chrome-aaa-Default", "key": "titan",
+                     "label": ""}, _sk, _sl)[0][0]["pos"] == [11, 129])
+    # A blank title must not become a label key, or every redacted foreign
+    # window lands in one group and the fallback pairs them at random.
+    ck("verify-index-ignores-a-blank-title", _sl == {})
+    # AND THE PAIR IS NOT UNIQUE EITHER: a dict kept whichever was seen last,
+    # so which row read ok came down to iteration order.
+    _vdup = [{"app_id": "kitty", "key": "kitty:/h", "title": "a",
+              "pos": [1, 1]},
+             {"app_id": "kitty", "key": "kitty:/h", "title": "b",
+              "pos": [9, 9]}]
+    _dk, _dl = verify_index(_vdup)
+    ck("verify-index-keeps-both-windows-of-a-shared-key",
+       len(_dk) == 1 and len(_verify_find(
+           {"app_id": "kitty", "key": "kitty:/h", "label": ""},
+           _dk, _dl)[0]) == 2)
+
+    # The deltas, and the tolerance that makes a rounded size agreement.
+    _vexp = {"expect_workspace": [1, 0], "expect_pos": [10, 10],
+             "expect_size": [100, 100]}
+    ck("verify-deltas-agree-at-the-slot",
+       _verify_deltas({"workspace": [1, 0], "pos": [10, 10],
+                       "size": [101, 100]}, _vexp, 2) == [])
+    ck("verify-deltas-name-the-field",
+       [b.split()[0] for b in _verify_deltas(
+           {"workspace": [1, 0], "pos": [80, 10], "size": [100, 100]},
+           _vexp, 2)] == ["pos"])
+
+    # A ROW A SHARED KEY LEFT BEHIND IS NOT A FAULT: one slot, N windows, and
+    # the slot ledger leaves the rest where they opened. So the row is
+    # satisfied if ANY of them is at the remembered place, and requiring ALL
+    # would report that design as a fault on every box with two terminals in
+    # one directory.
+    _vgrp = [{"workspace": [1, 0], "pos": [99, 99], "size": [100, 100]},
+             {"workspace": [1, 0], "pos": [10, 10], "size": [100, 100]}]
+    ck("verify-one-of-a-shared-key-at-the-slot-is-ok",
+       verify_verdict(_vgrp, _vexp, 2) == (True, []))
+    _vno, _vbad = verify_verdict(_vgrp[:1], _vexp, 2)
+    ck("verify-none-of-a-shared-key-at-the-slot-is-wrong", not _vno)
+    ck("verify-a-wrong-row-reports-its-deltas",
+       [b.split()[0] for b in _vbad] == ["pos"])
+
+    # THE WIRING, because every check above is about functions do_verify has
+    # to CALL, and this package has found that hole eight times.
+    _vsrc_txt = inspect.getsource(engine.do_verify)
+    ck("verify-indexes-through-the-one-definition",
+       "verify_index(live)" in _vsrc_txt)
+    ck("verify-does-not-index-on-the-identity-alone",
+       'w.get("key"): w' not in _vsrc_txt)
+    ck("verify-names-a-row-through-the-one-definition",
+       "verify_row_name(r)" in _vsrc_txt)
+    ck("verify-judges-a-group-through-the-one-definition",
+       "verify_verdict(wins, r, tol)" in _vsrc_txt)
+    # A row with no label prints its APP, or three of an account's apps all
+    # report as the bare source name.
+    ck("verify-row-name-prefers-the-label",
+       verify_row_name({"label": "Inbox", "app_id": "a", "key": "b"})
+       == "Inbox")
+    ck("verify-row-name-falls-back-to-app-and-key",
+       verify_row_name({"label": "", "app_id": "slack", "key": "titan"})
+       == "slack | titan")
 
     # A STORED ENTRY IS THE ONE GENUINE `NEVER`: its pid is long dead, so no
     # amount of asking will ever make the cwd readable, and saying so beats

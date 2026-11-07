@@ -6082,18 +6082,90 @@ def do_predict(out=None):
     return 0
 
 
-def _verify_find(row, live_by_key, live_by_label):
-    """The live window a predicted row refers to, and which matcher found it.
+def verify_index(live):
+    """Live windows grouped by the pair a predicted row names them with. PURE.
+
+    THE PAIR IS `(app_id, identity)`, which is the STORE's own key shape, and
+    an index on the identity ALONE is not a near miss: three of one account's
+    apps share the source-alone identity, so every one of those rows is handed
+    the same window and the rows whose app it is not report WRONG against
+    their own correct expectation. Measured on manifold with a store carrying
+    no drift at all.
+
+    NOT the store key itself, though that is what placement matches on:
+    `verify` compares the SCREEN against a PREDICTION and must not read the
+    store, which is the circularity it exists to break. The pair is derivable
+    from both sides without it.
+
+    A LIST, because the pair is not unique either. Two windows legitimately
+    share one key (the owner's two terminals in one directory, an account's
+    windows it cannot tell apart), and a dict keeps whichever was seen last,
+    so which row read `ok` came down to iteration order."""
+    by_pair, by_label = {}, {}
+    for w in live:
+        k = w.get("key")
+        if k:
+            by_pair.setdefault(((w.get("app_id") or ""), k), []).append(w)
+        lab = (w.get("title") or "").strip()
+        if lab:
+            by_label.setdefault(lab, []).append(w)
+    return by_pair, by_label
+
+
+def _verify_find(row, live_by_pair, live_by_label):
+    """The live windows a predicted row refers to, and which matcher found it.
 
     KEY FIRST, because it is the thing usher actually places on. LABEL second,
     for the apps whose key is only valid within one process lifetime."""
     k = row.get("key")
-    if k and k in live_by_key:
-        return live_by_key[k], "key"
+    group = live_by_pair.get(((row.get("app_id") or ""), k)) if k else None
+    if group:
+        return group, "key"
     lab = (row.get("label") or "").strip()
     if lab and lab in live_by_label:
         return live_by_label[lab], "label"
     return None, None
+
+
+def _verify_deltas(w, row, tol):
+    """Which of a row's three expectations this window misses. PURE."""
+    bad = []
+    for field, exp in (("workspace", row["expect_workspace"]),
+                       ("pos", row["expect_pos"]),
+                       ("size", row["expect_size"])):
+        got = w.get(field)
+        if exp is None or got is None:
+            continue
+        if any(abs(float(a) - float(b)) > tol for a, b in zip(got, exp)):
+            bad.append(f"{field} {got} != {exp}")
+    return bad
+
+
+def verify_verdict(wins, row, tol):
+    """Did a predicted row's slot come back, and the deltas if not. PURE.
+
+    ANY MEMBER SATISFIES THE ROW, because a shared key holds exactly ONE slot
+    and the slot ledger deliberately leaves the other windows where they
+    opened, saying so in watch.log. "Did the layout come back" is answered by
+    somebody being at the remembered place, not by all of them being, and
+    requiring all would report that design as a fault on every box with two
+    terminals in one directory."""
+    bads = [_verify_deltas(w, row, tol) for w in wins]
+    if any(not b for b in bads):
+        return True, []
+    return False, (bads[0] if bads else [])
+
+
+def verify_row_name(row):
+    """What to call a predicted row in the report. PURE.
+
+    THE APP IS HALF THE KEY, so a row with no label has to print it: another
+    account's titles are redacted, so three of that account's apps all report
+    as the bare source name and a reader cannot tell which row failed."""
+    lab = (row.get("label") or "").strip()
+    if lab:
+        return lab[:44]
+    return f"{row.get('app_id') or '?'} | {row.get('key') or '?'}"[:56]
 
 
 def do_verify(against=None, tol=2):
@@ -6113,9 +6185,7 @@ def do_verify(against=None, tol=2):
     doc = json.load(open(path))
     rows = doc["windows"]
     live = snapshot(ipc())["windows"]
-    by_key = {w.get("key"): w for w in live if w.get("key")}
-    by_label = {(w.get("title") or "").strip(): w for w in live
-                if (w.get("title") or "").strip()}
+    by_pair, by_label = verify_index(live)
 
     age = (time.time() - doc.get("recorded", 0)) / 3600.0
     print(f"against {path} ({age:.1f}h old, host {doc.get('host')}, "
@@ -6131,33 +6201,26 @@ def do_verify(against=None, tol=2):
 
     ok = miss = moved = noslot = 0
     for r in rows:
-        name = (r.get("label") or r.get("key") or "?")[:40]
+        name = verify_row_name(r)
         if r.get("expect_workspace") is None:
             noslot += 1
             print(f"  skip   {name}  (had no slot when predicted)")
             continue
-        w, how = _verify_find(r, by_key, by_label)
-        if w is None:
+        wins, how = _verify_find(r, by_pair, by_label)
+        if not wins:
             miss += 1
             print(f"  GONE   {name}")
             continue
-        bad = []
-        for field, exp in (("workspace", r["expect_workspace"]),
-                           ("pos", r["expect_pos"]),
-                           ("size", r["expect_size"])):
-            got = w.get(field)
-            if exp is None or got is None:
-                continue
-            if any(abs(float(a) - float(b)) > tol for a, b in zip(got, exp)):
-                bad.append(f"{field} {got} != {exp}")
-        if bad:
+        landed, bad = verify_verdict(wins, r, tol)
+        share = f"  ({len(wins)} share this key)" if len(wins) > 1 else ""
+        if landed:
+            ok += 1
+            print(f"  ok     {name}  (by {how}){share}")
+        else:
             moved += 1
-            print(f"  WRONG  {name}  (by {how})")
+            print(f"  WRONG  {name}  (by {how}){share}")
             for b in bad:
                 print(f"           {b}")
-        else:
-            ok += 1
-            print(f"  ok     {name}  (by {how})")
 
     print(f"verify: {ok} ok, {moved} wrong, {miss} gone, {noslot} unpredicted")
     return 0 if (moved == 0 and miss == 0) else 1
