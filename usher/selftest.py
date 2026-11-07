@@ -580,10 +580,26 @@ def _t_resolution(ck):
     ck("collision-fix-names-a-source",
        "titan" in _cfix("titan", "titan")
        and "plugin" not in _cfix("titan", "titan"))
-    ck("collision-fix-five-cases-are-pairwise-distinct",
+    ck("collision-fix-six-cases-are-pairwise-distinct",
        len({_cfix("titan", "titan"), _cfix("titan", "titan", 6),
+            _cfix("titan:abc123", "titan", 6),
             _cfix("chrome:win:1"), _cfix("kitty:/tmp"),
-            _cfix("whatever")}) == 5)
+            _cfix("whatever")}) == 6)
+    # A REAL COLLISION ON A PER-WINDOW KEY IS NOT BLINDNESS, and it became
+    # reachable the moment the daemon started PUBLISHING its map: the report
+    # resolves per window now, so two windows landing on one
+    # `<source>:<digest>` key share an identity INSIDE that account. Saying
+    # "this report cannot see it" there sends a reader to look for a daemon
+    # that is working.
+    ck("collision-on-a-per-window-key-is-reported-as-real",
+       "cannot see" not in _cfix("titan:abc123", "titan", 6)
+       and "ONE identity" in _cfix("titan:abc123", "titan", 6))
+    ck("collision-on-a-per-window-key-names-the-account",
+       "titan" in _cfix("titan:abc123", "titan", 6))
+    # AND IT STILL OFFERS NO REMEDY HERE, because only that account can make
+    # them distinct: a plugin on this side could not read its state either.
+    ck("collision-on-a-per-window-key-does-not-say-write-a-plugin",
+       "plugin" not in _cfix("titan:abc123", "titan", 6))
 
     # THE FIFTH CASE: not a collision at all, but THIS REPORT's blindness.
     # `_SOURCE_WINDOWS` is filled by the refresh and so belongs to the
@@ -644,6 +660,12 @@ def _t_resolution(ck):
        "source_per_window_slots(kb," in _dsrc)
     ck("doctor-does-not-call-the-blind-case-a-collision",
        "NOT RESOLVED HERE" in _dsrc)
+    # AND THE BLIND TAG IS GATED ON A SOURCE-ALONE KEY, not merely on the
+    # count being non-zero: with the map published a verb resolves per
+    # window, so a collision on a `<source>:<digest>` key is REAL and must
+    # not wear a tag that tells the reader this report cannot see.
+    ck("doctor-reserves-the-blind-tag-for-a-source-alone-key",
+       "_pw and _ident == _csrc" in _dsrc)
     ck("collision-chrome-blames-usher",
        "mis-resolved" in _cfix("chrome:win:123"))
     ck("collision-chrome-does-not-say-plugin",

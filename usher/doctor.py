@@ -290,13 +290,29 @@ def collision_fix(ident, source="", per_window=0):
     or when either window closes. Measured on manifold 2026-10-13, where this
     state sat live for two days and the advice would have been useless."""
     if source:
+        if ident != source:
+            # A GENUINE COLLISION ON A PER-WINDOW KEY, which is a different
+            # thing from the blindness below and became reachable the moment
+            # the daemon started PUBLISHING its map: the report resolved
+            # these windows per window and they still landed on one key,
+            # because that account's own identity for them is the same (four
+            # shells in one directory, or two windows of one command).
+            #
+            # NOTHING A READER CAN DO HERE, and the remedy is not ours: only
+            # that account can make them distinct, and it would do it the
+            # same way the owner does, by moving one.
+            return (f"these resolve to ONE identity inside the {source} "
+                    f"account (the same directory, or the same command), so "
+                    f"one gets the remembered place and the rest stay where "
+                    f"they open")
         if per_window:
             # NOT A COLLISION AT ALL, AND THIS REPORT CANNOT SEE WHY. The
-            # per-window map is filled by the refresh and lives in the
-            # DAEMON's memory, so a one-shot verb resolves every one of this
-            # source's windows to the source-alone key and counts them as
-            # sharing a slot. The store's own per-window slots are the
-            # evidence a verb CAN read.
+            # per-window map lives in the DAEMON's memory and is PUBLISHED
+            # for a verb to adopt, so this is now the state of a box whose
+            # daemon has not published yet (a fresh boot, or a reload before
+            # the first refresh): the windows resolve to the source-alone key
+            # and count as sharing a slot. The store's own per-window slots
+            # are the evidence a verb can read either way.
             return (f"{per_window} per-window slot(s) are stored for this "
                     f"source, so they are told apart where the map lives; "
                     f"this one-shot report cannot see it")
@@ -403,7 +419,12 @@ def _doctor_relaunch(out, snap, live):
         # "1 keep" read as a typo; phrase it so the count never needs a
         # plural, which is the cheapest fix and reads better at every n.
         _pw = engine.source_per_window_slots(kb, _app, _csrc)
-        if _pw:
+        # THE BLIND TAG IS ONLY FOR A SOURCE-ALONE KEY. With the map
+        # published a verb resolves per window, so a collision on a
+        # `<source>:<digest>` key is REAL: reporting it as something this
+        # report cannot see would send a reader to look for a daemon that is
+        # working. Measured on manifold the moment publishing went live.
+        if _pw and _ident == _csrc:
             # A DIFFERENT TAG, because COLLISION names a FAULT and invites a
             # reader to act. Reporting one that is not happening is worse
             # than reporting nothing, which is this file's standing rule
