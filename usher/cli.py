@@ -113,17 +113,18 @@ def session_start(action):
     """
     path = engine.SESSION_START
     if not os.path.exists(path):
-        sys.exit(f"{PROG}: no session-start provider at {path}.\n"
+        engine.die_cannot(f"{PROG}: no session-start provider at {path}.\n"
                  "  usher does not know how this machine starts a session.\n"
                  "  Install one (tackup's compositor module provides one) or\n"
                  f"  link it yourself: ln -s <your-starter> {path}")
     if not os.access(path, os.X_OK):
-        sys.exit(f"{PROG}: {path} is not executable, so it would be silently\n"
+        engine.die_cannot(
+            f"{PROG}: {path} is not executable, so it would be silently\n"
                  "  skipped. That is the same no-op a 0644 hook is.")
     try:
         os.execv(path, [path, action])
     except OSError as e:
-        sys.exit(f"{PROG}: cannot run {path}: {e}")
+        engine.die_cannot(f"{PROG}: cannot run {path}: {e}")
 
 
 def do_cleanly(args):
@@ -153,7 +154,7 @@ def do_cleanly(args):
         # (reboot and shutdown exec; logoff returns) is otherwise only
         # visible in this source. tackup had the wrong belief about it for as
         # long as its power menu existed.
-        sys.exit(f"usage: {PROG} cleanly [-n] [--force] "
+        engine.die_cannot(f"usage: {PROG} cleanly [-n] [--force] "
                  "login | logoff | reboot | shutdown\n"
                  "  reboot and shutdown EXEC systemctl and never return on\n"
                  "  success; logoff signals the session and returns. A"
@@ -425,7 +426,7 @@ def _cleanly_leave(verb, dry, force=False):
     present = True if reachable else not _no_session_here()
     plan = _leave_plan(verb, reachable, present, force)
     if plan == "refuse":
-        sys.exit(f"{PROG}: cannot reach the compositor ({why}).\n"
+        engine.die_cannot(f"{PROG}: cannot reach the compositor ({why}).\n"
                  "  A session IS running, so winding down without a capture\n"
                  "  would lose the layout this exists to keep: refusing.\n"
                  f"  To {verb} anyway and LOSE that layout: "
@@ -435,7 +436,8 @@ def _cleanly_leave(verb, dry, force=False):
         # REFUSING HERE IS THE POINT. Seeing no session is not the same fact
         # as there being none, and the capture is the whole job, so the
         # benefit of the doubt goes to the layout.
-        sys.exit(f"{PROG}: cannot reach the compositor ({why}), and logind "
+        engine.die_cannot(
+            f"{PROG}: cannot reach the compositor ({why}), and logind "
                  "reports\n"
                  "  no session on the display either, so there is probably "
                  "nothing to\n"
@@ -610,7 +612,7 @@ def _dispatch(verb, args):
             print(f"mode: {s.get('mode', '?')}  "
                   f"seconds_left: {s.get('seconds_left', '?')}")
         except (OSError, ValueError):
-            sys.exit(f"{PROG}: no status (watcher not running?)")
+            engine.die_cannot(f"{PROG}: no status (watcher not running?)")
 
 
 def arm_plan(act, running, mode):
@@ -662,7 +664,7 @@ def _do_arm(act):
         with open(engine.ARM_FILE, "w") as f:
             f.write(f"{ts}\n")
     except OSError as e:
-        sys.exit(f"{PROG}: cannot {act}: {e}")
+        engine.die_cannot(f"{PROG}: cannot {act}: {e}")
     print(f"{PROG}: {msg}")
     return engine.EXIT_OK
 
@@ -690,7 +692,9 @@ def _run(prog, audience):
         _usage(audience)
     if gate_blocks(who, audience):
         other = "usher-mgr" if who == "mgr" else "usher"
-        sys.exit(f"{prog}: `{verb}` belongs to {other}. Try: {other} {verb}")
+        engine.die_cannot(
+            f"{prog}: `{verb}` belongs to {other}."
+            f" Try: {other} {verb}")
     _dispatch(verb, args)
 
 

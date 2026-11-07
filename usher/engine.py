@@ -89,6 +89,30 @@ EXIT_CANNOT = 2    # could not do it at all: no such verb, no prediction,
 #                    no visible session. Nothing was assessed.
 
 
+def die_cannot(msg):
+    """Say it on stderr and exit EXIT_CANNOT.
+
+    **`sys.exit("text")` PRINTS THE TEXT AND EXITS ONE**, which is the
+    idiomatic Python way to die with a message and is the wrong code for
+    every one of these: the taxonomy above reserves 1 for "usher DID what
+    you asked and the answer is bad", and a missing provider, an unreadable
+    file, an unknown verb, an absent daemon or an unreachable compositor are
+    all "could not do it at all".
+
+    MEASURED: fifteen sites across cli and engine did that, so
+    `usher cleanly not-a-verb` exited 1 while `usher not-a-verb` exited 2
+    for the same class of mistake, and the man page documents 2 for "no such
+    verb" in as many words. The exit-code check could not see them, because
+    it classifies the INTEGER literals handed to sys.exit and a string
+    argument is not one.
+
+    ONE HELPER RATHER THAN FIFTEEN PAIRS of print-and-exit, so the intent is
+    named at each site and a reader cannot mistake the code for a choice made
+    there."""
+    print(msg, file=sys.stderr)
+    sys.exit(EXIT_CANNOT)
+
+
 # This box's short hostname, matching tmux's #{host_short} (and `hostname -s`).
 # It is what tells a LOCAL mux session from one reached over ssh: mux stamps the
 # tmux SERVER's host into the terminal title, so the tag naming another box is
@@ -5162,23 +5186,23 @@ def resolve_snapshot(spec):
         sys.exit(0)
     if spec == "latest":
         if not hist:
-            sys.exit("usher: no history snapshots yet")
+            die_cannot("usher: no history snapshots yet")
         path, label = hist[-1], "latest (history)"
     else:
         d = _spec_to_date(spec)
         if d is None:
-            sys.exit(f"usher: unknown --from '{spec}' (want: latest, "
+            die_cannot(f"usher: unknown --from '{spec}' (want: latest, "
                      f"today, yesterday, or YYYY-MM-DD). Have: "
                      f"{', '.join(miles) or 'no milestones yet'}")
         path, label = os.path.join(STATE, "milestones", f"{d}.json"), d
         if not os.path.exists(path):
-            sys.exit(f"usher: no milestone for {d}. Have: "
+            die_cannot(f"usher: no milestone for {d}. Have: "
                      f"{', '.join(miles) or 'none'}")
     try:
         with open(path) as f:
             return label, json.load(f)
     except (OSError, ValueError) as e:
-        sys.exit(f"usher: cannot read {path}: {e}")
+        die_cannot(f"usher: cannot read {path}: {e}")
 
 
 def match(live, entries):
@@ -6818,11 +6842,11 @@ def _signal_watcher(sig, action, done):
     try:
         pid = int(open(path).read().strip())
     except (OSError, ValueError):
-        sys.exit(f"usher: no running watcher to {action}")
+        die_cannot(f"usher: no running watcher to {action}")
     try:
         os.kill(pid, sig)
     except OSError as e:
-        sys.exit(f"usher: cannot signal watcher pid {pid}: {e}")
+        die_cannot(f"usher: cannot signal watcher pid {pid}: {e}")
     print(f"usher: {done} watcher (pid {pid})")
 
 
