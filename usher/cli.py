@@ -500,7 +500,7 @@ def _hand_over_power(verb):
 def _dispatch(verb, args):
     """The verb bodies. Gating already happened; this is what each one does."""
     if verb in ("capture", "save"):
-        engine.do_capture()
+        sys.exit(engine.do_save())
     elif verb == "lock":
         sys.exit(engine.do_lock(forced="--force" in args or "-f" in args))
 

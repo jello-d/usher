@@ -27,7 +27,8 @@ import time
 # (engine.EXCLUDE_ERRORS). Everything imported by name below is a constant or a
 # function, which a rebind never touches.
 from . import chrome, engine
-from .engine import (PLACE_CAP, ARM_FILE, EXCLUDE_FILE, FORGET_FILE,
+from .engine import (PLACE_CAP, ARM_FILE, CAPTURE_FILE, EXCLUDE_FILE,
+                     FORGET_FILE,
                      IDLE_SETTLE,
                      INCLUDE_FILE, INVERT_STORE, LAUNCHED, REDISPLAY_FILE,
                      SWEEP_FILE,
@@ -1209,6 +1210,7 @@ class Watcher:
                 "inc": store_mtime(INCLUDE_FILE),
                 "arm": store_mtime(ARM_FILE),
                 "forget": store_mtime(FORGET_FILE),
+                "capture": store_mtime(CAPTURE_FILE),
                 "redisplay": store_mtime(REDISPLAY_FILE),
                 "sweep": store_mtime(SWEEP_FILE),
                 "plugins": plugins_sig(),
@@ -1333,6 +1335,9 @@ class Watcher:
         if store_mtime(FORGET_FILE) != seen["forget"]:
             self._take_forget()
             seen["forget"] = store_mtime(FORGET_FILE)
+        if store_mtime(CAPTURE_FILE) != seen["capture"]:
+            self._take_capture()
+            seen["capture"] = store_mtime(CAPTURE_FILE)
         if store_mtime(REDISPLAY_FILE) != seen["redisplay"]:
             self._take_redisplay()
             seen["redisplay"] = store_mtime(REDISPLAY_FILE)
@@ -1382,6 +1387,29 @@ class Watcher:
         except OSError:
             pass
         return sel
+
+    def _take_capture(self):
+        """Apply a `usher save` request and remove it.
+
+        WE DO IT BECAUSE WE CAN SEE, which is the whole reason the verb hands
+        it over: a one-shot client resolves another account's windows to the
+        source alone, where this process holds the per-window map the refresh
+        filled. See engine.capture_plan.
+
+        `last = 0` SO IT IS DUE AT ONCE, with no debounce wait, because the
+        caller asked for a capture rather than for one eventually: the same
+        pair the dock hold's expiry uses.
+
+        Consumed and removed like the forget request, so a request we cannot
+        act on is not retried on every poll."""
+        try:
+            os.remove(CAPTURE_FILE)
+        except OSError:
+            pass
+        with self.lock:
+            self.st["dirty"] = True
+            self.st["last"] = 0
+        logline("capture on request")
 
     def _rekey_chrome(self):
         """Move the chrome slots onto the current session's window ids, and
