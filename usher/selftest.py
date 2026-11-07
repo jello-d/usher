@@ -7783,6 +7783,61 @@ def _t_contracts(ck):
         else:
             os.environ["SSH_AUTH_SOCK"] = _renv
 
+    # THE STATUS FILE IS A CROSS-PACKAGE CONTRACT with no check: the daemon
+    # writes it, `usher status` and the TRAY read it, and the notes record
+    # the two sides being moved in one commit by DISCIPLINE. A renamed field
+    # blanks the tray silently, because `read_status` treats anything it
+    # cannot understand as `down`.
+    #
+    # DERIVED FROM BOTH SOURCES, like the tunables check, so neither side is
+    # a hand-written list that goes stale. The writer is the one json.dump
+    # in `_write_status`; the readers are every `.get("<name>")` against the
+    # parsed status in cli and in the tray's own module, which lives in this
+    # repo and is therefore readable from here.
+    _wsrc = inspect.getsource(sys.modules["usher.watch"])
+    _wbody = _wsrc.split("def _write_status", 1)[1].split("\n    def ", 1)[0]
+    _written = set(re.findall(r'["\'](\w+)["\']\s*:', _wbody))
+    _ind = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(engine.__file__))),
+        "indicator", "usher_indicator", "__main__.py")
+    _csrc = inspect.getsource(sys.modules["usher.cli"])
+    _cstat = _csrc.split('elif verb == "status"', 1)[1].split("\n    elif ",
+                                                              1)[0]
+    # BOTH QUOTE STYLES, because an f-string body commonly uses the other
+    # one and a double-quote-blind scrape then reads a real reader as
+    # nobody: this check flagged `recording` as unread one minute after it
+    # was given a reader, for exactly that reason.
+    _GET = r"""s\.get\(["'](\w+)["']"""
+    _read = set(re.findall(_GET, _cstat))
+    # ONLY IN A CHECKOUT: an INSTALL has the engine in site-packages with no
+    # `indicator/` beside it, so the tray's half is unreadable there and the
+    # skip is announced rather than silently narrowing the contract.
+    _tray = os.path.exists(_ind)
+    if _tray:
+        with open(_ind) as _ifh:
+            _isrc = _ifh.read()
+        _rs = _isrc.split("def read_status", 1)[1].split("\n\ndef ", 1)[0]
+        _read |= set(re.findall(_GET, _rs))
+    # VACUITY GUARD ON BOTH SCRAPES, because an empty set satisfies every
+    # assertion below and the line still reads ok.
+    ck("status-writer-scrape-is-not-vacuous", len(_written) >= 5)
+    # WHICH HALVES WERE READ IS IN THE CHECK'S NAME, which is how this suite
+    # announces a skip: `test/selftest.t` also runs from the INSTALLED venv,
+    # where the engine sits in site-packages with no `indicator/` beside it,
+    # and a check that quietly covered one side there would be reporting the
+    # same thing whether or not half of it ran.
+    ck("status-reader-scrape-is-not-vacuous-%s"
+       % ("cli-and-tray" if _tray else "cli-only-no-indicator-source"),
+       len(_read) >= 4)
+    # A FIELD A READER ASKS FOR MUST BE WRITTEN, which is the direction that
+    # breaks the tray.
+    ck("every-status-field-read-is-written", _read <= _written)
+    # AND A FIELD WRITTEN FOR NOBODY IS NOT PUBLISHED, it is litter:
+    # `recording` was written every tick and read by nothing at all for as
+    # long as it has existed, which is this file's published-and-never-read
+    # shape for the sixth time.
+    ck("every-status-field-written-is-read", _written <= _read)
+
     ck("exit-codes-are-distinct", len(_declared) == 3)
     ck("exit-codes-are-0-1-2", set(_declared) == {0, 1, 2})
     # Every INTEGER literal handed to sys.exit anywhere in the package must be

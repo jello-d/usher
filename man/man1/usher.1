@@ -104,7 +104,13 @@ Start/reload in ADOPT mode (adopt the current layout as baseline; do not
 restore).
 .TP
 .B status
-The daemon's mode + seconds until it settles.
+Everything the daemon publishes: its mode, the seconds until it settles, the
+ring fraction the tray draws, whether it is
+.B recording
+(learning the layout, which is false only while a display change is in
+flux), and how long ago the last transpose was. One line per fact, so every
+published field has a reader; a check asserts the two sides of that file
+agree.
 .TP
 .B plugins
 List the loaded window plugins (built-in + user).

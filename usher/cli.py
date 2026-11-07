@@ -606,13 +606,42 @@ def _dispatch(verb, args):
         sys.exit(engine.do_transpose())
     elif verb in ("place", "settle", "toggle"):
         sys.exit(_do_arm(verb))
-    elif verb == "status":        # current placement mode + seconds to settled
+    elif verb == "status":        # everything the daemon publishes
+        # EVERY PUBLISHED FIELD HAS A READER NOW, which is why this prints
+        # more than the two it used to. `recording` was written every tick
+        # and read by NOTHING: not this verb, not doctor, not the tray, not
+        # the integrator. Its own comment says it is "published because the
+        # exception is worth seeing", and nothing saw it, which is this
+        # file's published-and-never-read shape for the sixth time after the
+        # milestones, `wid`, the SNSS window id, the URL rules and five
+        # snapshot fields.
+        #
+        # THIS VERB IS THE RIGHT READER rather than doctor: it is the CLI's
+        # view OF the status file, where doctor reports the system. And a
+        # check now asserts the two sides agree, so a renamed field fails
+        # here instead of silently blanking the tray.
         try:
             s = json.load(open(engine.STATUS_FILE))
-            print(f"mode: {s.get('mode', '?')}  "
-                  f"seconds_left: {s.get('seconds_left', '?')}")
         except (OSError, ValueError):
             engine.die_cannot(f"{PROG}: no status (watcher not running?)")
+        # `transposed_at` IS AN INSTANT and the dwell is the reader's, which
+        # is the whole reason the daemon publishes a timestamp rather than a
+        # state: so this says HOW LONG AGO rather than inventing a window of
+        # its own and disagreeing with the tray's.
+        _ta = s.get("transposed_at") or 0
+        try:
+            _ago = time.time() - float(_ta)
+        except (TypeError, ValueError):
+            _ago = None
+        print(f"mode: {s.get('mode', '?')}  "
+              f"seconds_left: {s.get('seconds_left', '?')}  "
+              f"arc: {s.get('arc', '?')}")
+        print(f"recording: {s.get('recording', '?')}"
+              f"   (learning the layout; false while the displays are in"
+              f" flux)")
+        print("last transpose: "
+              + ("never" if not _ta or _ago is None
+                 else f"{_ago:.0f}s ago"))
 
 
 def arm_plan(act, running, mode):
