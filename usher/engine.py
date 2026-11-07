@@ -209,7 +209,13 @@ def reload_exclude():
     reload. is_transient reads EXCLUDE_RULES on each call, so the swap is picked
     up immediately (the GIL makes the rebinding atomic across the threads)."""
     global EXCLUDE_RULES, EXCLUDE_ERRORS
-    EXCLUDE_RULES, EXCLUDE_ERRORS = load_exclude_rules()
+    # THE PATH IS PASSED, as reload_anchor passes INCLUDE_FILE and as this
+    # function's own docstring is cited for. A bare call takes
+    # load_exclude_rules' DEFAULT, which Python evaluates once at def time,
+    # so it is a snapshot of EXCLUDE_FILE and rebinding that global has no
+    # effect: harmless in production, where nothing rebinds it, and the
+    # reason this reload could not be driven and never was.
+    EXCLUDE_RULES, EXCLUDE_ERRORS = load_exclude_rules(EXCLUDE_FILE)
     logline(f"exclude reloaded: {len(EXCLUDE_RULES)} rule(s),"
             f" {len(EXCLUDE_ERRORS)} error(s)")
     for _n, _text, _msg in EXCLUDE_ERRORS:
@@ -1683,11 +1689,23 @@ def resolution(v):
                 "the compositor reports neither an app-id nor a title, so "
                 "there is nothing to key this window on")
         return Resolution.ready(v["title"])
+    # A PLUGIN'S `name` IS FOR MESSAGES, SO IT MUST NEVER BE LOAD-BEARING.
+    # These two sites read it bare while the other eleven in the tree, two of
+    # them engine's own relaunch error handlers, all use this getattr. A
+    # dropped-in plugin that omits it is not a contract breach: `name` is in
+    # neither PLUGIN_HOOKS nor the README nor the man page, and appears only
+    # as an uncommented line in the example. Measured before fixing: it
+    # raised out of resolution, so identity, unidentified, _single_id and
+    # SNAPSHOT all raised, which left the daemon alive and blind, logging
+    # `capture error` every second and never learning or placing again. That
+    # is the exact outcome the degradation below exists to prevent, defeated
+    # by the label used to report it.
+    _who = getattr(p, "name", "?")
     try:
         r = p.resolve(v)
     except Exception as e:
-        return Resolution.pending(f"plugin {p.name} raised: {e}")
-    return _as_resolution(r, p.name)
+        return Resolution.pending(f"plugin {_who} raised: {e}")
+    return _as_resolution(r, _who)
 
 
 def _as_resolution(r, who):

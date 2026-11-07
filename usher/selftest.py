@@ -528,6 +528,113 @@ def _t_registry(ck):
     ck("latch-argv-lookalike",
        _latch_target_in(["/opt/mux/libexec/mux-latcher", "box"]) is None)
 
+    # THE USER'S OWN CONFIG LANGUAGE, which had NO checks at all: not the
+    # `<app-regex> :: <title-regex>` parser, not either reload, not the
+    # plugin drop-in. All three reloads were also in the set of functions
+    # the suite never executed, and their whole published promise is that an
+    # edit applies ON SAVE with no restart. LOSING THESE RULES IS SILENT,
+    # since no rules parses fine and means "place everything", so the
+    # symptom is windows moving that should not with nothing reporting a
+    # fault.
+    _cfg = tempfile.mkdtemp(prefix="usher-cfg-")
+    _ex, _in = os.path.join(_cfg, "exclude"), os.path.join(_cfg, "include")
+    _pd = os.path.join(_cfg, "plugins")
+    os.makedirs(_pd)
+    _o_ex, _o_in, _o_pd = (engine.EXCLUDE_FILE, engine.INCLUDE_FILE,
+                           engine.PLUGIN_DIR)
+    _o_er, _o_ee = engine.EXCLUDE_RULES, engine.EXCLUDE_ERRORS
+    _o_ar, _o_ae = engine.ANCHOR_RULES, engine.ANCHOR_ERRORS
+    _o_pl = engine._PLUGINS
+
+    def _put(path, text):
+        with open(path, "w") as f:
+            f.write(text)
+
+    _xv = _tv("zzz-x", "Secret Thing")
+    _xo = _tv("zzz-x", "Ordinary")
+    try:
+        engine.EXCLUDE_FILE, engine.INCLUDE_FILE = _ex, _in
+        engine.PLUGIN_DIR = _pd
+
+        _put(_ex, "zzz-x :: ^Secret\n")
+        engine.reload_exclude()
+        ck("exclude-reload-applies", engine.is_transient(_xv)
+           and not engine.is_transient(_xo))
+        # A REWRITE MUST TAKE EFFECT, which is the live-edit promise and the
+        # only thing distinguishing a reload from a one-time read.
+        _put(_ex, "zzz-x :: ^Ordinary\n")
+        engine.reload_exclude()
+        ck("exclude-reload-picks-up-a-rewrite",
+           engine.is_transient(_xo) and not engine.is_transient(_xv))
+        # ONE BAD LINE MUST NOT COST THE FILE. A typo in a hand-edited rule
+        # file is the ordinary case, and dropping every rule around it would
+        # silently stop excluding anything.
+        _put(_ex, "zzz-x :: ^Secret\nno separator here\nzzz-x :: ^Ordinary\n")
+        engine.reload_exclude()
+        ck("exclude-reports-a-bad-line", len(engine.EXCLUDE_ERRORS) == 1)
+        ck("exclude-keeps-the-good-rules-either-side",
+           len(engine.EXCLUDE_RULES) == 2 and engine.is_transient(_xv)
+           and engine.is_transient(_xo))
+        _put(_ex, "zzz-x :: ^(unclosed\n")
+        engine.reload_exclude()
+        ck("exclude-reports-a-bad-regex",
+           not engine.EXCLUDE_RULES and len(engine.EXCLUDE_ERRORS) == 1)
+        _put(_ex, "# a comment\n\n   \nzzz-x :: ^Secret\n")
+        engine.reload_exclude()
+        ck("exclude-ignores-comments-and-blanks",
+           len(engine.EXCLUDE_RULES) == 1 and not engine.EXCLUDE_ERRORS)
+        # NO FILE IS NO RULES AND NO ERRORS, which is the state doctor
+        # reports: a missing file is "place everything" rather than a fault.
+        os.remove(_ex)
+        engine.reload_exclude()
+        ck("exclude-with-no-file-is-no-rules",
+           not engine.EXCLUDE_RULES and not engine.EXCLUDE_ERRORS)
+
+        _put(_in, "zzz-a :: ^Keep\n")
+        engine.reload_anchor()
+        ck("anchor-reload-applies", engine.is_anchored("zzz-a", "Keep This")
+           and not engine.is_anchored("zzz-a", "Drop This"))
+        _put(_in, "zzz-a :: ^Drop\n")
+        engine.reload_anchor()
+        ck("anchor-reload-picks-up-a-rewrite",
+           engine.is_anchored("zzz-a", "Drop This")
+           and not engine.is_anchored("zzz-a", "Keep This"))
+
+        # THE PLUGIN DROP-IN, end to end: a file appears, the signature
+        # changes (which is what triggers the reload in the daemon), and the
+        # plugin then OWNS its app and resolves through the registry.
+        engine.reload_plugins()
+        _n0, _sig0 = len(engine.plugins()), engine.plugins_sig()
+        _put(os.path.join(_pd, "zzzdropin.py"),
+             "class P:\n"
+             "    name = 'zzz-dropin'\n"
+             "    def owns(self, v):\n"
+             "        return v['app'] == 'zzz-dropin'\n"
+             "    def resolve(self, v):\n"
+             "        return ('ready', 'dropin:1')\n"
+             "PLUGIN = P()\n")
+        ck("plugins-sig-sees-a-new-file", engine.plugins_sig() != _sig0)
+        engine.reload_plugins()
+        ck("plugin-dropin-is-registered",
+           len(engine.plugins()) == _n0 + 1
+           and engine.is_owned("zzz-dropin"))
+        ck("plugin-dropin-resolves",
+           engine.resolution(_tv("zzz-dropin", "x")).key == "dropin:1")
+        # AND REMOVING IT UNREGISTERS, or an uninstalled plugin would go on
+        # claiming its app for the life of the daemon.
+        os.remove(os.path.join(_pd, "zzzdropin.py"))
+        engine.reload_plugins()
+        ck("plugin-dropin-removal-unregisters",
+           len(engine.plugins()) == _n0
+           and not engine.is_owned("zzz-dropin"))
+    finally:
+        engine.EXCLUDE_FILE, engine.INCLUDE_FILE = _o_ex, _o_in
+        engine.PLUGIN_DIR = _o_pd
+        engine.EXCLUDE_RULES, engine.EXCLUDE_ERRORS = _o_er, _o_ee
+        engine.ANCHOR_RULES, engine.ANCHOR_ERRORS = _o_ar, _o_ae
+        engine._PLUGINS = _o_pl
+        shutil.rmtree(_cfg, ignore_errors=True)
+
 def _t_resolution(ck):
     """THE READINESS CONTRACT, as a table over every registered plugin.
 
@@ -619,6 +726,68 @@ def _t_resolution(ck):
            _as_resolution(_bad, "t").state == Resolution.PENDING)
     ck("duck-rejection-names-the-fix",
        "2-tuple" in (_as_resolution("k", "t").why or ""))
+
+    # 2d. AND A PLUGIN WITH NO `name`, which is the same promise one step
+    #     further out: `name` is in NEITHER PLUGIN_HOOKS nor the README nor
+    #     the man page, and appears only as an uncommented line in the
+    #     example, so a plugin written from the documented hooks has none.
+    #     Reading it bare raised OUT of resolution, so identity,
+    #     unidentified, _single_id and SNAPSHOT all raised, leaving the
+    #     daemon alive and BLIND: `capture error` every second and nothing
+    #     learned or placed again. A LABEL USED TO REPORT A FAILURE MUST NOT
+    #     BE ABLE TO CAUSE ONE.
+    class _Nameless:                       # deliberately no `name`
+        def owns(self, v):
+            return v["app"] == "zzz-nameless"
+
+        def resolve(self, v):
+            return ("ready", "nameless:1")
+
+    class _NamelessRaises:                 # the worse pair: no name AND it
+        def owns(self, v):                 # raises, so the HANDLER reads it
+            return v["app"] == "zzz-nameless-raises"
+
+        def resolve(self, v):
+            raise RuntimeError("boom")
+
+    _nv = _tv("zzz-nameless", "x")
+    _nr = _tv("zzz-nameless-raises", "x")
+
+    def _res(v):
+        """GUARDED, so the pre-fix code fails BY NAME. Unguarded, its
+        AttributeError aborts the area and is reported as
+        `_t_resolution-RAISED-AttributeError`, which localises to five
+        hundred checks instead of to the cell. This file's own rule, and
+        the plant is what showed my check breaking it."""
+        try:
+            return engine.resolution(v)
+        except Exception as e:                             # noqa: BLE001
+            return Resolution.pending(f"RAISED {type(e).__name__}: {e}")
+
+    _real = engine._PLUGINS
+    try:
+        engine._PLUGINS = [_Nameless(), _NamelessRaises()]
+        ck("nameless-plugin-resolves", _res(_nv).key == "nameless:1")
+        ck("nameless-plugin-that-raises-is-pending",
+           not _res(_nr).is_ready and "boom" in (_res(_nr).why or ""))
+        # AND THE CONTROL, or "always print ?" would pass the row above: a
+        # plugin that DOES carry a name must still be named in the reason,
+        # since that message is the only thing telling a reader whose
+        # plugin broke.
+        class _NamedRaises:
+            name = "zzz-named"
+
+            def owns(self, v):
+                return v["app"] == "zzz-named"
+
+            def resolve(self, v):
+                raise RuntimeError("boom")
+
+        engine._PLUGINS = [_NamedRaises()]
+        ck("a-named-plugin-that-raises-is-still-named",
+           "zzz-named" in (_res(_tv("zzz-named", "x")).why or ""))
+    finally:
+        engine._PLUGINS = _real
 
     # 2c. DOCTOR'S LABELS. Three states must print as three labels, which is
     #     the reporting payoff of all this and was left unspent for a day:
@@ -5242,6 +5411,35 @@ def _t_cli_split(ck):
                         and _node.name not in ("ipc", "connect")):
                     _bad.append(f"{_m.__name__}.{_node.name}")
     ck("only-ipc-and-connect-build-a-socket", not _bad)
+
+    # NO MODULE IMPORTS A REBOUND ENGINE GLOBAL BY VALUE, which the package
+    # split named as THE one real hazard in splitting this program: the
+    # importer gets a SNAPSHOT and goes silently stale at the next reload,
+    # with the daemon then running rules a user has edited away. That split
+    # left behind an instruction to "grep for `global` before any further
+    # split", which is a decision recorded only in prose, and the set has
+    # since grown from THREE rebound names to eleven with nothing asking.
+    #
+    # DERIVED FROM BOTH SIDES, so neither a new rebinding nor a new import
+    # can slip past: the rebound set is every name under a `global`
+    # statement inside an engine function, and the imports are every
+    # `from .engine import` elsewhere in the package.
+    _reb = {_nm for _n in ast.walk(ast.parse(inspect.getsource(engine)))
+            if isinstance(_n, ast.Global) for _nm in _n.names}
+    _byval = []
+    for _m in (_doc, _w, _ch, cli, sys.modules[__name__]):
+        for _n in ast.walk(ast.parse(inspect.getsource(_m))):
+            if (isinstance(_n, ast.ImportFrom)
+                    and (_n.module or "").endswith("engine")):
+                for _a in _n.names:
+                    if _a.name in _reb:
+                        _byval.append(f"{_m.__name__}:{_n.lineno} {_a.name}")
+    # A VACUITY GUARD, because an AST change or a rename could leave the
+    # rebound set EMPTY and the assertion would then pass over nothing. Four
+    # is well under the eleven measured, so it reports a collapse and not a
+    # normal edit.
+    ck("rebound-globals-were-found", len(_reb) >= 4)
+    ck("no-module-imports-a-rebound-engine-global-by-value", not _byval)
     # THE CONFIG DIR. One place, named for the command, and every config name
     # resolves under it. The per-file fallback to the pre-rename directory is
     # gone: both machines are migrated, so it could only ever resurrect a stale
@@ -6804,6 +7002,33 @@ def _t_snapshots(ck):
 
         _snapped = engine.snapshot(_SnapSock)["windows"]
         _by = {w["app_id"]: w for w in _snapped}
+        # AND IT SURVIVES A PLUGIN WITH NO `name`, which is the BLAST RADIUS
+        # rather than the fault: resolution reading that label bare raised
+        # all the way out through identity into here, and a capture that
+        # raises is a daemon that never learns or places again. The
+        # resolution checks prove the degradation; only driving snapshot
+        # proves what it was protecting.
+        class _Nameless:
+            def owns(self, v):
+                return True
+
+            def resolve(self, v):
+                return ("ready", "nameless:1")
+
+        _rp = engine._PLUGINS
+        try:
+            engine._PLUGINS = [_Nameless()]
+            # GUARDED, so the pre-fix code fails BY NAME rather than
+            # aborting the area: the whole point of this cell is that a
+            # capture must not raise, so a raise here IS the finding and
+            # wants reporting as one.
+            try:
+                _n = len(engine.snapshot(_SnapSock)["windows"])
+            except Exception:                              # noqa: BLE001
+                _n = -1
+            ck("snapshot-survives-a-plugin-with-no-name", _n == len(_snapped))
+        finally:
+            engine._PLUGINS = _rp
         ck("snapshot-records-another-accounts-window",
            _by.get("google-chrome", {}).get("owner") == 0)
         ck("snapshot-leaves-our-own-window-unstamped",
