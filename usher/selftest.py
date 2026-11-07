@@ -7358,6 +7358,61 @@ def _t_displays(ck):
                 except OSError:
                     pass
             ck("the-poll-consults-the-capture-request", _took == [1])
+
+            # A FAILED CHROME RE-KEY IS RETRIED, NOT LOST. The baseline was
+            # adopted BEFORE the work, so a re-key that raised was never
+            # tried again: the next poll saw no change and the pass was
+            # gone, which at a browser restart costs every chrome window its
+            # slot. Measured live on manifold, three times in the logs.
+            def _poll_rekey(ok, tries=0):
+                """One poll with the chrome sig CHANGED. Returns whether the
+                baseline was adopted, and the try counter after."""
+                _s = {"inv": _word2.store_mtime(engine.INVERT_STORE),
+                      "exc": _word2.store_mtime(engine.EXCLUDE_FILE),
+                      "inc": _word2.store_mtime(engine.INCLUDE_FILE),
+                      "arm": _word2.store_mtime(engine.ARM_FILE),
+                      "forget": _word2.store_mtime(engine.FORGET_FILE),
+                      "capture": _word2.store_mtime(engine.CAPTURE_FILE),
+                      "redisplay": _word2.store_mtime(
+                          engine.REDISPLAY_FILE),
+                      "sweep": _word2.store_mtime(engine.SWEEP_FILE),
+                      "plugins": engine.plugins_sig(),
+                      "chrome": "a-sig-that-cannot-be-current"}
+                _rrk = w._rekey_chrome
+                w.rekey_tries = tries
+                try:
+                    w._rekey_chrome = lambda: ok
+                    w._poll_files(_s)
+                finally:
+                    w._rekey_chrome = _rrk
+                return (_s["chrome"] != "a-sig-that-cannot-be-current",
+                        w.rekey_tries)
+
+            ck("a-successful-rekey-adopts-the-session-signature",
+               _poll_rekey(True) == (True, 0))
+            ck("a-failed-rekey-holds-the-signature-so-it-retries",
+               _poll_rekey(False) == (False, 1))
+            # BOUNDED, or a deterministic failure re-reads Chrome's session
+            # files every second for ever. Giving up adopts the sig, so the
+            # loop goes quiet until Chrome next writes.
+            ck("a-failed-rekey-gives-up-at-the-budget",
+               _poll_rekey(False, tries=_word2.REKEY_TRIES) == (True, 0))
+            # AND THE RETURN IS WHAT THE CALLER READS, so the function has to
+            # answer it: asserting the poll alone would pass over a
+            # `_rekey_chrome` that always claimed success.
+            _rsk, _rlg = engine.rekey_chrome, _word2.logline
+            try:
+                def _boom_rk(*a, **k):
+                    raise OSError(2, "No such file or directory")
+                _word2.rekey_chrome = _boom_rk
+                _word2.logline = lambda *a, **k: None
+                ck("rekey-reports-a-raise-as-failure",
+                   w._rekey_chrome() is False)
+                _word2.rekey_chrome = lambda *a, **k: 0
+                ck("rekey-reports-a-clean-pass-as-success",
+                   w._rekey_chrome() is True)
+            finally:
+                _word2.rekey_chrome, _word2.logline = _rsk, _rlg
         finally:
             engine.CAPTURE_FILE = _rt_cap
             _wm2.CAPTURE_FILE = _rw_cap
