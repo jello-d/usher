@@ -75,7 +75,7 @@ from .engine import (
     pick_socket, place_of, placement_landed, profile_id, pview,
     rekey_chrome, resolution, save_knowledge, saved_sizes, schema_path,
     is_unique, seated_session, target_geometry, unidentified,
-    verify_index, verify_row_name, verify_verdict,
+    upsert, verify_index, verify_row_name, verify_verdict,
     wayfire_socket)
 
 # THE REAL `logline`, captured at IMPORT before anything can patch it.
@@ -6308,6 +6308,67 @@ def _t_learn(ck):
           1_800_000_002)
     ck("learn-keeps-kitty-cwd", "kitty\x00kitty:/tmp" in _kb)
 
+    # THE TWO WRITERS AGREE, which is the INVARIANT rather than nine separate
+    # assertions: upsert() and learn() are the only things that write the
+    # store, so a shape one remembers and the other declines is two sites
+    # with a different idea of what may be keyed, and that disagreement is
+    # every silent failure this file records. Asserted as a table because the
+    # fault was found by building one: three shapes diverged, each a bug
+    # already fixed in learn and never in upsert.
+    _OUT = [{"name": "DP-1", "geometry": {"x": 0, "y": 0,
+                                          "width": 1920, "height": 1080}}]
+
+    def _uw(app, title, vid=11, **kw):
+        w = dict(LW(vid, title, app), output="DP-1")
+        w.update(kw)
+        return w
+
+    #                                           windows                outputs
+    _SHAPES = [
+        ("unowned, one window",   [_uw("zzz-unowned", "Thing")],         _OUT),
+        ("unowned, two windows",  [_uw("zzz-unowned", "One", 11),
+                                   _uw("zzz-unowned", "Two", 12)],       _OUT),
+        # AN OWNED APP ITS PLUGIN DECLINED: upsert took the raw TITLE, which
+        # is the chrome spam schema 7 purged and which the matcher never
+        # looks up for an owned app, so it was unmatchable from birth.
+        ("owned, plugin declined", [_uw("google-chrome",
+                                        "Nothing Like This - Google Chrome")],
+         _OUT),
+        ("no app-id and no title", [_uw("", "")],                        _OUT),
+        ("no app-id, with title",  [_uw("", "A Picture.png")],           _OUT),
+        # ANOTHER uid NO PROVIDER CAN NAME: upsert took `kkey(app, "")`,
+        # the OWNER's key, which matches every window of that app. pid 1 is
+        # init, so this needs no second account to drive.
+        ("another uid, unnamable", [_uw("zzz-unowned", "Thing", pid=1)],  _OUT),
+        ("foreign, per-window key", [_uw("slack", "", source="titan",
+                                         owner=997, key="titan:aabbccdd")],
+         _OUT),
+        # PARKED BETWEEN AN UNDOCK AND A REDOCK: upsert wrote a slot naming
+        # an output nobody has, which nothing can ever place.
+        ("parked on a lost output", [_uw("zzz-unowned", "T", output="DP-9")],
+         _OUT),
+        # ...and NO OUTPUT LIST CONCLUDES NOTHING, so both still learn.
+        ("parked, no output list",  [_uw("zzz-unowned", "T", output="DP-9")],
+         None),
+    ]
+    _rows = []
+    for _label, _ws, _outs in _SHAPES:
+        _ku, _kl = {}, {}
+        upsert(_ku, _ws, 1_800_000_000, _outs)
+        learn(_kl, {}, _ws, 1_800_000_000, set(), None, _outs)
+        _rows.append((_label, sorted(_ku), sorted(_kl)))
+    for _n, _u, _l in _rows:
+        if _u != _l:   # named, so a failure says WHICH shape and both answers
+            print("  %s: upsert %s vs learn %s" % (_n, _u, _l),
+                  file=sys.stderr)
+    ck("upsert-and-learn-agree", all(u == l for _, u, l in _rows))
+    # AND THE TABLE IS NOT VACUOUS: without this, a table whose every row
+    # wrote NOTHING would agree perfectly and assert nothing at all. Five
+    # shapes must be learned and four refused, by both.
+    ck("upsert-and-learn-agree-is-not-vacuous",
+       sum(1 for _, u, _l in _rows if u) == 5
+       and sum(1 for _, u, _l in _rows if not u) == 4)
+
 def _t_placement(ck):
     """place_of and target_geometry: the two halves of WHERE a window goes.
 
@@ -6616,6 +6677,61 @@ def _t_snapshots(ck):
     # signal is the only window of its app here, so it keys by app_id alone
     ck("milestone-unique",
        [x["appid_only"] for x in _e if x["app_id"] == "signal"] == [True])
+
+    # THE TWO WRITE PATHS ARE WIRED TO THE GATES, which only driving them can
+    # say: upsert's own checks prove the refusal and say NOTHING about whether
+    # its callers hand it the outputs the refusal needs. Both plants that drop
+    # that argument passed the whole suite until these existed, which is the
+    # wiring hole this package has now met eleven times.
+    if os.getuid() != 0:
+        def _pv(app, title, out, vid):
+            v = _trv(app, title, pid=os.getpid(), vid=vid)
+            v["output-name"] = out
+            v["geometry"] = {"x": 10, "y": 20, "width": 300, "height": 200}
+            return v
+
+        class _CapSock:
+            """One output attached, and a view parked on one that is not:
+            the state between an undock and a redock, which is where a
+            captured slot naming a lost output can never be placed."""
+            @staticmethod
+            def list_outputs():
+                return [{"name": "DP-1",
+                         "geometry": {"x": 0, "y": 0, "width": 1920,
+                                      "height": 1080},
+                         "workspace": {"x": 0, "y": 0, "grid_width": 1,
+                                       "grid_height": 1}}]
+
+            @staticmethod
+            def list_views(**_kw):
+                return [_pv("zzz-here", "Attached", "DP-1", 1),
+                        _pv("zzz-parked", "Parked", "DP-9", 2)]
+
+        _cap_dir = tempfile.mkdtemp(prefix="usher-capture-")
+        _cap_state, _cap_ipc = engine.STATE, engine.ipc
+        try:
+            engine.STATE = _cap_dir
+            engine.ipc = lambda: _CapSock
+            with _tprofile("capwire"):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    engine.do_capture()
+                _capped = engine.load_knowledge("capwire")
+            _apps = sorted(k.partition("\0")[0] for k in _capped)
+            ck("capture-learns-an-attached-window", "zzz-here" in _apps)
+            ck("capture-refuses-a-parked-window", "zzz-parked" not in _apps)
+            # AND THE SEED PATH, the other caller: a store that does not exist
+            # yet is seeded from the last snapshot, so a new desk's FIRST
+            # store is written by upsert. The snapshot do_capture just wrote
+            # names a lost output, so seeding must refuse it too.
+            os.remove(os.path.join(_cap_dir, "knowledge-capwire.json"))
+            with _tprofile("capwire"):
+                _seeded = engine.load_knowledge("capwire")
+            _sapps = sorted(k.partition("\0")[0] for k in _seeded)
+            ck("seed-learns-an-attached-window", "zzz-here" in _sapps)
+            ck("seed-refuses-a-parked-window", "zzz-parked" not in _sapps)
+        finally:
+            engine.STATE, engine.ipc = _cap_state, _cap_ipc
+            shutil.rmtree(_cap_dir, ignore_errors=True)
 
 def _t_profiles(ck):
     """the display-profile id and its paths."""

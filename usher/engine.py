@@ -2613,7 +2613,11 @@ def load_knowledge(profile=None):
         if snap is None:
             return {}
         kb = {}
-        upsert(kb, snap["windows"], snap["time"])
+        # THE SNAPSHOT'S OWN OUTPUTS, not the live ones: a replayed row's
+        # placement is believable against the desk it was RECORDED on. An
+        # older snapshot that carries none concludes nothing, which is the
+        # fail-safe reading unreadable_placement already takes.
+        upsert(kb, snap["windows"], snap["time"], snap.get("outputs"))
         return kb
     return kb
 
@@ -2705,16 +2709,37 @@ def prune_kb(kb, when):
         del kb[k]
 
 
-def upsert(kb, windows, when):
+def upsert(kb, windows, when, outputs=None):
     """One-shot knowledge update (no view-id grouping): record each window's
     CURRENT identity. Unique-app_id windows key by app_id alone; the rest by
     title. Used by `usher capture` and the seed-from-snapshot path;
     the watch daemon uses learn() instead, which groups a window's tabs by
-    view id."""
+    view id.
+
+    THE TWO WRITERS MUST REFUSE THE SAME WINDOWS, which is the whole reason
+    the gates below are here rather than at either call site. This and learn()
+    are the only things that write the store, so a window one remembers and
+    the other declines is two sites with a different idea of what may be
+    keyed, and `upsert-and-learn-agree` pins the agreement as a table."""
     counts = Counter(w["app_id"] for w in windows
                       if not w.get("source") and
                       w.get("owner") is None)
     for w in windows:
+        # THE GATES FIRST, WHATEVER KEY SHAPE THE WINDOW WOULD HAVE TAKEN.
+        # Asked ahead of the branches because that ordering is itself the
+        # fix: when this gate sat third in learn(), an app_id-only window
+        # walked past it and another account's Slack was keyed as the
+        # owner's. Three shapes diverged from learn() until this was added,
+        # and each is a bug that had already been fixed in the other writer:
+        # a window whose plugin declined took a raw-TITLE key (the chrome
+        # title spam schema 7 purged, and unmatchable for an owned app since
+        # the matcher never looks a title up for one); a window belonging to
+        # another uid that no provider can NAME took `kkey(app, "")`, which
+        # is the owner's key and matches every window of that app; and a
+        # window parked on an output nobody has took a slot naming that
+        # output, which nothing can ever place.
+        if unidentified(w) or unreadable_placement(w, outputs):
+            continue
         app = w["app_id"]
         key = _single_id(w)   # plugin single identity (chrome/mux/kitty)
         # A FOREIGN WINDOW IS KEYED ON ITS SOURCE AND NEVER app_id-ONLY.
@@ -3074,7 +3099,7 @@ def do_capture():
     os.makedirs(STATE, exist_ok=True)
     persist(snap)
     kb, prof = kb_for_profile()
-    upsert(kb, snap["windows"], snap["time"])
+    upsert(kb, snap["windows"], snap["time"], snap.get("outputs"))
     save_knowledge(kb, prof)
     print(f"usher: captured {len(snap['windows'])} window(s); "
           f"{len(kb)} known -> {STATE}")
