@@ -4897,11 +4897,25 @@ def _t_cli_split(ck):
         # SIGNALLED something, not when the session demonstrably ended.
         ck("leave-logoff-with-no-target-is-nonzero-so-the-caller-acts",
            _leave("logoff", True, True, sid=None) == (1, False))
+        # A REFUSAL IS `EXIT_CANNOT`, NOT `EXIT_FAIL`, and the difference is
+        # the published taxonomy rather than taste: usher could not SEE the
+        # session, so nothing was assessed, which the man page names for 2
+        # in as many words ("no visible session"). Asserted against the
+        # CONSTANTS, so a later change to their values cannot make this
+        # check quietly describe something else.
         for _v in ("reboot", "logoff"):
             ck(f"leave-refusal-is-nonzero-and-hands-over-nothing-{_v}",
-               _leave(_v, False, True) == (1, False))
+               _leave(_v, False, True) == (engine.EXIT_CANNOT, False))
         ck("leave-no-session-reboot-is-nonzero-and-hands-over-nothing",
-           _leave("reboot", False, False) == (1, False))
+           _leave("reboot", False, False) == (engine.EXIT_CANNOT, False))
+        # AND THE TWO NON-ZERO CELLS ARE DIFFERENT CODES, which is the whole
+        # point of having two: a logoff that wound down, captured, and found
+        # nothing to signal DID the work and the answer is bad (1), where a
+        # refusal never looked (2). Collapsing them is how a caller loses
+        # the ability to tell "usher is blind" from "usher tried".
+        ck("leave-blind-and-tried-are-different-codes",
+           _leave("reboot", False, True)[0]
+           != _leave("logoff", True, True, sid=None)[0])
         # ...and the one zero WITHOUT a handover, which is why the rule only
         # runs one way: there is nothing to end, so a caller must NOT act.
         ck("leave-no-session-logoff-is-zero-with-nothing-done",
@@ -4980,12 +4994,22 @@ def _t_cli_split(ck):
         try:
             engine.SESSION_START = _dud
             from . import cli as _cli
+            # BOTH HALVES, because `die_cannot` prints the reason and exits
+            # a CODE: `str(SystemExit(2))` is "2", so reading the exception
+            # alone would say nothing about whether a human was told. It
+            # also means the message lands on stderr the moment it is
+            # raised rather than at interpreter exit, so a check that
+            # catches the exit has to capture it or the suite prints it.
+            _pb = io.StringIO()
             try:
-                _cli.session_start("login")
+                with contextlib.redirect_stderr(_pb):
+                    _cli.session_start("login")
                 ck("a-non-executable-provider-is-refused", False)
             except SystemExit as _e:
                 ck("a-non-executable-provider-is-refused",
-                   "not executable" in str(_e))
+                   _e.code == engine.EXIT_CANNOT)
+                ck("a-non-executable-provider-says-why",
+                   "not executable" in _pb.getvalue())
         finally:
             engine.SESSION_START = _real_seam
 
@@ -7712,7 +7736,7 @@ def _t_contracts(ck):
     # Every INTEGER literal handed to sys.exit anywhere in the package must be
     # one of them. Read off the AST, so a `sys.exit(3)` fails here naming the
     # set instead of reaching a caller that branches on 0/1/2.
-    _sites, _lits = 0, []
+    _sites, _lits, _strs = 0, [], []
     for _nm in ("engine", "cli", "doctor", "watch", "chrome"):
         _m = sys.modules[f"usher.{_nm}"]
         for _node in ast.walk(ast.parse(inspect.getsource(_m))):
@@ -7723,6 +7747,18 @@ def _t_contracts(ck):
                 _a = _node.args[0]
                 if isinstance(_a, ast.Constant) and isinstance(_a.value, int):
                     _lits.append(_a.value)
+                # A STRING ARGUMENT IS AN EXIT CODE OF ONE, whatever it says.
+                # This check classified only the INTEGER literals, so fifteen
+                # sites across cli and engine died with a message and exited
+                # 1 while meaning "could not do it at all": `usher cleanly
+                # not-a-verb` gave 1 where `usher not-a-verb` gave 2, for the
+                # one class the man page names for 2 in as many words. An f
+                # string is a JoinedStr rather than a Constant, so both
+                # shapes have to be caught.
+                elif isinstance(_a, ast.JoinedStr) or (
+                        isinstance(_a, ast.Constant)
+                        and isinstance(_a.value, str)):
+                    _strs.append(f"{_nm}.py:{_node.lineno}")
     # VACUITY GUARD ON THE SCRAPE ITSELF, not on what it found. Counting only
     # the integer literals would make this pass by finding NONE, which is the
     # "a check passes for the wrong reason" shape; and naming the codes is
@@ -7730,6 +7766,19 @@ def _t_contracts(ck):
     ck("exit-scrape-is-not-vacuous", _sites >= 15)
     ck("every-literal-exit-is-declared",
        all(v in _declared for v in _lits))
+    # NO EXIT MAY BE A BARE STRING, because that is a code of 1 chosen by
+    # Python rather than by anybody here. `engine.die_cannot` says it on
+    # stderr and exits 2, which is what all fifteen of them meant.
+    # The offenders are NAMED in the check name's own failure path by
+    # being left in `_strs`, which the driver prints with the area.
+    ck("no-exit-dies-with-a-bare-string", _strs == [])
+    # AND THE HELPER IS WHAT THEY USE, so a future site has somewhere
+    # obvious to go: the wiring half, which the scrape above cannot assert.
+    ck("die-cannot-is-used-widely",
+       sum(inspect.getsource(sys.modules[f"usher.{n}"]).count("die_cannot(")
+           for n in ("engine", "cli")) >= 15)
+    ck("die-cannot-exits-cannot",
+       "sys.exit(EXIT_CANNOT)" in inspect.getsource(engine.die_cannot))
     # CONTRACT with mux: `mux resume --list` must stay BARE NAMES, one per line.
     # This is the guard the old `mux ls` scrape lacked, because a cosmetic
     # change over
