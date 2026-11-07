@@ -2283,6 +2283,35 @@ def matched_key(kb, app, ident, src=""):
     return next((k for k in ks if kb.get(k)), ks[-1])
 
 
+def stale_chrome_titles(kb):
+    """Chrome entries keyed on a RAW TITLE, which nothing can match. PURE.
+
+    NOT MEMORY, LITTER. `match_keys` offers a chrome window its app_id-only
+    key and the slot its plugin RESOLVED, never a title, so such an entry can
+    never be looked up again and only the 30-day TTL removes it. The
+    readiness gate stops them being created (a chrome window whose session
+    file has not caught up answers Pending and is not learned) and schema 7
+    purged 265 of them on one box.
+
+    NOTHING REPORTED THE ONES A STORE STILL HOLDS, which is why this exists:
+    three sat on manifold until a content sweep of the dry run found them,
+    one dating to before the pre-profile store and one created after the
+    gate was in place. A class the store can hold, that no window can match
+    and no check names, is a gap whatever its size.
+
+    ANOTHER ACCOUNT'S ENTRY IS SKIPPED, because a source-keyed identity is
+    the source name plus an OPAQUE DIGEST and so is correctly not a slot.
+    Reading those as stale would report every per-window foreign key."""
+    out = []
+    for k, e in kb.items():
+        app, _, ident = k.partition("\0")
+        if not ident or (e.get("source") or ""):
+            continue
+        if is_chrome(app) and not is_chrome_slot(ident):
+            out.append(k)
+    return sorted(out)
+
+
 def source_per_window_slots(kb, app, src):
     """How many PER-WINDOW slots the store holds for this source's app. PURE.
 

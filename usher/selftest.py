@@ -756,6 +756,34 @@ def _t_resolution(ck):
     # not wear a tag that tells the reader this report cannot see.
     ck("doctor-reserves-the-blind-tag-for-a-source-alone-key",
        "_pw and _ident == _csrc" in _dsrc)
+
+    # A CHROME ENTRY KEYED BY A RAW TITLE is litter nothing can match, and
+    # until this nothing named it: three sat on manifold, found by a content
+    # sweep of the dry run rather than by any check.
+    _slot = engine.kkey("google-chrome", "chrome:win:17")
+    _ttl = engine.kkey("google-chrome", "Inbox (1) - Gmail")
+    _only = engine.kkey("google-chrome", "")
+    _kbt = {_slot: {}, _ttl: {}, _only: {},
+            engine.kkey("signal", "Signal"): {},
+            # ANOTHER ACCOUNT'S per-window key is the source name plus an
+            # OPAQUE DIGEST, so it is correctly not a slot and reading it as
+            # stale would report every one of them.
+            engine.kkey("google-chrome", "titan:80a4286f0c64c477"):
+                {"source": "titan"}}
+    # NOT `_st`, which is already a resolution helper in this area and
+    # which a bare assignment shadows: the suite named it at once.
+    _stl = engine.stale_chrome_titles(_kbt)
+    ck("a-chrome-title-key-is-reported-as-stale", _stl == [_ttl])
+    ck("a-chrome-slot-is-not-stale", _slot not in _stl)
+    ck("the-app-id-only-chrome-key-is-not-stale", _only not in _stl)
+    ck("another-accounts-digest-is-not-read-as-stale",
+       not any((_kbt[k].get("source") or "") for k in _stl))
+    ck("a-non-chrome-title-key-is-not-stale",
+       not any(k.startswith("signal") for k in _stl))
+    # AND THE WIRING, the hole this file records ten times over: the pure
+    # function's checks say nothing about whether doctor prints it.
+    ck("doctor-reports-the-stale-chrome-titles",
+       "stale_chrome_titles(kb)" in _dsrc)
     ck("collision-chrome-blames-usher",
        "mis-resolved" in _cfix("chrome:win:123"))
     ck("collision-chrome-does-not-say-plugin",
