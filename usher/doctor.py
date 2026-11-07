@@ -107,6 +107,16 @@ def _doctor_store(out):
     if not counts.get("kitty"):
         out("  NOTE         no kitty entries: terminals are not being"
             " remembered, so they cannot be placed")
+    # UNMATCHABLE BY CONSTRUCTION, so the TTL is the only thing that removes
+    # them and nothing said they were there. Counted rather than named: the
+    # dry run already lists them as UNMATCHED-LAYOUT rows, and a count plus
+    # the remedy is what a reader needs here.
+    _ct = engine.stale_chrome_titles(kb)
+    if _ct:
+        out(f"  NOTE         {len(_ct)} chrome entr"
+            f"{'y' if len(_ct) == 1 else 'ies'} keyed by a raw TITLE, which"
+            " no window can ever match: litter the 30-day TTL removes, or"
+            " `usher forget` now")
     # An un-adopted pre-profile store is invisible otherwise: placement simply
     # goes quiet while the knowledge sits in a file nothing opens.
     legacy = os.path.join(STATE, "knowledge.json")
