@@ -4164,12 +4164,26 @@ def publish_sources(path=None):
     CONTENT-COMPARED BEFORE WRITING, so a poll that changes nothing does not
     rewrite the file: the mtime is what a reader would otherwise have to
     reason about.
+
+    AND AN EMPTY MAP NEVER OVERWRITES A KNOWN ONE, which is the roster's own
+    rule one level over and was found by DEPLOYING this: a reload's first
+    capture runs before the refresh, so the map is empty, and the publish at
+    the end of that poll wrote `{}` over a perfectly good file. Observed on
+    manifold, `published the per-window map for 0 source(s)`.
+
+    THE ASYMMETRY IS THE ROSTER'S EXACTLY. An identifier is per map-to-unmap,
+    so a STALE entry simply misses and costs nothing, where an EMPTIED file
+    costs every one-shot verb its sightedness until the next refresh. It
+    self-corrects either way: any real report replaces that source's entry.
     """
     p = SOURCES_FILE if path is None else path
     blob = json.dumps({s: dict(m) for s, m in _SOURCE_WINDOWS.items() if m},
                       indent=2, sort_keys=True)
     try:
-        if os.path.exists(p) and open(p).read() == blob:
+        have = open(p).read() if os.path.exists(p) else ""
+        if have == blob:
+            return False
+        if blob == "{}" and have not in ("", "{}"):
             return False
         os.makedirs(os.path.dirname(p), exist_ok=True)
         write_json(p, blob)

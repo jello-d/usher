@@ -5213,6 +5213,25 @@ def _t_relaunch(ck):
                 # to reason about.
                 ck("publishing-the-same-map-twice-writes-nothing",
                    engine.publish_sources() is False)
+                # AND AN EMPTY MAP NEVER OVERWRITES A KNOWN ONE. Found by
+                # DEPLOYING the publish: a reload's first capture runs before
+                # the refresh, so the map is empty, and that poll's publish
+                # wrote `{}` over a good file. Live on manifold, `published
+                # the per-window map for 0 source(s)`.
+                engine._SOURCE_WINDOWS.clear()
+                ck("an-empty-map-does-not-overwrite-a-known-one",
+                   engine.publish_sources() is False
+                   and engine.load_published_sources() == {"titan": {
+                       _TL1: engine.identity_digest("chrome:win:11")}})
+                # ...AND IT IS NOT A BLANKET REFUSAL TO WRITE NOTHING: with
+                # no file, or one already empty, publishing nothing is right.
+                os.remove(_sf)
+                ck("an-empty-map-is-published-when-there-is-no-file",
+                   engine.publish_sources() is True
+                   and engine.load_published_sources() == {})
+                engine.set_source_windows("titan", {
+                    _TL1: engine.identity_digest("chrome:win:11")})
+                engine.publish_sources()
                 # AND A VERB ADOPTS IT, which is the half that closes the
                 # gap: an EMPTY process map plus the file resolves the window
                 # per window, where before it answered the source alone.
