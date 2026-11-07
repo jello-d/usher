@@ -791,6 +791,45 @@ def _t_resolution(ck):
     # function's checks say nothing about whether doctor prints it.
     ck("doctor-reports-the-stale-chrome-titles",
        "stale_chrome_titles(kb)" in _dsrc)
+
+    # A DESK UNVISITED FOR LONGER THAN THE TTL loses its memory on the first
+    # visit back, AFTER placing from it once: the prune is wall-clock and
+    # fires on LEARN, never on load. Measured on manifestor: five dormant
+    # stores, 25 entries, 48 to 71 days, zero survivors in a simulated
+    # prune. No stateless cutoff rule fixes it (three were simulated), so
+    # the loss is at least SAID before it happens.
+    _rstate, _rprof = engine.STATE, engine.profile_id
+    _tdir = tempfile.mkdtemp(prefix="usher-ttl-", dir="/var/tmp")
+    try:
+        engine.STATE = _tdir
+        engine.profile_id = lambda *a, **k: "LIVE"
+        _old = time.time() - engine.KNOWLEDGE_TTL - 86400
+        _new = time.time()
+        for _p, _rows in (
+                ("LIVE", {"a\x00x": {"last_seen": _old}}),
+                ("DORM", {"a\x00x": {"last_seen": _old},
+                          "b\x00y": {"last_seen": _old},
+                          "c\x00z": {"last_seen": _new}}),
+                ("FRESH", {"a\x00x": {"last_seen": _new}})):
+            # `write_json` takes a BLOB, not an object: it is the atomic
+            # rename, and the caller does the encoding.
+            engine.write_json(
+                os.path.join(_tdir, "knowledge-%s.json" % _p),
+                json.dumps(_rows))
+        _dm = engine.ttl_doomed()
+        # THE LIVE PROFILE IS EXCLUDED, because its own capture loop is
+        # refreshing it and a doomed count there is just the TTL working.
+        ck("ttl-doomed-skips-the-live-profile", "LIVE" not in _dm)
+        ck("ttl-doomed-counts-only-the-aged", _dm.get("DORM") == 2)
+        # A STORE WITH NOTHING AGED IS NOT REPORTED AT ALL, or the line
+        # fires on every box with a second monitor set and gets ignored.
+        ck("ttl-doomed-omits-a-store-with-nothing-aged", "FRESH" not in _dm)
+        ck("ttl-doomed-reports-exactly-one-store", sorted(_dm) == ["DORM"])
+    finally:
+        engine.STATE, engine.profile_id = _rstate, _rprof
+        shutil.rmtree(_tdir, ignore_errors=True)
+    ck("doctor-warns-about-the-doomed-entries",
+       "ttl_doomed()" in _dsrc)
     ck("collision-chrome-blames-usher",
        "mis-resolved" in _cfix("chrome:win:123"))
     ck("collision-chrome-does-not-say-plugin",

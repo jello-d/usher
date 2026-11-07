@@ -2307,6 +2307,57 @@ def matched_key(kb, app, ident, src=""):
     return next((k for k in ks if kb.get(k)), ks[-1])
 
 
+def ttl_doomed(when=None):
+    """{profile: how many of its entries the next capture there would drop}
+    for every profile but the live one.
+
+    **A DESK YOU HAVE NOT VISITED IN A MONTH LOSES ITS MEMORY ON THE FIRST
+    VISIT BACK, AFTER PLACING FROM IT ONCE.** `prune_kb`'s cutoff is
+    wall-clock and it fires in the LEARN path, never on load, so the order is:
+    the desk returns, the sweep places every window from slots the store still
+    has, and then the first capture drops every entry older than the TTL,
+    which is every window you did not happen to open in that minute. The
+    visible behaviour is a correct restore followed by a silent loss, which is
+    this file's "restore works, mostly" shape.
+
+    MEASURED on manifestor 2026-11-07: five dormant stores, 25 entries, ages
+    48 to 71 days, and a simulated prune leaves ZERO in every one of them.
+
+    NO STATELESS CUTOFF RULE FIXES IT, which is why this reports rather than
+    repairs. Three were simulated over an advancing clock:
+
+        min(now, newest)                collapses: `newest` becomes now the
+                                        moment one window is refreshed
+        newest EXCLUDING this pass      never prunes ANYTHING, ever: the
+                                        newest stale entry always sits inside
+                                        its own cutoff
+        skip if it would EMPTY the      never fires in the real case, because
+        store                           the window you just opened is a fresh
+                                        entry
+
+    The honest rule is "unseen for TTL of THIS DESK'S USE", and that needs
+    per-profile usage state rather than wall-clock: a design change, recorded
+    as owed. Until then the loss is at least VISIBLE before it happens, which
+    is the same call this package made for the dry-run collapse and for the
+    stale chrome titles."""
+    when = time.time() if when is None else when
+    cutoff = when - KNOWLEDGE_TTL
+    live, out = profile_id(), {}
+    for p in glob.glob(os.path.join(STATE, "knowledge-*.json")):
+        prof = os.path.basename(p)[len("knowledge-"):-len(".json")]
+        if prof == live:
+            continue
+        try:
+            kb = load_knowledge(prof)
+        except Exception:                                  # noqa: BLE001
+            continue
+        n = sum(1 for e in kb.values()
+                if float(e.get("last_seen") or 0) < cutoff)
+        if n:
+            out[prof] = n
+    return out
+
+
 def stale_chrome_titles(kb):
     """Chrome entries keyed on a RAW TITLE, which nothing can match. PURE.
 
