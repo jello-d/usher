@@ -78,6 +78,13 @@ from .engine import (
     verify_index, verify_row_name, verify_verdict,
     wayfire_socket)
 
+# THE REAL `logline`, captured at IMPORT before anything can patch it.
+# `_quiet_log` replaces `engine.logline` and `watch.logline` for the whole
+# area loop, so a check that wants to exercise the production function has
+# no other way to reach it, and reaching for the patched one would test the
+# stub.
+_real_logline = engine.logline
+
 
 @contextlib.contextmanager
 def _tprofile(name):
@@ -2947,6 +2954,51 @@ def _t_verify(ck):
         with open(_lf, errors="replace") as _fh:
             _tail = _fh.read()[-4000:]
     ck("quiet-log-keeps-fixtures-out-of-watch-log", _probe not in _tail)
+
+    # A LINE FROM A DEV TREE SAYS SO. watch.log is the forensic record this
+    # package leans on, and nothing marked a line that did not come from the
+    # installed code: five such lines sat in manifestor's log, including a
+    # NameError NO COMMIT EVER HAD, from a half-edited working tree run
+    # against the live session. `_quiet_log` cannot help, because it patches
+    # this function for the SUITE and a hand probe is not the suite.
+    #
+    # THE PURE HALF FIRST, including the shape a substring test gets wrong.
+    for _p, _want in (
+            ("/opt/usher/venv/lib/python3.14/site-packages/usher/engine.py",
+             False),
+            ("/home/jello/.local/share/usher/venv/lib/python3.12/"
+             "site-packages/usher/engine.py", False),
+            ("/home/jello/src/usher/usher/engine.py", True),
+            ("/var/tmp/plantX/usher/engine.py", True),
+            # a DEV tree whose path merely CONTAINS the words
+            ("/home/jello/src/site-packages-notes/usher/engine.py", True)):
+        ck("dev-path-%s" % _p.strip("/").replace("/", "-")[-40:],
+           engine.is_dev_path(_p) is _want)
+    # AND THE WIRING, host-free: the cache is the seam, so the mark is
+    # asserted BOTH WAYS without caring where this suite happens to run
+    # from. Asserting the mark's presence directly would be a check on the
+    # host, since `test/selftest.t` runs the suite from the installed venv
+    # AND from the dev tree.
+    _rdev, _rll = engine._DEV_TREE, engine.logline
+    _ldir = tempfile.mkdtemp(prefix="usher-dev-", dir="/var/tmp")
+    _rst = engine.STATE
+    try:
+        engine.STATE = _ldir
+        engine.logline = _real_logline
+        for _dev, _tag in ((True, "[dev] "), (False, "")):
+            engine._DEV_TREE = _dev
+            _n = f"devmark-{_dev}-{os.getpid()}"
+            _real_logline(_n)
+            with open(os.path.join(_ldir, "watch.log")) as _fh:
+                _lines = [x for x in _fh if _n in x]
+            ck("logline-marks-a-dev-tree-line" if _dev
+               else "logline-leaves-an-installed-line-bare",
+               len(_lines) == 1
+               and _lines[0].split(" ", 2)[2].startswith(_tag + _n))
+    finally:
+        engine._DEV_TREE, engine.logline = _rdev, _rll
+        engine.STATE = _rst
+        shutil.rmtree(_ldir, ignore_errors=True)
 
     _o = {"name": "DP-1", "id": 1,
           "geometry": {"x": 0, "y": 0, "width": 100, "height": 100},

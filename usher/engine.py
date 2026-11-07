@@ -6442,13 +6442,59 @@ SOURCES_FILE = os.path.join(RUNTIME_DIR, "usher.sources")
 LOG_CAP = 256 * 1024   # rotate watch.log past this; bounds it to ~2x LOG_CAP
 
 
+def is_dev_path(path):
+    """Does `path` sit outside an install? PURE, so it is checkable.
+
+    SITE-PACKAGES IS THE TEST, and it is the one this tree already uses for
+    the cwd-shadow trap: an install (system, user or any venv) puts the
+    package there, and `PYTHONPATH=~/src/usher` or a bare `python -m usher`
+    from the repo does not.
+
+    A COMPONENT RATHER THAN A SUBSTRING, because a substring test calls
+    `~/src/site-packages-notes/usher` an install. Checked against that
+    shape."""
+    return "site-packages" not in os.path.dirname(
+        os.path.abspath(path)).replace(os.sep, "/").split("/")
+
+
+def from_dev_tree():
+    """Is THIS module running from a dev tree? Cached: logline asks per
+    line, and the answer cannot change inside a process."""
+    global _DEV_TREE
+    if _DEV_TREE is None:
+        _DEV_TREE = is_dev_path(__file__)
+    return _DEV_TREE
+
+
+_DEV_TREE = None
+
+
 def logline(msg):
     """Append a timestamped line to the daemon's own log. Autostart discards a
     child's stdout/stderr, so without this a death (or a skipped event) is
     invisible, which is exactly how a slow-login crash went unnoticed. Best
     effort: logging must never itself take the daemon down. Rotated at LOG_CAP
     (one generation kept) so a respawn loop cannot fill the disk: the tree
-    has a 14G-session-log scar behind that caution."""
+    has a 14G-session-log scar behind that caution.
+
+    **A LINE FROM A DEV TREE SAYS SO**, because this log is the forensic
+    record this package leans on to settle "usher or the human" and nothing
+    marked a line that did not come from the installed code. Measured on
+    manifestor: five lines, including
+
+        relaunch (desktop default) error: name 'missing' is not defined
+
+    from a HALF-EDITED working tree run against the live session, for a
+    NameError no commit ever had, plus `titan capture:` fixture rows on a box
+    with no second account at all. A reader six hours later cannot tell those
+    from production, and the suite's own `_quiet_log` cannot help: it patches
+    this function for the SUITE, and a hand probe, a plant runner or any
+    `PYTHONPATH=<tree> python -m usher <verb>` is not the suite.
+
+    THE MARK RATHER THAN A REFUSAL, because a dev run that logs nothing is
+    harder to debug than one that logs honestly, and because the daemon this
+    is for is the installed one: the prefix costs production nothing and
+    makes the other case self-identifying for ever."""
     try:
         os.makedirs(STATE, exist_ok=True)
         path = os.path.join(STATE, "watch.log")
@@ -6457,8 +6503,9 @@ def logline(msg):
                 os.replace(path, path + ".1")
         except OSError:
             pass
+        mark = "[dev] " if from_dev_tree() else ""
         with open(path, "a") as f:
-            f.write(f"{time.strftime('%F %T')} {msg}\n")
+            f.write(f"{time.strftime('%F %T')} {mark}{msg}\n")
     except OSError:
         pass
 
