@@ -301,10 +301,14 @@ def collision_fix(ident, source="", per_window=0):
             # NOTHING A READER CAN DO HERE, and the remedy is not ours: only
             # that account can make them distinct, and it would do it the
             # same way the owner does, by moving one.
-            return (f"these resolve to ONE identity inside the {source} "
+            # SAYS WHAT THE OUTER LINE DOES NOT. That line already states
+            # the consequence ("1 gets the remembered place, N-1 stay where
+            # they opened"), so repeating it here was the whole message
+            # twice; what a reader cannot get anywhere else is the CAUSE and
+            # who could fix it.
+            return (f"they resolve to ONE identity inside the {source} "
                     f"account (the same directory, or the same command), so "
-                    f"one gets the remembered place and the rest stay where "
-                    f"they open")
+                    f"only that account can make them distinct")
         if per_window:
             # NOT A COLLISION AT ALL, AND THIS REPORT CANNOT SEE WHY. The
             # per-window map lives in the DAEMON's memory and is PUBLISHED
