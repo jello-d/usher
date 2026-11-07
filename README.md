@@ -274,7 +274,7 @@ usher predict                # record what the next restore SHOULD produce
 usher verify                 # diff the live layout against that prediction
 usher doctor                 # what it is doing, and what it is NOT
 usher forget 'chrome:win:*'  # drop remembered slots (previews; --apply acts)
-usher status                 # placement mode and seconds until settled
+usher status                 # every fact the daemon publishes
 usher place             # place every window that maps, for a while
 usher settle                 # go settled now: leave new windows where they open
 usher transpose              # sweep OPEN windows onto where they now belong
