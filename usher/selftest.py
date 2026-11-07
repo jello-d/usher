@@ -5106,6 +5106,112 @@ def _t_relaunch(ck):
                              _TL2: engine.identity_digest("chrome:win:22")})
             ck("source-window-parse-ignores-prose-on-the-same-channel",
                len(_parsed_w) == 2)
+            # ---- THE MAP IS PUBLISHED, so a one-shot verb can see ------
+            # THE MEASURED GAP: the map is per PROCESS and filled only by a
+            # trigger, so `restore`, `restore --dry-run`, `predict` and
+            # `verify` all read another account's windows as the source
+            # ALONE. On manifold 2026-11-06, with eleven per-window slots in
+            # the store, a blind verb matched ZERO of them.
+            _sdir2 = tempfile.mkdtemp(prefix="usher-pub-", dir="/var/tmp")
+            _sf = os.path.join(_sdir2, "usher.sources")
+            _r_sfile, _r_adopt = engine.SOURCES_FILE, engine._SOURCES_ADOPTED
+            try:
+                engine.SOURCES_FILE = _sf
+                engine._SOURCE_WINDOWS.clear()
+                engine._SOURCE_SLOT.clear()
+                engine._SOURCES_ADOPTED = False
+                ck("publishing-nothing-writes-an-empty-map",
+                   engine.publish_sources() is True
+                   and engine.load_published_sources() == {})
+                engine.set_source_windows("titan", {
+                    _TL1: engine.identity_digest("chrome:win:11")})
+                ck("the-daemon-publishes-what-it-knows",
+                   engine.publish_sources() is True
+                   and engine.load_published_sources() == {"titan": {
+                       _TL1: engine.identity_digest("chrome:win:11")}})
+                # CONTENT-COMPARED, so a poll that changed nothing neither
+                # rewrites the file nor moves the mtime a reader would have
+                # to reason about.
+                ck("publishing-the-same-map-twice-writes-nothing",
+                   engine.publish_sources() is False)
+                # AND A VERB ADOPTS IT, which is the half that closes the
+                # gap: an EMPTY process map plus the file resolves the window
+                # per window, where before it answered the source alone.
+                engine._SOURCE_WINDOWS.clear()
+                engine._SOURCE_SLOT.clear()
+                engine._SOURCES_ADOPTED = False
+                _pv_q = dict(_trv("google-chrome", "Anything At All",
+                                  pid=os.getpid(), vid=909, tlid=_TL1),
+                             **{"source": "titan"})
+                ck("a-verb-with-an-empty-map-adopts-the-published-one",
+                   engine.resolution(_pv_q).key
+                   == "titan:" + engine.identity_digest("chrome:win:11"))
+                # ONCE, because resolution runs on every event and the answer
+                # only changes when the daemon publishes.
+                # ONCE MEANS ONE FILE READ, and that is what the check has
+                # to count: asserting the RETURN is 0 passes with the guard
+                # removed too, because the second read finds the source
+                # already known and skips it. `resolution` runs on every
+                # window event, so the guard is a read per event.
+                _reads = []
+                _rlps = engine.load_published_sources
+                try:
+                    engine.load_published_sources = (
+                        lambda *a, **k: _reads.append(1) or {})
+                    engine.adopt_published_sources()
+                    engine.adopt_published_sources()
+                    engine.resolution(_pv_q)
+                finally:
+                    engine.load_published_sources = _rlps
+                ck("the-published-map-is-read-once-per-process",
+                   _reads == [])
+                engine._SOURCES_ADOPTED = False
+                _reads.clear()
+                try:
+                    engine.load_published_sources = (
+                        lambda *a, **k: _reads.append(1) or {})
+                    engine.adopt_published_sources()
+                    engine.adopt_published_sources()
+                finally:
+                    engine.load_published_sources = _rlps
+                ck("a-reset-process-reads-the-published-map-exactly-once",
+                   _reads == [1])
+                # A LIVE TRIGGER BEATS THE FILE, or a reload would be stuck
+                # with whatever was published however stale.
+                engine._SOURCES_ADOPTED = False
+                engine.set_source_windows("titan", {_TL2: "0" * 16})
+                ck("a-known-source-is-not-overwritten-by-the-file",
+                   engine.adopt_published_sources() == 0
+                   and engine._SOURCE_WINDOWS["titan"] == {_TL2: "0" * 16})
+                # AND THE OPACITY IS STILL OURS: a hand-edited file must not
+                # be able to put a READABLE identity into a store key, which
+                # is the whole reason the digest exists.
+                with open(_sf, "w") as _f:
+                    _f.write(json.dumps({
+                        "titan": {_TL1: "chrome:win:11",
+                                  "not-hex": "a" * 16,
+                                  _TL2: engine.identity_digest("x")}}))
+                ck("the-published-map-is-validated-on-the-way-in",
+                   engine.load_published_sources()
+                   == {"titan": {_TL2: engine.identity_digest("x")}})
+                for _bad in ("[]", "{\"titan\": 7}", "not json"):
+                    with open(_sf, "w") as _f:
+                        _f.write(_bad)
+                    ck("a-malformed-published-map-is-simply-no-map-%s"
+                       % _bad[:6],
+                       engine.load_published_sources() == {})
+                os.remove(_sf)
+                ck("a-missing-published-map-is-simply-no-map",
+                   engine.load_published_sources() == {})
+            finally:
+                engine.SOURCES_FILE = _r_sfile
+                engine._SOURCES_ADOPTED = _r_adopt
+                engine._SOURCE_WINDOWS.clear()
+                engine._SOURCE_SLOT.clear()
+                engine.set_source_windows(
+                    "titan", _parsed_w)
+                shutil.rmtree(_sdir2, ignore_errors=True)
+
             # THE TITLE IS NOT CONSULTED, asserted BEHAVIOURALLY in both
             # directions rather than by reading the code, because that is
             # the whole claim of this protocol and the one a reader will
@@ -6845,6 +6951,52 @@ def _t_displays(ck):
             w.redisplay_ok = set()
             w.kb, w.kb_profile = {}, "DESK"
 
+        # ---- THE DAEMON PUBLISHES THE MAP, which is the WIRING ----------
+        # The pure publish/adopt pair says nothing about whether the refresh
+        # calls it, and a planted `_poll_sources` that never published passed
+        # the whole suite: EIGHTH instance of that hole here. Without it
+        # every one-shot verb stays blind, which is the gap this closes.
+        _rsrp, _rstr = engine.source_refresh_plan, engine.source_trigger
+        _rpub, _rlog3 = engine.publish_sources, engine.logline
+        _pub = []
+        try:
+            engine.source_refresh_plan = (
+                lambda rows, asked, now, seen: (["titan"], {}))
+            engine.source_trigger = lambda *a, **k: 1
+            engine.publish_sources = lambda *a, **k: _pub.append(1) or True
+            w.src_asked, w.src_seen = {}, {}
+            w.kb, w.kb_profile = {}, "DESK"
+            w._poll_sources({"windows": []})
+        finally:
+            engine.source_refresh_plan, engine.source_trigger = _rsrp, _rstr
+            engine.publish_sources = _rpub
+            w.src_asked, w.src_seen = {}, {}
+            w.kb, w.kb_profile = {}, "DESK"
+        ck("the-refresh-publishes-the-map-for-every-one-shot-verb",
+           _pub == [1])
+        # AND A PUBLISH THAT RAISES DOES NOT COST THE REFRESH, since every
+        # outcome of that poll is optional: it is a sudo subprocess on the
+        # capture thread and the windows keep the source-alone key without it.
+        _raised = []
+        try:
+            engine.source_refresh_plan = (
+                lambda rows, asked, now, seen: (["titan"], {}))
+            engine.source_trigger = lambda *a, **k: 1
+            engine.publish_sources = _raise_it
+            engine.logline = lambda *a, **k: None
+            w.src_asked, w.src_seen = {}, {}
+            _ok_poll = w._poll_sources({"windows": []}) is not None
+        except Exception as _e:                            # noqa: BLE001
+            _raised.append(type(_e).__name__)
+            _ok_poll = False
+        finally:
+            engine.source_refresh_plan, engine.source_trigger = _rsrp, _rstr
+            engine.publish_sources = _rpub
+            engine.logline = _rlog3
+            w.src_asked, w.src_seen = {}, {}
+        ck("a-failed-publish-does-not-break-the-refresh",
+           _ok_poll and not _raised)
+
         # ---- A HAND-ASKED CAPTURE IS THE DAEMON'S, and here is why -------
         # A one-shot verb resolves another account's windows to the SOURCE
         # ALONE, because `_SOURCE_WINDOWS` is per process and filled only by
@@ -7612,6 +7764,14 @@ def selftest():
     _scratch_root = tempfile.mkdtemp(prefix="usher-selftest-state-")
     _scratch_state = os.path.join(_scratch_root, "usher")
     os.makedirs(_scratch_state)
+    # AND THE PUBLISHED PER-WINDOW MAP, which is the one thing in the RUNTIME
+    # dir a check now READS without being asked to: `resolution` adopts it
+    # lazily, so on a box whose daemon has published one every foreign-window
+    # check would be answering from the live desk. A check that depends on
+    # the host is a check on the host, and that class has cost this package
+    # four green-on-one-box suites.
+    _real_sources = engine.SOURCES_FILE
+    _scratch_sources = os.path.join(_scratch_root, "usher.sources")
 
     def _wj_canary(path, blob):
         try:
@@ -7642,6 +7802,8 @@ def selftest():
 
     engine.write_json = _wj_canary
     engine.STATE = _scratch_state
+    engine.SOURCES_FILE = _scratch_sources
+    engine._SOURCES_ADOPTED = False
     try:
         for area in (_t_registry, _t_resolution, _t_lock,
                      _t_toplevels, _t_roster,
@@ -7661,6 +7823,8 @@ def selftest():
     finally:
         engine.write_json = _real_wj
         engine.STATE = _real_state
+        engine.SOURCES_FILE = _real_sources
+        engine._SOURCES_ADOPTED = False
         shutil.rmtree(_scratch_root, ignore_errors=True)
     # NAMED, so a leak is a check rather than something a reader has to
     # notice. It runs after every area, because any of them could be the one.

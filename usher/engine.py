@@ -4086,6 +4086,98 @@ def set_source_windows(src, mapping):
     _SOURCE_WINDOWS[src] = dict(mapping or {})
 
 
+# WHETHER THE PUBLISHED MAP HAS BEEN READ IN THIS PROCESS. Read-once rather
+# than per lookup: `resolution` runs on every event, and the answer only
+# changes when the daemon publishes, which it does on its own schedule.
+_SOURCES_ADOPTED = False
+
+
+def publish_sources(path=None):
+    """Write the per-window map where any process can read it. THE DAEMON
+    CALLS THIS; nothing else should.
+
+    WHY IT HAS TO BE PUBLISHED AT ALL: the map is per PROCESS and filled only
+    by a trigger, so every one-shot verb that resolves a LIVE foreign window
+    reads it as the source ALONE. Measured on manifold 2026-11-06, with the
+    store holding eleven per-window slots: a blind verb matched ZERO of them,
+    so `restore`, `restore --dry-run`, `predict` and `verify` were all
+    reporting and acting on a collapsed view of another account's desk.
+
+    THE RUNTIME DIR, beside usher.status, and for the same reason: this is a
+    FACT THE SERVICE HOLDS and the presenters need. It is per-boot, so a stale
+    file cannot outlive the compositor that minted the identifiers in it.
+
+    CONTENT-COMPARED BEFORE WRITING, so a poll that changes nothing does not
+    rewrite the file: the mtime is what a reader would otherwise have to
+    reason about.
+    """
+    p = SOURCES_FILE if path is None else path
+    blob = json.dumps({s: dict(m) for s, m in _SOURCE_WINDOWS.items() if m},
+                      indent=2, sort_keys=True)
+    try:
+        if os.path.exists(p) and open(p).read() == blob:
+            return False
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        write_json(p, blob)
+    except OSError:
+        return False
+    return True
+
+
+def load_published_sources(path=None):
+    """{source: {identifier: digest}} from the published map. Validated the
+    same way an arriving report is, and for the same reason: THE OPACITY IS
+    OURS TO ENFORCE. A hand-edited or half-written file must not be able to
+    put a readable identity into a store key, which is what the digest exists
+    to prevent. A missing or unreadable file is simply no map."""
+    p = SOURCES_FILE if path is None else path
+    try:
+        with open(p) as f:
+            blob = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(blob, dict):
+        return {}
+    out = {}
+    for src, m in blob.items():
+        if not isinstance(src, str) or not src or not isinstance(m, dict):
+            continue
+        keep = {k: v for k, v in m.items()
+                if is_toplevel_identifier(k) and is_digest(v)}
+        if keep:
+            out[src] = keep
+    return out
+
+
+def adopt_published_sources():
+    """Fill this process's map from the daemon's published one, ONCE.
+
+    LAZY AND NOT PER VERB, deliberately. A list of the verbs that need it is
+    a selector, and this tree's own rule is that a listed selector silently
+    covers less the moment something is added: `restore`, `predict`, `verify`
+    and `doctor` all resolve live foreign windows today and a fifth would be
+    added without anybody remembering. Hooking the one lookup every reader
+    goes through cannot go stale.
+
+    A SOURCE ALREADY KNOWN IS NOT OVERWRITTEN, because a live trigger beats a
+    published snapshot: the daemon's own map is the thing that produced the
+    file, and after a reload the file is the only copy there is until the next
+    refresh. That is a second thing this buys, measured at 33s of blindness
+    after every reload.
+    """
+    global _SOURCES_ADOPTED
+    if _SOURCES_ADOPTED:
+        return 0
+    _SOURCES_ADOPTED = True
+    got = load_published_sources()
+    n = 0
+    for src, m in got.items():
+        if not _SOURCE_WINDOWS.get(src):
+            _SOURCE_WINDOWS[src] = dict(m)
+            n += 1
+    return n
+
+
 def forget_source_window(vid):
     """Drop a view's remembered identity. Called on view-unmapped, because a
     cache that only grows is a leak in a process that runs for weeks."""
@@ -4108,6 +4200,9 @@ def source_window_identity(src, v, tlid=None):
     vid = v.get("id")
     if vid is not None and (src, vid) in _SOURCE_SLOT:
         return _SOURCE_SLOT[(src, vid)]
+    # THE ONE LOOKUP EVERY READER GOES THROUGH, which is why the adoption
+    # hangs here rather than on a list of verbs. See adopt_published_sources.
+    adopt_published_sources()
     fps = _SOURCE_WINDOWS.get(src) or {}
     if not fps:
         return None
@@ -6131,6 +6226,9 @@ SWEEP_FILE = os.path.join(RUNTIME_DIR, "usher.sweep")
 # CAPTURE they need: capture is event-driven, so dropping a key and waiting
 # relearns nothing.
 CAPTURE_FILE = os.path.join(RUNTIME_DIR, "usher.capture")
+# AND THE PUBLISHED PER-WINDOW MAP, which is not a request but a FACT the
+# service holds and every presenter needs. See publish_sources.
+SOURCES_FILE = os.path.join(RUNTIME_DIR, "usher.sources")
 
 
 LOG_CAP = 256 * 1024   # rotate watch.log past this; bounds it to ~2x LOG_CAP

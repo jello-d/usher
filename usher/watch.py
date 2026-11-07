@@ -1732,6 +1732,21 @@ class Watcher:
                 changed = True
                 logline(f"{src}: re-keyed {n} window slot(s) onto that "
                         f"account's restarted browser")
+        # PUBLISHED FOR EVERY ONE-SHOT VERB, because the map is per process:
+        # without this `restore`, `restore --dry-run`, `predict` and `verify`
+        # all read another account's windows as the source ALONE, and
+        # measured on manifold a blind verb matched ZERO of eleven
+        # per-window slots. The daemon is the only thing that has the map, so
+        # it is the only thing that can publish it.
+        #
+        # NEVER FATAL AND CONTENT-COMPARED, so a poll that changed nothing
+        # neither writes nor can fail the refresh.
+        try:
+            if engine.publish_sources():
+                logline("published the per-window map for %d source(s)"
+                        % len(engine._SOURCE_WINDOWS))
+        except Exception as e:                             # noqa: BLE001
+            logline(f"could not publish the per-window map: {e}")
         return changed
 
     def _capture_once(self, cap):
