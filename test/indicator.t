@@ -139,7 +139,7 @@ if [ -x "$_iv" ]; then
   # THE COUNT IS READ, because a table that silently shrank would still say
   # OK: the lesson this fleet paid for at 149-to-129 files.
   _sn=$(printf '%s' "$_so" | sed -n 's/.*OK (\([0-9]*\) checks).*/\1/p')
-  [ -n "$_sn" ] && [ "$_sn" -ge 12 ] \
+  [ -n "$_sn" ] && [ "$_sn" -ge 16 ] \
     || fail "the status table shrank to ${_sn:-?} checks"
   _smsg="the status reader ($_sn cells)"
 else

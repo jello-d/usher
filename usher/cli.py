@@ -620,9 +620,12 @@ def _dispatch(verb, args):
         # view OF the status file, where doctor reports the system. And a
         # check now asserts the two sides agree, so a renamed field fails
         # here instead of silently blanking the tray.
-        try:
-            s = json.load(open(engine.STATUS_FILE))
-        except (OSError, ValueError):
+        # NO STATUS AND AN UNUSABLE ONE ARE THE SAME ANSWER HERE: either
+        # way nothing can be said about a running daemon. Measured before
+        # json_object: a status file holding `null`, a list, a string or a
+        # number raised an AttributeError out of this verb instead.
+        s = engine.json_object(engine.STATUS_FILE)
+        if s is None:
             engine.die_cannot(f"{PROG}: no status (watcher not running?)")
         # `transposed_at` IS AN INSTANT and the dwell is the reader's, which
         # is the whole reason the daemon publishes a timestamp rather than a
@@ -671,11 +674,12 @@ def arm_plan(act, running, mode):
 
 def _live_mode():
     """The mode the running daemon last published, or None if unreadable."""
-    try:
-        with open(engine.STATUS_FILE) as f:
-            return json.load(f).get("mode")
-    except (OSError, ValueError):
-        return None
+    # UNREADABLE INCLUDES "VALID JSON THAT IS NOT AN OBJECT", which the old
+    # guard let through to a `.get` that raised: this feeds `usher toggle`,
+    # whose documented behaviour is to arm anyway when the mode cannot be
+    # read, and it cannot do that from a traceback.
+    s = engine.json_object(engine.STATUS_FILE)
+    return s.get("mode") if s else None
 
 
 def _do_arm(act):

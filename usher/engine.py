@@ -645,10 +645,12 @@ def other_profile_entries(app, ident, profile=None, source=""):
         name = os.path.basename(path)[len("knowledge-"):-len(".json")]
         if name == profile:
             continue
-        try:
-            with open(path) as f:
-                kb = json.load(f)
-        except (OSError, ValueError):
+        # ITS EXISTING CHECK PASSED FOR THE WRONG REASON: the notes
+        # record "a corrupt store being skipped rather than fatal", and it
+        # only ever saw an UNPARSEABLE one, where valid JSON that is not an
+        # object went straight through to `kb.get` and raised.
+        kb = json_object(path)
+        if kb is None:
             continue
         for k in keys:
             e = kb.get(k)
@@ -797,17 +799,17 @@ def adopt_legacy_store():
     legacy = os.path.join(STATE, "knowledge.json")
     if not os.path.exists(legacy):
         return
-    try:
-        with open(legacy) as f:
-            old = json.load(f)
-    except (OSError, ValueError) as e:
-        logline(f"legacy store unreadable, leaving it alone: {e}")
+    # LEFT ALONE RATHER THAN RETIRED when it cannot be read, which is the
+    # existing policy and the right one: the file is the only copy of those
+    # placements, so a merge that cannot see them must not rename the file
+    # out of the way. Measured before json_object: a legacy store holding
+    # `null`, a list, a string or a number raised `has no attribute 'items'`
+    # out of EVERY load_knowledge.
+    old = json_object(legacy)
+    if old is None:
+        logline("legacy store is missing or not an object, leaving it alone")
         return
-    try:
-        with open(kb_path()) as f:
-            cur = json.load(f)
-    except (OSError, ValueError):
-        cur = {}
+    cur = json_object(kb_path()) or {}
     added = 0
     for k, v in old.items():
         if k not in cur:
@@ -851,12 +853,14 @@ def load_inverts():
     is invert-SPECIFIC but only session-live in spirit: view ids reset every
     wayfire session while this file persists, so it accumulates stale ids: see
     is_inverted for why we gate it on the live shader. Best-effort: a missing or
-    corrupt file means none are inverted."""
-    try:
-        with open(INVERT_STORE) as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return {}
+    corrupt file means none are inverted.
+
+    THAT LAST SENTENCE WAS NOT TRUE, which is the cleanest kind of finding: a
+    docstring stating a contract the code did not keep. `null` parses, so the
+    old guard returned None, and `is_inverted` then raised `argument of type
+    'NoneType' is not a container` out of `snapshot()` for every window on
+    every capture. json_object answers the question properly."""
+    return json_object(INVERT_STORE) or {}
 
 
 def store_mtime(path):
@@ -1062,6 +1066,49 @@ def write_json(path, blob):
     with open(tmp, "w") as f:
         f.write(blob)
     os.replace(tmp, path)
+
+
+def json_object(path):
+    """The JSON OBJECT at `path`, or None if there is not one there: missing,
+    unreadable, unparseable, or VALID JSON THAT IS NOT AN OBJECT.
+
+    THE ONE PLACE THAT ASKS, because six readers asked it separately and four
+    of them got it wrong the same way. `except (OSError, ValueError)` is the
+    obvious guard and it is half of one: `null`, `[1,2]`, `"x"` and `42` all
+    parse, so each of those readers handed its caller a value of the wrong
+    type and the failure surfaced somewhere else entirely.
+
+    MEASURED, per shape, each against a well-formed control:
+
+        the live store        prune_kb raised in the CAPTURE loop,
+                              matched_key in the PLACER, and the save path
+                              wrote the corruption back
+        current.json          the kb seed, launch_missing and
+                              entries_from_snapshot all raised, so the
+                              relaunch was gone
+        a DORMANT store       broke the LIVE load, because migrate_stores
+                              walks every profile on every load: the worst
+                              of the six, since a dormant store is old,
+                              hand-editable and nobody looks at it
+        the legacy store      raised on every load_knowledge
+        another desk's store  raised in the surface seed
+        the invert store      returned None, and is_inverted then raised
+                              from snapshot() for every window
+
+    THE POLICY STAYS WITH THE CALLER, which is why this answers None rather
+    than deciding: the store SEEDS, the snapshot REFUSES, a migration SKIPS
+    that profile, the inverts fall back to none. One question, six answers.
+
+    AND IT IS ONLY THE SHAPE OF THE CONTAINER. What the object must CONTAIN
+    is the caller's business, and deliberately not duplicated here: see
+    load_snapshot, whose rows have seven required fields that `snapshot()`
+    is the single writer of."""
+    try:
+        with open(path) as f:
+            obj = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return obj if isinstance(obj, dict) else None
 
 
 # --- plugin framework: app-specific window identity + restore --------------
@@ -2679,9 +2726,14 @@ def migrate_stores():
             frm = ""
         if frm == KB_SCHEMA:
             continue
-        try:
-            kb = json.load(open(path))
-        except (OSError, ValueError):
+        # SKIP THAT PROFILE, which is the existing policy; what was
+        # missing is that a store can be valid JSON and not an object. THE
+        # WORST OF THE SIX, because this walks EVERY profile on every load:
+        # a corrupt DORMANT store broke the LIVE one's load, and a dormant
+        # store is old (47 to 71 days, measured), hand-editable and nobody
+        # looks at it.
+        kb = json_object(path)
+        if kb is None:
             continue
         n = _migrate_store(kb, frm)
         try:
@@ -2705,24 +2757,20 @@ def load_knowledge(profile=None):
     profile = profile or profile_id()
     adopt_legacy_store()
     migrate_stores()      # every profile's store, not just the one we are on
-    try:
-        kb = json.load(open(kb_path(profile)))
-        # VALID JSON IS NOT A STORE. `null`, a list, a string and a number
-        # all parse, and this function then handed the daemon that value: a
-        # ValueError is raised instead so the ONE branch that already means
-        # "this store cannot be read" handles it, which is the fail-safe
-        # direction (a store we cannot read is no store).
-        #
-        # MEASURED BEFORE FIXING, per shape and with a dict control:
-        # prune_kb raised in the CAPTURE loop, matched_key in the PLACER,
-        # and save_knowledge then WROTE THE CORRUPTION BACK, so the daemon
-        # went blind and persisted the cause. These notes prescribe editing
-        # this file by hand in five separate repair recipes, which is
-        # exactly how a store comes to hold something that is not an object.
-        if not isinstance(kb, dict):
-            raise ValueError(
-                f"the store is a {type(kb).__name__}, not an object")
-    except (FileNotFoundError, ValueError):
+    # VALID JSON IS NOT A STORE. `null`, a list, a string and a number all
+    # parse, and this function used to hand the daemon that value. Measured
+    # per shape with a dict control: prune_kb raised in the CAPTURE loop,
+    # matched_key in the PLACER, and save_knowledge then WROTE THE
+    # CORRUPTION BACK, so the daemon went blind and persisted its own cause.
+    # These notes prescribe editing this file by hand in five separate
+    # repair recipes, which is exactly how a store comes to hold something
+    # that is not an object.
+    #
+    # A STORE WE CANNOT READ IS NO STORE, so it takes the same branch as one
+    # that does not exist yet: the fail-safe direction, and the branch was
+    # already there.
+    kb = json_object(kb_path(profile))
+    if kb is None:
         # A store that does not exist yet is CURRENT by construction, so stamp
         # it NOW. Without this, the first monitor set to be seen writes an
         # unstamped store, and the very next load judges it stale and drops
@@ -3375,22 +3423,15 @@ def load_snapshot():
     format could not be detected, only misread, and the relaunch paths would
     act on fields that had moved. Refusing is the safe failure: no snapshot
     means no relaunch, rather than a wrong one, and it is loud in the log."""
-    try:
-        with open(os.path.join(STATE, "current.json")) as f:
-            snap = json.load(f)
-    except (OSError, ValueError):
-        return None
-    # VALID JSON IS NOT A SNAPSHOT, the same guard the store needed and for
-    # a sharper reason: this file feeds the RELAUNCH, so anything raising
-    # out of here is "nothing came back at the login". Measured per shape,
-    # `null`, a list, a string and a number each raised on the `.get` below
-    # and took load_knowledge's seed, launch_missing and
+    # VALID JSON IS NOT A SNAPSHOT, and this file feeds the RELAUNCH, so
+    # anything raising out of here is "nothing came back at the login".
+    # Measured per shape: `null`, a list, a string and a number each raised
+    # on the `.get` below and took load_knowledge's seed, launch_missing and
     # entries_from_snapshot with them. These notes prescribe hand-seeding
     # this file to recover an unreachable slot, so a wrong shape here is a
-    # state that really happens.
-    if not isinstance(snap, dict):
-        logline(f"current.json holds a {type(snap).__name__} rather than an"
-                " object: refusing to read it rather than guess at its shape")
+    # state that really happens. json_object is the one place that asks.
+    snap = json_object(os.path.join(STATE, "current.json"))
+    if snap is None:
         return None
     got = snap.get("version")
     if got != SNAPSHOT_VERSION:
@@ -5483,11 +5524,14 @@ def resolve_snapshot(spec):
         if not os.path.exists(path):
             die_cannot(f"usher: no milestone for {d}. Have: "
                      f"{', '.join(miles) or 'none'}")
-    try:
-        with open(path) as f:
-            return label, json.load(f)
-    except (OSError, ValueError) as e:
-        die_cannot(f"usher: cannot read {path}: {e}")
+    # REFUSED WITH A MESSAGE, never half-read: a milestone that is valid JSON
+    # and not an object went straight to entries_from_snapshot and raised
+    # there, so `restore --from` answered a traceback where it has a clean
+    # refusal to give.
+    snap = json_object(path)
+    if snap is None:
+        die_cannot(f"usher: cannot read {path}, or it is not an object")
+    return label, snap
 
 
 def match(live, entries):
@@ -6520,7 +6564,17 @@ def do_verify(against=None, tol=2):
         print("usher: run `usher predict` BEFORE the thing you want to "
               "test", file=sys.stderr)
         return EXIT_CANNOT
-    doc = json.load(open(path))
+    # THE SAME REFUSAL AS A MISSING ONE, since this read was not even in a
+    # try: an unparseable or non-object prediction answered a raw traceback,
+    # and `doc["windows"]` KeyError'd on an object without that key. A
+    # prediction we cannot read is no prediction, which is what EXIT_CANNOT
+    # means.
+    doc = json_object(path)
+    if doc is None or not isinstance(doc.get("windows"), list):
+        print(f"usher: the prediction at {path} is unreadable or has no"
+              " window list", file=sys.stderr)
+        print("usher: run `usher predict` again", file=sys.stderr)
+        return EXIT_CANNOT
     rows = doc["windows"]
     live = snapshot(ipc())["windows"]
     by_pair, by_label = verify_index(live)

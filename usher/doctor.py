@@ -134,11 +134,12 @@ def _doctor_store(out):
     # goes quiet while the knowledge sits in a file nothing opens.
     legacy = os.path.join(STATE, "knowledge.json")
     if os.path.exists(legacy):
-        try:
-            with open(legacy) as f:
-                n = len(json.load(f))
-        except (OSError, ValueError):
-            n = "?"
+        # THE LAST SPELLING OF THE QUESTION. This one was already SAFE, its
+        # `len` sitting inside the try, so it is changed to keep the derived
+        # check EXACT rather than to fix a fault: an invariant with one
+        # justified exception is one that grows a list of them.
+        _lkb = engine.json_object(legacy)
+        n = "?" if _lkb is None else len(_lkb)
         out(f"  ORPHANED     knowledge.json holds {n} entries and is NOT in"
             " use: it should have been merged into the profile above")
     snap = load_snapshot()

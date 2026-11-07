@@ -251,6 +251,18 @@ def read_status():
         s = json.load(open(STATUS_FILE))
     except (OSError, ValueError):
         return ("down", 0.0, None, False)
+    # VALID JSON IS NOT A STATUS, and this reader's whole contract is that
+    # everything it cannot understand is `down`. The guard above catches an
+    # unparseable file and NOT `null`, a list, a string or a number: each of
+    # those raised an AttributeError out of the one function the draw loop
+    # cannot afford to lose. The twelve-cell table added for this reader
+    # covered "unparseable" and not "parsed into the wrong type".
+    #
+    # NOT engine.json_object, deliberately: this package imports nothing
+    # from usher, which is what lets the tray be installed per user while
+    # the core is machine-wide.
+    if not isinstance(s, dict):
+        return ("down", 0.0, None, False)
     mode = s.get("mode")
     if age > _STALE or mode not in ("place", "settled"):
         return ("down", 0.0, None, False)
@@ -340,6 +352,23 @@ def _status_test():
             plant("{not json")
             ck("unparseable-is-down",
                read_status() == ("down", 0.0, None, False))
+            # AND VALID JSON THAT IS NOT AN OBJECT, which the cell above
+            # does NOT cover and which this table missed when it was
+            # written: `null`, a list, a string and a number all PARSE, so
+            # each slipped past the except and raised an AttributeError out
+            # of the one function the draw loop cannot afford to lose. Four
+            # rows rather than one, because they fail on different types.
+            for _shape in ("null", "[1,2]", '"x"', "42"):
+                plant(_shape)
+                # GUARDED, because the fault IS a raise: an unguarded call
+                # here takes the whole status-test down with a traceback
+                # instead of naming the cell that found it.
+                try:
+                    _got = read_status()
+                except Exception as _e:                    # noqa: BLE001
+                    _got = "RAISED %s" % type(_e).__name__
+                ck(f"a-status-that-is-{_shape[:4]}-is-down",
+                   _got == ("down", 0.0, None, False))
             # A MODE OUTSIDE THE WHITELIST. This is why `transposed_at` was
             # added as a FIELD and not as a third `mode` value: a new value
             # would have BLANKED the tray against an older reader, and this

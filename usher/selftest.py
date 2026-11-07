@@ -5518,6 +5518,33 @@ def _t_cli_split(ck):
     # normal edit.
     ck("rebound-globals-were-found", len(_reb) >= 4)
     ck("no-module-imports-a-rebound-engine-global-by-value", not _byval)
+
+    # AND THE WIRING, DERIVED FROM THE SOURCE, which is the only thing that
+    # stops a seventh instance: a NEW reader is the failure, not a wrong
+    # value, and nothing else can see one being added. Every function that
+    # calls json.load must either BE json_object or test the type itself.
+    _loads = []
+    for _m in (engine, cli, _doc, _w):
+        _tree = ast.parse(inspect.getsource(_m))
+        for _fn in ast.walk(_tree):
+            if not isinstance(_fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            _body = ast.get_source_segment(inspect.getsource(_m), _fn) or ""
+            if not [n for n in ast.walk(_fn)
+                    if isinstance(n, ast.Call)
+                    and isinstance(n.func, ast.Attribute)
+                    and n.func.attr in ("load", "loads")
+                    and getattr(n.func.value, "id", "") == "json"]:
+                continue
+            _loads.append((_m.__name__, _fn.name,
+                           _fn.name == "json_object"
+                           or "isinstance" in _body))
+    # A VACUITY GUARD FIRST: an AST change that found no call sites would
+    # pass the assertion below over an empty list.
+    ck("json-readers-were-found", len(_loads) >= 3)
+    ck("every-json-reader-establishes-its-shape",
+       all(ok for _mod, _fn, ok in _loads))
+
     # THE CONFIG DIR. One place, named for the command, and every config name
     # resolves under it. The per-file fallback to the pre-rename directory is
     # gone: both machines are migrated, so it could only ever resurrect a stale
@@ -7048,6 +7075,34 @@ def _t_snapshots(ck):
     ck("spec-date", _spec_to_date("2025-12-31", _t) == "2025-12-31")
     ck("spec-junk", _spec_to_date("lastweek", _t) is None)
 
+    # EVERY EXTERNAL READER ESTABLISHES THE SHAPE IT PROMISES. Six readers
+    # asked "is this a JSON object" separately and four got it wrong the
+    # same way, because `except (OSError, ValueError)` is the obvious guard
+    # and it is HALF of one: `null`, `[1,2]`, `"x"` and `42` all parse.
+    _o_js = engine.json_object
+    _jsdir = tempfile.mkdtemp(prefix="usher-jsobj-")
+    try:
+        _p = os.path.join(_jsdir, "x.json")
+        for _lbl, _blob in (("null", "null"), ("a-list", "[1,2]"),
+                            ("a-string", '"x"'), ("a-number", "42"),
+                            ("unparseable", "{oops")):
+            engine.write_json(_p, _blob)
+            ck(f"json-object-refuses-{_lbl}", engine.json_object(_p) is None)
+        ck("json-object-refuses-a-missing-file",
+           engine.json_object(os.path.join(_jsdir, "nope.json")) is None)
+        # THE CONTROL, or every row above passes over a reader that answers
+        # None for everything.
+        engine.write_json(_p, json.dumps({"a": 1}))
+        ck("json-object-reads-an-object",
+           engine.json_object(_p) == {"a": 1})
+        # AND IT IS ONLY THE CONTAINER: what the object must CONTAIN is the
+        # caller's business, so an EMPTY one is a perfectly good answer.
+        engine.write_json(_p, "{}")
+        ck("json-object-reads-an-empty-object", engine.json_object(_p) == {})
+    finally:
+        shutil.rmtree(_jsdir, ignore_errors=True)
+
+
     # ADVERSARIAL current.json, which is the file the RELAUNCH reads, so
     # anything raising out of its single reader is "nothing came back at the
     # login". Measured per shape: `null`, a list, a string and a number each
@@ -7431,6 +7486,94 @@ def _t_migration_body(ck):
                     "zzz\x00good": dict(_good), "zzz\x00b": dict(_good)}))
                 ck("a-clean-store-loses-nothing",
                    len(load_knowledge()) == 2)
+
+                # A CORRUPT DORMANT STORE MUST NOT BREAK THE LIVE LOAD,
+                # which is the worst of the six readers in this class:
+                # migrate_stores walks EVERY profile on every load, so a
+                # store for a monitor set nobody has plugged in for months
+                # took down the daemon's startup. Measured on manifestor:
+                # five dormant stores, 47 to 71 days old, hand-editable,
+                # and nothing ever reads them.
+                engine.write_json(kb_path(), json.dumps(
+                    {"zzz\x00good": dict(_good)}))
+                for _lbl, _blob in (("null", "null"), ("a-list", "[1,2]"),
+                                    ("a-string", '"x"'), ("junk", "{oops")):
+                    engine.write_json(
+                        os.path.join(engine.STATE, "knowledge-dorm.json"),
+                        _blob)
+                    engine.write_json(
+                        os.path.join(engine.STATE, "knowledge-dorm.schema"),
+                        "4")      # stale, so migrate_stores touches it
+                    try:
+                        _n = len(load_knowledge())
+                    except Exception:                      # noqa: BLE001
+                        _n = -1
+                    ck(f"a-dormant-store-that-is-{_lbl}-spares-the-live-one",
+                       _n == 1)
+                os.remove(os.path.join(engine.STATE, "knowledge-dorm.json"))
+
+                # THE LEGACY STORE, merged on every load: it raised `has no
+                # attribute items` for every non-object shape. LEFT ALONE
+                # rather than retired when unreadable, since the file is the
+                # only copy of those placements.
+                _leg = os.path.join(engine.STATE, "knowledge.json")
+                for _lbl, _blob in (("null", "null"), ("a-list", "[1,2]")):
+                    engine.write_json(_leg, _blob)
+                    try:
+                        _n = len(load_knowledge())
+                    except Exception:                      # noqa: BLE001
+                        _n = -1
+                    ck(f"a-legacy-store-that-is-{_lbl}-is-left-alone",
+                       _n == 1 and os.path.exists(_leg))
+                os.remove(_leg)
+
+                # ANOTHER DESK'S STORE, which the surface seed reads. Its
+                # existing "a corrupt store is skipped rather than fatal"
+                # check passed for the WRONG REASON: it only ever saw an
+                # unparseable file, and valid JSON that is not an object
+                # went straight through to `kb.get`.
+                for _lbl, _blob in (("null", "null"), ("a-list", "[1,2]")):
+                    engine.write_json(
+                        os.path.join(engine.STATE, "knowledge-far.json"),
+                        _blob)
+                    try:
+                        _r = engine.other_profile_entries("zzz", "i")
+                    except Exception:                      # noqa: BLE001
+                        _r = None
+                    ck(f"another-desks-store-that-is-{_lbl}-is-skipped",
+                       _r == [])
+                os.remove(os.path.join(engine.STATE, "knowledge-far.json"))
+
+                # AND THE INVERT STORE, whose docstring already promised
+                # that "a missing or corrupt file means none are inverted"
+                # and whose code did not keep it: `null` parsed, so it
+                # answered None and is_inverted then raised out of
+                # snapshot() for every window on every capture.
+                _inv = engine.INVERT_STORE
+                try:
+                    engine.INVERT_STORE = os.path.join(engine.STATE, "inv")
+                    for _lbl, _blob in (("null", "null"),
+                                        ("a-list", "[1,2]"),
+                                        ("a-number", "42")):
+                        engine.write_json(engine.INVERT_STORE, _blob)
+                        ck(f"inverts-that-are-{_lbl}-mean-none",
+                           engine.load_inverts() == {})
+                        # GUARDED: the pre-fix reader answers None and
+                        # is_inverted then RAISES, which is the fault, so
+                        # it wants naming rather than aborting the area.
+                        try:
+                            _iv_r = engine.is_inverted(
+                                None, 7, engine.load_inverts())
+                        except Exception:                  # noqa: BLE001
+                            _iv_r = "RAISED"
+                        ck(f"is-inverted-survives-{_lbl}", _iv_r is False)
+                    # THE CONTROL, or the rows above pass over a reader
+                    # that answers {} for everything.
+                    engine.write_json(engine.INVERT_STORE, '{"7": "invert"}')
+                    ck("inverts-reads-a-real-store",
+                       engine.load_inverts() == {"7": "invert"})
+                finally:
+                    engine.INVERT_STORE = _inv
         finally:
             engine.STATE = _cst
     finally:
