@@ -7047,6 +7047,80 @@ def _t_snapshots(ck):
        _spec_to_date("yesterday", _t) == "2026-02-28")
     ck("spec-date", _spec_to_date("2025-12-31", _t) == "2025-12-31")
     ck("spec-junk", _spec_to_date("lastweek", _t) is None)
+
+    # ADVERSARIAL current.json, which is the file the RELAUNCH reads, so
+    # anything raising out of its single reader is "nothing came back at the
+    # login". Measured per shape: `null`, a list, a string and a number each
+    # raised on load_snapshot's own `.get` and took the kb seed,
+    # launch_missing and entries_from_snapshot with them. These notes
+    # prescribe hand-seeding this file to recover an unreachable slot, so a
+    # wrong shape here is a state that really happens.
+    _snapdir = tempfile.mkdtemp(prefix="usher-snapshape-")
+    _o_state = engine.STATE
+    _W = {"id": 1, "app_id": "zzz", "title": "t", "key": "t", "cmd": None,
+          "pid": -1, "output": "DP-1", "workspace": [0, 0], "pos": [1, 2],
+          "size": [3, 4]}
+
+    def _snap(blob):
+        # GUARDED, so the pre-fix code fails BY NAME: without the shape
+        # guard the reader RAISES rather than answering badly, and an
+        # unguarded call here aborts the area instead of naming the cell.
+        engine.write_json(os.path.join(engine.STATE, "current.json"), blob)
+        try:
+            return engine.load_snapshot()
+        except Exception:                                  # noqa: BLE001
+            return "RAISED"
+
+    def _ok_snap(**kw):
+        s = {"version": engine.SNAPSHOT_VERSION, "time": 1.0, "host": "h",
+             "outputs": [], "windows": [dict(_W)]}
+        s.update(kw)
+        return json.dumps(s)
+
+    try:
+        engine.STATE = _snapdir
+        for _lbl, _blob in (("null", "null"), ("list", "[1,2]"),
+                            ("string", '"x"'), ("number", "42")):
+            ck(f"a-snapshot-that-is-{_lbl}-is-refused", _snap(_blob) is None)
+        # THE CONTROL, or every row above passes over a reader that answers
+        # None for everything.
+        ck("a-well-formed-snapshot-is-read",
+           len((_snap(_ok_snap()) or {}).get("windows", [])) == 1)
+        # `time` IS AS FUNDAMENTAL AS `version`: a snapshot that cannot be
+        # DATED is refused, since every consumer that reasons about age does
+        # arithmetic on it.
+        ck("a-snapshot-with-no-usable-time-is-refused",
+           _snap(_ok_snap(time="yesterday")) is None)
+        # AND A BOOL IS NOT A NUMBER, which Python disagrees with: `True` is
+        # an int, so an unguarded isinstance would date a snapshot to 1970.
+        ck("a-boolean-time-is-refused", _snap(_ok_snap(time=True)) is None)
+        # SHAPE, NOT FIELDS. `windows` and `outputs` are what every consumer
+        # iterates, so the single reader owns them.
+        # A NUMBER IS THE INPUT THAT DISTINGUISHES THE LIST GUARD from the
+        # row filter below it: a string and a dict are both ITERABLE, so the
+        # filter answers [] either way and a plant removing the guard is
+        # invisible. Only a non-iterable reaches the TypeError the guard
+        # exists for. This file's own rule, met again: ask what inputs a
+        # guard tells apart, not whether the fixture reaches it.
+        for _lbl, _kw in (("a-string", {"windows": "abc"}),
+                          ("a-dict", {"windows": {"a": 1}}),
+                          ("a-number", {"windows": 42})):
+            _sn = _snap(_ok_snap(**_kw))
+            ck(f"windows-that-is-{_lbl}-names-no-windows",
+               isinstance(_sn, dict) and _sn.get("windows") == [])
+        _mixed = _snap(_ok_snap(windows=[dict(_W), "x", None, 7]))
+        # READ THE ROWS DEFENSIVELY, or the pre-fix code's surviving junk
+        # rows make this an area-aborting TypeError instead of a named cell.
+        _rows = (_mixed or {}).get("windows", []) if isinstance(_mixed, dict) \
+            else []
+        ck("a-window-row-that-is-not-an-object-is-dropped",
+           [w.get("app_id") for w in _rows if isinstance(w, dict)] == ["zzz"]
+           and len(_rows) == 1)
+        ck("outputs-that-is-not-a-list-is-emptied",
+           (_snap(_ok_snap(outputs="DP-1")) or {}).get("outputs") == [])
+    finally:
+        engine.STATE = _o_state
+        shutil.rmtree(_snapdir, ignore_errors=True)
     ck("spec-not-a-date", _spec_to_date("2026-3-1", _t) is None)
 
     # a milestone becomes placement entries keyed by the RECORDED identity

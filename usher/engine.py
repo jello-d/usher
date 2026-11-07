@@ -3380,11 +3380,65 @@ def load_snapshot():
             snap = json.load(f)
     except (OSError, ValueError):
         return None
+    # VALID JSON IS NOT A SNAPSHOT, the same guard the store needed and for
+    # a sharper reason: this file feeds the RELAUNCH, so anything raising
+    # out of here is "nothing came back at the login". Measured per shape,
+    # `null`, a list, a string and a number each raised on the `.get` below
+    # and took load_knowledge's seed, launch_missing and
+    # entries_from_snapshot with them. These notes prescribe hand-seeding
+    # this file to recover an unreachable slot, so a wrong shape here is a
+    # state that really happens.
+    if not isinstance(snap, dict):
+        logline(f"current.json holds a {type(snap).__name__} rather than an"
+                " object: refusing to read it rather than guess at its shape")
+        return None
     got = snap.get("version")
     if got != SNAPSHOT_VERSION:
         logline(f"snapshot version {got!r} is not {SNAPSHOT_VERSION}:"
                 f" refusing to read it rather than guess at its shape")
         return None
+    # AND `windows` IS A LIST OF OBJECTS, which is the shape every consumer
+    # reads: the seed, the relaunch, the restore and doctor all iterate it.
+    # Measured: a `windows` that is a string, a dict, or a list holding a
+    # string or a null each raised in the seed while the relaunch happened
+    # to survive, so the file was half-usable in a way no caller could see.
+    #
+    # SHAPE ONLY, DELIBERATELY. A row missing a FIELD (no `app_id`, no
+    # `pos`) still raises in whichever consumer needs it, and that is left
+    # alone on purpose: seven fields are required between kb_entry and
+    # upsert, `snapshot()` is the single writer that defines them, and a
+    # list of them here would be a second copy of the row shape. Recorded as
+    # measured rather than guarded.
+    # `time` IS AS FUNDAMENTAL AS `version`, so a snapshot whose timestamp
+    # is not a number is refused outright rather than half-used: every
+    # consumer that reasons about age does arithmetic on it (the seed's TTL
+    # among them), and a file with a nonsense timestamp is a broken file
+    # rather than one to soldier on with. Refusing costs a relaunch in that
+    # one case, which is the cheaper side of writing a store dated by a
+    # string.
+    if not isinstance(snap.get("time"), (int, float)) \
+            or isinstance(snap.get("time"), bool):
+        logline(f"current.json: `time` is {snap.get('time')!r}, not a"
+                " number: refusing a snapshot that cannot be dated")
+        return None
+    # AND `outputs` IS A LIST, which unreadable_placement iterates: a string
+    # there walks it character by character and raises on the first.
+    if not isinstance(snap.get("outputs"), list):
+        if snap.get("outputs") is not None:
+            logline("current.json: `outputs` is not a list, so this"
+                    " snapshot says nothing about which monitors it saw")
+        snap["outputs"] = []
+    wins = snap.get("windows")
+    if not isinstance(wins, list):
+        logline(f"current.json: `windows` is a {type(wins).__name__} rather"
+                " than a list, so this snapshot names no windows")
+        snap["windows"] = []
+    else:
+        rows = [w for w in wins if isinstance(w, dict)]
+        if len(rows) != len(wins):
+            logline(f"current.json: dropped {len(wins) - len(rows)} window"
+                    " row(s) that are not objects")
+        snap["windows"] = rows
     return snap
 
 
