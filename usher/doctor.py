@@ -363,7 +363,12 @@ def _doctor_relaunch(out, snap, live):
     # is a property of the STORE, not of the window, so it has to be asked.
     kb = load_knowledge()
     lk = live_keys(live)
-    chrome_up = any(is_chrome(pview(v)["app"]) for v in live)
+    # OURS ONLY, which is what the engine asks: another account's browser is
+    # not evidence that the owner's is up, so counting it reported `self,
+    # Chrome restores its own` for a window usher would in fact START. The
+    # quiet direction, and the one a reader has no way to doubt.
+    chrome_up = any(is_chrome(pview(v)["app"])
+                    for v in engine.our_views(live))
     chrome_note = ("Chrome restores its own" if chrome_up
                    else "browser NOT running: usher starts it, Chrome"
                         " restores its own")
@@ -380,8 +385,36 @@ def _doctor_relaunch(out, snap, live):
                  and TERM_KEY_RE.match(saved_key(w)))
     if n_term and not todo:
         out(f"  live       all {n_term} terminal(s) already up")
+    # ANOTHER ACCOUNT'S SAVED WINDOWS, REPORTED AS THE ASK THEY ARE. Reaching
+    # the per-window verdicts below, a foreign row resolved its app-id in the
+    # OWNER's registry and printed `RELAUNCH slack (/usr/bin/slack)`: an
+    # action usher does not take, naming the owner starting another account's
+    # application, which is the single most alarming thing this report could
+    # say falsely. The engine skips every row `snapshot` stamped with an
+    # `owner` and asks that ACCOUNT to resume its own, so that is the verdict.
+    #
+    # PER SOURCE AND COUNTED, like the terminal lines above, because the
+    # account restores from its OWN roster and the owner cannot read it: one
+    # line per window would be seventeen identical rows on a real desk and
+    # would imply usher knows which of them come back.
+    _theirs = Counter(engine.source_of(w) or f"uid {w['owner']}"
+                      for w in saved if w.get("owner") is not None)
+    _hook_ok = os.access(engine.SOURCE_TRIGGER_HOOK, os.X_OK)
+    for _src, _n in sorted(_theirs.items()):
+        if _hook_ok:
+            out(f"  ASK        {_src:14} {_n} saved window(s); that account"
+                f" resumes its own")
+        else:
+            # SAID, because source_trigger's own rule is never silent: with
+            # no hook nothing starts them and the reader is owed the reason
+            # and the path, not a cheerful omission.
+            out(f"  none       {_src:14} {_n} saved window(s), and no"
+                f" source-trigger hook: nothing will start them"
+                f" ({engine.SOURCE_TRIGGER_HOOK})")
     for w in saved:
         app, key = w.get("app_id", ""), saved_key(w)
+        if w.get("owner") is not None:
+            continue        # covered by the per-source lines above
         if is_chrome(app):
             out(f"  {'self' if chrome_up else 'START':10} {app:14}"
                 f" {key[:36]:36}  ({chrome_note})")
@@ -411,7 +444,14 @@ def _doctor_relaunch(out, snap, live):
                 out(f"  RELAUNCH   {app:14} {key[:36]:36}"
                     f"  ({' '.join(_argv)[:28]})")
             else:
-                out(f"  none       {app:14} {key[:36]:36}  ({_why[:30]})")
+                # THE WHOLE REASON, untruncated. At 30 characters
+                # "nm-applet.desktop is NoDisplay=true: the registry treats
+                # ..." was cut to "nm-applet.desktop is NoDisplay", which
+                # reads as a COMPLETE sentence, so a reader never learns the
+                # explanation was taken away; and "no desktop entry names
+                # this app" lost its last letter and read as a typo. It is
+                # the last field on the line and nothing is aligned after it.
+                out(f"  none       {app:14} {key[:36]:36}  ({_why})")
     # WINDOWS SHARING ONE KEY, which now has a VISIBLE consequence rather
     # than a silent one: a slot holds one window at a time, so the first gets
     # the remembered place and the rest are left where they opened. Before

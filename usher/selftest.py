@@ -698,6 +698,90 @@ def _t_resolution(ck):
     ck("collision-on-a-per-window-key-does-not-say-write-a-plugin",
        "plugin" not in _cfix("titan:abc123", "titan", 6))
 
+    # THE RELAUNCH SECTION ITSELF, driven, because its faults were in the
+    # BRANCHING and not in any message function: the suite had never executed
+    # it. Reading its real output is what found all three.
+    if os.getuid() != 0:
+        from . import doctor as _dr
+        _d_state = tempfile.mkdtemp(prefix="usher-drep-")
+        _d_old, _d_old2 = engine.STATE, _dr.STATE
+        # doctor imports STATE BY NAME and holds its own copy, so patching
+        # engine's alone leaves its `load_knowledge()` reading the REAL store
+        # and the check answering from the host.
+        try:
+            engine.STATE = _dr.STATE = _d_state
+            with _tprofile("drep"):
+                save_knowledge({}, "drep")
+
+                def _srow(app, **kw):
+                    r = {"app_id": app, "title": kw.pop("title", ""),
+                         "key": kw.pop("key", ""), "id": kw.pop("vid", 1),
+                         "pid": -1, "cmd": None, "output": "DP-1",
+                         "workspace": [0, 0], "pos": [1, 2], "size": [3, 4]}
+                    r.update(kw)
+                    return r
+
+                def _report(saved, live, hook=None):
+                    _rows = []
+                    _rh = engine.SOURCE_TRIGGER_HOOK
+                    try:
+                        if hook is not None:
+                            engine.SOURCE_TRIGGER_HOOK = hook
+                        _dr._doctor_relaunch(_rows.append,
+                                             {"time": 0, "windows": saved},
+                                             live)
+                    finally:
+                        engine.SOURCE_TRIGGER_HOOK = _rh
+                    return "\n".join(_rows)
+
+                # ANOTHER ACCOUNT'S SAVED WINDOW. It fell through to the
+                # per-window verdicts, resolved its app-id in the OWNER's
+                # registry and printed `RELAUNCH slack (/usr/bin/slack)`: an
+                # action usher does not take, naming the owner starting
+                # somebody's work application, which is the most alarming
+                # thing this report could say falsely.
+                _theirs = [_srow("slack", key="titan", source="titan",
+                                 owner=997)]
+                _r1 = _report(_theirs, [], hook=sys.executable)
+                ck("doctor-asks-the-account-for-its-own-windows",
+                   "ASK" in _r1 and "titan" in _r1)
+                ck("doctor-never-offers-to-relaunch-another-accounts-window",
+                   "RELAUNCH" not in _r1 and "START" not in _r1)
+                # AND WITH NO HOOK IT SAYS SO AND NAMES THE PATH, which is
+                # source_trigger's own never-silent rule: nothing starts them
+                # and the reader is owed the reason, not a cheerful omission.
+                _r2 = _report(_theirs, [],
+                              hook=os.path.join(_d_state, "no-such-hook"))
+                ck("doctor-says-when-no-hook-will-start-them",
+                   "no source-trigger hook" in _r2
+                   and "no-such-hook" in _r2)
+                ck("doctor-hook-present-and-absent-read-differently",
+                   _r1 != _r2)
+                # THE OWNER'S CHROME, with ONLY another account's browser
+                # live. The engine starts ours (its plugin asks per user and
+                # says why); the report counted any live browser and said
+                # `self`, so it described a desk coming back that would not.
+                _r3 = _report([_srow("google-chrome", key="chrome:win:7")],
+                              [_trv("google-chrome", "theirs", pid=1)])
+                ck("doctor-a-foreign-browser-does-not-read-as-ours-being-up",
+                   "START" in _r3 and "self" not in _r3)
+                ck("doctor-our-own-live-browser-still-reads-as-up",
+                   "self" in _report(
+                       [_srow("google-chrome", key="chrome:win:7")],
+                       [_trv("google-chrome", "mine", pid=os.getpid())]))
+                # AND A REASON IS NOT CUT MID-SENTENCE. At 30 characters
+                # "no desktop entry names this app" lost its last letter and
+                # read as a typo, and "<app>.desktop is NoDisplay=true: the
+                # registry ..." was cut to a sentence that reads COMPLETE, so
+                # a reader never learns the explanation was taken away.
+                _r4 = _report([_srow("zzz-no-entry-names-this",
+                                     title="Thing", key="Thing")], [])
+                ck("doctor-gives-the-whole-reason",
+                   "names this app)" in _r4)
+        finally:
+            engine.STATE, _dr.STATE = _d_old, _d_old2
+            shutil.rmtree(_d_state, ignore_errors=True)
+
     # THE FIFTH CASE: not a collision at all, but THIS REPORT's blindness.
     # `_SOURCE_WINDOWS` is filled by the refresh and so belongs to the
     # DAEMON's process; a one-shot verb resolves every one of a source's
@@ -937,6 +1021,33 @@ def _t_resolution(ck):
        engine.foreign_owner(42, uid_of=lambda _p: 1000, me=1000) is None)
     ck("foreign-another-uid-is-foreign",
        engine.foreign_owner(42, uid_of=lambda _p: 997, me=1000) == 997)
+
+    # AND THE LIVE-SIDE READER OF THAT TABLE, which is the one definition of
+    # "is one of MINE already up". Three relaunch paths answered it with the
+    # whole view list, and every consequence was the QUIET direction: the
+    # owner's Signal not started while only the work account's ran, two of
+    # the owner's shells in one directory coming back as ONE whenever any
+    # other account had a terminal on screen, and doctor reporting Chrome as
+    # `self` for a window usher would START.
+    #
+    # pid 1 IS init, so a second account is not needed to drive it; skipped
+    # as root, where pid 1 genuinely is ours.
+    if os.getuid() != 0:
+        _ov_mine = _trv("zzz-app", "Mine", pid=os.getpid(), vid=1)
+        _ov_dead = _trv("zzz-app", "Stored", pid=-1, vid=2)
+        _ov_them = _trv("zzz-app", "Theirs", pid=1, vid=3)
+        ck("our-views-keeps-our-own",
+           engine.our_views([_ov_mine]) == [_ov_mine])
+        ck("our-views-keeps-a-dead-pid",
+           engine.our_views([_ov_dead]) == [_ov_dead])
+        ck("our-views-drops-another-accounts",
+           engine.our_views([_ov_them]) == [])
+        # THE MIXED CASE, which is the only one production ever sees and the
+        # one a per-cell check cannot speak for: it must KEEP ours and DROP
+        # theirs in the same pass, in order.
+        ck("our-views-splits-a-mixed-list",
+           engine.our_views([_ov_mine, _ov_them, _ov_dead])
+           == [_ov_mine, _ov_dead])
 
     # AND A FOREIGN WINDOW WITH NO NAME IS STILL NEVER, which is the half that
     # keeps the uid out of the store: with no provider wired the only thing
@@ -5997,6 +6108,59 @@ def _t_chrome(ck):
             ck("chrome-our-own-live-browser-still-suppresses", not _asked)
         finally:
             engine.shutil = _rsh
+
+        # THE SAME CLAIM FOR THE OTHER TWO RELAUNCH PATHS, which asked it
+        # with the whole view list while only Chrome's plugin asked it per
+        # user. Both measured on real code before the fix.
+        #
+        # THE REGISTRY DEFAULT covers every app no plugin claims, which is
+        # most of a desk: the owner's Signal was not started while only the
+        # work account's was running.
+        _saved_1 = [{"app_id": "signal", "title": "Signal", "key": "Signal",
+                     "pid": -1, "cmd": None, "id": 1}]
+
+        def _started(live):
+            _got = []
+            # STDOUT CAPTURED, because `_announce` deliberately prints as
+            # well as logging (a person running `usher launch` by hand reads
+            # the print; `_quiet_log` only takes the log half). Left loose it
+            # puts a `launch` line into the suite's own output, which is the
+            # record this package reads to tell its noise from a daemon's.
+            with contextlib.redirect_stdout(io.StringIO()):
+                engine.desktop_relaunch_missing(
+                    _saved_1, live,
+                    spawn=lambda *a, **k: (_got.append(a[0]), 1)[1])
+            return _got
+
+        ck("default-relaunch-ignores-another-accounts-copy",
+           bool(_started([_trv("signal", "Theirs", pid=1)])))
+        # THE CONTROL: our own live copy must still suppress it, or the
+        # check above would pass over a path that double-starts everything.
+        ck("default-relaunch-still-skips-our-own-live-copy",
+           not _started([_trv("signal", "Mine", pid=os.getpid())]))
+
+        # AND THE TERMINAL COUNT, where the cost was subtler: a foreign kitty
+        # matched neither the `kitty:<cwd>` nor the `term:` branch, so it read
+        # as a terminal that could not be placed and flipped the whole pass
+        # to UNREADABLE, and the candidate list then fell back to one per
+        # cwd. Two of the owner's shells in one directory came back as one
+        # whenever any other account had a terminal on screen: the bug the
+        # per-window counting exists to fix, reintroduced through a flag.
+        _saved_2 = [{"app_id": "kitty", "title": "a", "id": 1, "pid": -1,
+                     "cmd": None, "key": "kitty:/var/tmp"},
+                    {"app_id": "kitty", "title": "b", "id": 2, "pid": -1,
+                     "cmd": None, "key": "kitty:/var/tmp"}]
+        ck("terminal-count-survives-another-accounts-terminal",
+           engine.kitty_candidates(_saved_2,
+                                   [_trv("kitty", "", pid=1)])
+           == engine.kitty_candidates(_saved_2, []) == ["/var/tmp"] * 2)
+        # THE CONTROL, and it is the reason the flag exists at all: one of
+        # OUR OWN kitty windows that resolves to neither set really is
+        # unaccountable, and must still force the conservative fallback.
+        ck("terminal-count-still-falls-back-on-an-unreadable-own-kitty",
+           engine.kitty_candidates(
+               _saved_2, [_trv("kitty", "", pid=os.getpid())])
+           == ["/var/tmp"])
     ck("chrome-already-live",
        _ch.relaunch_missing([{"app_id": "google-chrome"}],
                             [_tv("google-chrome", "x")]) == set())

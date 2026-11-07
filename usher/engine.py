@@ -1544,6 +1544,30 @@ def foreign_owner(pid, uid_of=None, me=None):
     return u
 
 
+def our_views(live):
+    """The live views belonging to THIS session's user. PURE given /proc.
+
+    THE ONE DEFINITION OF "IS ONE OF MINE ALREADY UP", which every relaunch
+    path has to ask and three of them answered with the whole view list.
+    ChromePlugin asked it correctly and stated the reason in a comment, which
+    is where this generalises from: another account running its own copy of an
+    app "answers neither question for us: its saved window is not ours to
+    restore, and its LIVE browser is not evidence that ours is up".
+
+    MEASURED CONSEQUENCES OF NOT ASKING, each a real path: the owner's Signal
+    was not started while only the work account's was running; two of the
+    owner's shells in one directory came back as ONE whenever any other
+    account's terminal was on screen; and doctor reported Chrome as "self"
+    where usher would in fact start it. Every one is the QUIET direction, so
+    nothing says the window did not come back.
+
+    THE SAVED SIDE HAS ITS OWN SPELLING and keeps it: `snapshot` stamps
+    `owner` on a row precisely so a replayed window can be skipped without a
+    pid to read, and a stored pid is long dead. This is the LIVE side, where
+    the pid is real and is the only honest reading."""
+    return [v for v in live if foreign_owner(pview(v).get("pid")) is None]
+
+
 def resolution(v):
     """What usher knows about this window's identity. See Resolution.
 
@@ -2128,8 +2152,7 @@ class ChromePlugin(WindowPlugin):
                  if is_chrome(w.get("app_id")) and w.get("owner") is None}
         if not _mine:
             return set()
-        if any(is_chrome(pview(v)["app"])
-               and foreign_owner(pview(v).get("pid")) is None for v in live):
+        if any(is_chrome(pview(v)["app"]) for v in our_views(live)):
             return set()
         exe = next((shutil.which(c) for c in
                     ("google-chrome", "google-chrome-stable", "chromium",
@@ -3470,7 +3493,14 @@ def kitty_live_counts(live):
     be assumed absent. See kitty_candidates.
     """
     have, ok = Counter(), True
-    for v in live:
+    # ANOTHER ACCOUNT'S TERMINAL IS ACCOUNTED FOR, NOT UNREADABLE, which is
+    # the same statement the `term:` branch below makes. Counted as a kitty we
+    # could not place, it flipped `ok` false for the whole pass, and
+    # kitty_candidates then fell back to one-per-cwd: two of the owner's
+    # shells in ONE directory came back as one whenever any other account had
+    # a terminal on screen, which is the bug the per-window counting was
+    # written to fix, reintroduced through this flag.
+    for v in our_views(live):
         vv = pview(v)
         k = identity(v) or ""
         if k.startswith("kitty:"):
@@ -3731,7 +3761,10 @@ def desktop_relaunch_missing(saved, live, spawn=None, claimed=None):
         want.setdefault(app, w)
     if not want:
         return set()
-    have = {app_of(v) for v in live}
+    # OURS ONLY, the same reading ChromePlugin makes: another account's copy
+    # of this app is not evidence that the owner's is up, and treating it as
+    # evidence leaves the owner's window shut with nothing saying why.
+    have = {app_of(v) for v in our_views(live)}
     entries = desktop_entries()
     started = set()
     for app, w in sorted(want.items()):
