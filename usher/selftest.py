@@ -594,6 +594,11 @@ def _t_resolution(ck):
     ck("collision-on-a-per-window-key-is-reported-as-real",
        "cannot see" not in _cfix("titan:abc123", "titan", 6)
        and "ONE identity" in _cfix("titan:abc123", "titan", 6))
+    # AND IT DOES NOT REPEAT THE OUTER LINE, which already states the
+    # consequence: the message's job is the CAUSE and who could fix it.
+    ck("collision-on-a-per-window-key-adds-to-the-outer-line",
+       "stay where" not in _cfix("titan:abc123", "titan", 6)
+       and "only that account" in _cfix("titan:abc123", "titan", 6))
     ck("collision-on-a-per-window-key-names-the-account",
        "titan" in _cfix("titan:abc123", "titan", 6))
     # AND IT STILL OFFERS NO REMEDY HERE, because only that account can make
