@@ -23,7 +23,7 @@ suite stubs are therefore NEVER in the import list below, and qualifying all
 of them uniformly is the rule that cannot be got wrong site by site:
 
     SESSION_START   _announce       _seated_now     lock_now
-    SOCKET_HUNTED   _loginctl       _spawn_kitty    logline
+    SOCKET_HUNTED   loginctl        _spawn_kitty    logline
     STATE           _owner          _term_cwd       plugins
     _HUNT_WARNED    desktop_entries _term_mux_pending
     runtime_dir     load_snapshot   session_history
@@ -2463,7 +2463,7 @@ def _t_lock(ck):
     # rather than trust: `loginctl lock-session` exits 0 whether or not
     # anything is listening, which is the same "report the end state, never
     # the call returning" rule the plymouth capture script needed.
-    _real_lc, _real_hint = engine._loginctl, engine.session_locked_hint
+    _real_lc, _real_hint = engine.loginctl, engine.session_locked_hint
     try:
         calls = []
         # THE LISTING MUST NAME THE REAL USER, because lock_now resolves the
@@ -2479,7 +2479,7 @@ def _t_lock(ck):
                 return 0, f"  13 1000 {_me} seat0 999 user tty7 no -\n"
             return 0, ""
 
-        engine._loginctl = _lc
+        engine.loginctl = _lc
 
         # the hint flips to yes on the second poll: locked, and confirmed
         seq = iter(["no", "no", "yes", "yes"])
@@ -2512,14 +2512,14 @@ def _t_lock(ck):
             return (0, "") if a[0] == "list-sessions" else (0, "")
 
         calls.clear()
-        engine._loginctl = _lc_empty
+        engine.loginctl = _lc_empty
         engine.session_locked_hint = lambda _s: "no"
         ok, plan, _d = engine.lock_now()
         ck("lock-now-no-session-declines", (not ok) and plan == "no-session")
         ck("lock-now-no-session-asks-nothing",
            not any(c[0] == "lock-session" for c in calls))
     finally:
-        engine._loginctl = _real_lc
+        engine.loginctl = _real_lc
         engine.session_locked_hint = _real_hint
 
     # THE SUMMONED-LOCK MARKER, which must be per SESSION and not per boot.
@@ -2527,7 +2527,7 @@ def _t_lock(ck):
     # logout and a boot-scoped marker suppressed the lock on every summoned
     # login after the first. That leaves a console open for somebody who is
     # not in front of it, and it is the exact shape of a test campaign.
-    _rl, _rs, _rln = engine._loginctl, engine._seated_now, engine.logline
+    _rl, _rs, _rln = engine.loginctl, engine._seated_now, engine.logline
     _rt = os.environ.get("USHER_SUMMONED")
     import tempfile as _tf
     _d = _tf.mkdtemp(prefix="usher-mark-")
@@ -2654,7 +2654,7 @@ def _t_lock(ck):
             _cl.session_start, engine.lock_capability = _rss, _rlc
 
     finally:
-        engine._loginctl = _rl
+        engine.loginctl = _rl
         engine._seated_now = _rs
         engine.logline = _rln
         engine.runtime_dir = _rrd
@@ -5406,6 +5406,97 @@ def _t_cli_split(ck):
              and id(n) not in _docs]
     ck("the-leaving-path-names-no-compositor",
        not [x for x in _lits if "killall" in x or "wayfire" in x])
+
+    # WHAT THE TWELVE CELLS ABOVE CANNOT SEE: they stub `_end_session`
+    # wholesale, which is right (it signals a real session) and leaves the one
+    # function on this path that talks to the world untested. It had neither a
+    # bound nor a catch while the two other sites asking logind the same
+    # question had both, so a missing `loginctl` RAISED out of `cleanly` and a
+    # wedged one never returned, which defeats the integrator's
+    # `usher cleanly reboot; systemctl reboot` outright: the `;` fallback only
+    # runs once usher RETURNS.
+    #
+    # DRIVEN THROUGH THE STUBBED `engine.loginctl`, which is also the point of
+    # routing both through it: the seam that makes them bounded is the seam
+    # that makes them checkable.
+    _real_lc2 = engine.loginctl
+    try:
+        engine.loginctl = lambda *a, **k: (None, "")
+
+        def _g(fn):
+            """The pre-fix code RAISES, and a raise aborts the area: these are
+            the plants that matter most, so each must name its own cell."""
+            try:
+                return fn()
+            except Exception as e:                             # noqa: BLE001
+                return f"RAISED {type(e).__name__}"
+        _es = _g(lambda: _c._end_session(dry=True))
+        _ns = _g(_c._no_session_here)
+        ck("end-session-survives-a-loginctl-it-cannot-run",
+           _es == (None, "cannot ask logind which session to end"))
+        ck("no-session-here-survives-it-too", _ns is False)
+        # PAIRWISE, because the whole content of the fix is that ONE value
+        # reads in OPPOSITE directions at the two sites: for `_end_session`
+        # "cannot ask" is the same fact as a bad answer, and for
+        # `_no_session_here` it must NOT be, since its True authorises
+        # skipping a capture. Collapsing them is the one way to get this
+        # wrong while both cells above still pass individually.
+        ck("the-two-read-a-missing-loginctl-in-opposite-directions",
+           _ns is False and _es[0] is None)
+        engine.loginctl = lambda *a, **k: (1, "")
+        ck("a-failing-loginctl-is-not-a-session-to-end",
+           _g(lambda: _c._end_session(dry=True))
+           == (None, "cannot ask logind which session to end"))
+    finally:
+        engine.loginctl = _real_lc2
+
+    # AND NO WAITING EXTERNAL COMMAND IS UNBOUNDED, which is the general form
+    # of the above and the only thing that can see a FOURTH spelling being
+    # added. A hung provider is the same hazard as a regex that backtracks for
+    # ever: the system must be protected above any particular provider.
+    #
+    # POPEN IS EXCLUDED DELIBERATELY, not overlooked: it is fire and forget
+    # (a window, a worker, a relaunched app) and a timeout means nothing to a
+    # call that never waits. The waiting forms are the ones a stuck bus or a
+    # wedged hook can hold for ever.
+    #
+    # THE FUNC IS WALKED, NOT MATCHED, because `window_source` calls
+    # `(subprocess.run if run is None else run)(...)` so the attribute is
+    # nested inside the callee rather than being it. A matcher that only
+    # looked at `node.func` would report that call as not existing.
+    from . import doctor as _dr2
+    from . import watch as _wt2
+    _WAIT = {"run", "check_output", "call", "check_call", "getoutput"}
+    _unbounded, _waiting, _nested = [], 0, 0
+    for _mod in (engine, _c, _dr2, _wt2):
+        _t2 = _ast.parse(_i.getsource(_mod))
+        for _n in _ast.walk(_t2):
+            if not isinstance(_n, _ast.Call):
+                continue
+            _hit = any(isinstance(_s, _ast.Attribute) and _s.attr in _WAIT
+                       and isinstance(_s.value, _ast.Name)
+                       and _s.value.id == "subprocess"
+                       for _s in _ast.walk(_n.func))
+            if not _hit:
+                continue
+            _waiting += 1
+            if not (isinstance(_n.func, _ast.Attribute)
+                    and _n.func.attr in _WAIT):
+                _nested += 1
+            if "timeout" not in {k.arg for k in _n.keywords if k.arg}:
+                _unbounded.append(f"{_mod.__name__}:{_n.lineno}")
+    if _unbounded:                     # named on stderr, since ck takes none
+        print(f"selftest: unbounded external commands: {_unbounded}",
+              file=sys.stderr)
+    ck("every-waiting-external-command-is-bounded", not _unbounded)
+    # A VACUITY GUARD CAN ONLY BE SHOWN TO MATTER BY EMPTYING THE THING IT
+    # GUARDS, so this is the cell the plant that breaks the scrape hits.
+    ck("waiting-external-commands-were-found", _waiting >= 5)
+    # AND THE NESTED SHAPE IS REACHED, which the floor above cannot say: a
+    # matcher reading `node.func` alone still clears it, because the one call
+    # it would miss happens to be bounded TODAY. This is the cell that fails
+    # when the walk is narrowed, so a future nested call cannot be invisible.
+    ck("the-callee-is-walked-not-matched", _nested >= 1)
 
     # THE SEAM HANDS THE PROVIDER THE ACTION, and this is the caller's half of
     # that contract. Both halves were written here and never run against each

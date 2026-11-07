@@ -22,7 +22,6 @@ exclude and include verbs read two of them.
 import json
 import os
 import signal
-import subprocess
 import sys
 import time
 
@@ -296,13 +295,28 @@ def _end_session(dry=False):
     SO WE SIGNAL WHAT THE DISPLAY MANAGER HANDED US: see session_tops. That is
     discovered rather than named, needs no privilege because it is ours, and its
     exit is the session's own teardown path.
+
+    BOUNDED AND NEVER RAISING, THROUGH engine's ONE loginctl, because this
+    sits on the power path and that path's whole doctrine is that a broken
+    usher must never be why a machine will not reboot. Its own call was
+    neither, while the two other sites asking logind the same question were
+    both, and measured against those as controls: with no `loginctl` on PATH
+    this raised FileNotFoundError out of `cleanly`, and against a wedged one
+    (a stuck system bus) it never returned at all, where the controls
+    answered immediately and at their 10s bound. UNBOUNDED IS THE WORSE HALF:
+    the integrator's action is `usher cleanly reboot; systemctl reboot`, and
+    the `;` fallback only runs once usher RETURNS, so a hang defeats the one
+    thing that separator exists for.
+
+    `rc is None` (cannot be run at all) joins the nonzero arm deliberately:
+    "no answer" and "a bad answer" are the same fact to a caller who needed
+    to know which session to end.
     """
     import getpass
-    done = subprocess.run(["loginctl", "list-sessions", "--no-legend"],
-                          capture_output=True, text=True)
-    if done.returncode != 0:
+    rc, out = engine.loginctl("list-sessions", "--no-legend")
+    if rc != 0:
         return None, "cannot ask logind which session to end"
-    found = engine.seated_session(getpass.getuser(), done.stdout)
+    found = engine.seated_session(getpass.getuser(), out)
     if not found:
         return None, "no seated graphical session to end"
     sid, leader = found
@@ -341,13 +355,20 @@ def _no_session_here():
     columns that have to agree (user AND a real seat AND class `user`), which
     is what excludes the ssh connection asking the question, the user manager,
     and the greeter's own seated session.
+
+    THROUGH engine's ONE loginctl, rather than a third spelling of a bounded
+    call: this one was already bounded and already caught, and leaving it as
+    its own copy is exactly how the sibling above came to be neither.
+
+    `rc is None` IS THE ONLY CELL THAT MAY NOT COLLAPSE INTO THE OTHERS, and
+    it is the opposite of the sibling's reading of the same value. Here
+    "cannot tell" must answer FALSE, i.e. assume a session and refuse,
+    because this answer authorises skipping a capture. Mapping it to True
+    would turn a wedged logind into permission to proceed.
     """
     import getpass
-    try:
-        out = subprocess.run(["loginctl", "list-sessions", "--no-legend"],
-                             capture_output=True, text=True,
-                             timeout=10).stdout
-    except (OSError, subprocess.SubprocessError):
+    rc, out = engine.loginctl("list-sessions", "--no-legend")
+    if rc is None:
         return False        # cannot tell, so assume a session and refuse
     return engine.seated_session(getpass.getuser(), out) is None
 

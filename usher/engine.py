@@ -6194,7 +6194,7 @@ def take_summoned():
     return present or os.environ.get("USHER_SUMMONED") == "1"
 
 
-def _loginctl(*args, timeout=10):
+def loginctl(*args, timeout=10):
     """(rc, stdout) from loginctl, or (None, "") if it cannot be run."""
     try:
         r = subprocess.run(["loginctl", *args], capture_output=True,
@@ -6241,7 +6241,7 @@ def session_locked_hint(sid):
     over a genuinely locked session. That is a real inconsistency in the
     caller, not here, and it is why this is never read as "is the screen
     locked" in general: only as "did the lock I just requested take"."""
-    rc, out = _loginctl("show-session", str(sid), "-p", "LockedHint",
+    rc, out = loginctl("show-session", str(sid), "-p", "LockedHint",
                         "--value")
     if rc != 0:
         return None
@@ -6254,7 +6254,7 @@ def _seated_now():
     place, because lock_now, lock_capability and the summoned-lock marker all
     ask the same question and a second spelling is how they come to differ."""
     import getpass
-    rc, out = _loginctl("list-sessions", "--no-legend")
+    rc, out = loginctl("list-sessions", "--no-legend")
     if rc is None:
         return None
     return seated_session(getpass.getuser(), out)
@@ -6270,7 +6270,7 @@ def lock_capability():
     can be REQUESTED, and the only proof of one being HONOURED is doing it
     and reading the hint back."""
     import getpass
-    rc, out = _loginctl("list-sessions", "--no-legend")
+    rc, out = loginctl("list-sessions", "--no-legend")
     have = rc is not None
     seated = seated_session(getpass.getuser(), out) if have else None
     hint = session_locked_hint(seated[0]) if seated else None
@@ -6294,7 +6294,7 @@ def lock_now(wait=LOCK_WAIT, forced=False):
     exits 0 whether or not anything is listening, so its status says nothing
     at all. The hint read back is the only evidence."""
     import getpass
-    rc, out = _loginctl("list-sessions", "--no-legend")
+    rc, out = loginctl("list-sessions", "--no-legend")
     have = rc is not None
     seated = seated_session(getpass.getuser(), out) if have else None
     hint = session_locked_hint(seated[0]) if seated else None
@@ -6305,7 +6305,7 @@ def lock_now(wait=LOCK_WAIT, forced=False):
         _, _, detail = lock_capability()
         return False, plan, detail
     sid = seated[0]
-    lrc, _ = _loginctl("lock-session", str(sid))
+    lrc, _ = loginctl("lock-session", str(sid))
     deadline = time.time() + wait
     while time.time() < deadline:
         if session_locked_hint(sid) == "yes":
