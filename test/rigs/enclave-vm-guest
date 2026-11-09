@@ -447,6 +447,27 @@ else
   M S2_ENC_RETRY SKIPPED
 fi
 M S2_STORE "$(_entries)"
+# THE SOURCE-KEYED IDENTITIES THEMSELVES, because a COUNT cannot tell a
+# round trip that gained a slot from one that gained an artifact: a foreign
+# window keys SOURCE-ALONE until the refresh asks the account, so a per-window
+# key arriving afterwards can leave the collapsed one behind. Both spellings
+# are opaque (a name and a digest), so printing them discloses nothing.
+M S2_KEYS "$(python3 -I -c 'import glob, json, sys
+ks = []
+for p in glob.glob(sys.argv[1]):
+    try:
+        for k in json.load(open(p)):
+            a, _, i = k.partition("\x00")
+            if i.startswith(sys.argv[2]):
+                ks.append(a + "|" + i)
+    except Exception:
+        pass
+print(" ".join(sorted(ks)) or "NONE")' \
+  "$H/.local/state/usher/knowledge-*.json" "$ENC" 2>/dev/null)"
+# AND WHETHER THE ACCOUNT'S OWN TERMINAL WAS PLACED, which the placement
+# COUNT cannot say: it is the one window whose slot lives under a per-window
+# key, so it is unplaceable until the refresh has run in THIS session.
+M S2_PLACED_T "$(_count "placed  kitty.*\[$ENC\]")"
 
 # THE REDACTION TAG IS ASSERTED HERE, not in session 1. A titled log line
 # for a foreign window only exists once one is PLACED or re-graced, and

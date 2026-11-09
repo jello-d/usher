@@ -183,7 +183,7 @@ for k in PREDICTED LOGOFF_RC LOGOFF_CAPTURED LOGOFF_RETAINED ASKED_CAPTURE \
 done
 echo "===== SESSION 2 ====="
 for k in S2_WAYFIRE S2_SOCK S2_ASKED S2_LAUNCHED S2_PLACED S2_ENC_PROCS \
-         LOG_TAG LEAK_LOG2 \
+         S2_PLACED_T LOG_TAG LEAK_LOG2 S2_KEYS \
          S2_ENC_RETRY S2_STORE VERIFY VERIFY_RC; do
   printf '  %-16s %s\n' "$k" "$(_val "$k")"
 done
@@ -309,6 +309,31 @@ esac
 case "$(_val ASKED_CAPTURE)" in
   ""|0) _add "the logoff never asked the source to capture" ;;
 esac
+# THE COLLAPSED-KEY ARTIFACT, REPORTED AND NOT ASSERTED, because it is a
+# measured state nobody has decided about rather than a regression. A foreign
+# window keys SOURCE-ALONE until the refresh asks its account, so one whose
+# grace expires first is LEARNED under the collapsed key and keeps that slot
+# after its per-window key arrives. The signature is both spellings present
+# for one app, and the cost is a brief wrong placement at each login (the
+# collapsed slot holds wherever the window opened) which `_recheck_all` then
+# corrects. Silent when it is absent, so this goes quiet if it is ever fixed.
+_arte=""
+for _k in $(_val S2_KEYS); do
+  case $_k in
+    *:*) continue ;;
+  esac
+  for _k2 in $(_val S2_KEYS); do
+    case $_k2 in
+      "$_k":*) _arte="$_arte $_k" ;;
+    esac
+  done
+done
+if [ -n "$_arte" ]; then
+  echo "NOTE: a collapsed source key survives beside its per-window one"
+  echo "  ($_arte). The window was learned before the refresh named it, so"
+  echo "  the next login places it from that slot until the refresh lands."
+  echo "  MEASURED, not a regression: no decision has been taken on it."
+fi
 case "$(_val S2_ASKED)" in
   ""|0) _add "the login never asked the source to resume" ;;
 esac
