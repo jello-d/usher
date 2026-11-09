@@ -356,23 +356,33 @@ def collision_fix(ident, source="", per_window=0):
     SOURCE alone, so several windows of one of its apps legitimately share one
     key.
 
-    A TERMINAL SHARING A CWD KEY HAS NO REMEDY TODAY, and this used to say
-    "name one: settitle" on the belief that a named window becomes
-    title-keyed. MEASURED ON MANIFOLD 2026-11-03 AND IT IS FALSE, in the
-    direction that makes things worse: `MuxPlugin.owns` is `":" in title`,
-    so ANY colon in the name hands the window to it, and with no latch
-    target `_mux_slot` answers `term:resume`, which the real mux
-    terminal already holds. A colon-free name changes nothing at all,
-    since
-    KittyPlugin keys on the cwd either way. Two wrong outcomes and no right
-    one, so it says what is true instead.
+    A TERMINAL SHARING A CWD KEY HAS TWO REMEDIES, and the second is the one
+    for windows that BELONG in one directory. Give the window its own
+    app-id (`kitty --app-id work-logs`): no plugin claims that app-id, so it
+    is keyed by the app-id ALONE and gets its own slot, and an authored
+    `work-logs.desktop` starts it again. MEASURED end to end rather than
+    reasoned: `is_unique` answers True for it, `match_keys` offers
+    `work-logs NUL`, and `desktop_launch_for` returns the entry's argv with
+    the field codes stripped. That is the README's SECOND TIER doing exactly
+    what it is for, with no new identity shape.
 
-    ADVICE THAT MAKES THINGS WORSE COSTS MORE THAN THE MISSING FEATURE,
-    which is why this is a wording change rather than a held fix: narrowing
-    MuxPlugin to require actual mux evidence would remove the harm, and
-    making a named terminal genuinely title-keyed is what would make the
-    remedy real. Both are identity surgery in the most-burned code here and
-    neither is needed to stop misdirecting a reader.
+    THE OLD ADVICE WAS `settitle` AND IT IS FALSE, in the direction that
+    makes things worse (measured on manifold 2026-11-03): `MuxPlugin.owns` is
+    `":" in title`, so ANY colon in the name hands the window to it, and with
+    no latch target `_mux_slot` answers `term:resume`, which the real mux
+    terminal already holds. A colon-free name changes nothing at all, since
+    KittyPlugin keys on the cwd either way. Two wrong outcomes and no right
+    one, so it was removed; THIS SECTION THEN SAID THERE WAS NO REMEDY,
+    which is the opposite overclaim and just as expensive, because a reader
+    who believes it stops looking.
+
+    WHAT IS STILL MISSING IS NAMING A WINDOW THAT IS ALREADY OPEN, and that
+    is a different feature rather than this one being unfinished: an app-id
+    is fixed at exec, so both remedies above are decided when the terminal is
+    opened. Nothing usher can read post hoc is both per-window and stable
+    (the title churns, /proc's environ is fixed at exec, and a kitty user-var
+    needs `listen_on` in somebody else's config plus a socket read), so it is
+    recorded as not done rather than hinted at here.
 
     For an ordinary app a plugin is the answer, which is what the README's
     tiers describe.
@@ -420,7 +430,8 @@ def collision_fix(ident, source="", per_window=0):
         return "usher mis-resolved these; usher reload clears it"
     if ident.startswith("kitty:"):
         return ("usher keys a terminal on its shell's directory, so two in "
-                "one directory share a slot; move one, or open it elsewhere")
+                "one directory share a slot; move one, or give it its own "
+                "app-id (kitty --app-id NAME) plus a NAME.desktop entry")
     return "a plugin can tell them apart; see README"
 
 

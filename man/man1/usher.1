@@ -302,6 +302,19 @@ so it describes terminal vim and usher correctly refuses it for a gvim
 window), or when its app-id differs from the entry's filename.
 .I StartupWMClass
 is then the load-bearing line, since the join is on the app-id.
+.IP
+IT IS ALSO HOW TWO WINDOWS OF ONE APP ARE TOLD APART WITHOUT A PLUGIN, where
+the app can be asked for its own app-id. Two terminals in one directory share
+a slot, because usher keys a terminal on its shell's directory; start one as
+.I "kitty --app-id work-logs"
+and no plugin claims that app-id, so it is keyed by the app-id ALONE and has
+its own slot, and a
+.I work-logs.desktop
+naming that
+.I Exec
+brings it back. Cheaper than a plugin, and
+.B doctor
+names it when it reports the collision.
 .TP
 .B a plugin
 is for when IDENTITY is the problem rather than launching. Any one of these

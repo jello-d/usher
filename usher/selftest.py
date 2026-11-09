@@ -1608,6 +1608,47 @@ def _t_resolution(ck):
        "settitle" not in _cfix("kitty:/w"))
     ck("collision-kitty-explains-the-cwd-key",
        "directory" in _cfix("kitty:/w"))
+    # AND IT NAMES THE REMEDY FOR WINDOWS THAT BELONG IN ONE DIRECTORY, which
+    # is the case the cwd advice alone cannot answer. Saying there was NO
+    # remedy was the opposite overclaim to `settitle` and just as expensive:
+    # a reader who believes it stops looking.
+    ck("collision-kitty-names-the-app-id-remedy",
+       "--app-id" in _cfix("kitty:/w") and ".desktop" in _cfix("kitty:/w"))
+    # AND THE REMEDY IS REAL, driven rather than asserted, because advice
+    # that does not work is the exact fault this whole message has had twice.
+    # BOTH HALVES: its own app-id is keyed app-id-ONLY (no plugin claims it,
+    # so there is nothing to make it share), and an authored entry starts it
+    # again with the field codes stripped.
+    _nm = [{"app_id": "work-logs", "title": "terminal", "pid": -1},
+           {"app_id": "kitty", "title": "terminal", "pid": -1},
+           {"app_id": "kitty", "title": "terminal", "pid": -1}]
+    _nc = engine.own_app_counts(_nm)
+    # THE SET, not the tuple: with an empty identity both keys it offers ARE
+    # the app-id-only one, and the claim is that it is offered NOTHING ELSE.
+    # Asserting the tuple shape failed over correct behaviour, which took one
+    # print to see and is the twenty-second instance of reasoning about a
+    # value this file could have printed.
+    ck("a-named-terminal-gets-its-own-app-id-only-key",
+       engine.is_unique("work-logs", _nc)
+       and set(engine.match_keys("work-logs", "", ""))
+       == {engine.kkey("work-logs", "")})
+    # ...and the control: the two unnamed ones still share, or the row above
+    # would pass over a predicate that gave everything its own key.
+    ck("and-the-unnamed-ones-still-share-the-cwd-key",
+       not engine.is_unique("kitty", _nc))
+    _ndir = tempfile.mkdtemp(prefix="usher-named-")
+    try:
+        with open(os.path.join(_ndir, "work-logs.desktop"), "w") as _f:
+            _f.write("[Desktop Entry]\nType=Application\nName=W\n"
+                     "Exec=kitty --app-id work-logs --directory /tmp %F\n"
+                     "StartupWMClass=work-logs\n")
+        _nents = engine.desktop_entries([_ndir])
+        ck("a-named-terminal-can-be-started-again",
+           engine.desktop_launch_for("work-logs", _nents)
+           == (["kitty", "--app-id", "work-logs", "--directory", "/tmp"],
+               None))
+    finally:
+        shutil.rmtree(_ndir, ignore_errors=True)
     # THE MECHANISM BEHIND THAT, pinned so the advice cannot drift back in
     # while it stays true: a colon-titled kitty with no mux in its tree is
     # handed the key a real `mux resume` terminal holds.
