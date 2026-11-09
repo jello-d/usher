@@ -71,7 +71,15 @@ printf '%s:%s\n' "$U" "$PW" | chpasswd
 # precondition is a marker and a missing one names ITSELF rather than
 # surfacing later as an assertion failure nobody can attribute.
 R "===== phase 0: what this base gives ====="
-M SEVERANCE "$(command -v severance 2>/dev/null || echo MISSING)"
+# ASKED AS THE USER, THROUGH A LOGIN SHELL, because this script is ROOT and
+# this fleet installs some packages per user: `command -v severance` as root
+# reads ROOT's PATH and answers MISSING for a perfectly good install under
+# ~/.local/bin. Measured on the first real run of this rig, which reported
+# SEVERANCE=MISSING over a provision log that plainly said
+# `install: pkg severance -> ~/.local`. THE ANSWER MUST NOT DEPEND ON WHO
+# ASKS, and the consumer that matters is usher's daemon, which is a
+# compositor child carrying the session PATH.
+M SEVERANCE "$(AS 'command -v severance' | tail -1)"
 M USHER_SYS "$(command -v usher-mgr 2>/dev/null || echo MISSING)"
 M HOOK_SRC "$([ -x "$H/.config/usher/window-source" ] && echo yes \
   || echo MISSING)"
@@ -90,8 +98,14 @@ M SECCTX_SO "$(ls -1 /opt/wayfire/lib/*/wayfire/*security-context* \
 # status, so an incomplete registry would read as complete.
 EACCT=
 ESOCK=
-if command -v severance >/dev/null 2>&1; then
-  _rows=$(severance enclaves </dev/null 2>/dev/null) && _rrc=0 || _rrc=$?
+if [ -n "$(AS 'command -v severance' | tail -1)" ]; then
+  # AS THE USER for the same reason, and because the registry is the user's:
+  # a root `severance enclaves` would read root's own, which is not the set
+  # usher's daemon will be asking about.
+  # THE REDIRECT GOES INSIDE THE COMMAND STRING: `AS` merges stderr into its
+  # output so a spawned window's noise reaches the log, and here that would
+  # turn a warning line into a fake registry row for awk to parse.
+  _rows=$(AS 'severance enclaves </dev/null 2>/dev/null') && _rrc=0 || _rrc=$?
   M REGISTRY_RC "$_rrc"
   if [ "$_rrc" -eq 0 ]; then
     _line=$(printf '%s\n' "$_rows" \
@@ -154,8 +168,19 @@ M USHER_AT "$(AS 'command -v usher')"
 # not test. `place` with cascade IS included, because racing the compositor's
 # own placer is what the placement read-back exists for.
 install -d -o "$U" -g "$U" "$H/.config"
-cp /usr/local/share/enclavevm/wayfire.ini "$H/.config/wayfire.ini"
-chown "$U:$U" "$H/.config/wayfire.ini"
+# PREFER THE DEPLOYED ini WHEN IT ALREADY NAMES THE PLUGIN, because a
+# rehearsal rig is a different machine and its plugin list IS the
+# configuration under test: a run against the integrator's own ini measures
+# the real thing, where the minimal one measures a compositor nobody has. Only
+# if the deployed file cannot answer the question is it replaced.
+if [ -f "$H/.config/wayfire.ini" ] \
+   && grep -q "security-context-v1" "$H/.config/wayfire.ini"; then
+  M WF_SOURCE deployed
+else
+  cp /usr/local/share/enclavevm/wayfire.ini "$H/.config/wayfire.ini"
+  chown "$U:$U" "$H/.config/wayfire.ini"
+  M WF_SOURCE rig-minimal
+fi
 M WF_INI "$(wc -l < "$H/.config/wayfire.ini")"
 
 # THE FOREGROUND VT MUST MATCH THE SESSION'S. greetd runs on vt 7 here and

@@ -161,7 +161,8 @@ for k in SEVERANCE USHER_SYS HOOK_SRC HOOK_TRIG SUDOERS SECCTX_SO \
   printf '  %-16s %s\n' "$k" "$(_val "$k")"
 done
 echo "===== SESSION 1 ====="
-for k in SEEDED_TREES USHER_AT WF_INI S1_WAYFIRE S1_DAEMON SOCK_UP \
+for k in SEEDED_TREES USHER_AT WF_SOURCE WF_INI S1_WAYFIRE S1_DAEMON \
+         SOCK_UP \
          SOCK_UNIT ENC_PROCS S1_LIVE S1_STORE; do
   printf '  %-16s %s\n' "$k" "$(_val "$k")"
 done
@@ -218,9 +219,19 @@ esac
 
 if [ "$(_val ENCLAVE_OK)" != yes ]; then
   echo "ENCLAVE HALF SKIPPED, and the inventory above says which precondition"
-  echo "  is missing. A base provisioned before severance's"
-  echo "  one-user-per-enclave model has no second account at all, which is a"
-  echo "  fact about the base and not about usher."
+  echo "  is missing. THIS IS A FACT ABOUT THE BASE, NOT ABOUT usher."
+  # THE FIRST WORDING BLAMED THE BASE'S AGE and was wrong within the hour: a
+  # base built from a CURRENT tree came out with severance installed per-user
+  # and its registry EMPTY, so the enclave is declared and never provisioned.
+  # Reading the two rows that distinguish those is cheaper than a sentence
+  # that names one cause, so the message points at them instead of guessing.
+  if [ "$(_val SEVERANCE)" = "" ]; then
+    echo "  No severance at all: nothing can declare an enclave."
+  elif [ "$(_val REGISTRY_NF)" = 0 ] || [ "$(_val ENC_ACCT)" = MISSING ]; then
+    echo "  severance is installed and its registry is EMPTY, so the enclave"
+    echo "  is DECLARED and never provisioned. That needs the integrator, not"
+    echo "  this rig: see U13 in _usher-requests-tackup.md."
+  fi
   if [ -n "$_fail" ]; then
     echo "NATIVE HALF FAILED:$_fail"
     exit 1
