@@ -6586,13 +6586,42 @@ def _t_relaunch(ck):
             _rep_w = engine.source_window_report([_v1, _v2],
                                                  {"titan": _parsed_w})
             ck("source-window-report-counts-the-join",
-               _rep_w == ["titan: 1 of 2 window(s) identified "
-                          "(2 reported)"])
+               _rep_w == ["titan: 1 of 2 reported identifier(s) match a "
+                          "live window (2 here)"])
             ck("source-window-report-says-zero-of-n-rather-than-nothing",
                engine.source_window_report([_v2], {"titan": _parsed_w})
-               == ["titan: 0 of 1 window(s) identified (2 reported)"])
-            ck("source-window-report-is-empty-with-no-sources",
-               engine.source_window_report([_v1, _v2], {}) == [])
+               == ["titan: 0 of 2 reported identifier(s) match a live "
+                   "window (1 here)"])
+            # A SOURCE THAT REPORTED NOTHING MUST STILL BE NAMED, which is
+            # this line's whole promise and which the check here used to
+            # REFUSE: it asserted silence over two live foreign views and
+            # called that "no sources", so the one state worth diagnosing
+            # (the account named none of its windows) printed nothing and
+            # read as "no such windows". Measured in the enclave rig, where
+            # the silence cost a VM boot and a purpose-written probe.
+            ck("source-window-report-names-a-source-that-reported-nothing",
+               engine.source_window_report([_v1, _v2], {})
+               == ["titan: 0 of 0 reported identifier(s) match a live "
+                   "window (2 here)"])
+            # AND IT IS EMPTY ONLY WHEN THERE IS GENUINELY NO SOURCE, which
+            # is the control: without it the row above is satisfied by a
+            # report that names every call.
+            ck("source-window-report-is-empty-with-no-source-at-all",
+               engine.source_window_report(
+                   [{"app-id": "foot", "title": "t", "pid": -1}], {}) == [])
+            # EVERY WINDOW OF THE SOURCE COUNTS, NOT ONLY CHROME'S. The
+            # denominator was chrome-only from the title-hash era, when a
+            # chrome slot was the only acceptable identity; acceptance is an
+            # opaque DIGEST now, so an account whose windows are terminals
+            # was reported as having none at all.
+            _vt = {"app-id": "foot", "title": "shell", "source": "titan",
+                   "pid": -1,
+                   "security-context": {"toplevel-identifier": _TL2}}
+            ck("source-window-report-counts-a-window-no-plugin-owns",
+               engine.source_window_report(
+                   [_vt], {"titan": {_TL2: engine.identity_digest("x")}})
+               == ["titan: 1 of 1 reported identifier(s) match a live "
+                   "window (1 here)"])
             # AND THE TRIGGER COLLECTS IT, which the resolver's own checks say
             # nothing about: a caller that never passes `windows` gets the
             # old behaviour and one that does must be filled in.

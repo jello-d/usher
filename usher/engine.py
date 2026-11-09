@@ -4781,16 +4781,34 @@ def source_window_report(views, windows):
     that was measured on one box on one day, and the two ends read the field
     independently through two different protocols: a rate that drops is the
     only thing that would say so.
+
+    THE SOURCES COME FROM BOTH SIDES, which is the promise above kept rather
+    than merely stated: iterating the REPORTED side alone means a source that
+    reported NOTHING is not mentioned, so "the account named none of its
+    windows" is silent and reads exactly like "there are no such windows".
+    Measured in the enclave rig, where that silence cost a VM boot and a
+    purpose-written probe to learn what this line exists to say.
+
+    AND EVERY WINDOW OF THE SOURCE COUNTS, not only chrome's. That filter was
+    written when only a chrome slot was an acceptable identity; the account
+    reports an opaque DIGEST for anything its own plugins can resolve now, so
+    restricting the denominator hides a whole account whose windows are
+    terminals.
+
+    THREE NUMBERS, BECAUSE THE DISAGREEMENT IS ONLY ONE OF THEM. An
+    identifier REPORTED and not found live is the two ends disagreeing and
+    must never happen; a window here that the account named nothing for is
+    ordinary (a single-window app needs no per-window identity), so it is
+    reported beside the rate rather than counted as a miss.
     """
     out = []
-    for src in sorted(windows):
-        fps = windows[src]
-        mine = [v for v in views if source_of(v) == src
-                and is_chrome(app_of(v))]
-        hit = sum(1 for v in mine
-                  if (toplevel_identifier_of(v) or "") in fps)
-        out.append(f"{src}: {hit} of {len(mine)} window(s) identified "
-                   f"({len(fps)} reported)")
+    for src in sorted(set(windows) | {s for s in map(source_of, views) if s}):
+        fps = windows.get(src) or {}
+        mine = [v for v in views if source_of(v) == src]
+        live = {toplevel_identifier_of(v) or "" for v in mine}
+        hit = sum(1 for f in fps if f in live)
+        out.append(f"{src}: {hit} of {len(fps)} reported identifier(s) match "
+                   f"a live window ({len(mine)} here)")
     return out
 
 
