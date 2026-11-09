@@ -272,6 +272,11 @@ if [ "$ENCLAVE_OK" = yes ] && [ -S "$ESOCK" ]; then
   # runs `foot` too, so counting log lines whose title is not the source tag
   # matches the owner's own window and answers nothing. A string that exists
   # ONLY inside the enclave is decidable on every surface at once.
+  # CAN THAT ACCOUNT EVEN RUN IT, asked before launching so a missing binary
+  # reads as a named precondition rather than as "the enclave opened no
+  # window", which is accurate and says nothing about why.
+  M ENC_HAS_FOOT "$(su "$EACCT" -s /bin/sh -c 'command -v foot' 2>/dev/null \
+    || echo MISSING)"
   enclave_win "foot --title $SECRET"
   sleep 8
   M ENC_PROCS "$(NP -u "$EACCT" foot)"

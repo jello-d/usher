@@ -163,7 +163,7 @@ done
 echo "===== SESSION 1 ====="
 for k in SEEDED_TREES USHER_AT WF_SOURCE WF_INI S1_WAYFIRE S1_DAEMON \
          SOCK_UP \
-         SOCK_UNIT ENC_PROCS S1_LIVE S1_STORE; do
+         SOCK_UNIT ENC_HAS_FOOT ENC_PROCS S1_LIVE S1_STORE; do
   printf '  %-16s %s\n' "$k" "$(_val "$k")"
 done
 echo "===== THE FOREIGN WINDOW, ON THE OWNER'S SIDE ====="
