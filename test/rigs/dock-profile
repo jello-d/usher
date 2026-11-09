@@ -1,0 +1,315 @@
+#!/bin/sh
+# dock-profile - does a REAL daemon change desks, and SEED from a surface?
+#
+# RUN BY HAND, not by test/run: it starts a nested compositor, a real worker
+# and a real window, so it is slow, needs a host compositor to nest inside,
+# and spawns processes.
+#
+# WHY IT EXISTS: `seeded from surface ` and `display profile is now ` have
+# NEVER appeared in either box's whole log. Derived from every logline the
+# code can emit, they are two of the three cold FEATURE paths, and they are
+# the two with real logic behind them. These are desktops; the laptop this was
+# built for does not exist yet, so without a rig the surface seed has no
+# production run at all and never will until the hardware arrives.
+#
+# AND IT NEEDS NO VM, WHICH IS THE POINT. The first instinct was a VM with two
+# virtio displays, and `virtio-gpu-pci` turns out not to support hotplugging,
+# so a VM cannot add or remove a panel at runtime. It does not matter: usher
+# asks hwdp for the desk by RUNNING IT (`shutil.which("hwdp")`, three call
+# sites, all 5-second TTL caches), so a stub earlier on the daemon's PATH
+# controls the profile, the panel map and the surface map, and can change its
+# answer MID-RUN. That is this tree's standing technique for an external
+# command, and it reaches further here than hardware would.
+#
+# WHAT IT DELIBERATELY DOES NOT COVER, so a pass is not read as more than it
+# is: hwdp's own EDID reading and panel identity (hwdp's suite owns that),
+# kanshi reapplying an arrangement, the compositor's real output arrival (which
+# `dock-outputs` covers with a headless output), and tackup's grid resize.
+#
+# ISOLATION IS THE WHOLE TRICK, and getting it wrong breaks the user's desktop
+# rather than the test: a nested compositor sharing the live XDG_RUNTIME_DIR
+# puts a SECOND wayfire socket in it, and `pick_socket` refuses on two
+# candidates, so every usher verb on the box stops working. Done once, by a
+# previous session. So: its own XDG_RUNTIME_DIR, its own XDG_STATE_HOME, and
+# the host reached by an ABSOLUTE WAYLAND_DISPLAY, which libwayland accepts
+# and which does not depend on XDG_RUNTIME_DIR at all.
+set -eu
+
+SBX=${USHER_SBX:-/var/tmp/usher-profile-rig}
+TREE=${USHER_TREE:-$(cd "$(dirname "$0")/../.." && pwd)}
+_C="'$SBX'"
+# shellcheck disable=SC2064  # the literal is baked in at ARM time, per this
+# tree's rule that `rm -rf` never runs with a variable expansion
+trap "rm -rf $_C" EXIT
+
+rm -rf "$SBX"
+mkdir -p "$SBX/run" "$SBX/state/usher" "$SBX/bin" "$SBX/answers"
+chmod 700 "$SBX/run"
+
+# THE INSTALLED INTERPRETER, resolved from the command rather than named: the
+# per-user venv an earlier rig hardcoded was REMOVED by the machine-wide
+# install mode, and `readlink -f` on the command cannot go stale.
+PY=$(dirname "$(readlink -f "$(command -v usher-mgr)")")/python3
+[ -x "$PY" ] || { echo "no venv python at $PY"; exit 1; }
+command -v foot >/dev/null 2>&1 || { echo "this rig needs foot"; exit 1; }
+
+HOST_SOCK="${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY:-wayland-1}"
+[ -S "$HOST_SOCK" ] || { echo "no host wayland socket at $HOST_SOCK"; exit 1; }
+echo "tree $TREE"
+echo "interpreter $PY"
+
+# ---------------------------------------------------------------- the stub
+# FILE-DRIVEN so the rig can change the desk MID-RUN, which is what a dock is.
+# Its answers are the real verbs' shapes: `hwdp surfaces` prints 8 fields, and
+# an exit 0 with NO output means "no file authored for this desk", which is
+# how every desk on this fleet answers today.
+cat > "$SBX/bin/hwdp" <<'STUBEOF'
+#!/bin/sh
+A=${USHER_RIG_ANSWERS:?the stub needs USHER_RIG_ANSWERS}
+_say() { [ -f "$A/$1" ] && cat "$A/$1"; exit 0; }
+case "${1:-}${2:-}" in
+  "id--panels") _say panels ;;
+  "id--desk")   _say desk ;;
+  "id")         _say id ;;
+  "surfaces")   _say surfaces ;;
+  "shape")      _say shape ;;
+esac
+exit 2
+STUBEOF
+chmod 755 "$SBX/bin/hwdp"
+
+printf 'DESK-A' > "$SBX/answers/id"
+printf 'DESK-A' > "$SBX/answers/desk"
+printf 'WL-1 panel-aaaaaaaaaaaa\n' > "$SBX/answers/panels"
+printf 'EL' > "$SBX/answers/shape"
+# ONE SURFACE on the live output, in a cell the 3x3 grid below really has:
+# seeding into a cell the grid lacks is refused by design, and that refusal
+# would read exactly like the seed not working.
+printf 'comms WL-1 1 0 40 60 600 400\n' > "$SBX/answers/surfaces"
+
+export USHER_RIG_ANSWERS="$SBX/answers"
+RIGPATH="$SBX/bin:$PATH"
+echo "stub hwdp: $("$SBX/bin/hwdp" id) / surfaces $("$SBX/bin/hwdp" surfaces)"
+
+# ------------------------------------------------- the OTHER desk's memory
+# The seed's whole input: this identity learned at ANOTHER desk, carrying the
+# SURFACE NAME. The name is the only thing that can travel, which is the
+# design claim; a cell or a rect cannot.
+#
+# `foot` IS THE FIXTURE BECAUSE NO PLUGIN OWNS IT, so it keys by app-id ALONE
+# and the key is predictable. A kitty here would be claimed by the mux/kitty
+# plugins and keyed on its cwd, which this file's notes record as the way a
+# placement fixture ends up testing the registry instead.
+"$PY" - "$SBX" <<'SEEDEOF'
+import json
+import sys
+import time
+
+sbx = sys.argv[1]
+other = {
+    "foot\u0000": {
+        "app": "foot", "title": "", "appid_only": True,
+        "output": "OTHER-1", "workspace": [2, 2], "pos": [111, 222],
+        "size": [500, 300], "panel": "panel-zzzzzzzzzzzz",
+        "surface": "comms", "last_seen": time.time(),
+    }
+}
+with open(f"{sbx}/state/usher/knowledge-DESK-B.json", "w") as f:
+    json.dump(other, f)
+SEEDEOF
+echo "other desk DESK-B knows foot on surface comms"
+
+# ---------------------------------------------------------- the compositor
+cat > "$SBX/wayfire.ini" <<'INI'
+[core]
+plugins = ipc ipc-rules stipc
+vwidth = 3
+vheight = 3
+[output:WL-1]
+mode = 1280x720@60000
+INI
+
+env -u WAYFIRE_SOCKET XDG_RUNTIME_DIR="$SBX/run" XDG_STATE_HOME="$SBX/state" \
+    WAYLAND_DISPLAY="$HOST_SOCK" WAYFIRE_CONFIG_FILE="$SBX/wayfire.ini" \
+    WLR_BACKENDS=wayland \
+    setsid /opt/wayfire/bin/wayfire > "$SBX/wayfire.log" 2>&1 &
+
+_n=0
+while ! ls "$SBX/run"/wayfire-*.socket >/dev/null 2>&1; do
+  _n=$((_n + 1))
+  [ "$_n" -gt 60 ] && { echo "nested wayfire never came up"
+    tail -5 "$SBX/wayfire.log"; exit 1; }
+  sleep 0.5
+done
+NSOCK=$(ls "$SBX/run"/wayfire-*.socket | head -1)
+echo "nested socket $NSOCK"
+
+# --no-launch SO IT CANNOT SPAWN ANYTHING: this runs against a real compositor
+# on somebody's live machine, and the store it reads names apps.
+env XDG_RUNTIME_DIR="$SBX/run" XDG_STATE_HOME="$SBX/state" \
+    WAYFIRE_SOCKET="$NSOCK" WAYLAND_DISPLAY=wayland-1 \
+    PYTHONPATH="$TREE" PATH="$RIGPATH" \
+    USHER_RIG_ANSWERS="$SBX/answers" \
+    setsid "$PY" -m usher _worker --no-launch > "$SBX/worker.log" 2>&1 &
+
+LOG="$SBX/state/usher/watch.log"
+_n=0
+while [ ! -f "$LOG" ] || ! grep -q "watching," "$LOG" 2>/dev/null; do
+  _n=$((_n + 1))
+  [ "$_n" -gt 60 ] && { echo "worker never started watching"
+    tail -5 "$SBX/worker.log"; exit 1; }
+  sleep 0.5
+done
+
+# LET THE BASELINE SETTLE, the fourth instance of this trap in this package:
+# a poll that adopts on CHANGE reads anything present at its first tick as the
+# baseline. Waiting for `watching,` is NOT enough, because that line comes
+# from the EVENT loop, which beats the capture thread's first tick.
+sleep 3
+
+_fail=0
+_vacuity=0
+
+# THE RIG MUST PROVE THE WORKER IS ASKING THE STUB AT ALL, or every assertion
+# below passes over a daemon that found the REAL hwdp (or none) and answered
+# "default". A vacuous pass here would read as the features working.
+#
+# ASKED OF WHAT THE WORKER DID, not of what the rig can do: running the stub
+# ourselves proves only that the rig's own PATH is right. The worker files its
+# store BY PROFILE, so a DESK-A-named artifact in the state dir is the
+# worker's own answer, and it is not circular with anything below.
+_seen=$(ls -1 "$SBX/state/usher" 2>/dev/null | grep -c DESK-A || true)
+if [ "${_seen:-0}" -gt 0 ]; then
+  echo "stub IS in play: the worker filed $_seen DESK-A artifact(s)"
+else
+  echo "   VACUITY: the worker is not reading the stub, so nothing below"
+  echo "   means anything. It filed: $(ls -1 "$SBX/state/usher" | tr '\n' ' ')"
+  _vacuity=1
+fi
+
+echo ""
+echo "--- PHASE 1: a window this desk has never learned (the SEED) ---"
+env XDG_RUNTIME_DIR="$SBX/run" WAYLAND_DISPLAY=wayland-1 \
+    setsid foot > "$SBX/foot.log" 2>&1 &
+sleep 6
+if grep -q "seeded from surface" "$LOG"; then
+  echo "   SEEDED: $(grep -m1 'seeded from surface' "$LOG")"
+else
+  echo "   FAIL: no window was seeded from a surface"
+  _fail=1
+fi
+
+echo ""
+echo "--- PHASE 2: the desk changes under us (hwdp answers DESK-C) ---"
+printf 'DESK-C' > "$SBX/answers/id"
+printf 'DESK-C' > "$SBX/answers/desk"
+# PAST THE PROFILE TTL plus a capture tick, read from the module rather than
+# hardcoded: a rig carrying its own copy of a tunable goes stale the day the
+# tunable moves.
+_ttl=$(PYTHONPATH="$TREE" "$PY" -c 'from usher.engine import PROFILE_TTL
+print(int(PROFILE_TTL) + 4)')
+sleep "$_ttl"
+if grep -q "display profile is now DESK-C" "$LOG"; then
+  echo "   NOTICED: $(grep -m1 'display profile is now' "$LOG")"
+else
+  echo "   FAIL: the profile change produced nothing"
+  _fail=1
+fi
+
+# AND IT MUST ADOPT RATHER THAN HOLD FOREVER, which is what makes hwdp's hook
+# an optimisation and not a dependency. That is the half a box with no hook at
+# all depends on, so it is the half worth asserting.
+_hold=$(PYTHONPATH="$TREE" "$PY" -c 'from usher.watch import DOCK_HOLD
+print(int(DOCK_HOLD) + 4)')
+echo ""
+echo "--- PHASE 3: and it adopts by itself after ${_hold}s (no hook here) ---"
+sleep "$_hold"
+# ONE PATTERN FOR THE TEST AND THE ECHO. They differed at first: the echo's
+# looser `known window` also matches `watching, 0 known windows` higher up the
+# file, so `-m1` reported THAT line as the evidence for an adopt. The
+# assertion was sound and the evidence shown was the wrong row, which is how a
+# rig teaches a reader something false.
+_adopted='known window(s) here'
+if grep -qF "$_adopted" "$LOG"; then
+  echo "   ADOPTED: $(grep -m1 -F "$_adopted" "$LOG")"
+else
+  echo "   FAIL: the drift was never adopted"
+  _fail=1
+fi
+
+echo ""
+echo "--- the whole log ---"
+sed 's/^/    /' "$LOG"
+echo ""
+echo "--- the stores afterwards ---"
+ls -1 "$SBX/state/usher"/knowledge-*.json 2>/dev/null | sed 's/^/    /'
+
+# CLEAN UP BY ENVIRON, EXCLUDING OUR OWN PIDS, and tolerating every /proc
+# entry we may not read: an earlier rig died partway through on `Permission
+# denied` for another user's process and LEAKED six processes onto the live
+# box. Reading the process table by pattern is banned here for the self-match
+# reason; this reads environ and skips what it cannot.
+echo ""
+echo "--- cleanup ---"
+"$PY" - "$SBX" <<'PYEOF'
+import os
+import signal
+import sys
+import time
+
+sbx = sys.argv[1]
+me = {os.getpid(), os.getppid()}
+
+
+def mine():
+    out = []
+    for d in os.listdir("/proc"):
+        if not d.isdigit() or int(d) in me:
+            continue
+        try:
+            with open(f"/proc/{d}/environ", "rb") as f:
+                env = f.read().decode(errors="replace")
+        except OSError:
+            continue                      # not ours to read: skip, never die
+        if sbx in env:
+            out.append(int(d))
+    return out
+
+
+targets = mine()
+print(f"    signalling {len(targets)} sandbox process(es)")
+for pid in targets:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        pass
+for _ in range(20):
+    time.sleep(0.5)
+    if not mine():
+        break
+left = mine()
+for pid in left:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+time.sleep(1)
+left = mine()
+# AND IT VERIFIES, because "I sent a signal" is not "nothing is left".
+print("    leaked afterwards:", left or "none")
+sys.exit(1 if left else 0)
+PYEOF
+_crc=$?
+[ "$_crc" = 0 ] || _fail=1
+
+echo ""
+if [ "$_vacuity" = 1 ]; then
+  echo "RIG INCONCLUSIVE: the stub was not in play"
+  exit 2
+fi
+if [ "$_fail" = 0 ]; then
+  echo "RIG PASSED: seeded from a surface, noticed the desk change, adopted it"
+else
+  echo "RIG FAILED"
+fi
+exit "$_fail"

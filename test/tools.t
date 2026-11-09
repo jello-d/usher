@@ -367,5 +367,5 @@ fi
 # is how a renamed package went uncompiled behind a green test. The numbers only
 # have to be low enough never to need touching and high enough to catch a
 # collapse; they are not an inventory.
-[ "$_sh" -ge 7 ] || fail "only $_sh shell file(s): a selector is gone"
+[ "$_sh" -ge 8 ] || fail "only $_sh shell file(s): a selector is gone"
 pass "$_py python, $_sh shell, $_nk tunables, $_nv verbs, $_opc opcodes"

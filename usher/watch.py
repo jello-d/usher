@@ -1248,6 +1248,23 @@ class Watcher:
             try:
                 self._poll_files(seen)
                 cap = self._poll_outputs(cap)
+                # AND THE PROFILE, not just the output NAMES that poll
+                # compares. A desk change that keeps the names is invisible to
+                # it: same connector, same resolution, a DIFFERENT monitor,
+                # which is two docks reached through one port. `hwdp id` is
+                # EDID-derived so it differs, nothing moves, so nothing
+                # dirties the store, so `_capture_once` (the drift detector's
+                # only other caller) is never due: the wrong desk's store
+                # stays loaded AND goes on being written, which is the
+                # cross-contamination the profile binding cannot see because
+                # it only guarantees we write where we LOADED from.
+                #
+                # PRECEDENCE IS THE CAPTURE STEP'S, ordered exactly as it
+                # orders them, so an arriving monitor is laid out before
+                # anything adopts. Costs at most one subprocess per
+                # PROFILE_TTL, which the id cache bounds.
+                if not self._in_transition():
+                    self._profile_drift()
                 self._write_status()
                 pollstreak = 0
             except Exception as e:                         # noqa: BLE001

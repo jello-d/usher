@@ -5891,6 +5891,41 @@ def _t_cli_split(ck):
     # the assertion over an empty list.
     ck("the-thread-targets-were-found", len(_tgts) >= 2)
 
+    # THE DESK MUST BE POLLED BY THE LOOP THAT ALWAYS RUNS, not only by the
+    # capture step. `_poll_outputs` compares output NAMES, so a desk change
+    # that keeps them is invisible to it: same connector, same resolution, a
+    # DIFFERENT monitor, which is two docks reached through one port. Nothing
+    # moves, so nothing dirties the store, so `_capture_once` is never due and
+    # the wrong desk's store stays loaded AND goes on being written. Measured
+    # by test/rigs/dock-profile, which saw nothing noticed in 30s.
+    #
+    # NO SEPARATE VACUITY GUARD, deliberately: a broken scrape yields an
+    # empty list and BOTH assertions below fail loudly, so a third would be
+    # code no plant could catch.
+    _drift_in = sorted(
+        f for f, n in _wfuncs.items()
+        if [c for c in _ast.walk(n) if isinstance(c, _ast.Call)
+            and getattr(c.func, "attr", "") == "_profile_drift"])
+    ck("the-desk-is-polled-and-not-only-captured",
+       "_capture_loop" in _drift_in)
+    # AND THE CAPTURE STEP KEEPS ITS OWN CALL, which is the one that GATES
+    # the capture: noticing promptly and suppressing a mid-change capture are
+    # two jobs, and losing the second writes the collapse into a store.
+    ck("the-capture-step-still-gates-on-the-desk",
+       "_capture_once" in _drift_in)
+    # AND IT YIELDS TO A TRANSITION, ordered exactly as `_capture_once`
+    # orders them, or an arriving monitor is adopted before it is laid out.
+    _yields = False
+    for _n in _ast.walk(_wfuncs["_capture_loop"]):
+        if not isinstance(_n, _ast.If):
+            continue
+        if "_in_transition" not in _ast.unparse(_n.test):
+            continue
+        if [c for c in _ast.walk(_n) if isinstance(c, _ast.Call)
+                and getattr(c.func, "attr", "") == "_profile_drift"]:
+            _yields = True
+    ck("the-desk-poll-yields-to-a-transition", _yields)
+
     # AND THE ESCALATION IS THE CAPTURE STEP'S, not a second policy: log
     # with the streak, and at the limit EXIT so the supervisor does a clean
     # full respawn. A guard that merely continued for ever would trade a
