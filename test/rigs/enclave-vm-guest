@@ -167,21 +167,28 @@ M USHER_AT "$(AS 'command -v usher')"
 # plugins a blank VM has not built: a rig must not fail for a plugin it does
 # not test. `place` with cascade IS included, because racing the compositor's
 # own placer is what the placement read-back exists for.
-install -d -o "$U" -g "$U" "$H/.config"
+# THE NESTED PATH IS THE ONE THE INTEGRATOR DEPLOYS, measured rather than
+# assumed: a provisioned box carries exactly ONE wayfire.ini, at
+# `~/.config/wayfire/wayfire.ini`, with no XDG_CONFIG_HOME and no `-c` in the
+# compositor's argv, and its plugins are plainly loaded. wayfire accepts the
+# un-nested path too, so a rig writing THAT while a deployed file sits at the
+# nested one reports a config it may not be running: write only here, and the
+# answer is the same whichever of the two wayfire prefers.
+WFINI=$H/.config/wayfire/wayfire.ini
+install -d -o "$U" -g "$U" "$H/.config" "$H/.config/wayfire"
 # PREFER THE DEPLOYED ini WHEN IT ALREADY NAMES THE PLUGIN, because a
 # rehearsal rig is a different machine and its plugin list IS the
 # configuration under test: a run against the integrator's own ini measures
 # the real thing, where the minimal one measures a compositor nobody has. Only
 # if the deployed file cannot answer the question is it replaced.
-if [ -f "$H/.config/wayfire.ini" ] \
-   && grep -q "security-context-v1" "$H/.config/wayfire.ini"; then
+if [ -f "$WFINI" ] && grep -q "security-context-v1" "$WFINI"; then
   M WF_SOURCE deployed
 else
-  cp /usr/local/share/enclavevm/wayfire.ini "$H/.config/wayfire.ini"
-  chown "$U:$U" "$H/.config/wayfire.ini"
+  cp /usr/local/share/enclavevm/wayfire.ini "$WFINI"
+  chown "$U:$U" "$WFINI"
   M WF_SOURCE rig-minimal
 fi
-M WF_INI "$(wc -l < "$H/.config/wayfire.ini")"
+M WF_INI "$(wc -l < "$WFINI")"
 
 # THE FOREGROUND VT MUST MATCH THE SESSION'S. greetd runs on vt 7 here and
 # nothing switches VT in a headless guest, so a session started while tty1 is
@@ -278,8 +285,30 @@ if [ "$ENCLAVE_OK" = yes ] && [ -S "$ESOCK" ]; then
   M ENC_HAS_FOOT "$(su "$EACCT" -s /bin/sh -c 'command -v foot' 2>/dev/null \
     || echo MISSING)"
   enclave_win "foot --title $SECRET"
+  # AND A WINDOW A PLUGIN CAN RESOLVE PER WINDOW, which `foot` cannot be and
+  # which is not a shortcoming of either: `source_window_lines` reports
+  # nothing for an app NO plugin claims, deliberately, because one window of
+  # such an app is already completely keyed by its app-id plus this account's
+  # name. So an all-`foot` fixture CANNOT reach the re-capture, and asserting
+  # it there named the product for a thing the fixture could not produce.
+  # kitty is owned by KittyPlugin and resolves to `kitty:<cwd>` out of its
+  # shell's /proc, which is exactly the half the relayed pid exists for.
+  # READ ONCE INTO A VARIABLE, because a marker goes to the serial console and
+  # cannot be read back here: a second `command -v` would be a second fact.
+  _ekit=$(su "$EACCT" -s /bin/sh -c 'command -v kitty' 2>/dev/null) || _ekit=
+  M ENC_HAS_TERM "${_ekit:-MISSING}"
+  [ -n "$_ekit" ] && enclave_win "kitty --title $SECRET"
   sleep 8
   M ENC_PROCS "$(NP -u "$EACCT" foot)"
+  M ENC_PROCS_T "$(NP -u "$EACCT" kitty)"
+  # THE ONE MEASUREMENT THAT SPLITS "the compositor does not publish an
+  # identifier" from "the account's half did not use it". Run as the user,
+  # from a FILE, with the venv's python (the system one has no pywayfire).
+  _pyu=$(dirname "$(readlink -f "$(command -v usher-mgr)")")/python3
+  M ENC_IDENT "$(AS "USHER_TREE=/nonexistent $_pyu \
+/usr/local/share/enclavevm/probe.py 2>/dev/null" | tail -1)"
+  AS "USHER_TREE=/nonexistent $_pyu \
+/usr/local/share/enclavevm/probe.py 2>&1 >/dev/null" | D
 else
   M ENC_PROCS SKIPPED
 fi
@@ -313,7 +342,6 @@ if [ "$ENCLAVE_OK" = yes ]; then
   #    the store, the log, and a report. Each was found separately and the
   #    audit that enumerated them missed the row it did not enumerate, so the
   #    rig asks the same question of each rather than trusting one.
-  M LOG_TAG "$(_count "\[$ENC\]")"
   M LEAK_LOG "$(_count "$SECRET")"
   M LEAK_STORE "$(grep -rl "$SECRET" "$H/.local/state/usher" 2>/dev/null \
     | wc -l | tr -d ' ')"
@@ -359,6 +387,12 @@ M LOGOFF_RETAINED "$(ls -1 "$H/.local/state/usher/logoff" 2>/dev/null \
 # whose absence means the cross-account half of wind-down did nothing.
 M RECAPTURED "$(_count 're-captured with')"
 M ASKED_CAPTURE "$(_count "asked $ENC to capture")"
+# AND THE RATE, from the one place that holds BOTH sides, because `RECAPTURED
+# 0` has two causes and reads as one: the owner relayed no identifier (so the
+# account could not tie a toplevel to a process), or it relayed one and the
+# account made nothing of it. This line reports both counts, so it tells them
+# apart without a second boot.
+M IDENTIFIED "$(sed -n 's/.*window identity, //p' "$LOG" | tail -1)"
 # THE ROSTER IS WRITTEN BY THE ACCOUNT, IN ITS OWN 0700 HOME, which is the
 # whole authority argument: the owner cannot read or forge it, and root here
 # can read it only because a rig is root. Its ROW COUNT is the strong reading,
@@ -413,6 +447,17 @@ else
   M S2_ENC_RETRY SKIPPED
 fi
 M S2_STORE "$(_entries)"
+
+# THE REDACTION TAG IS ASSERTED HERE, not in session 1. A titled log line
+# for a foreign window only exists once one is PLACED or re-graced, and
+# session 1 runs SETTLED on purpose (so the windows are learned where they
+# open), so phase 5 asserted a line that could not yet exist and read 0 over
+# a redaction that works. Session 2 places, so this is the first point the
+# question is answerable.
+if [ "$ENCLAVE_OK" = yes ]; then
+  M LOG_TAG "$(_count "\[$ENC\]")"
+  M LEAK_LOG2 "$(_count "$SECRET")"
+fi
 
 R "===== the verdict: the SCREEN against the PRE-LOGOUT prediction ====="
 AS 'usher verify' > /tmp/evv 2>&1

@@ -127,7 +127,10 @@ INIEOF
     printf '  - path: /usr/local/share/enclavevm/wayfire.ini\n'
     printf '    permissions: "0644"\n    encoding: b64\n'
     printf '    content: %s\n' "$(base64 -w0 "$VM/ev-wayfire.ini")"
-    printf '  - path: /usr/local/share/enclavevm/who\n'
+    printf '  - path: /usr/local/share/enclavevm/probe.py\n'
+  printf '    permissions: "0644"\n    encoding: b64\n'
+  printf '    content: %s\n' "$(base64 -w0 "$HERE/enclave-vm-probe.py")"
+  printf '  - path: /usr/local/share/enclavevm/who\n'
     printf '    permissions: "0600"\n    encoding: b64\n'
     printf '    content: %s\n' "$(base64 -w0 "$VM/ev-who")"
     printf 'runcmd:\n  - [ /usr/local/bin/ev-guest ]\n'
@@ -163,7 +166,9 @@ done
 echo "===== SESSION 1 ====="
 for k in SEEDED_TREES USHER_AT WF_SOURCE WF_INI S1_WAYFIRE S1_DAEMON \
          SOCK_UP \
-         SOCK_UNIT ENC_HAS_FOOT ENC_PROCS S1_LIVE S1_STORE; do
+         SOCK_UNIT ENC_HAS_FOOT ENC_HAS_TERM ENC_PROCS ENC_PROCS_T \
+         ENC_IDENT S1_LIVE \
+         S1_STORE; do
   printf '  %-16s %s\n' "$k" "$(_val "$k")"
 done
 echo "===== THE FOREIGN WINDOW, ON THE OWNER'S SIDE ====="
@@ -173,11 +178,12 @@ for k in KEY_SRC LOG_TAG LEAK_LOG LEAK_STORE LEAK_REPORT LEAK_DOCTOR \
 done
 echo "===== THE LOGOUT ====="
 for k in PREDICTED LOGOFF_RC LOGOFF_CAPTURED LOGOFF_RETAINED ASKED_CAPTURE \
-         RECAPTURED ENC_ROSTER ENC_ROSTER_N S1_ENDED; do
+         IDENTIFIED RECAPTURED ENC_ROSTER ENC_ROSTER_N S1_ENDED; do
   printf '  %-16s %s\n' "$k" "$(_val "$k")"
 done
 echo "===== SESSION 2 ====="
 for k in S2_WAYFIRE S2_SOCK S2_ASKED S2_LAUNCHED S2_PLACED S2_ENC_PROCS \
+         LOG_TAG LEAK_LOG2 \
          S2_ENC_RETRY S2_STORE VERIFY VERIFY_RC; do
   printf '  %-16s %s\n' "$k" "$(_val "$k")"
 done
@@ -281,9 +287,24 @@ for _s in LEAK_LOG LEAK_STORE LEAK_REPORT LEAK_DOCTOR; do
     ($(_val "$_s") hit(s))" ;;
   esac
 done
-case "$(_val RECAPTURED)" in
-  ""|0) _add "no re-capture at logoff, so the identities the logoff asked for
-    never reached the store (this line has never run anywhere)" ;;
+# THE RE-CAPTURE IS ASKED ONLY WHERE THE FIXTURE CAN PRODUCE IT, which is
+# this rig's own correction rather than a softened bar. `source_window_lines`
+# reports nothing for an app NO plugin claims, deliberately, so an enclave
+# running only `foot` has no per-window identity to report and the re-capture
+# correctly does not fire: asserting it there named the product for something
+# the fixture could not reach. `IDENTIFIED` is printed either way and is what
+# tells the two apart without a probe.
+case "$(_val ENC_HAS_TERM)" in
+  MISSING|"")
+    echo "NOTE: that account has no kitty, so no window of it resolves to a"
+    echo "  per-window identity and the re-capture cannot be exercised."
+    echo "  The rest of the chain is asserted; this one row is not." ;;
+  *)
+    case "$(_val RECAPTURED)" in
+      ""|0) _add "no re-capture at logoff, so the identities the logoff
+    asked for never reached the store. IDENTIFIED says which half:
+    '$(_val IDENTIFIED)'" ;;
+    esac ;;
 esac
 case "$(_val ASKED_CAPTURE)" in
   ""|0) _add "the logoff never asked the source to capture" ;;

@@ -54,6 +54,7 @@ _compile_group providers 1 "$HERE/share/providers"/*
 # months. A bare glob with the `-f` guard above skips the directories and the
 # `*.t` files the shell sweep already covers.
 _compile_group helpers   1 "$HERE/test"/no-provider-vocabulary
+_compile_group rigs      1 "$HERE/test/rigs"/*.py
 _sh=0
 # AND THE RIGS, GLOBBED rather than listed, so one written next month is
 # covered the day it exists. A rig is not run by `test/run` (it starts a
@@ -64,6 +65,10 @@ for _f in "$HERE/setup.sh" "$HERE/indicator/setup.sh" "$HERE/test/run" \
           "$HERE/test/harness_lib" "$HERE/.githooks/pre-commit" \
           "$HERE/share/hooks"/* "$HERE/test/rigs"/*; do
   [ -f "$_f" ] || continue
+  # A RIG MAY SHIP A PYTHON PROBE, and this sweep is the SHELL one: dash would
+  # read a docstring as a command. Dispatched on the suffix rather than
+  # listed, so the python group below is the one that compiles it.
+  case $_f in *.py) continue ;; esac
   _sh=$((_sh + 1))
   { dash -n "$_f" 2>/dev/null || sh -n "$_f" 2>/dev/null; } \
     || { echo "  sh: $_f" >&2; _bad=1; }

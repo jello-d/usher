@@ -83,10 +83,18 @@ M USHER_AT "$(AS 'command -v usher')"
 # third-party plugins a blank VM has not built, and a rig must not fail for a
 # plugin it does not test. `place` IS included, with cascade, because racing
 # the compositor's own placer is the thing the placement read-back exists for.
-install -d -o "$U" -g "$U" "$H/.config"
-cp /usr/local/share/roundtrip/wayfire.ini "$H/.config/wayfire.ini"
-chown "$U:$U" "$H/.config/wayfire.ini"
-M WF_INI "$(wc -l < "$H/.config/wayfire.ini")"
+# AT THE NESTED PATH, which is the one the integrator deploys: a provisioned
+# box carries exactly ONE wayfire.ini, at `~/.config/wayfire/wayfire.ini`,
+# with no XDG_CONFIG_HOME and no `-c` in the compositor's argv. wayfire
+# accepts the un-nested path too, so writing THERE while a deployed file sits
+# at the nested one leaves the rig measuring a config it did not write, and
+# saying nothing about it. Writing only here is right whichever of the two
+# wayfire prefers. (The base has had none for this user; a base rebuilt from
+# a current tree may, which is what makes the path matter now.)
+install -d -o "$U" -g "$U" "$H/.config" "$H/.config/wayfire"
+cp /usr/local/share/roundtrip/wayfire.ini "$H/.config/wayfire/wayfire.ini"
+chown "$U:$U" "$H/.config/wayfire/wayfire.ini"
+M WF_INI "$(wc -l < "$H/.config/wayfire/wayfire.ini")"
 
 # THE FOREGROUND VT MUST MATCH THE SESSION'S. greetd runs on vt 7 here, and
 # nothing switches VT in a headless guest, so a session started while tty1 is
