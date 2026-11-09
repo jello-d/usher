@@ -1,0 +1,190 @@
+#!/bin/sh
+# roundtrip-vm - does a layout survive a REAL logout and login?
+#
+# RUN BY HAND, not by test/run: it boots a VM, logs in twice and takes several
+# minutes.
+#
+# WHY A VM AND NOT THE NESTED RIG: the nested compositor can create and
+# destroy outputs, drive a stub hwdp and place real windows, and it cannot
+# give a SESSION BOUNDARY. Everything in usher that runs exactly once per
+# login lives on the other side of that boundary:
+#
+#     wind-down          capture, stop the watcher, release the apps
+#     retain_logoff      the pre-logoff pair the forensics depend on
+#     launch_missing     the relaunch, per command and per app
+#     the restore        place mode, the read-back, the store-changed recheck
+#
+# None of it has ever been exercised with ASSERTIONS. Every statement these
+# notes make about a login is a reading of watch.log after the user logged in,
+# which is evidence and is not a test.
+#
+# WHAT A VM CANNOT DO, measured rather than assumed, so a pass is not read as
+# more than it is:
+#   - DISPLAY PERMUTATIONS. qemu's virtio-gpu reports NO EDID in either
+#     `-display none` or `-display egl-headless`, so hwdp has nothing to hash
+#     (`id --panels` yields no pairs and `shape` says `single` over two
+#     connected outputs), and `virtio-gpu-pci` does not support hotplugging,
+#     so the ATTACHED set cannot change at all. test/rigs/dock-profile covers
+#     usher's half of a dock with a stub hwdp instead.
+#   - THE ENCLAVE. The provisioned base carries no severance and no second
+#     account, so another account's windows cannot be round-tripped here. That
+#     wants a base rebuilt from a current tree, where the severance pin is
+#     ungated and would install.
+#
+# IT RUNS ON tackup-vmcheck's PROVISIONED DISK as a COW overlay, so the base
+# is never written and one expensive provision supports many runs. usher is a
+# consumer of that artifact exactly as this fleet's other checks are.
+#
+#   test/rigs/roundtrip-vm [scratch-dir]      (default /var/tmp/tackupvm)
+#
+# Watch it live: tail -f <scratch>/rt-console.log
+set -eu
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+TREE=$(cd "$HERE/../.." && pwd)
+VM=${1:-/var/tmp/tackupvm}
+BASE=$VM/tackup.qcow2
+U=${RT_USER:-jello}
+PW=${RT_PASS:-roundtrip123}
+
+_die() { echo "roundtrip-vm: $*" >&2; exit 1; }
+
+[ -f "$BASE" ] || _die "no provisioned disk at $BASE;
+  tackup's test/vm/tackup-vmcheck builds it, and this rig only reads it"
+command -v qemu-system-x86_64 >/dev/null 2>&1 || _die "qemu missing"
+command -v xorriso >/dev/null 2>&1 || _die "xorriso missing"
+[ -f "$HERE/roundtrip-vm-guest" ] || _die "the guest half is missing"
+
+C=$VM/rt-console.log
+rm -f "$C" "$VM/rt.qcow2" "$VM/rt-seed.iso"
+
+# ---------------------------------------------------------------- the seed
+# EVERY PAYLOAD IS A FILE, base64-encoded by cloud-init, so there is no guest
+# heredoc anywhere and therefore none of the host-side backtick execution this
+# fleet's other VM checks have to guard against by hand.
+echo "== seed: current usher, a minimal wayfire.ini, and the credentials =="
+rm -rf "$VM/rt-seed"
+mkdir -p "$VM/rt-seed"
+printf 'instance-id: rt-%s\nlocal-hostname: tackuptest\n' "$(date +%s)" \
+  > "$VM/rt-seed/meta-data"
+
+# THE CODE UNDER TEST, as a tarball of the payload's python ALONE. The base is
+# weeks old, so without this the rig measures the base's usher and reports it
+# as today's; and the *.py set is exactly what the deploy digest compares on a
+# real box, so seeding it is the same claim a provision makes.
+tar czf "$VM/rt-usher-py.tgz" -C "$TREE" $(cd "$TREE" && ls usher/*.py)
+
+# A MINIMAL ini, with its reasons in the guest script. `place` with cascade is
+# included on purpose: the compositor's own placer is what the placement
+# read-back exists to survive.
+cat > "$VM/rt-wayfire.ini" <<'INIEOF'
+[core]
+plugins = ipc ipc-rules stipc place autostart
+vwidth = 3
+vheight = 3
+close_top_view = none
+[place]
+mode = cascade
+[autostart]
+autostart_wf_shell = false
+0_environment = dbus-update-activation-environment --systemd \
+    WAYLAND_DISPLAY WAYFIRE_SOCKET XDG_SESSION_TYPE
+session_restore = usher-mgr watch
+[input]
+xkb_layout = us
+INIEOF
+
+printf '%s\n%s\n' "$U" "$PW" > "$VM/rt-who"
+
+{
+  printf '#cloud-config\n'
+  printf 'write_files:\n'
+  printf '  - path: /usr/local/bin/rt-guest\n'
+  printf '    permissions: "0755"\n    encoding: b64\n'
+  printf '    content: %s\n' "$(base64 -w0 "$HERE/roundtrip-vm-guest")"
+  printf '  - path: /usr/local/share/roundtrip/usher-py.tgz\n'
+  printf '    permissions: "0644"\n    encoding: b64\n'
+  printf '    content: %s\n' "$(base64 -w0 "$VM/rt-usher-py.tgz")"
+  printf '  - path: /usr/local/share/roundtrip/wayfire.ini\n'
+  printf '    permissions: "0644"\n    encoding: b64\n'
+  printf '    content: %s\n' "$(base64 -w0 "$VM/rt-wayfire.ini")"
+  printf '  - path: /usr/local/share/roundtrip/who\n'
+  printf '    permissions: "0600"\n    encoding: b64\n'
+  printf '    content: %s\n' "$(base64 -w0 "$VM/rt-who")"
+  printf 'runcmd:\n  - [ /usr/local/bin/rt-guest ]\n'
+} > "$VM/rt-seed/user-data"
+xorriso -as mkisofs -R -J -V CIDATA -o "$VM/rt-seed.iso" \
+  "$VM/rt-seed/user-data" "$VM/rt-seed/meta-data" >/dev/null 2>&1
+
+echo "== COW overlay on the provisioned base (base stays untouched) =="
+qemu-img create -q -f qcow2 -F qcow2 -b "$BASE" "$VM/rt.qcow2" 60G
+
+echo "== boot: two logins, so this takes a few minutes =="
+echo "   live: tail -f $C"
+timeout "${RT_TIMEOUT:-2400}" qemu-system-x86_64 -enable-kvm \
+  -m "${RT_MEM:-6144}" -smp "${RT_SMP:-6}" -cpu host \
+  -drive file="$VM/rt.qcow2",if=virtio,format=qcow2 \
+  -drive file="$VM/rt-seed.iso",if=virtio,format=raw \
+  -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+  -device virtio-vga,edid=on,xres=2880,yres=1800 \
+  -display none -serial file:"$C" -monitor none -no-reboot || true
+
+# NOT anchored at line start: the guest's serial is shared with a getty, so a
+# marker arrives as "tackuptest login: RT_FOO=bar".
+_val() { sed -n "s/.*RT_$1=//p" "$C" 2>/dev/null | tail -1 | tr -d '\r'; }
+
+echo ""
+echo "===== THE ROUND TRIP ====="
+printf '  %-20s %s\n' "seeded usher .py" "$(_val SEEDED_PY)"
+printf '  %-20s %s\n' "usher at" "$(_val USHER_AT)"
+printf '  %-20s %s\n' "wayfire.ini lines" "$(_val WF_INI)"
+printf '  %-20s %s\n' "foreground VT" "$(_val FG_VT)"
+echo "  -- session 1 --"
+for k in S1_WAYFIRE S1_DAEMON S1_WATCHING S1_LIVE S1_STORE S1_DRYRUN \
+         PREDICTED; do
+  printf '  %-20s %s\n' "$k" "$(_val "$k")"
+done
+echo "  -- the logout --"
+for k in LOGOFF_RC LOGOFF_CAPTURED LOGOFF_RETAINED RECAPTURED S1_ENDED; do
+  printf '  %-20s %s\n' "$k" "$(_val "$k")"
+done
+echo "  -- session 2 --"
+for k in S2_WAYFIRE S2_LAUNCHED S2_PLACED S2_STORE VERIFY VERIFY_RC; do
+  printf '  %-20s %s\n' "$k" "$(_val "$k")"
+done
+printf '  %-20s %s\n' "RESULT" "$(_val RESULT)"
+
+_v=$(_val VERIFY)
+_rc=$(_val VERIFY_RC)
+_ok=$(printf '%s' "$_v" | sed -n 's/^\([0-9]*\) ok.*/\1/p')
+_pred=$(_val PREDICTED)
+echo ""
+if [ "$(_val RESULT)" != done ]; then
+  echo "RIG INCONCLUSIVE: the guest did not finish (see $C)"
+  exit 2
+fi
+# A VACUITY FLOOR, and it is the fix that matters most here: `0 ok, 0 wrong,
+# 0 gone` is what a session where NOTHING was learned and NOTHING placed
+# reports, and the first version of this verdict matched it as a PASS. Placing
+# 0 of 0 windows is a green run that proves nothing, which is the shape this
+# fleet's VM asks already name. The rig opens three windows deliberately, so
+# three is the honest floor.
+if [ "${_ok:-0}" -lt 3 ]; then
+  echo "RIG INCONCLUSIVE: only ${_ok:-0} window(s) verified, so this run"
+  echo "            measured nothing (verify: ${_v:-nothing reported})"
+  exit 2
+fi
+# AND THE TWO HALVES MUST AGREE: the prediction is the reference, so a verdict
+# that accounts for fewer rows than were predicted is a partial answer wearing
+# a clean one.
+if [ -n "$_pred" ] && [ "$_ok" != "$_pred" ]; then
+  echo "RIG FAILED: $_ok verified of $_pred predicted ($_v, rc $_rc)"
+  exit 1
+fi
+case "$_v" in
+  *"0 wrong, 0 gone"*) echo "RIG PASSED: the layout survived a real logout"
+                       echo "            and login ($_v, rc $_rc)" ;;
+  *)                   echo "RIG FAILED: $_v (rc $_rc)"; exit 1 ;;
+esac
+rm -f "$VM/rt.qcow2" "$VM/rt-seed.iso" "$VM/rt-usher-py.tgz" \
+  "$VM/rt-wayfire.ini" "$VM/rt-who"

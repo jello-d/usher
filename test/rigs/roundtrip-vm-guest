@@ -1,0 +1,219 @@
+#!/bin/sh
+# The guest half of roundtrip-vm. Runs as root via cloud-init runcmd.
+#
+# Output goes to /dev/ttyS0 and NOT /dev/console: a provisioned box has moved
+# its kernel console off serial, so a write to /dev/console reaches tty0 and
+# the host's file stays empty, which looks exactly like a guest that never
+# booted.
+#
+# NO INTERPOLATION ANYWHERE IN THIS FILE, which is why it is its own file
+# rather than a heredoc in the driver: this fleet's VM checks carry a hard
+# guard against a backtick inside an unquoted guest heredoc, because such a
+# backtick runs on the HOST, comment lines included. A separate file that the
+# seed delivers base64-encoded cannot have that class of fault at all.
+set -u
+
+# THE GUEST'S STDERR GOES TO THE SERIAL, which is the diagnostic that would
+# have answered a wedged run in one read. cloud-init captures runcmd stderr to
+# its OWN log inside the guest, so a fatal shell error here is silent: the
+# script stops, the box never powers off, and the host sees only a VM running
+# to its timeout. One line, and any error names its own line number.
+exec 2>/dev/ttyS0
+
+M() { printf 'RT_%s=%s\n' "$1" "$2" > /dev/ttyS0 2>&1; }
+R() { printf 'RT: %s\n' "$*" > /dev/ttyS0 2>&1; }
+D() { sed 's/^/RT| /' > /dev/ttyS0 2>&1; }
+
+# The driver writes these; nothing here is interpolated.
+U=$(sed -n 1p /usr/local/share/roundtrip/who)
+PW=$(sed -n 2p /usr/local/share/roundtrip/who)
+UID_=$(id -u "$U")
+H=/home/$U
+LOG=$H/.local/state/usher/watch.log
+
+# WAYLAND_DISPLAY IS LOAD-BEARING AND IS RESOLVED AT CALL TIME, not when this
+# function is defined: without it a spawned kitty cannot reach the compositor
+# and dies instantly, whose ONLY symptom is `[kitty] <defunct>` beside a
+# cheerful launch line. That is the single most expensive trap in this
+# package's own notes, and a rig that hit it would report a product failure.
+# The session does not exist when this is defined, so the globs run per call.
+AS() {
+  _wd=$(basename "$(ls -1 /run/user/"$UID_"/wayland-? 2>/dev/null \
+    | head -1)" 2>/dev/null)
+  _wfs=$(ls -1 /run/user/"$UID_"/wayfire-*.socket 2>/dev/null | head -1)
+  su "$U" -c "PATH=$H/.local/bin:/usr/local/bin:/usr/bin:/bin \
+XDG_RUNTIME_DIR=/run/user/$UID_ \
+WAYLAND_DISPLAY=${_wd:-wayland-1} \
+WAYFIRE_SOCKET=${_wfs:-} \
+DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$UID_/bus $1" 2>&1
+}
+NP() { _n=$(pgrep -c "$@" 2>/dev/null) || _n=0; printf '%s' "${_n:-0}"; }
+
+# `grep -c` PRINTS ITS COUNT AND STILL EXITS 1 WHEN THE COUNT IS ZERO, so the
+# obvious `grep -c ... || echo 0` answers TWICE and yields "0 0". Used in
+# arithmetic that is a syntax error, which killed this rig's guest silently.
+# A missing file is different again: grep prints NOTHING and exits 2.
+_count() {
+  _c=$(grep -c "$1" "$LOG" 2>/dev/null) || :
+  printf '%s' "${_c:-0}"
+}
+
+printf '%s:%s\n' "$U" "$PW" | chpasswd
+
+# ---------------------------------------------- the code under test
+# CURRENT usher INTO THE EXISTING per-user venv. The provisioned base is weeks
+# old, so without this the rig would measure the base's usher and report it as
+# today's. Replacing the payload's *.py needs no pip and no network, and that
+# file set is exactly what the fleet's deploy digest compares.
+_sp=$(echo "$H"/.local/share/usher/venv/lib/python*/site-packages/usher)
+if [ -d "$_sp" ]; then
+  tar xzf /usr/local/share/roundtrip/usher-py.tgz -C /tmp
+  cp /tmp/usher/*.py "$_sp"/
+  chown -R "$U:$U" "$_sp"
+  rm -rf /tmp/usher
+  M SEEDED_PY "$(ls -1 "$_sp"/*.py | wc -l)"
+else
+  M SEEDED_PY NO-VENV
+fi
+M USHER_AT "$(AS 'command -v usher')"
+
+# A MINIMAL wayfire.ini, because the base has none for this user and without
+# one there is no ipc plugin (hence no WAYFIRE_SOCKET) and no autostart (hence
+# no daemon). DELIBERATELY NOT the integrator's 951-line file: that names
+# third-party plugins a blank VM has not built, and a rig must not fail for a
+# plugin it does not test. `place` IS included, with cascade, because racing
+# the compositor's own placer is the thing the placement read-back exists for.
+install -d -o "$U" -g "$U" "$H/.config"
+cp /usr/local/share/roundtrip/wayfire.ini "$H/.config/wayfire.ini"
+chown "$U:$U" "$H/.config/wayfire.ini"
+M WF_INI "$(wc -l < "$H/.config/wayfire.ini")"
+
+# THE FOREGROUND VT MUST MATCH THE SESSION'S. greetd runs on vt 7 here, and
+# nothing switches VT in a headless guest, so a session started while tty1 is
+# foreground is one some tools cannot find.
+chvt 7 2>/dev/null || true
+M FG_VT "$(cat /sys/class/tty/tty0/active 2>/dev/null)"
+
+login() {
+  _i=0
+  while [ "$_i" -lt 60 ]; do
+    [ "$(NP -f regreet)" != 0 ] && break
+    _i=$((_i + 2)); sleep 2
+  done
+  printf '%s\n%s\n' "$PW" "$PW" | SUDO_UID="$UID_" SUDO_USER="$U" \
+    /usr/local/libexec/usher-greetd --session Wayfire 2>&1 \
+    | grep -vE 'GetPassWarning|fallback_getpass|echoed' | tail -3 | D
+  _i=0
+  while [ "$_i" -lt 90 ]; do
+    [ "$(NP -f 'opt/wayfire/bin/wayfire')" != 0 ] && break
+    _i=$((_i + 3)); sleep 3
+  done
+  _i=0
+  while [ "$_i" -lt 60 ]; do
+    grep -q 'watching,' "$LOG" 2>/dev/null && break
+    _i=$((_i + 2)); sleep 2
+  done
+}
+
+# DOCTOR'S OWN WORDING, read from the code rather than guessed: it prints
+# `knowledge    N entries`, and a sed for `store: N` silently answered EMPTY
+# for a whole run, which is how a marker comes to teach a reader nothing.
+_entries() { AS 'usher doctor' \
+  | sed -n 's/^ *knowledge  *\([0-9]*\) entr.*/\1/p' | head -1; }
+
+# =============================== SESSION ONE ===============================
+R "===== session 1: login ====="
+login
+M S1_WAYFIRE "$(NP -f 'opt/wayfire/bin/wayfire')"
+M S1_DAEMON "$(NP -f 'usher-mgr')"
+M S1_WATCHING "$(_count 'watching,')"
+[ "$(NP -f 'opt/wayfire/bin/wayfire')" = 0 ] && {
+  R "no compositor; the rest cannot run"
+  tail -20 "$LOG" 2>/dev/null | D
+  M RESULT no-session
+  sync
+  poweroff -f
+}
+
+# SETTLED, NOT PLACE, FOR THE FIRST SESSION, and the reason is a documented
+# trap rather than impatience: a fresh login arms PLACE mode, and a window the
+# placer has not reached is HELD out of the store until map + PLACE_GRACE
+# (120s). With an empty store nothing can be placed, so every window would sit
+# unlearned for two minutes and a rig that read the store sooner would report
+# a capture failure that is the hold working. Settled grants no grace, so the
+# windows are learned where they open, which is exactly the layout this round
+# trip is about.
+AS 'usher settle' | tail -1 | D
+
+R "===== session 1: open windows ====="
+mkdir -p "$H/rtA" "$H/rtB"
+chown "$U:$U" "$H/rtA" "$H/rtB"
+AS "setsid kitty --directory $H/rtA >/dev/null 2>&1 &" >/dev/null
+sleep 4
+AS "setsid kitty --directory $H/rtB >/dev/null 2>&1 &" >/dev/null
+sleep 4
+AS 'setsid foot >/dev/null 2>&1 &' >/dev/null
+sleep 8
+M S1_LIVE "$(AS 'usher doctor' | sed -n 's/^ *live  *//p' | head -1)"
+
+# WAIT FOR THE STORE TO HOLD THEM, because capture is EVENT-DRIVEN: a rig
+# that reads the store at a fixed time reads whatever the last event left.
+_i=0
+while [ "$_i" -lt 40 ]; do
+  [ "$(_entries)" != "" ] && [ "$(_entries)" -ge 3 ] && break
+  _i=$((_i + 2)); sleep 2
+done
+M S1_STORE "$(_entries)"
+M S1_DRYRUN "$(AS 'usher restore --dry-run' \
+  | sed -n 's/^matched/matched/p' | head -1)"
+
+R "===== session 1: the reference, taken BEFORE the logout ====="
+AS 'usher predict' | tail -2 | D
+M PREDICTED "$(AS 'usher predict' \
+  | sed -n 's/^predicted \([0-9]*\) window.*/\1/p' | head -1)"
+
+R "===== session 1: cleanly logoff ====="
+# NO PIPE BETWEEN THE COMMAND AND ITS STATUS: `cmd | tail` then `$?` is
+# TAIL's status, which is always 0. These notes call that the single most
+# repeated measurement error in this tree, and it was in this rig.
+AS 'usher cleanly logoff' > /tmp/rtl 2>&1
+M LOGOFF_RC "$?"
+tail -6 /tmp/rtl | D
+_i=0
+while [ "$_i" -lt 90 ]; do
+  [ "$(NP -f 'opt/wayfire/bin/wayfire')" = 0 ] && break
+  _i=$((_i + 3)); sleep 3
+done
+M S1_ENDED "$([ "$(NP -f 'opt/wayfire/bin/wayfire')" = 0 ] && echo yes \
+  || echo STILL-UP)"
+M LOGOFF_CAPTURED "$(_count 'wind-down captured')"
+M LOGOFF_RETAINED "$(ls -1 "$H/.local/state/usher/logoff" 2>/dev/null \
+  | tr '\n' ' ')"
+M RECAPTURED "$(_count 're-captured with')"
+
+# =============================== SESSION TWO ===============================
+R "===== session 2: login, and the restore ====="
+# A LEADING SPACE, because `placed ` also matches `init-placed 0 window(s)`
+# and the first run reported 4 placements for 3.
+_before=$(_count ' placed ')
+login
+M S2_WAYFIRE "$(NP -f 'opt/wayfire/bin/wayfire')"
+# GIVE THE RELAUNCH AND THE PLACER TIME, bounded: the measured restore reaches
+# its last placement in seconds, and PLACE_VERIFY's budget is ~6s on top.
+sleep 45
+M S2_LAUNCHED "$(_count ' launch  ')"
+M S2_PLACED "$(( $(_count ' placed ') - _before ))"
+M S2_STORE "$(_entries)"
+
+R "===== the verdict: the SCREEN against the PRE-LOGOUT prediction ====="
+AS 'usher verify' > /tmp/rtv 2>&1
+M VERIFY_RC "$?"
+sed 's/^/RT| /' /tmp/rtv > /dev/ttyS0 2>&1
+M VERIFY "$(sed -n 's/^verify: //p' /tmp/rtv | head -1)"
+
+R "===== the whole usher log ====="
+sed 's/^/RT| /' "$LOG" > /dev/ttyS0 2>&1
+
+M RESULT done
+sync
+poweroff -f
