@@ -119,8 +119,18 @@ service() {
   mkdir -p "$UNIT_DIR"
   install -m 0644 "$PKG_DIR/$UNIT" "$UNIT_DIR/$UNIT"
   systemctl --user daemon-reload 2>/dev/null || true
+  # DISABLE BEFORE ENABLE, because `enable` only ADDS the links the unit
+  # declares and removes none. When this unit moved from default.target to
+  # graphical-session.target the old `default.target.wants` symlink stayed,
+  # so the tray went on being pulled up at BOOT and the move was a silent
+  # no-op on every already-installed box. A rename must remove what it
+  # replaced, and here the thing replaced is an enable link rather than a
+  # file. Not `--now`: that would stop the tray mid-provision.
+  systemctl --user disable "$UNIT" 2>/dev/null || true
   systemctl --user enable "$UNIT" 2>/dev/null || true
-  # restart (not just enable --now) so a re-run picks up a unit/code change; a
+  # restart (not just enable --now) so a re-run picks up a unit/code change,
+  # AND so a box whose session predates the graphical-session.target wiring
+  # keeps its tray until the next login rather than losing it to this move; a
   # headless install (no user bus yet) falls through to the next login.
   systemctl --user restart "$UNIT" 2>/dev/null || true
   echo "$APP: service $UNIT installed + enabled"
@@ -154,6 +164,15 @@ check() {
   _st=$(systemctl --user is-enabled "$UNIT" 2>/dev/null || true)
   if [ "$_st" = enabled ]; then ok "$UNIT enabled"
   else bad "$UNIT not enabled (${_st:-unknown})"; fi
+  # AND A STEP AN INSTALL CAN MAKE MUST BE A STEP A CHECK CAN SEE. The move
+  # off default.target is invisible otherwise: `enable` leaves the old wants
+  # link, so a box that has never re-run this would read fully enabled while
+  # still being pulled up at boot by the target this unit no longer names.
+  if [ -e "$UNIT_DIR/default.target.wants/$UNIT" ] \
+  || [ -L "$UNIT_DIR/default.target.wants/$UNIT" ]
+  then bad "$UNIT is still wanted by default.target:" \
+           "re-run \`setup.sh indicator install\` to retire that link"
+  else ok "no stale default.target enable link"; fi
   return "$RC"
 }
 

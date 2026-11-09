@@ -1,16 +1,54 @@
 [Unit]
 Description=usher-indicator: SNI tray icon for window-placement mode
-After=default.target
+
+# THE GRAPHICAL SESSION, NOT default.target, and the reason is not tidiness.
+# This user LINGERS (so the ssh agent survives the last logout), so under
+# default.target the tray ran from BOOT: a tray process, drawing nothing,
+# on a box nobody has logged into. Measured on manifestor, where
+# usher-indicator read `active` while graphical-session.target read
+# `inactive`.
+#
+# IT IS HARMLESS THERE AND STILL WRONG: with no StatusNotifierHost it waits
+# and renders grey `down`, so the cost is a process rather than a fault. The
+# shape comes from uwsm's own examples/waybar.service, which is the upstream
+# pattern for a session-scoped GUI helper.
+#
+# THE PRECONDITION IS A LOGIN AFTER THE CONFIG LANDED, because nothing
+# systemd-managed brings graphical-session.target up on its own here:
+# wayfire.ini's `1_session` autostart entry starts wayfire-session.target,
+# which BindsTo it. A session older than that line has the target INACTIVE
+# (manifestor: compositor 2026-10-28, ini 2026-11-02), and a unit wanted by
+# an inactive target does not start. The installer's `systemctl --user
+# restart` covers the gap on a box in that state, and the next login makes it
+# moot.
+After=graphical-session.target
+
+# STOPPED WITH THE SESSION, which is right for a PRESENTER and would be
+# wrong for the daemon: `cleanly logoff` captures the layout as its FIRST
+# step, so a usher-mgr unit torn down with this target would lose it. The
+# tray has nothing to save. See the notes on why usher-mgr is not a unit.
+PartOf=graphical-session.target
 
 [Service]
+# Type=exec rather than the default simple: it reports a missing or
+# unrunnable ExecStart as a START FAILURE instead of a silent success, which
+# is the whole difference on a venv console script whose interpreter path is
+# baked in and can be left dangling by a prefix move.
+Type=exec
+Slice=app-graphical.slice
+
 # The console script installed by usher's indicator setup.sh (a venv script at
 # ~/.local/bin/usher-indicator). A --user service inherits no login PATH, so
 # name ~/.local/bin explicitly, because the indicator shells `usher toggle` (the
-# CLI, also there) on a left-click.
+# CLI, which is in /usr/local/bin once the core is machine-wide) on a click.
 Environment=PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/.local/bin/usher-indicator
-Restart=always
+
+# on-failure, NEVER always, which is this fleet's rule for a session unit and
+# differs from `always` only on a CLEAN exit. A clean exit here means it was
+# asked to stop, and bringing it back then is how a teardown gets fought.
+Restart=on-failure
 RestartSec=2
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target

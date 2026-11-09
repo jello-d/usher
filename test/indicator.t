@@ -115,6 +115,80 @@ grep -qx -- "$RO" "$T/pip.log" \
 [ -z "$(ls -a "$RO" | grep -E 'egg-info|^build$')" ] \
   || fail "the install wrote build detritus into the source"
 
+# --- THE UNIT'S LIFETIME, AND THE ENABLE LINK IT REPLACED ------------------
+# THE TRAY IS A SESSION HELPER, so it belongs to graphical-session.target and
+# not to default.target. Under default.target it ran from BOOT, because this
+# user lingers: a tray process on a box nobody has logged into. Measured on
+# manifestor, where it read `active` while graphical-session.target read
+# `inactive`.
+grep -q '^WantedBy=graphical-session.target$' \
+  "$HERE/indicator/$APP.service" \
+  || fail "the unit is not wanted by graphical-session.target"
+# ANCHORED ON A DIRECTIVE, not on the word: the unit's own comments explain
+# why it MOVED OFF default.target, so a bare substring test fails over
+# correct prose. A blanket substring sees too much as easily as a word
+# boundary sees too little, which this tree records in both directions.
+grep -qE '^(WantedBy|After|PartOf|Requires|BindsTo)=.*default\.target' \
+  "$HERE/indicator/$APP.service" \
+  && fail "a unit directive still names default.target"
+grep -q '^Restart=on-failure$' "$HERE/indicator/$APP.service" \
+  || fail "the unit does not use Restart=on-failure"
+# AND IT STOPS WITH THE SESSION. WantedBy alone only STARTS it; PartOf is
+# what propagates the stop, so without it the tray outlives the logout and
+# the move buys half of what it is for. Right for a PRESENTER and wrong for
+# the daemon, whose capture is the FIRST step of a clean logoff.
+grep -q '^PartOf=graphical-session.target$' \
+  "$HERE/indicator/$APP.service" \
+  || fail "the unit does not stop with graphical-session.target"
+
+# AND THE MOVE IS A SILENT NO-OP WITHOUT RETIRING THE OLD ENABLE LINK, which
+# is the half that would have shipped: `systemctl enable` only ADDS the links
+# a unit declares and removes none, so the stale `default.target.wants` symlink
+# goes on pulling the tray up at boot while `is-enabled` reads `enabled` and
+# everything looks done. A rename must remove what it replaced, and here the
+# thing replaced is an enable link rather than a file.
+grep -q 'disable "\$UNIT"' "$HERE/indicator/setup.sh" \
+  || fail "service() does not retire the old enable link before enabling"
+
+# ...AND A STEP AN INSTALL CAN MAKE MUST BE A STEP check CAN SEE. Driven with
+# a PLANTED stale link in a sandboxed unit dir, plus the control: this must
+# not fire when there is no such link, or it is a check nobody can satisfy.
+_uc=$T/unitcfg; mkdir -p "$_uc/systemd/user/default.target.wants"
+_chk() {  # indicator check, with the unit dir sandboxed under $_uc
+  env HOME="$H" UI_BIN="$T/sand/bin" XDG_DATA_HOME="$T/sand/share" \
+    XDG_CONFIG_HOME="$_uc" NO_COLOR=1 \
+    sh "$HERE/indicator/setup.sh" check 2>&1
+}
+# THE TARGET HAS TO EXIST FOR THIS CASE TO BE THE RESOLVING ONE. The first
+# version linked to a unit file the sandbox did not have, so this case was
+# ITSELF dangling and the `-e`-only plant was caught here rather than by the
+# dangling case below: three cases, two of them the same. The plant is what
+# said so.
+: > "$_uc/systemd/user/$APP.service"
+ln -sfn "$_uc/systemd/user/$APP.service" \
+  "$_uc/systemd/user/default.target.wants/$APP.service"
+case $(_chk) in
+  *"still wanted by default.target"*) : ;;
+  *) fail "check passed over a stale default.target enable link" ;;
+esac
+rm -f "$_uc/systemd/user/default.target.wants/$APP.service"
+case $(_chk) in
+  *"still wanted by default.target"*)
+    fail "check reports a stale enable link that is not there" ;;
+  *) : ;;
+esac
+# A DANGLING LINK COUNTS TOO: `-e` follows the symlink, so a wants link whose
+# target does not exist yet is INVISIBLE to `-e` alone and that is exactly
+# the shape an uninstalled-then-reinstalled box leaves. `-e` AND `-L`, the
+# pair `_user_copies` already tests for the same reason.
+ln -sfn /nonexistent/usher-indicator.service \
+  "$_uc/systemd/user/default.target.wants/$APP.service"
+case $(_chk) in
+  *"still wanted by default.target"*) : ;;
+  *) fail "check passed over a DANGLING stale enable link" ;;
+esac
+rm -f "$_uc/systemd/user/default.target.wants/$APP.service"
+
 # --- THE READER'S OWN TABLE ------------------------------------------------
 # `read_status` is this package's ONE contract with the daemon and it decides
 # whether the tray draws at all: everything it cannot understand reads as
