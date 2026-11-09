@@ -2974,6 +2974,15 @@ def load_knowledge(profile=None):
         # placement is believable against the desk it was RECORDED on. An
         # older snapshot that carries none concludes nothing, which is the
         # fail-safe reading unreadable_placement already takes.
+        #
+        # AND IT COLLECTS NO REFUSALS, which is the one place that is right:
+        # every replayed row whose plugin reads /proc resolves NEVER, because
+        # its pid is long dead (measured: a replayed kitty row says so in as
+        # many words). So the refusals here are a property of REPLAY rather
+        # than a fact about any window, and the capture loop relearns those
+        # windows from live rows within a second. Reporting them would be the
+        # cries-wolf shape, and a check that fires when nothing is wrong gets
+        # switched off.
         upsert(kb, snap["windows"], snap["time"], snap.get("outputs"))
         return kb
     # AND ONE BAD ENTRY MUST NOT COST THE STORE, which is the more reachable
@@ -3171,7 +3180,7 @@ def stamp_key(w, app, key, counts):
     return None
 
 
-def upsert(kb, windows, when, outputs=None):
+def upsert(kb, windows, when, outputs=None, refused=None):
     """One-shot knowledge update (no view-id grouping): record each window's
     CURRENT identity. Unique-app_id windows key by app_id alone; the rest by
     title. Used by `usher capture` and the seed-from-snapshot path;
@@ -3198,7 +3207,14 @@ def upsert(kb, windows, when, outputs=None):
         # is the owner's key and matches every window of that app; and a
         # window parked on an output nobody has took a slot naming that
         # output, which nothing can ever place.
-        if unidentified(w) or unreadable_placement(w, outputs):
+        #
+        # AND IT SAYS WHY, to `refused` when the caller is collecting. Refusing
+        # in silence is this package's most repeated failure shape, and the
+        # user's rule is the two halves together: log what cannot round-trip,
+        # and never write it.
+        _r = refusal_of(w, outputs)
+        if _r is not None:
+            _refuse(refused, w, _r)
             continue
         app = w["app_id"]
         key = _single_id(w)   # plugin single identity (chrome/mux/kitty)
@@ -3243,7 +3259,7 @@ def _learn_fold(groups, windows, ambiguous):
                 g["titles"].add(w["title"])
 
 
-def _learn_stamp(kb, groups, windows, counts, when, hold=()):
+def _learn_stamp(kb, groups, windows, counts, when, hold=(), refused=None):
     """Write each live view's placement under the right key. `hold` is the set
     of view ids whose CURRENT position must not be believed yet: see the
     watcher's _held: a window the placer has not got to is sitting where its
@@ -3286,7 +3302,13 @@ def _learn_stamp(kb, groups, windows, counts, when, hold=()):
         # confirmed current, because this branch never asked. Third instance of
         # the shape in this file: a gate scoped to one category, met by
         # something outside the category.
-        if unidentified(w):
+        #
+        # NO OUTPUTS HERE, deliberately: that asks the identity half alone,
+        # which is all that is left, since `learn` has already folded the
+        # parked windows into `hold` and reported them.
+        _r = refusal_of(w)
+        if _r is not None:
+            _refuse(refused, w, _r)
             continue
         key = _single_id(w)
         decided = stamp_key(w, app, key, counts)
@@ -3347,12 +3369,88 @@ def unreadable_placement(w, outputs):
 
     NO OUTPUT LIST CONCLUDES NOTHING, which is the fail-safe direction and the
     same guard recorded_window_ids and seen_terms take: an empty list means we
-    were not told what is attached, not that nothing is."""
+    were not told what is attached, not that nothing is.
+
+    IT READS BOTH SPELLINGS OF THE FIELD, because this is asked about two row
+    shapes and they disagree: a SNAPSHOT row carries `output` (snapshot sets it
+    from the raw view) and a RAW view carries `output-name`. Handed a raw view
+    while reading only `output`, the answer is None, None is in no attached set,
+    and EVERY window reads as parked. `doctor` passes raw views, so the one-line
+    version of this predicate was a report that condemned the whole desk. Same
+    trap this tree records for `app_id` versus `app` and for the four geometry
+    helpers' argument shapes: the fix belongs in the predicate, where no call
+    site can get it wrong."""
     names = {o.get("name") for o in (outputs or [])}
-    return bool(names) and w.get("output") not in names
+    here = w.get("output") or w.get("output-name")
+    return bool(names) and here not in names
 
 
-def learn(kb, groups, windows, when, hold=(), seen=None, outputs=None):
+def refusal_of(w, outputs=None):
+    """Why the store's two writers will not record window w, or None if they
+    will. `(kind, why)`, PURE.
+
+    THE WRITERS ASK THIS RATHER THAN THE PREDICATES DIRECTLY, which is the
+    whole point: a report built beside a gate is a second answer to the same
+    question, and this file records seven gates that drifted from the category
+    their author had in mind. Here the DECISION and the REASON come out of one
+    call, so a window reported as refused is exactly a window that was.
+
+    THREE KINDS, because what a reader should do about them differs:
+
+        pending  not identifiable YET: chrome's session file has not caught up,
+                 a terminal's shell is not in /proc yet (measured at 0.25s).
+                 Normal, sub-second, retried every capture. NOT worth a log
+                 line: the grace machinery exists for exactly this, and a line
+                 per terminal per session is noise in the one record this
+                 package's forensics quote verbatim.
+        never    no join is possible, ever: no app-id AND no title, so no
+                 handle at all; another account's window no provider can name;
+                 a plugin saying so (chrome incognito). THIS is the class the
+                 design rule is about, and the one worth logging: it is decided
+                 and final, so it costs one line per window per session.
+        parked   identifiable, but its output is not attached, so its current
+                 position is not evidence of where it belongs. CORRECT and
+                 self-clearing, and the normal state of every external-monitor
+                 window between an undock and a redock.
+
+    IDENTITY IS ASKED FIRST, so a window that is both unidentifiable and parked
+    reports the identity reason. One refusal per window, the more fundamental
+    one, which also keeps the two writers from reporting it twice.
+
+    NO OUTPUT LIST ASKS THE IDENTITY HALF ALONE, which is not a degradation but
+    what `_learn_stamp` wants: `learn` folds the parked set into `hold`
+    (deliberately, so the terminal purge still sees those windows as HERE), so
+    by the time the stamp runs the parked half has already been answered."""
+    r = resolution(w)
+    if not r.is_ready:
+        return ("never" if r.state == Resolution.NEVER else "pending",
+                r.why or "its plugin gave no reason")
+    if unreadable_placement(w, outputs):
+        return "parked", (
+            f"its output {w.get('output') or w.get('output-name') or ''!r} is"
+            f" not attached, so its position is not where it belongs")
+    return None
+
+
+def refusal_note(app, label, kind, why):
+    """The one wording for a refused window, so the log, `usher save` and the
+    report cannot describe the same refusal differently."""
+    return f"not remembered ({kind}): {app or '(no app-id)'} | {label}  {why}"
+
+
+def _refuse(refused, w, r):
+    """Record one refusal for a caller that is collecting them.
+
+    THROUGH `log_title`, which is not tidiness: the common `never` case is
+    another account's window, and its raw title must not reach a report or the
+    log. That predicate answers the source name, or the uid when no provider
+    named it, and passes OUR OWN titles through."""
+    if refused is not None:
+        refused.append((w.get("id"), w.get("app_id") or "", log_title(w)) + r)
+
+
+def learn(kb, groups, windows, when, hold=(), seen=None, outputs=None,
+          refused=None):
     """Watch-time knowledge update with view-id tab-grouping.
 
     Each live view: keyed by its wayfire id, stable for the window's whole
@@ -3376,11 +3474,24 @@ def learn(kb, groups, windows, when, hold=(), seen=None, outputs=None):
     # the degroup or the terminal purge, and those ask "is this window still
     # HERE", which a parked window plainly is. A purge on absence would
     # otherwise drop the slot of every terminal on the unplugged monitor.
-    hold = set(hold) | {w["id"] for w in windows if w.get("id") is not None
-                        and unreadable_placement(w, outputs)}
+    #
+    # THROUGH `refusal_of` rather than the bare predicate, so the parked
+    # windows are REPORTED by the same call that decides to hold them. It
+    # answers the identity reason first for a window that is both, which is why
+    # only the `parked` kind joins the hold here: the others are the stamp's to
+    # refuse and to report.
+    parked = set()
+    for w in windows:
+        if w.get("id") is None:
+            continue
+        _r = refusal_of(w, outputs)
+        if _r is not None and _r[0] == "parked":
+            parked.add(w["id"])
+            _refuse(refused, w, _r)
+    hold = set(hold) | parked
     _learn_degroup(kb, groups, ambiguous, live)
     _learn_fold(groups, windows, ambiguous)
-    _learn_stamp(kb, groups, windows, counts, when, hold)
+    _learn_stamp(kb, groups, windows, counts, when, hold, refused)
     # `hold` deliberately does NOT reach the degroup or the terminal purge:
     # those ask "is this window still HERE", which a held window plainly is.
     # Hiding it from them would drop the very entry we are protecting.
@@ -3515,10 +3626,16 @@ def do_capture():
     os.makedirs(STATE, exist_ok=True)
     persist(snap)
     kb, prof = kb_for_profile()
-    upsert(kb, snap["windows"], snap["time"], snap.get("outputs"))
+    refused = []
+    upsert(kb, snap["windows"], snap["time"], snap.get("outputs"), refused)
     save_knowledge(kb, prof)
     print(f"usher: captured {len(snap['windows'])} window(s); "
           f"{len(kb)} known -> {STATE}")
+    # AND SAY WHAT WAS NOT WRITTEN, which is the answer to "why does it not
+    # remember that window". This runs once, so every refusal is printed with
+    # its reason rather than rate-limited the way the daemon's log must be.
+    for _vid, _app, _label, _kind, _why in refused:
+        print(f"  {refusal_note(_app, _label, _kind, _why)}")
 
 
 def capture_plan(running, foreign):

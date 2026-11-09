@@ -37,7 +37,7 @@ from .engine import (KB_SCHEMA, LOCAL_HOST, PLUGIN_HOOKS, STATE, TERM_KEY_RE,
                      WayfireSocket, app_of, hwdp_id, is_mux_term, live_keys,
                      load_knowledge, load_snapshot, match, mux_candidates,
                      mux_host_of, mux_session_of, mux_session_set, plugins,
-                     Resolution, lock_capability, profile_id, pview, resolution,
+                     lock_capability, profile_id, pview,
                      desktop_entries, desktop_launch_for, identity,
                      kkey,
                      saved_key,
@@ -611,11 +611,23 @@ def _doctor_placement(out, kb, live, outs):
             out(f"  UNPLACEABLE {app_of(lv)[:13]:13} {e['title'][:34]:34}"
                 f" -> {where} OFF THIS GRID "
                 f"({_ws.get('grid_width')}x{_ws.get('grid_height')})")
+        elif engine.refusal_of(lv) is not None:
+            # AND A SLOT IS NOT A PLACEMENT IF THE PLACER WILL REFUSE THE
+            # WINDOW. `match` does not ask about readiness, so a window usher
+            # cannot identify can still pair with a slot here, and this said
+            # `placeable` over one `_place_view` declines on the next line it
+            # reaches. NO OUTPUTS PASSED, deliberately: that asks the identity
+            # half, which is the half that stops a placement. A PARKED window
+            # is held out of LEARNING and is still perfectly placeable, so
+            # passing them would condemn a row that is fine.
+            _t, _w = _unmatched_why(lv)
+            out(f"  {_t:10} {app_of(lv)[:14]:14} {e['title'][:34]:34}"
+                f" -> {where}{_w}")
         else:
             out(f"  placeable  {app_of(lv)[:14]:14} {e['title'][:34]:34}"
                 f" -> {where}{shows}")
     for lv in unlive:
-        tag, why = _unmatched_why(lv)
+        tag, why = _unmatched_why(lv, outs)
         # THE ONE REPORT LINE THAT RENDERS A LIVE VIEW'S OWN TITLE, so it is
         # the one that needs redacting: every other line here prints a kb
         # entry's key-title, which for another account is already its source
@@ -624,7 +636,7 @@ def _doctor_placement(out, kb, live, outs):
             f" {engine.log_title(lv)[:34]:34}{why}")
 
 
-def _unmatched_why(lv):
+def _unmatched_why(lv, outs=None):
     """(label, reason) for a live window with no slot, in the words of the
     plugin that knows.
 
@@ -636,16 +648,28 @@ def _unmatched_why(lv):
 
     Saying something at all is the point: a window silently missing from the
     report reads as a fault in usher and is not one."""
-    r = resolution(lv)
-    why = f"  ({r.why})" if r.why else ""
-    # THREE STATES, THREE LABELS. Collapsing PENDING into NEVER is the same
-    # overclaim as the hardcoded text above, so the check that guards this
-    # asserts the three are PAIRWISE DISTINCT rather than each one correct.
-    if r.is_ready:
+    # THROUGH THE WRITERS' OWN LABELLING, so the report cannot name a refusal
+    # the store's writers do not make, nor miss one they do. The kinds are
+    # FACTS and these words are PRESENTATION, which is why the mapping sits
+    # here rather than in the engine: `unjoinable` is the word this package's
+    # notes quote verbatim, and renaming it to match an internal kind would
+    # falsify every one of them.
+    r = engine.refusal_of(lv, outs)
+    if r is None:
         return "unmatched", ""      # identified fine; no slot yet
-    if r.state == Resolution.NEVER:
-        return "unjoinable", why    # no join is possible, ever
-    return "pending", why           # it will know shortly; ask again
+    kind, why = r
+    # FOUR STATES, FOUR LABELS, and the fourth was printing as `unmatched`: a
+    # window parked on a monitor that is away is identified perfectly and is
+    # DELIBERATELY not being learned, where `unmatched` means "nothing is
+    # remembered yet", which the next capture fixes. Two opposite facts under
+    # one word, and the second is the state a docking laptop is in several
+    # times a day. Collapsing any two is the overclaim the hardcoded text
+    # above was, so the check asserts all four are PAIRWISE DISTINCT rather
+    # than each one individually correct.
+    label = {"never": "unjoinable",     # no join is possible, ever
+             "pending": "pending",      # it will know shortly; ask again
+             "parked": "parked"}[kind]  # its monitor is away; correct
+    return label, f"  ({why})" if why else ""
 
 
 def _doctor_blind(out, what, *fix):

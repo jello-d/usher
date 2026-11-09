@@ -508,6 +508,22 @@ class Watcher:
         # window holds and this is a property of the desk; one set would make
         # either message suppress the other.
         self.cell_said = set()
+        # (vid, kind) PAIRS WHOSE REFUSAL TO REMEMBER WE HAVE ALREADY SAID.
+        # The capture loop runs every second and a refused window stays
+        # refused, so this is per window rather than per pass. Discarded with
+        # the rest of a view's state on unmap. See _note_refusals.
+        self.refused_said = set()
+        # HOW MANY WINDOWS WERE PARKED AT THE LAST REPORT. Not per window:
+        # during an undock EVERY external-monitor window is parked at once, so
+        # a line each would bury the one fact a reader wants, which is the
+        # count and that it is deliberate.
+        #
+        # ZERO RATHER THAN A "NOT YET ASKED" SENTINEL, which is the baseline
+        # trap this daemon's polls have hit four times: a sentinel makes the
+        # FIRST pass a change, so an ordinary start would log that nothing is
+        # parked. Starting with nothing parked is not news; starting DURING an
+        # undock is, and 0 reports that correctly.
+        self.parked_said = 0
         # THE OUTPUT SET AS OF THE LAST POLL, or None before the first one.
         # None is not the empty set: the first poll must not read "everything
         # arrived" as a display change. See _poll_outputs.
@@ -1878,14 +1894,58 @@ class Watcher:
         # geometry change is already a capture trigger.
         self.hold_until = min((self.deadline.get(i, 0) for i in hold),
                               default=0)
+        refused = []
         with self.lock:
             roll = self.st["layout"]
             learn(self.kb, self.groups, snap["windows"], snap["time"], hold,
-                  seen=self.seen_terms, outputs=snap["outputs"])
+                  seen=self.seen_terms, outputs=snap["outputs"],
+                  refused=refused)
             self.st["dirty"] = False
             self.st["layout"] = False
             save_knowledge(self.kb, self.kb_profile)
+        self._note_refusals(refused)
         persist(snap, roll=roll)
+
+    def _note_refusals(self, refused):
+        """Say why a live window is not being remembered. ONCE.
+
+        THE DESIGN RULE IS TWO HALVES: never write an entry that cannot
+        round-trip, and LOG the ones refused. The write path had enforced the
+        first half for a month and said nothing at all, which is the silent
+        refusal this package keeps rediscovering in other clothes.
+
+        WHICH KINDS REACH THE LOG IS THE WHOLE JUDGEMENT, and the rest of this
+        is bookkeeping. watch.log is the forensic record these notes quote
+        verbatim, so a line that fires on a normal desk every second, or per
+        window per session, costs more than it buys:
+
+            never   ONE line per window. Decided and final, so it will not
+                    resolve by waiting, and a reader who sees it knows that
+                    window is not coming back. This is the class the rule is
+                    about.
+            parked  ONE line per CHANGE in the count, because an undock parks
+                    every external window at once and the useful fact is the
+                    number plus that it is deliberate. It self-clears on
+                    redock, and says so.
+            pending NOTHING. Sub-second and retried every capture (a terminal
+                    at 0.25s, chrome until its session file catches up), so a
+                    line here would be two per window per session describing a
+                    state that was already over. `doctor` reports it per
+                    window, which is where a question about one window goes."""
+        now = [r for r in refused if r[3] == "never"]
+        with self.lock:
+            fresh = [r for r in now if (r[0], r[3]) not in self.refused_said]
+            self.refused_said |= {(r[0], r[3]) for r in now}
+            parked = len([r for r in refused if r[3] == "parked"])
+            say_parked = parked != self.parked_said
+            self.parked_said = parked
+        for _vid, app, label, kind, why in fresh:
+            logline(engine.refusal_note(app, label, kind, why))
+        if say_parked and parked:
+            logline(f"{parked} window(s) parked on an output that is not"
+                    f" attached: not learning where they are until it is back")
+        elif say_parked:
+            logline("no windows are parked now: learning positions again")
 
     def _loop_failed(self, what, e, streak):
         """Report an error that escaped a daemon thread's loop BODY, and
@@ -2007,6 +2067,11 @@ class Watcher:
                 self.slot_said = {p for p in self.slot_said
                                   if p[0] != v["id"]}
                 self.cell_said.discard(v["id"])
+                # and having said it would never be remembered, for the same
+                # two reasons: a vid is reused, and a set that only grows is a
+                # leak in a process that runs for weeks.
+                self.refused_said = {p for p in self.refused_said
+                                     if p[0] != v["id"]}
             # and the identity chrome resolved for it once and remembered. A
             # cache that only ever grows is a leak in a process that runs for
             # weeks, and this is the one moment we know the view is gone.

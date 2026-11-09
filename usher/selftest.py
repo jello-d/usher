@@ -897,9 +897,27 @@ def _t_resolution(ck):
         ck("doctor-pending-is-pending", _uw(_lv)[0] == "pending")
         _P.st = Resolution.NEVER
         ck("doctor-never-is-unjoinable", _uw(_lv)[0] == "unjoinable")
-        ck("doctor-labels-are-three-distinct", len({
-            _uw(_lv)[0] for _P.st in (Resolution.READY, Resolution.PENDING,
-                                      Resolution.NEVER)}) == 3)
+        # AND THE FOURTH, which printed as `unmatched` for as long as the hold
+        # has existed: a window parked on a monitor that is away is identified
+        # perfectly and is DELIBERATELY not being learned, where `unmatched`
+        # means nothing is remembered YET and the next capture fixes it. Two
+        # opposite facts under one word, and the parked one is the state a
+        # docking laptop is in several times a day.
+        _P.st = Resolution.READY
+        _lvp = dict(_lv, **{"output-name": "DP-9"})
+        _o1 = [{"name": "DP-1", "geometry": {"x": 0, "y": 0,
+                                             "width": 1920, "height": 1080}}]
+        ck("doctor-parked-is-parked", _uw(_lvp, _o1)[0] == "parked")
+        ck("doctor-parked-names-the-output", "DP-9" in _uw(_lvp, _o1)[1])
+        # AND AN ATTACHED WINDOW IS NOT PARKED, which is the control: without
+        # it a predicate reading only the snapshot's `output` spelling labels
+        # EVERY raw view parked, and doctor passes raw views.
+        ck("doctor-an-attached-window-is-not-parked",
+           _uw(dict(_lv, **{"output-name": "DP-1"}), _o1)[0] == "unmatched")
+        ck("doctor-labels-are-four-distinct", len(
+            {_uw(_lvp, _o1)[0]}
+            | {_uw(_lv)[0] for _P.st in (Resolution.READY, Resolution.PENDING,
+                                         Resolution.NEVER)}) == 4)
         _P.st = Resolution.PENDING
         ck("doctor-prints-the-plugin-reason", "not yet" in _uw(_lv)[1])
     finally:
@@ -3587,6 +3605,116 @@ def _t_slots(ck):
             w._try_place(V(4))
             ck("slot-refusal-is-said-again-for-a-new-window",
                len([m for m in _slog if "slot taken" in m]) == _n2 + 1)
+
+            # AND A WINDOW THE STORE REFUSES TO REMEMBER IS SAID TOO, same
+            # family: a standing condition on one window, so once per window
+            # and not once a second. The capture loop runs every second and a
+            # refused window stays refused.
+            def _rf(vid, kind, app="zzz-unowned"):
+                return (vid, app, "[label]", kind, "why-" + kind)
+
+            def _nrf(*rs):
+                _slog[:] = []
+                w._note_refusals(list(rs))
+                return [m for m in _slog if "not remembered" in m]
+            w.refused_said.clear()
+            w.parked_said = 0
+            ck("never-is-said-at-all", len(_nrf(_rf(21, "never"))) == 1)
+            ck("never-carries-its-reason-and-its-app",
+               not _slog or ("why-never" in _slog[-1]
+                             and "zzz-unowned" in _slog[-1]))
+            ck("never-is-said-once-not-per-pass",
+               _nrf(_rf(21, "never")) == [] and _nrf(_rf(21, "never")) == [])
+            ck("never-is-said-for-a-different-window",
+               len(_nrf(_rf(22, "never"))) == 1)
+            # PENDING REACHES THE LOG NEVER. Sub-second and retried every
+            # capture (a terminal at 0.25s, chrome until its session file
+            # catches up), so a line here is two per window per session about
+            # a state that was already over, in the one record this package's
+            # forensics quote verbatim. `doctor` reports it per window.
+            ck("pending-is-not-logged", _nrf(_rf(23, "pending")) == [])
+            # A NEW WINDOW REUSING THE vid MUST BE SAID AGAIN, or quietening
+            # becomes permanent as view ids are recycled, and the set would
+            # only ever grow in a process that runs for weeks.
+            w._on_event({"event": "view-unmapped", "view": {"id": 21}})
+            ck("never-is-said-again-for-a-new-window-on-that-vid",
+               len(_nrf(_rf(21, "never"))) == 1)
+
+            # PARKED IS A COUNT, ONCE PER CHANGE, because an undock parks
+            # EVERY external-monitor window at once and the useful fact is
+            # the number plus that it is deliberate.
+            def _nrp(n):
+                _slog[:] = []
+                w._note_refusals([_rf(100 + i, "parked") for i in range(n)])
+                return [m for m in _slog if "parked" in m
+                        or "learning positions" in m]
+            # A FRESH WATCHER'S FIRST PASS, which is the only input that tells
+            # the initial value from a "not yet asked" sentinel: a sentinel
+            # makes that pass a CHANGE, so an ordinary daemon start logs that
+            # nothing is parked. Setting the field first, as the rows below
+            # do, passes either way, and the plant for it was the one this
+            # battery missed. Fifth instance of the baseline trap in this
+            # daemon's polls, and the tenth of "ask what inputs a guard tells
+            # apart" rather than what the fixture reaches.
+            _slog[:] = []
+            Watcher(launch=False)._note_refusals([])
+            ck("a-fresh-daemon-does-not-announce-that-nothing-is-parked",
+               [m for m in _slog if "parked" in m
+                or "learning positions" in m] == [])
+            w.parked_said = 0
+            ck("parked-nothing-is-silent", _nrp(0) == [])
+            ck("parked-is-counted-not-listed",
+               len(_nrp(3)) == 1 and "3 window(s)" in _slog[-1])
+            ck("parked-unchanged-is-silent", _nrp(3) == [])
+            ck("parked-changed-is-said-again", len(_nrp(4)) == 1)
+            ck("parked-clearing-is-said", len(_nrp(0)) == 1
+               and "again" in _slog[-1])
+
+            # AND THE CAPTURE PASS IS WIRED TO IT, which only driving one can
+            # say: `_note_refusals` has eleven checks above and NONE of them
+            # asks whether `_capture_once` hands it anything. Both plants
+            # (dropping `refused=` from the learn call, and dropping the
+            # `_note_refusals` call) pass every row above. Eleventh instance
+            # of that hole in this file.
+            class _RefSock:
+                @staticmethod
+                def list_outputs():
+                    return [{"name": "DP-1",
+                             "geometry": {"x": 0, "y": 0, "width": 100,
+                                          "height": 100},
+                             "workspace": {"x": 0, "y": 0, "grid_width": 1,
+                                           "grid_height": 1}}]
+
+                @staticmethod
+                def list_views(**_kw):
+                    # NO APP-ID AND NO TITLE: no handle at all, so NEVER,
+                    # which is the one kind that reaches the log. An output
+                    # and a geometry, or the row is refused for the parked
+                    # reason instead and this would pass for the wrong one.
+                    return [dict(_trv("", "", pid=os.getpid(), vid=777),
+                                 **{"output-name": "DP-1",
+                                    "geometry": {"x": 0, "y": 0,
+                                                 "width": 10, "height": 10}})]
+            # A FRESH WATCHER, or this clobbers the store the rest of the area
+            # drives its placements against: the first version set `w.kb = {}`
+            # and the area died on a KeyError twelve checks later.
+            _wc = Watcher(launch=False)
+            _r_sk2, _r_pe2 = _wslot.save_knowledge, _wslot.persist
+            try:
+                _wslot.save_knowledge = lambda *_a, **_k: None
+                _wslot.persist = lambda *_a, **_k: None
+                _wc._profile_drift = lambda: False
+                _wc.transition_until = 0
+                _wc.kb, _wc.groups = {}, {}
+                _slog[:] = []
+                _wc._capture_once(_RefSock())
+                ck("the-capture-pass-reports-its-refusals",
+                   any("not remembered (never)" in m for m in _slog))
+                # AND IT WROTE NOTHING, the control: a pass that remembered
+                # the window would make the row above meaningless.
+                ck("the-capture-pass-refused-that-window", not _wc.kb)
+            finally:
+                _wslot.save_knowledge, _wslot.persist = _r_sk2, _r_pe2
         finally:
             engine.logline, _wslot.logline = _rl_e, _rl_w
 
@@ -7692,12 +7820,14 @@ def _t_learn(ck):
         ("parked, no output list",  [_uw("zzz-unowned", "T", output="DP-9")],
          None),
     ]
-    _rows = []
+    _rows, _said = [], []
     for _label, _ws, _outs in _SHAPES:
         _ku, _kl = {}, {}
-        upsert(_ku, _ws, 1_800_000_000, _outs)
-        learn(_kl, {}, _ws, 1_800_000_000, set(), None, _outs)
+        _ru, _rl = [], []
+        upsert(_ku, _ws, 1_800_000_000, _outs, _ru)
+        learn(_kl, {}, _ws, 1_800_000_000, set(), None, _outs, _rl)
         _rows.append((_label, sorted(_ku), sorted(_kl)))
+        _said.append((_label, len(_ws), _ru, _rl))
     for _n, _u, _l in _rows:
         if _u != _l:   # named, so a failure says WHICH shape and both answers
             print("  %s: upsert %s vs learn %s" % (_n, _u, _l),
@@ -7709,6 +7839,93 @@ def _t_learn(ck):
     ck("upsert-and-learn-agree-is-not-vacuous",
        sum(1 for _, u, _l in _rows if u) == 5
        and sum(1 for _, u, _l in _rows if not u) == 4)
+
+    # --- AND A REFUSAL IS REPORTED, over the SAME table -------------------
+    # THE DESIGN RULE HAS TWO HALVES: never write an entry that cannot round
+    # trip, and LOG the ones refused. The write path enforced the first for a
+    # month and said NOTHING, measured over exactly these shapes: three of
+    # eight refused, in silence, by both writers.
+    #
+    # ASSERTED OVER THE AGREEMENT TABLE rather than as its own fixture,
+    # because the claim is structural: a writer reports a refusal for a window
+    # EXACTLY when it writes no key for it. That cannot be satisfied by a
+    # report built beside the gate, which is the shape this file records seven
+    # gates drifting into.
+    for _n, _nw, _ru, _rl in _said:
+        _u_quiet = [r for r in _ru if r[3] not in ("never", "pending",
+                                                   "parked")]
+        if _u_quiet or [r[3] for r in _ru] != [r[3] for r in _rl]:
+            print("  %s: upsert said %s vs learn said %s"
+                  % (_n, [r[3] for r in _ru], [r[3] for r in _rl]),
+                  file=sys.stderr)
+    ck("both-writers-report-the-same-refusal",
+       all([r[3] for r in u] == [r[3] for r in l] for _n, _w, u, l in _said))
+    # A SHAPE WITH NO KEY HAS A REASON, AND ONE WITH A KEY HAS NONE. The
+    # second half is the control: a reporter that named every window would
+    # pass the first on its own.
+    ck("every-refused-window-says-why",
+       all(bool(u) == (not _ku) for (_n, _ku, _kl), (_n2, _w, u, _l)
+           in zip(_rows, _said)))
+    ck("every-remembered-window-is-quiet",
+       all(not u for (_n, _ku, _kl), (_n2, _w, u, _l)
+           in zip(_rows, _said) if _ku))
+    # AND THE KINDS ARE REAL, which is what stops the two above passing over a
+    # table that refused nothing: these shapes must produce a `never` (no
+    # handle at all, and another uid nobody named) and a `parked`.
+    _kinds = {r[3] for _n, _w, u, _l in _said for r in u}
+    ck("the-refusal-kinds-are-measured-not-assumed",
+       {"never", "parked"} <= _kinds)
+    # AND NO FOREIGN TITLE IS IN A REFUSAL, which is the one thing a report of
+    # them could leak: the common `never` case IS another account's window.
+    # pid 1 is init, so this row needs no second account.
+    ck("a-refusal-carries-no-raw-title",
+       all("Thing" not in r[2] for _n, _w, u, _l in _said for r in u
+           if r[1] == "zzz-unowned" and r[3] == "never"))
+
+    # --- THE LABELLING ITSELF, including the row shape that condemned a desk
+    def _rk(w, outs=_OUT):
+        r = engine.refusal_of(w, outs)
+        return None if r is None else r[0]
+    # THE TWO ROW SHAPES DISAGREE ABOUT THE OUTPUT FIELD and this predicate is
+    # asked about both: a SNAPSHOT row carries `output`, a RAW view carries
+    # `output-name`. Reading only the first, a raw view answers None, None is
+    # in no attached set, and EVERY window reads as parked. `doctor` passes
+    # raw views, so that is a report condemning the whole desk. BOTH
+    # DIRECTIONS, because the ATTACHED control is what catches a predicate
+    # that has become too eager.
+    _rawp = {"app-id": "zzz-unowned", "title": "T", "pid": -1, "id": 3,
+             "output-name": "DP-9"}
+    _rawh = dict(_rawp, **{"output-name": "DP-1"})
+    ck("refusal-reads-a-raw-view-s-output-name", _rk(_rawp) == "parked")
+    ck("refusal-lets-an-attached-raw-view-through", _rk(_rawh) is None)
+    ck("refusal-reads-a-snapshot-row-s-output",
+       _rk(_uw("zzz-unowned", "T", output="DP-9")) == "parked"
+       and _rk(_uw("zzz-unowned", "T")) is None)
+    # NO OUTPUT LIST ASKS THE IDENTITY HALF ALONE, which is what _learn_stamp
+    # relies on: by the time it runs, `learn` has folded the parked windows
+    # into `hold` and reported them.
+    ck("refusal-with-no-outputs-is-the-identity-half",
+       _rk(_uw("zzz-unowned", "T", output="DP-9"), None) is None
+       and _rk(_uw("", ""), None) == "never")
+    # AND IDENTITY WINS OVER PARKED for a window that is both, so one window
+    # produces ONE refusal and the two writers cannot report it twice.
+    ck("refusal-reports-identity-before-parked",
+       _rk(_uw("", "", output="DP-9")) == "never")
+    # THE KINDS ARE PAIRWISE DISTINCT, which is the assertion that catches a
+    # collapse: each one individually correct is what three labels looked
+    # like for a day while the fourth printed as `unmatched`.
+    ck("refusal-kinds-are-pairwise-distinct", len({
+        _rk(_uw("", "")),                                      # never
+        _rk(_uw("google-chrome", "Nope - Google Chrome")),      # pending
+        _rk(_uw("zzz-unowned", "T", output="DP-9")),            # parked
+        _rk(_uw("zzz-unowned", "T"))}) == 4)                    # None
+    # AND ONE WORDING, so the log, `usher save` and the report cannot
+    # describe the same refusal differently.
+    ck("a-refusal-note-names-the-app-the-kind-and-the-reason",
+       all(s in engine.refusal_note("slack", "[titan]", "never", "because")
+           for s in ("slack", "[titan]", "never", "because")))
+    ck("a-refusal-note-says-no-app-id-rather-than-nothing",
+       "(no app-id)" in engine.refusal_note("", "x", "never", "y"))
 
     # --- AND THE DECISION IS ONE FUNCTION, not two copies ----------------
     # The table above catches a divergence AFTER it exists. `stamp_key` makes
@@ -8384,12 +8601,28 @@ def _t_snapshots(ck):
             engine.STATE = _cap_dir
             engine.ipc = lambda: _CapSock
             with _tprofile("capwire"):
-                with contextlib.redirect_stdout(io.StringIO()):
+                _cout = io.StringIO()
+                with contextlib.redirect_stdout(_cout):
                     engine.do_capture()
                 _capped = engine.load_knowledge("capwire")
             _apps = sorted(k.partition("\0")[0] for k in _capped)
             ck("capture-learns-an-attached-window", "zzz-here" in _apps)
             ck("capture-refuses-a-parked-window", "zzz-parked" not in _apps)
+            # AND IT SAYS SO, which is the other half of the design rule and
+            # the half the write path had enforced in silence for a month.
+            # `usher save` runs ONCE, so every refusal is printed with its
+            # reason rather than rate-limited the way the daemon's log is.
+            # ASSERTED THROUGH THE REAL VERB's OUTPUT: a check on
+            # refusal_note alone says nothing about whether anything prints
+            # it, which is the wiring hole this paragraph is already about.
+            _ctext = _cout.getvalue()
+            ck("capture-says-what-it-refused",
+               "not remembered (parked)" in _ctext
+               and "zzz-parked" in _ctext and "DP-9" in _ctext)
+            # AND IT IS QUIET ABOUT THE ONE IT KEPT, the control: a report
+            # naming every window would satisfy the row above on its own.
+            ck("capture-is-quiet-about-what-it-kept",
+               "zzz-here" not in _ctext.split("not remembered", 1)[-1])
             # AND THE SEED PATH, the other caller: a store that does not exist
             # yet is seeded from the last snapshot, so a new desk's FIRST
             # store is written by upsert. The snapshot do_capture just wrote
@@ -8920,14 +9153,14 @@ def _t_displays(ck):
     # `placeable`, which sends a reader hunting a fault in the placer.
     from . import doctor as _dgrid
 
-    def _doc_text(ws, out="DP-1"):
+    def _doc_text(ws, out="DP-1", view=None):
         _lines = []
         _pm = engine.panel_map
         try:
             engine.panel_map = lambda *_a, **_k: {}
             _dgrid._doctor_placement(
                 _lines.append, {kkey("zzz-unowned", ""): _rent(ws, out)},
-                [_rview], {"DP-1": _rgo})
+                [view or _rview], {"DP-1": _rgo})
         finally:
             engine.panel_map = _pm
         return "\n".join(_lines)
@@ -8942,6 +9175,20 @@ def _t_displays(ck):
        "UNPLACEABLE" in _dgone and "NOT ATTACHED" in _dgone)
     ck("doctors-three-placement-states-are-pairwise-distinct",
        _dfit != _doff and _doff != _dgone and _dfit != _dgone)
+    # AND A SLOT IS NOT A PLACEMENT IF THE PLACER WILL REFUSE THE WINDOW.
+    # `match` does not ask about readiness, so a window usher cannot identify
+    # still PAIRS with a slot here, and this printed `placeable` over one
+    # `_place_view` declines on the next line it reaches. pid 1 is init, so
+    # this needs no second account to drive, and it is a real reachable
+    # pairing: no provider names that uid, so the source is empty and the
+    # owner's app-id-only key is offered to it.
+    if os.getuid() != 0:
+        _dnot = _doc_text([1, 1], view=dict(_rview, pid=1))
+        ck("doctor-will-not-call-an-unidentifiable-window-placeable",
+           "placeable" not in _dnot and "unjoinable" in _dnot)
+        # AND IT SAYS WHOSE, which is the whole value of printing the
+        # plugin's own reason rather than a label.
+        ck("doctor-says-why-it-will-not-place-it", "uid" in _dnot)
     # AND THE TWO REFUSALS ARE WORDED APART, pairwise, because an absent
     # OUTPUT and an out-of-grid CELL want different things done about them and
     # one wording for both sends a reader to the wrong one. Collapsing two

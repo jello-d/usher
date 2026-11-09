@@ -35,7 +35,12 @@ The daemon (started at login): record continuously, place on map. Re-running it
 reloads a running instance.
 .TP
 .B save | capture
-Snapshot the current layout into the store now.
+Snapshot the current layout into the store now, and SAY what it declined to
+remember and why: an entry nothing could ever match again is not memory, so
+the rule is to log one and never write it. The daemon logs the same refusals
+to
+.IR watch.log ,
+once per window rather than once per pass.
 .IP
 HANDED TO THE DAEMON WHEN ONE IS RUNNING, because a one-shot verb cannot see
 another account's windows individually: the per-window map is filled by a
@@ -248,7 +253,23 @@ Show the never-place and anchor rules as loaded, with any parse errors.
 .B doctor
 Report what usher is and is not doing: the store (entries per app, the display
 profile, schema), the plugin registry, the cross-tool contracts, and per window
-what would be relaunched or placed and WHY not. Exit 1 on a contract breach;
+what would be relaunched or placed and WHY not.
+.IP
+A window usher will not REMEMBER is labelled with the reason, and the four are
+not interchangeable:
+.I unmatched
+is identified fine with nothing stored yet, which the next capture fixes;
+.I pending
+means ask again shortly;
+.I unjoinable
+means no join is possible ever (another account's window, or a plugin saying
+so); and
+.I parked
+means its monitor is away, so where it currently sits is not where it belongs
+and usher is deliberately not learning it until the display is back. The
+reason comes from the plugin that knows.
+.IP
+Exit 1 on a contract breach;
 exit 2 when it could not see the live session at all (no
 .BR WAYFIRE_SOCKET ,
 no pywayfire, or no compositor answering), in which case the window sections
