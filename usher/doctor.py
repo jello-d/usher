@@ -111,9 +111,6 @@ def _doctor_store(out):
         f"  (schema {schema}, current {KB_SCHEMA})")
     for app, n in counts.most_common():
         out(f"                 {app or '(blank app-id)':32} {n}")
-    if not counts.get("kitty"):
-        out("  NOTE         no kitty entries: terminals are not being"
-            " remembered, so they cannot be placed")
     # UNMATCHABLE BY CONSTRUCTION, so the TTL is the only thing that removes
     # them and nothing said they were there. Counted rather than named: the
     # dry run already lists them as UNMATCHED-LAYOUT rows, and a count plus
@@ -143,6 +140,26 @@ def _doctor_store(out):
         age = int(time.time()) - snap.get("time", 0)
         out(f"  snapshot     {len(snap.get('windows', []))} window(s),"
             f" {age}s old")
+    # A STORE WITH NO TERMINAL ENTRIES IS ONLY A FAULT IF THERE ARE
+    # TERMINALS. The 2026-09-15 purge compared store KEYS against RAW live
+    # titles, so nothing ever matched and it deleted every terminal entry on
+    # the very pass that wrote it: measured as 294 entries, ZERO for kitty,
+    # WITH TWO MUX TERMINALS ON SCREEN. The on-screen half is the whole
+    # signal, and this line did not ask it: gated on the store alone it fired
+    # on every box with no terminal open, which is an ordinary state, and
+    # named a fault that was not happening.
+    #
+    # THE SNAPSHOT RATHER THAN THE LIVE VIEWS, because this section
+    # deliberately makes no IPC call: it is the half of the report that still
+    # prints when usher cannot see the compositor at all. A missing snapshot
+    # therefore says NOTHING here, which is the fail-safe reading.
+    if snap is not None and not counts.get("kitty"):
+        _terms = sum(1 for w in snap.get("windows", [])
+                     if isinstance(w, dict) and w.get("app_id") == "kitty")
+        if _terms:
+            out(f"  NOTE         {_terms} terminal(s) in the last capture and"
+                " NO kitty entries: terminals are not being remembered, so"
+                " they cannot be placed")
     return kb, snap
 
 

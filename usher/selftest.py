@@ -1235,6 +1235,61 @@ def _t_resolution(ck):
     finally:
         engine.STATE, engine.profile_id = _rstate, _rprof
         shutil.rmtree(_tdir, ignore_errors=True)
+    # --- THE TERMINAL NOTE: only a fault when there ARE terminals --------
+    # The 2026-09-15 purge compared store KEYS against RAW live titles, so
+    # nothing matched and it deleted every terminal entry on the pass that
+    # wrote it: 294 entries, ZERO for kitty, WITH TWO MUX TERMINALS ON
+    # SCREEN. This line is that signature, and it had NO checks, which is why
+    # it was gated on the store alone and fired on every box with no terminal
+    # open, naming a fault that was not happening. Fourth doctor message of
+    # that class.
+    #
+    # doctor IMPORTS ITS LOADERS BY NAME, so its own copies are what must be
+    # stubbed: patching engine's would leave doctor reading the real store,
+    # which is the stale-copy hazard this package documents.
+    _dsave = (_dr.load_knowledge, _dr.load_snapshot, _dr._doctor_surfaces,
+              _dr.profile_id)
+    try:
+        _dr._doctor_surfaces = lambda *a, **k: None
+        _dr.profile_id = lambda *a, **k: "P"
+
+        def _store_rows(kb, snap):
+            _dr.load_knowledge = lambda *a, **k: kb
+            _dr.load_snapshot = lambda *a, **k: snap
+            rows = []
+            _dr._doctor_store(rows.append)
+            return [r for r in rows if "NO kitty entries" in r]
+
+        _term = {"app_id": "kitty", "title": "t"}
+        _sig = {"windows": [_term, _term], "time": time.time()}
+        # THE REAL SIGNATURE: terminals in the last capture, none in the store
+        ck("doctor-names-the-missing-terminal-entries",
+           len(_store_rows({"signal\x00": {"last_seen": time.time()}},
+                           _sig)) == 1)
+        # ...AND IT IS SILENT WITH NO TERMINAL OPEN, which is an ordinary
+        # state and was the false alarm: a box whose terminals the user
+        # closed has no kitty entries CORRECTLY, and the purge dropping them
+        # is the fail-safe working.
+        ck("doctor-is-silent-when-no-terminal-is-open",
+           _store_rows({"signal\x00": {"last_seen": time.time()}},
+                       {"windows": [{"app_id": "signal", "title": "S"}],
+                        "time": time.time()}) == [])
+        # ...and silent when the store DOES remember them, which is the
+        # control: without it both cells above pass over a line that has
+        # stopped printing at all.
+        ck("doctor-is-silent-when-the-terminals-are-remembered",
+           _store_rows({"kitty\x00term:resume": {"last_seen": time.time()}},
+                       _sig) == [])
+        # A MISSING SNAPSHOT CONCLUDES NOTHING rather than reading "no
+        # terminals": this section makes no IPC call on purpose, so it is the
+        # half that still prints when usher cannot see the compositor.
+        ck("doctor-says-nothing-about-terminals-with-no-snapshot",
+           _store_rows({"signal\x00": {"last_seen": time.time()}},
+                       None) == [])
+    finally:
+        (_dr.load_knowledge, _dr.load_snapshot, _dr._doctor_surfaces,
+         _dr.profile_id) = _dsave
+
     ck("collision-chrome-blames-usher",
        "mis-resolved" in _cfix("chrome:win:123"))
     ck("collision-chrome-does-not-say-plugin",
