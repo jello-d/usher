@@ -2440,6 +2440,13 @@ class KittyPlugin(WindowPlugin):
 # LRU is needed, the TTL bounds the store (see learn() for the grouping).
 KNOWLEDGE_TTL = 30 * 86400
 
+# How long a gap since a store was last written means THE DESK WAS AWAY,
+# rather than that the daemon restarted. See forgive_dormancy, which shifts a
+# store forward by such a gap so a desk's memory ages only while the desk is
+# in USE. Small on purpose and NOT a policy knob: its only job is to stop a
+# trivial gap rewriting every entry, and a respawn is seconds.
+DORMANT_FLOOR = 300
+
 # Apps a plugin claims (is_owned) legitimately SHARE one app_id, and a momentary
 # drop to a single window must NOT collapse them to an app_id-only key (which
 # would prune the whole title-keyed set), so they always key by identity. This
@@ -2463,55 +2470,71 @@ def matched_key(kb, app, ident, src=""):
     return next((k for k in ks if kb.get(k)), ks[-1])
 
 
-def ttl_doomed(when=None):
-    """{profile: how many of its entries the next capture there would drop}
-    for every profile but the live one.
 
-    **A DESK YOU HAVE NOT VISITED IN A MONTH LOSES ITS MEMORY ON THE FIRST
-    VISIT BACK, AFTER PLACING FROM IT ONCE.** `prune_kb`'s cutoff is
-    wall-clock and it fires in the LEARN path, never on load, so the order is:
-    the desk returns, the sweep places every window from slots the store still
-    has, and then the first capture drops every entry older than the TTL,
-    which is every window you did not happen to open in that minute. The
-    visible behaviour is a correct restore followed by a silent loss, which is
-    this file's "restore works, mostly" shape.
 
-    MEASURED on manifestor 2026-11-07: five dormant stores, 25 entries, ages
-    48 to 71 days, and a simulated prune leaves ZERO in every one of them.
+def forgive_dormancy(kb, now, floor=DORMANT_FLOOR):
+    """A desk's memory must not AGE while the desk is ASLEEP. Shift every
+    entry forward by the gap since this store was last written, and return
+    the gap applied (0.0 when nothing moved). PURE apart from the clock.
 
-    NO STATELESS CUTOFF RULE FIXES IT, which is why this reports rather than
-    repairs. Three were simulated over an advancing clock:
+    **THE BUG THIS CLOSES: A DESK YOU HAVE NOT VISITED IN A MONTH LOST ITS
+    MEMORY ON THE FIRST VISIT BACK, AFTER PLACING FROM IT ONCE.** `prune_kb`'s
+    cutoff is wall-clock and fires in the LEARN path, never on load, so the
+    order was: the desk returns, the sweep places every window from the slots
+    the store still has, and then the first capture drops every entry older
+    than the TTL, which is every window you did not happen to open in that
+    minute. A correct restore followed by a silent loss, which is this
+    package's "restore works, mostly" shape.
 
-        min(now, newest)                collapses: `newest` becomes now the
-                                        moment one window is refreshed
-        newest EXCLUDING this pass      never prunes ANYTHING, ever: the
-                                        newest stale entry always sits inside
-                                        its own cutoff
-        skip if it would EMPTY the      never fires in the real case, because
-        store                           the window you just opened is a fresh
-                                        entry
+    MEASURED on manifestor: five dormant stores, 25 entries, ages 51 to 74
+    days, and a prune today leaves ZERO in every one. With this, zero are
+    dropped and the live store is byte-identical.
 
-    The honest rule is "unseen for TTL of THIS DESK'S USE", and that needs
-    per-profile usage state rather than wall-clock: a design change, recorded
-    as owed. Until then the loss is at least VISIBLE before it happens, which
-    is the same call this package made for the dry-run collapse and for the
-    stale chrome titles."""
-    when = time.time() if when is None else when
-    cutoff = when - KNOWLEDGE_TTL
-    live, out = profile_id(), {}
-    for p in glob.glob(os.path.join(STATE, "knowledge-*.json")):
-        prof = os.path.basename(p)[len("knowledge-"):-len(".json")]
-        if prof == live:
-            continue
-        try:
-            kb = load_knowledge(prof)
-        except Exception:                                  # noqa: BLE001
-            continue
-        n = sum(1 for e in kb.values()
-                if float(e.get("last_seen") or 0) < cutoff)
-        if n:
-            out[prof] = n
-    return out
+    THREE STATELESS CUTOFF RULES WERE SIMULATED FIRST AND ALL FAIL, which is
+    why this shifts the DATA rather than moving the cutoff:
+
+        min(now, newest)              collapses: `newest` becomes now the
+                                      moment one window is refreshed
+        newest EXCLUDING this pass    never prunes ANYTHING, ever: the newest
+                                      stale entry always sits inside its own
+                                      cutoff
+        skip if it would EMPTY the    never fires in the real case, because
+        store                         the window you just opened is a fresh
+                                      entry
+
+    AND RELATIVE STALENESS SURVIVES EXACTLY, which is the property the three
+    above lack and the reason this is safe. Every entry moves by the SAME
+    gap, so an entry that was already stale when the desk went dormant is
+    still stale afterwards: simulated over three ages, the entry 40 days
+    behind the desk's last use is still pruned while the other two live. Only
+    the DORMANCY is forgiven, never staleness earned while the desk was in
+    use.
+
+    SO IT IS THE "unseen for the TTL OF THIS DESK'S USE" RULE, which this
+    package recorded as needing per-profile usage state. It needs none: after
+    the shift an entry's age is its age AT THE DESK'S LAST USE, and it then
+    grows only while the session runs. The use clock is `last_seen` itself.
+
+    SELF-LIMITING, so a worker respawn cannot forgive anything twice: the
+    first load moves the gap, after which `newest` IS now and every later
+    load computes ~0. Simulated over four loads: 60 days, then 0, 0, 0.
+
+    THE FLOOR IS NOT A POLICY KNOB, and is small on purpose. Its only job is
+    to stop a trivial gap rewriting every entry in the store: a respawn is
+    seconds. Anything above it is time this desk could not have been seen in,
+    whatever the cause, so forgiving all of it is the point rather than a
+    concession."""
+    seen = [e.get("last_seen") for e in kb.values()
+            if isinstance(e, dict) and e.get("last_seen")]
+    if not seen:
+        return 0.0
+    gap = now - max(seen)
+    if gap <= floor:
+        return 0.0
+    for e in kb.values():
+        if isinstance(e, dict) and e.get("last_seen"):
+            e["last_seen"] += gap
+    return gap
 
 
 def stale_chrome_titles(kb):
@@ -2812,6 +2835,15 @@ def load_knowledge(profile=None):
             del kb[k]
         logline(f"store {profile}: dropped {len(bad)} entr(ies) that are "
                 f"not objects: {', '.join(repr(k) for k in bad[:5])}")
+    # AND A DESK'S MEMORY DOES NOT AGE WHILE THE DESK IS ASLEEP, which has to
+    # happen HERE: the loss it prevents is the first CAPTURE after a return,
+    # and the only moment before that with the whole store in hand is the
+    # load. There is nothing to save explicitly either, since the shifted
+    # values go to disk with the next ordinary save.
+    _gap = forgive_dormancy(kb, time.time())
+    if _gap:
+        logline(f"store {profile}: away {_gap / 86400:.1f} day(s), so "
+                f"{len(kb)} entr(ies) are not aged for it")
     return kb
 
 

@@ -1123,44 +1123,118 @@ def _t_resolution(ck):
     ck("doctor-reports-the-stale-chrome-titles",
        "stale_chrome_titles(kb)" in _dsrc)
 
-    # A DESK UNVISITED FOR LONGER THAN THE TTL loses its memory on the first
-    # visit back, AFTER placing from it once: the prune is wall-clock and
-    # fires on LEARN, never on load. Measured on manifestor: five dormant
-    # stores, 25 entries, 48 to 71 days, zero survivors in a simulated
-    # prune. No stateless cutoff rule fixes it (three were simulated), so
-    # the loss is at least SAID before it happens.
+    # A DESK UNVISITED FOR LONGER THAN THE TTL used to lose its memory on
+    # the first visit back, AFTER placing from it once: the prune is
+    # wall-clock and fires on LEARN, never on load, so the order was place,
+    # then strip. Measured on manifestor: five dormant stores, 25 entries,
+    # 51 to 74 days, and ZERO survivors in a prune today.
+    #
+    # `forgive_dormancy` shifts the store forward by the gap it was away, so
+    # a desk's memory ages only while the desk is in USE. Three stateless
+    # cutoff rules were simulated first and all fail, which is why this
+    # moves the DATA and not the cutoff.
+    _fd = engine.forgive_dormancy
+    _ttl = engine.KNOWLEDGE_TTL
+    _n0 = time.time()
+
+    def _store(*ages_d):
+        return {"a%d\x00x" % i: {"last_seen": _n0 - d * 86400}
+                for i, d in enumerate(ages_d)}
+
+    # THE REAL SHAPE: a desk last used 60 days ago, holding one entry seen on
+    # its last day, one 10 days before that, and one 40 days before that,
+    # which was ALREADY stale when the desk went dormant.
+    _dorm = _store(60, 70, 100)
+    _gap = _fd(_dorm, _n0)
+    ck("dormancy-is-forgiven-by-the-gap-it-was-away",
+       abs(_gap - 60 * 86400) < 2)
+    # RELATIVE STALENESS SURVIVES EXACTLY, which is the property all three
+    # rejected rules lack and the whole reason this is safe to do: every
+    # entry moves by the SAME gap, so staleness earned while the desk was in
+    # USE is kept and only the dormancy is forgiven.
+    _ages = sorted(round((_n0 - e["last_seen"]) / 86400.0)
+                   for e in _dorm.values())
+    ck("forgiving-dormancy-keeps-relative-staleness", _ages == [0, 10, 40])
+    # ...so the entry that was already stale is STILL pruned, and the other
+    # two survive, which is what the whole change is for.
+    engine.prune_kb(_dorm, _n0)
+    ck("the-already-stale-entry-is-still-pruned", len(_dorm) == 2)
+
+    # A LIVE DESK IS UNTOUCHED: its gap is seconds, which is what the floor
+    # is for. Asserted byte-for-byte, because a shift of a few seconds would
+    # pass a looser test while still rewriting every entry in the store.
+    # SECONDS OLD, NOT EXACTLY NOW, which is what a real live store looks
+    # like: with the newest entry at age 0 the gap is exactly 0 and a plant
+    # removing the floor entirely passed this cell. The fixture has to make
+    # the floor load-bearing.
+    _live = {"k\x00a": {"last_seen": _n0 - 2.0},
+             "k\x00b": {"last_seen": _n0 - 86400.0}}
+    _was = json.dumps(_live, sort_keys=True)
+    ck("a-live-desk-is-not-shifted", _fd(_live, _n0) == 0.0
+       and json.dumps(_live, sort_keys=True) == _was)
+    # AND THE FLOOR IS WHAT DECIDES, rather than the TTL or a guess: just
+    # under it moves nothing, just over it moves.
+    _a = {"k": {"last_seen": _n0 - engine.DORMANT_FLOOR + 10}}
+    _b = {"k": {"last_seen": _n0 - engine.DORMANT_FLOOR - 10}}
+    ck("the-floor-is-what-separates-a-respawn-from-a-return",
+       _fd(_a, _n0) == 0.0 and _fd(_b, _n0) > 0)
+
+    # SELF-LIMITING, so a worker respawn cannot forgive the same gap twice:
+    # after the first load `newest` IS now, so every later load computes ~0.
+    _s = _store(60)
+    _gaps = []
+    for _i in range(4):
+        _gaps.append(_fd(_s, _n0 + 5.0 * (_i + 1)))
+    ck("forgiving-dormancy-is-self-limiting",
+       _gaps[0] > 86400 and all(g == 0.0 for g in _gaps[1:]))
+
+    # AN EMPTY STORE, AND ONE WITH NO TIMESTAMPS, CONCLUDE NOTHING rather
+    # than shifting by `now`, which would be a gap measured from the epoch.
+    ck("an-empty-store-is-not-shifted", _fd({}, _n0) == 0.0)
+    ck("a-store-with-no-timestamps-is-not-shifted",
+       _fd({"k": {}}, _n0) == 0.0)
+    # A NON-DICT ENTRY MUST NOT RAISE HERE either: load_knowledge drops those
+    # just above, and this runs on the same pass.
+    ck("a-non-dict-entry-does-not-break-the-shift",
+       _fd({"k": "not an entry", "j": {"last_seen": _n0 - 60 * 86400}}, _n0)
+       > 0)
+
+    # AND THE WIRING: the shift happens at LOAD, which is the only moment
+    # before the first capture with the whole store in hand. The function's
+    # own cells say nothing about whether anything calls it, which is the
+    # hole this file records eleven times.
     _rstate, _rprof = engine.STATE, engine.profile_id
     _tdir = tempfile.mkdtemp(prefix="usher-ttl-", dir="/var/tmp")
     try:
         engine.STATE = _tdir
-        engine.profile_id = lambda *a, **k: "LIVE"
-        _old = time.time() - engine.KNOWLEDGE_TTL - 86400
-        _new = time.time()
-        for _p, _rows in (
-                ("LIVE", {"a\x00x": {"last_seen": _old}}),
-                ("DORM", {"a\x00x": {"last_seen": _old},
-                          "b\x00y": {"last_seen": _old},
-                          "c\x00z": {"last_seen": _new}}),
-                ("FRESH", {"a\x00x": {"last_seen": _new}})):
-            # `write_json` takes a BLOB, not an object: it is the atomic
-            # rename, and the caller does the encoding.
-            engine.write_json(
-                os.path.join(_tdir, "knowledge-%s.json" % _p),
-                json.dumps(_rows))
-        _dm = engine.ttl_doomed()
-        # THE LIVE PROFILE IS EXCLUDED, because its own capture loop is
-        # refreshing it and a doomed count there is just the TTL working.
-        ck("ttl-doomed-skips-the-live-profile", "LIVE" not in _dm)
-        ck("ttl-doomed-counts-only-the-aged", _dm.get("DORM") == 2)
-        # A STORE WITH NOTHING AGED IS NOT REPORTED AT ALL, or the line
-        # fires on every box with a second monitor set and gets ignored.
-        ck("ttl-doomed-omits-a-store-with-nothing-aged", "FRESH" not in _dm)
-        ck("ttl-doomed-reports-exactly-one-store", sorted(_dm) == ["DORM"])
+        engine.profile_id = lambda *a, **k: "DESK"
+        # `write_json` takes a BLOB, not an object: it is the atomic rename,
+        # and the caller does the encoding.
+        engine.write_json(
+            os.path.join(_tdir, "knowledge-DESK.json"),
+            json.dumps(_store(60, 70)))
+        engine.write_json(os.path.join(_tdir, "knowledge-DESK.schema"),
+                          str(engine.KB_SCHEMA))
+        _loaded = engine.load_knowledge("DESK")
+        # AND THEN PRUNE, because `load` does not: the loss is the first
+        # CAPTURE after the return, so a cell that only loads passes whether
+        # or not the gap was forgiven. The plant that removes the call is
+        # caught by this and by nothing else.
+        engine.prune_kb(_loaded, time.time())
+        ck("load-forgives-a-dormant-desk", len(_loaded) == 2)
+        # THE CONTROL: without it this passes over a load that has stopped
+        # pruning altogether rather than one that forgave correctly.
+        engine.write_json(
+            os.path.join(_tdir, "knowledge-DESK.json"),
+            json.dumps({"k\x00x": {"last_seen": _n0 - 60 * 86400},
+                        "k\x00y": {"last_seen": _n0 - 200 * 86400}}))
+        _l2 = engine.load_knowledge("DESK")
+        engine.prune_kb(_l2, time.time())
+        ck("load-forgiveness-still-prunes-what-was-stale-at-that-desk",
+           len(_l2) == 1)
     finally:
         engine.STATE, engine.profile_id = _rstate, _rprof
         shutil.rmtree(_tdir, ignore_errors=True)
-    ck("doctor-warns-about-the-doomed-entries",
-       "ttl_doomed()" in _dsrc)
     ck("collision-chrome-blames-usher",
        "mis-resolved" in _cfix("chrome:win:123"))
     ck("collision-chrome-does-not-say-plugin",

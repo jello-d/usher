@@ -95,19 +95,13 @@ def _doctor_store(out):
                     != profile_id())
     if others:
         out(f"  other sets   {', '.join(others)}  (remembered separately)")
-    # AND WHAT A RETURN TO ONE OF THEM WOULD COST. The prune is wall-clock
-    # and fires on LEARN, never on load, so a desk unvisited for longer than
-    # the TTL is placed from its slots and then stripped of them by the first
-    # capture: a correct restore followed by a silent loss. Said BEFORE it
-    # happens, because afterwards there is nothing left to say it about.
-    _dm = engine.ttl_doomed()
-    if _dm:
-        _n = sum(_dm.values())
-        out(f"  NOTE         {_n} entr{'y' if _n == 1 else 'ies'} across"
-            f" {len(_dm)} other monitor set(s) are older than the"
-            f" {engine.KNOWLEDGE_TTL // 86400}-day TTL: returning to one of"
-            " those desks places from them and then the first capture drops"
-            " them")
+    # THE NOTE THAT USED TO SIT HERE IS RETIRED, not merely silent. It
+    # warned that returning to a desk unvisited for longer than the TTL would
+    # place from its slots and then have the first capture strip them, which
+    # was true and is no longer: `forgive_dormancy` shifts a store forward by
+    # the gap it was away, so a desk's memory ages only while the desk is in
+    # USE. A warning about a loss that cannot happen is worse than none,
+    # because it answers a question the reader then stops asking.
     _doctor_surfaces(out)
     try:
         schema = open(schema_path()).read().strip()
