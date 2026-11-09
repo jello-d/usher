@@ -5401,31 +5401,61 @@ def launch_missing(snap=None):
     working, where nothing else is running to clobber it."""
     saved = ((snap if snap is not None else load_snapshot()) or {}).get(
         "windows", [])
+    # A FAILED LIVE READ DOES NOT DEGRADE THIS, IT INVERTS IT. Every
+    # owner-side path below asks "is mine already up?" and an empty live set
+    # answers "no" for everything, so the one error that must not be
+    # swallowed here is this one. Measured on a 26-window desk where every
+    # saved window WAS live: 0 launches became 4 apps and 6 spawns, a second
+    # Chrome, four more terminals and a second Signal.
+    #
+    # AND IT IS THE STATED REASON A RE-RUN IS SAFE, which is what makes it
+    # worth refusing rather than merely logging. Supervisor.run's own comment
+    # says a re-run is safe "because the open terminals are live, so
+    # launch_missing skips them", and `usher-mgr watch` against a live
+    # instance is idempotent for that same reason. Both rest on this read.
+    #
+    # THE ASYMMETRY DECIDES IT, exactly as it did for the terminal count:
+    # refusing costs a relaunch, which the next start repeats and a human can
+    # ask for; proceeding duplicates a whole desk, which a human then closes
+    # window by window.
+    live, blind = [], None
     try:
         live = ipc().list_views(filter_mapped_toplevel=True)
-    except Exception:
-        live = []
-    n = 0
-    for p in plugins():
-        try:
-            n += launched_count(p.relaunch_missing(saved, live))
-        except Exception as e:
-            logline(f"relaunch ({getattr(p, 'name', '?')}) error: {e}")
-    # THEN THE DEFAULT, for everything no plugin claimed. Last, so a specific
-    # plugin always wins: it has already handled its own app by here, and
-    # desktop_relaunch_missing skips every is_owned app anyway.
-    try:
-        # NO `claimed` HERE, DELIBERATELY: this is a restore, where a
-        # plugin owning an app really is the thing that starts it, from a
-        # recorded command per window. Passing the roster's policy would
-        # have the default spawn a BARE kitty at $HOME for a saved terminal
-        # whose cwd is unreadable, where today it spawns nothing.
-        n += launched_count(desktop_relaunch_missing(saved, live))
     except Exception as e:
-        logline(f"relaunch (desktop default) error: {e}")
+        blind = e
+        logline("relaunch: the live windows could not be read "
+                f"({e}), so NOTHING of ours is started: with no way to tell "
+                "what is already up, every saved app would look missing")
+    n = 0
+    if blind is None:
+        for p in plugins():
+            try:
+                n += launched_count(p.relaunch_missing(saved, live))
+            except Exception as e:
+                logline(f"relaunch ({getattr(p, 'name', '?')}) error: {e}")
+        # THEN THE DEFAULT, for everything no plugin claimed. Last, so a
+        # specific plugin always wins: it has already handled its own app by
+        # here, and desktop_relaunch_missing skips every is_owned app anyway.
+        try:
+            # NO `claimed` HERE, DELIBERATELY: this is a restore, where a
+            # plugin owning an app really is the thing that starts it, from a
+            # recorded command per window. Passing the roster's policy would
+            # have the default spawn a BARE kitty at $HOME for a saved
+            # terminal whose cwd is unreadable, where today it spawns nothing.
+            n += launched_count(desktop_relaunch_missing(saved, live))
+        except Exception as e:
+            logline(f"relaunch (desktop default) error: {e}")
     # AND ANOTHER ACCOUNT IS ASKED TO START ITS OWN. Last, because it is the
     # only one that leaves this process: everything above has already decided
     # about the owner's own windows.
+    #
+    # ASKED EVEN WHEN WE ARE BLIND, which is the one place an empty live set
+    # is already the safe answer rather than the inverted one, by the very
+    # paragraph below: the ACCOUNT decides what of its own is missing, against
+    # its own roster and its own compositor view, and the relayed views only
+    # sharpen its per-command terminal count. So a failed read makes it ask
+    # for less, never more, and skipping it would cost that account its whole
+    # desk for no gain.
     #
     # DRIVEN BY THE SAVED SNAPSHOT, NOT BY WHAT IS MISSING. Which of that
     # account's apps are absent is ITS question, answered against its own

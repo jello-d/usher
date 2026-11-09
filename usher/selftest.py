@@ -3749,15 +3749,34 @@ def _t_launch_source(ck):
     import contextlib
     import io
     real = (engine.load_snapshot, engine.plugins,
-            engine.desktop_relaunch_missing)
-    seen, desk = [], []
+            engine.desktop_relaunch_missing, engine.ipc,
+            engine.source_trigger, engine.logline)
+    seen, desk, asked, logs = [], [], [], []
 
     class _P:
         def relaunch_missing(self, saved, live):
             seen.append([w.get("cmd") for w in saved])
             return 0
 
+    class _Sock:
+        def list_views(self, **k):
+            return []
+
     try:
+        # THE LIVE SET IS THE FIXTURE'S, NOT THE HOST'S. This area called the
+        # REAL ipc(), so every cell below behaved differently depending on
+        # whether the box had a compositor: with one it read the developer's
+        # own windows, and without one the read raised and fell back to an
+        # empty list. Both happen in this fleet's own suite, which runs it
+        # under the system python3 (no pywayfire) AND under the venv against
+        # a live socket.
+        engine.ipc = lambda *a, **k: _Sock()
+        engine.source_trigger = lambda *a, **k: asked.append(k) or 0
+        # STUBBED HERE rather than left to _quiet_log, which silences the log
+        # for the whole area loop: an area that wants to ASSERT what was
+        # logged stubs for itself, which is what that helper's own docstring
+        # says and what restoring to whatever we found keeps working.
+        engine.logline = lambda s: logs.append(s)
         engine.load_snapshot = lambda *a: {
             "windows": [{"app_id": "kitty", "cmd": "FROM THE FILE"}]}
         engine.plugins = lambda: [_P()]
@@ -3781,20 +3800,60 @@ def _t_launch_source(ck):
         with contextlib.redirect_stdout(io.StringIO()):
             launch_missing()
         ck("launch-falls-back-to-reading-when-given-nothing",
-           seen[-1] == ["FROM THE FILE"])
+           bool(seen) and seen[-1] == ["FROM THE FILE"])
         # AN EMPTY SNAPSHOT MUST NOT BE MISTAKEN FOR "nothing was saved": it is
         # what the caller hands us at a cold start, and relaunching from it is
         # the bug. Passing it through unchanged is what lets the caller decide.
         with contextlib.redirect_stdout(io.StringIO()):
             launch_missing({"windows": []})
-        ck("launch-passes-an-empty-snapshot-through", seen[-1] == [])
+        ck("launch-passes-an-empty-snapshot-through",
+           bool(seen) and seen[-1] == [])
         # ASSERT THE STUB WAS REACHED, or a future launch_missing that stops
         # calling the registry default would make this silently vacuous and
         # the spawn could come back unnoticed.
         ck("launch-reaches-the-registry-default", len(desk) == 3)
+
+        # --- AND A FAILED LIVE READ MUST START NOTHING OF OURS ----------
+        # Every owner-side path asks "is mine already up?", so an empty live
+        # set answers "no" for everything: a failed read does not degrade the
+        # relaunch, it INVERTS it. Measured on a real 26-window desk where
+        # every saved window WAS live: 0 launches became 4 apps and 6 spawns.
+        def _boom(*a, **k):
+            raise OSError("planted: the compositor is not answering")
+        engine.ipc = _boom
+        _n0, _d0, _a0 = len(seen), len(desk), len(asked)
+        with contextlib.redirect_stdout(io.StringIO()):
+            _blind_n = launch_missing(given)
+        ck("launch-starts-nothing-of-ours-when-the-live-read-fails",
+           _blind_n == 0 and len(seen) == _n0 and len(desk) == _d0)
+        # AND IT STILL ASKS THE OTHER ACCOUNTS, which is the one place an
+        # empty live set is already the SAFE answer: the account decides what
+        # of its own is missing against its own compositor view, and the
+        # relayed views only sharpen its per-command terminal count, so a
+        # failed read makes it ask for LESS. Skipping it would cost that
+        # account its whole desk for no gain.
+        ck("launch-still-asks-the-sources-when-the-live-read-fails",
+           len(asked) == _a0 + 1)
+        # AND IT SAYS SO, CARRYING THE CAUSE. Refusing silently is worse than
+        # the bug for a reader: a login would come up with an empty desk and
+        # nothing anywhere to explain it, which is this package's most
+        # repeated failure shape. Asserted on the planted exception's own
+        # text rather than on our wording, so the message stays free to be
+        # reworded and a generic line cannot satisfy it.
+        ck("launch-says-why-it-started-nothing",
+           any("not answering" in s for s in logs))
+        # THE CONTROL, without which both cells above pass over a
+        # launch_missing that has simply stopped calling anything: the SAME
+        # fixture with a working read must still reach the owner's paths.
+        engine.ipc = lambda *a, **k: _Sock()
+        with contextlib.redirect_stdout(io.StringIO()):
+            launch_missing(given)
+        ck("launch-blindness-has-a-working-control",
+           len(seen) == _n0 + 1 and len(desk) == _d0 + 1)
     finally:
         (engine.load_snapshot, engine.plugins,
-         engine.desktop_relaunch_missing) = real
+         engine.desktop_relaunch_missing, engine.ipc,
+         engine.source_trigger, engine.logline) = real
 
 def _raises(exc, fn):
     """True when fn() raises exc. A GUARDED call rather than letting it
