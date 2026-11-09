@@ -146,11 +146,16 @@ echo "nested socket $NSOCK"
 
 # --no-launch SO IT CANNOT SPAWN ANYTHING: this runs against a real compositor
 # on somebody's live machine, and the store it reads names apps.
-env XDG_RUNTIME_DIR="$SBX/run" XDG_STATE_HOME="$SBX/state" \
+# FROM A NEUTRAL CWD, because `-m usher` puts the CURRENT DIRECTORY first on
+# sys.path: launched from the checkout, the worker imports THAT tree whatever
+# PYTHONPATH says, so a run meant to test another tree silently measures this
+# one. This file's notes record that trap five times, and it made a planted
+# regression in `window_origin` read as NOT CAUGHT.
+(cd / && env XDG_RUNTIME_DIR="$SBX/run" XDG_STATE_HOME="$SBX/state" \
     WAYFIRE_SOCKET="$NSOCK" WAYLAND_DISPLAY=wayland-1 \
     PYTHONPATH="$TREE" PATH="$RIGPATH" \
     USHER_RIG_ANSWERS="$SBX/answers" \
-    setsid "$PY" -m usher _worker --no-launch > "$SBX/worker.log" 2>&1 &
+    setsid "$PY" -m usher _worker --no-launch) > "$SBX/worker.log" 2>&1 &
 
 LOG="$SBX/state/usher/watch.log"
 _n=0

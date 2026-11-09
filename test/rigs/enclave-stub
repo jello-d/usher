@@ -1,0 +1,401 @@
+#!/bin/sh
+# enclave-stub - does another account's window get KEYED, PLACED and REDACTED?
+#
+# RUN BY HAND, not by test/run: it starts a nested compositor, a real worker
+# and a real window, so it is slow, needs a host compositor to nest inside,
+# and spawns processes.
+#
+# WHY IT EXISTS: every claim this package makes about another account's
+# windows is a reading of manifold's watch.log with the real severance
+# attached. That is evidence and it is not a test, and manifestor cannot
+# produce it at all (no enclave), so the whole surface has exactly one test
+# bed in the fleet and no assertions anywhere.
+#
+# AND A VM CANNOT HELP, measured: the provisioned base carries no severance
+# and no second account, so `roundtrip-vm` reaches a real session boundary
+# and still has nobody else's windows to round-trip.
+#
+# SO IT IS STUBBED, which usher's own design makes exact rather than
+# approximate: usher asks an external provider by RUNNING it, and both hooks
+# resolve through `config_path`, which reads XDG_CONFIG_HOME. A sandboxed
+# config directory therefore owns both answers:
+#
+#     usher/window-source     names a pid's source   (here: a marker in the
+#                             process's own environ, so the rig decides which
+#                             window is foreign and nothing else is)
+#     usher/source-trigger    stands in for the account, records the ask
+#
+# WHAT IT COVERS, neither of which has an assertion today:
+#     the roster ASK      `launch_missing` naming the sources its SNAPSHOT
+#                         holds and invoking the real hook to ask them
+#     the uid-FIRST ORDER the hook is NOT asked about the session user's own
+#                         windows, which is a cost decision and therefore a
+#                         property worth pinning: asking first would mean a
+#                         subprocess per window per second, forever
+#
+# WHAT IT CANNOT COVER, AND THE REASON IS A DESIGN BOUNDARY RATHER THAN A
+# LIMIT OF THE RIG. The first version of this tried to make a window usher
+# spawned read as FOREIGN by planting a `window-source` hook that named it,
+# and `window_origin` says in as many words why that cannot work:
+#
+#     uid == mine  ->  (None, None)   ours. The hook is NOT asked.
+#
+# The uid goes first, deliberately, so a same-uid window is never put to the
+# hook at all and the source key, the placement from a source slot and the
+# redaction cannot be reached without a SECOND uid. That needs severance (the
+# real box) or a VM base rebuilt from a current tree, where the severance pin
+# is ungated. Those halves keep their unit coverage and their live runs on
+# manifold; what is new here is the ask and the order.
+#
+# ISOLATION IS THE WHOLE TRICK, and getting it wrong breaks the user's desktop
+# rather than the test: a nested compositor sharing the live XDG_RUNTIME_DIR
+# puts a SECOND wayfire socket in it, and `pick_socket` refuses on two
+# candidates, so every usher verb on the box stops working. Done once, by a
+# previous session. So: its own XDG_RUNTIME_DIR, XDG_STATE_HOME and
+# XDG_CONFIG_HOME, and the host reached by an ABSOLUTE WAYLAND_DISPLAY.
+set -eu
+
+SBX=${USHER_SBX:-/var/tmp/usher-enclave-rig}
+TREE=${USHER_TREE:-$(cd "$(dirname "$0")/../.." && pwd)}
+SRC=${USHER_RIG_SOURCE:-titan}
+PROF=RIGDESK
+_C="'$SBX'"
+# KEEPABLE, because a rig whose sandbox evaporates cannot be diagnosed: the
+# first run of this one failed three assertions and every piece of evidence
+# went with the trap. `USHER_KEEP=1` leaves it.
+if [ -z "${USHER_KEEP:-}" ]; then
+  # shellcheck disable=SC2064  # the literal is baked in at ARM time, per this
+  # tree's rule that `rm -rf` never runs with a variable expansion
+  trap "rm -rf $_C" EXIT
+fi
+
+rm -rf "$SBX"
+mkdir -p "$SBX/run" "$SBX/state/usher" "$SBX/config/usher"
+chmod 700 "$SBX/run"
+
+PY=$(dirname "$(readlink -f "$(command -v usher-mgr)")")/python3
+[ -x "$PY" ] || { echo "no venv python at $PY"; exit 1; }
+command -v foot >/dev/null 2>&1 || { echo "this rig needs foot"; exit 1; }
+
+HOST_SOCK="${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY:-wayland-1}"
+[ -S "$HOST_SOCK" ] || { echo "no host wayland socket at $HOST_SOCK"; exit 1; }
+echo "tree $TREE"
+echo "interpreter $PY"
+echo "source name $SRC"
+
+# ------------------------------------------------------------- the two hooks
+# IT RECORDS EVERY CALL, because that is the assertion: the daemon must not
+# ask it about the session user's own windows. The hook's contract is three
+# states and this honours all three (a name on stdout at 0, nothing at 1 for
+# our own window, anything else is "could not tell"), so calling it by hand
+# also proves it WORKS, which is what separates "never asked" from "asked and
+# broken".
+cat > "$SBX/config/usher/window-source" <<'SRCEOF'
+#!/bin/sh
+_pid=${1:-}
+printf 'CALLED %s\n' "$_pid" >> "${USHER_RIG_SOURCE_LOG:?}"
+case "$_pid" in
+  ''|*[!0-9]*) exit 2 ;;
+esac
+if grep -qz 'USHER_RIG_FOREIGN=1' "/proc/$_pid/environ" 2>/dev/null; then
+  printf '%s\n' "${USHER_RIG_SOURCE:-titan}"
+  exit 0
+fi
+exit 1
+SRCEOF
+
+# THE TRIGGER RECORDS THE ASK AND READS ITS STDIN. Reading matters: the owner
+# relays `pid <identifier> <pid>` lines that way, and a provider that never
+# drained them could block a writer. It reports NOTHING on stdout, which is
+# the honest stand-in here, because with no security-context there are no
+# identifiers for the owner to relay and so nothing for an account to answer.
+cat > "$SBX/config/usher/source-trigger" <<'TRGEOF'
+#!/bin/sh
+_in=$(cat 2>/dev/null || true)
+{
+  printf 'ASKED %s %s\n' "${1:-}" "${2:-}"
+  printf 'STDIN-LINES %s\n' "$(printf '%s' "$_in" | grep -c . || true)"
+} >> "${USHER_RIG_TRIGGER_LOG:?}"
+exit 0
+TRGEOF
+chmod 755 "$SBX/config/usher/window-source" "$SBX/config/usher/source-trigger"
+export USHER_RIG_TRIGGER_LOG="$SBX/trigger.log"
+export USHER_RIG_SOURCE_LOG="$SBX/source-calls.log"
+: > "$USHER_RIG_TRIGGER_LOG"
+: > "$USHER_RIG_SOURCE_LOG"
+
+# ------------------------------------------------------------- the store
+# THE STORE IS SEEDED AS THE SANDBOX'S OWN PROOF: a worker that reports
+# `watching, 2 known windows` can only have read THIS state directory, which
+# is what makes every later assertion non-vacuous. Nothing matches these rows,
+# because a same-uid window can never be foreign (see the header).
+#
+# AND THE SNAPSHOT IS THE ROSTER ASK'S ACTUAL INPUT, which is the distinction
+# the first run of this rig got wrong.
+"$PY" - "$SBX" "$SRC" "$PROF" <<'SEEDEOF'
+import json
+import sys
+import time
+
+sbx, src, prof = sys.argv[1], sys.argv[2], sys.argv[3]
+now = time.time()
+
+
+def row(app, ws, pos, size):
+    # `source` is what resolution and the matcher read; `owner` is what
+    # snapshot stamps and what the relaunch skips a row by. A hand-seeded row
+    # needs both to look like one a real capture wrote.
+    return {"app": app, "title": "", "appid_only": False,
+            "output": "WL-1", "workspace": ws, "pos": pos, "size": size,
+            "panel": "", "surface": "", "source": src, "owner": 999,
+            "last_seen": now}
+
+
+kb = {
+    f"foot\u0000{src}": row("foot", [1, 0], [40, 60], [600, 400]),
+    f"zzz-absent\u0000{src}": row("zzz-absent", [2, 2], [10, 10], [300, 200]),
+}
+with open(f"{sbx}/state/usher/knowledge-{prof}.json", "w") as f:
+    json.dump(kb, f)
+
+# AND THE SNAPSHOT, because THE RELAUNCH READS THE SNAPSHOT WHERE PLACEMENT
+# READS THE STORE. That seam is recorded in this package's notes as the cause
+# of a store slot that could never bring its window back, and the first run of
+# this rig seeded only the store: `launch_missing` therefore saw no rows, named
+# no sources, and the roster ask could not fire. A slot can PLACE a window
+# that exists and can never cause one to EXIST.
+snap = {
+    "version": 1, "time": now,
+    "outputs": [{"name": "WL-1", "geometry": {"x": 0, "y": 0,
+                                              "width": 1280, "height": 720}}],
+    "windows": [
+        {"app_id": "foot", "title": "", "key": src, "source": src,
+         "owner": 999, "pid": -1, "output": "WL-1", "workspace": [1, 0],
+         "pos": [40, 60], "size": [600, 400]},
+        {"app_id": "zzz-absent", "title": "", "key": src, "source": src,
+         "owner": 999, "pid": -1, "output": "WL-1", "workspace": [2, 2],
+         "pos": [10, 10], "size": [300, 200]},
+    ],
+}
+with open(f"{sbx}/state/usher/current.json", "w") as f:
+    json.dump(snap, f)
+print(f"seeded {len(kb)} store row(s) and {len(snap['windows'])} snapshot "
+      f"row(s) for {src} in profile {prof}")
+SEEDEOF
+
+# ------------------------------------------------------------- the compositor
+cat > "$SBX/wayfire.ini" <<'INIEOF'
+[core]
+plugins = ipc ipc-rules stipc place
+vwidth = 3
+vheight = 3
+[place]
+mode = cascade
+[output:WL-1]
+mode = 1280x720@60000
+INIEOF
+
+env -u WAYFIRE_SOCKET XDG_RUNTIME_DIR="$SBX/run" XDG_STATE_HOME="$SBX/state" \
+    XDG_CONFIG_HOME="$SBX/config" \
+    WAYLAND_DISPLAY="$HOST_SOCK" WAYFIRE_CONFIG_FILE="$SBX/wayfire.ini" \
+    WLR_BACKENDS=wayland \
+    setsid /opt/wayfire/bin/wayfire > "$SBX/wayfire.log" 2>&1 &
+
+_n=0
+while ! ls "$SBX/run"/wayfire-*.socket >/dev/null 2>&1; do
+  _n=$((_n + 1))
+  [ "$_n" -gt 60 ] && { echo "nested wayfire never came up"
+    tail -5 "$SBX/wayfire.log"; exit 1; }
+  sleep 0.5
+done
+NSOCK=$(ls "$SBX/run"/wayfire-*.socket | head -1)
+echo "nested socket $NSOCK"
+
+# LAUNCH IS ENABLED, deliberately, because the roster ask lives in
+# `launch_missing`. Nothing of the OWNER's can be started by it: every seeded
+# row carries a source, and the registry default skips exactly those, so the
+# only thing it can do is ask the stub trigger.
+# FROM A NEUTRAL CWD, because `-m usher` puts the CURRENT DIRECTORY first on
+# sys.path: launched from the checkout, the worker imports THAT tree whatever
+# PYTHONPATH says, so a run meant to test another tree silently measures this
+# one. This file's notes record that trap five times, and it made a planted
+# regression in `window_origin` read as NOT CAUGHT.
+(cd / && env XDG_RUNTIME_DIR="$SBX/run" XDG_STATE_HOME="$SBX/state" \
+    XDG_CONFIG_HOME="$SBX/config" \
+    WAYFIRE_SOCKET="$NSOCK" WAYLAND_DISPLAY=wayland-1 \
+    PYTHONPATH="$TREE" USHER_PROFILE="$PROF" \
+    USHER_RIG_SOURCE="$SRC" \
+    USHER_RIG_TRIGGER_LOG="$USHER_RIG_TRIGGER_LOG" \
+    USHER_RIG_SOURCE_LOG="$USHER_RIG_SOURCE_LOG" \
+    setsid "$PY" -m usher _worker) > "$SBX/worker.log" 2>&1 &
+
+LOG="$SBX/state/usher/watch.log"
+_n=0
+while [ ! -f "$LOG" ] || ! grep -q "watching," "$LOG" 2>/dev/null; do
+  _n=$((_n + 1))
+  [ "$_n" -gt 60 ] && { echo "worker never started watching"
+    tail -5 "$SBX/worker.log"; exit 1; }
+  sleep 0.5
+done
+sleep 3
+
+_fail=0
+
+# THE RIG MUST PROVE THE WORKER READ ITS CONFIG DIR, or every assertion below
+# passes over a daemon that found no hooks at all and treated every window as
+# the owner's. Asked of what the WORKER did: it loaded the seeded store, which
+# only the sandboxed XDG_STATE_HOME can explain, and it invoked the stub
+# trigger, which only the sandboxed XDG_CONFIG_HOME can.
+_known=$(sed -n 's/.*watching, \([0-9]*\) known.*/\1/p' "$LOG" | head -1)
+echo ""
+echo "--- the sandbox is in play ---"
+echo "   store loaded: ${_known:-?} known window(s) (2 seeded)"
+if [ "${_known:-0}" -lt 2 ]; then
+  echo "   VACUITY: the worker did not load the seeded store, so nothing"
+  echo "   below means anything"
+  _fail=1
+fi
+
+echo ""
+echo "--- the roster ASK, which is launch_missing's source half ---"
+if grep -q "ASKED $SRC resume" "$USHER_RIG_TRIGGER_LOG" 2>/dev/null; then
+  echo "   ASKED: $(grep -m1 "ASKED $SRC" "$USHER_RIG_TRIGGER_LOG")"
+  echo "   and usher said: $(grep -m1 "asked $SRC to resume" "$LOG" \
+    || echo '(no log line)')"
+else
+  echo "   FAIL: the account was never asked to resume"
+  echo "   trigger log: $(cat "$USHER_RIG_TRIGGER_LOG" | tr '\n' ' ')"
+  _fail=1
+fi
+
+echo ""
+echo "--- OUR OWN window: the hook must NOT be asked about it ---"
+# THE uid GOES FIRST, and that is a cost decision rather than a nicety:
+# `resolution` runs on every event and on every capture pass for every window,
+# so asking a provider first would mean a subprocess per window per second
+# forever. The property has no end-to-end test, and a regression in it would
+# be a fork storm nothing reports.
+#
+# THE MARKER IS DELIBERATELY SET ON THIS WINDOW, so a hook that WERE asked
+# would name it and the assertion would fail loudly rather than vacuously.
+env XDG_RUNTIME_DIR="$SBX/run" WAYLAND_DISPLAY=wayland-1 \
+    USHER_RIG_FOREIGN=1 setsid foot > "$SBX/foot.log" 2>&1 &
+sleep 7
+_views=$(env XDG_RUNTIME_DIR="$SBX/run" WAYFIRE_SOCKET="$NSOCK" "$PY" -c "
+import os
+from wayfire import WayfireSocket
+s = WayfireSocket(os.environ['WAYFIRE_SOCKET'])
+print(' '.join(sorted(str(v.get('app-id')) for v in
+                      s.list_views(filter_mapped_toplevel=True))))" 2>&1)
+echo "   mapped toplevels: ${_views:-none}"
+case "${_views:-}" in
+  *foot*) ;;
+  *)      echo "   VACUITY: no window mapped, so nothing below is a test"
+          _fail=1 ;;
+esac
+_calls=$(grep -c . "$USHER_RIG_SOURCE_LOG" 2>/dev/null) || _calls=0
+if [ "${_calls:-0}" = 0 ]; then
+  echo "   NOT ASKED: 0 hook calls for our own window, as designed"
+else
+  echo "   FAIL: the hook was asked $_calls time(s) about our own window:"
+  sed 's/^/     /' "$USHER_RIG_SOURCE_LOG"
+  _fail=1
+fi
+# THE CONTROL, which is what separates "never asked" from "asked and broken":
+# the same hook, called by hand against the same marked process, must answer.
+_fpid=$("$PY" -c "
+import os
+for d in os.listdir('/proc'):
+    if not d.isdigit():
+        continue
+    try:
+        e = open(f'/proc/{d}/environ', 'rb').read().decode(errors='replace')
+    except OSError:
+        continue
+    if 'USHER_RIG_FOREIGN=1' in e and 'foot' in open(
+            f'/proc/{d}/cmdline', 'rb').read().decode(errors='replace'):
+        print(d)
+        break")
+if [ -n "${_fpid:-}" ]; then
+  _said=$(USHER_RIG_SOURCE_LOG="$SBX/control.log" \
+    USHER_RIG_SOURCE="$SRC" "$SBX/config/usher/window-source" "$_fpid")
+  echo "   control: the hook itself answers '${_said:-}' for pid $_fpid"
+  [ "$_said" = "$SRC" ] || { echo "   FAIL: the hook does not work, so"
+    echo "   'not asked' above proves nothing"; _fail=1; }
+else
+  echo "   FAIL: could not find our own marked window to control against"
+  _fail=1
+fi
+
+echo ""
+echo "--- the whole log ---"
+sed 's/^/    /' "$LOG"
+echo ""
+echo "--- the trigger log ---"
+sed 's/^/    /' "$USHER_RIG_TRIGGER_LOG"
+
+# CLEAN UP BY ENVIRON, EXCLUDING OUR OWN PIDS, and tolerating every /proc
+# entry we may not read: an earlier rig died partway through on `Permission
+# denied` for another user's process and LEAKED six processes onto the live
+# box. Reading the process table by pattern is banned here for the self-match
+# reason; this reads environ and skips what it cannot.
+echo ""
+echo "--- cleanup ---"
+"$PY" - "$SBX" <<'PYEOF'
+import os
+import signal
+import sys
+import time
+
+sbx = sys.argv[1]
+me = {os.getpid(), os.getppid()}
+
+
+def mine():
+    out = []
+    for d in os.listdir("/proc"):
+        if not d.isdigit() or int(d) in me:
+            continue
+        try:
+            with open(f"/proc/{d}/environ", "rb") as f:
+                env = f.read().decode(errors="replace")
+        except OSError:
+            continue                      # not ours to read: skip, never die
+        if sbx in env:
+            out.append(int(d))
+    return out
+
+
+targets = mine()
+print(f"    signalling {len(targets)} sandbox process(es)")
+for pid in targets:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        pass
+for _ in range(20):
+    time.sleep(0.5)
+    if not mine():
+        break
+for pid in mine():
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+time.sleep(1)
+left = mine()
+# AND IT VERIFIES, because "I sent a signal" is not "nothing is left".
+print("    leaked afterwards:", left or "none")
+sys.exit(1 if left else 0)
+PYEOF
+_crc=$?
+[ "$_crc" = 0 ] || _fail=1
+
+echo ""
+if [ "$_fail" = 0 ]; then
+  echo "RIG PASSED: the account was asked to resume through a real hook,"
+  echo "            and the hook was NOT asked about our own window"
+else
+  echo "RIG FAILED"
+fi
+exit "$_fail"
