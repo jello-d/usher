@@ -5695,6 +5695,67 @@ def _t_cli_split(ck):
     ck("every-json-reader-establishes-its-shape",
        all(ok for _mod, _fn, ok in _loads))
 
+    # --- WHO STAMPS A FIELD EVERY DOWNSTREAM READ TRUSTS -----------------
+    # Twelve sites read `w.get("source")` bare, and whether that is
+    # hand-rolling the question or consuming a single-sourced answer depends
+    # on exactly one thing: WHO WRITES IT. One writer makes every read safe
+    # by construction; two on the same record type make every read a coin
+    # toss, which is the "two sites with a different idea of one fact" family
+    # that every silent failure in this package has come from.
+    #
+    # MEASURED RATHER THAN ASSUMED, and the answer was nuanced: most
+    # multi-writer fields are DIFFERENT RECORD TYPES (a snapshot row, a
+    # prediction row and a roster row each carry their own `key` and `cmd`),
+    # which is fine. The pairs worth naming are the ones on the SAME type.
+    #
+    # PINNED BY NAME, because the point is that a third writer has to be a
+    # DECISION. A new stamper of `owner`, or of a store entry's `panel`, is
+    # exactly the defect this cannot be allowed to acquire quietly.
+    _STAMPERS = {
+        # a live snapshot row's facts: one writer, which is the capture
+        "owner": {"snapshot"},
+        # a store entry's own: kb_entry stamps it, and surface_seed CLEARS
+        # it deliberately, because another desk's panel id names a monitor
+        # that may not be attached here and entry_output would fall back to
+        # the connector NAME and place the old panel's rect on a new one
+        "panel": {"kb_entry", "surface_seed"},
+        "surface": {"kb_entry"},
+        # snapshot stamps the live fact; kb_entry CARRIES it into the store
+        # rather than re-deriving, since a replayed row's pid is long dead
+        "source": {"snapshot", "kb_entry"},
+    }
+    _seen_w = {f: set() for f in _STAMPERS}
+    for _mn, _mod in (("engine", engine),):
+        _tr = _ast.parse(_i.getsource(_mod))
+        _ow = {}
+        for _n in _ast.walk(_tr):
+            if isinstance(_n, _ast.FunctionDef):
+                for _s in _ast.walk(_n):
+                    if hasattr(_s, "lineno"):
+                        _ow.setdefault(_s.lineno, _n.name)
+        for _n in _ast.walk(_tr):
+            if isinstance(_n, _ast.Dict):
+                for _k in _n.keys:
+                    if (isinstance(_k, _ast.Constant)
+                            and _k.value in _seen_w):
+                        _seen_w[_k.value].add(_ow.get(_n.lineno, "<module>"))
+            if isinstance(_n, _ast.Assign):
+                for _tg in _n.targets:
+                    if (isinstance(_tg, _ast.Subscript)
+                            and isinstance(_tg.slice, _ast.Constant)
+                            and _tg.slice.value in _seen_w):
+                        _seen_w[_tg.slice.value].add(
+                            _ow.get(_n.lineno, "<module>"))
+    for _f, _want in sorted(_STAMPERS.items()):
+        if _seen_w[_f] != _want:
+            print(f"selftest: `{_f}` is stamped by {sorted(_seen_w[_f])}, "
+                  f"not {sorted(_want)}", file=sys.stderr)
+        ck(f"only-the-named-writers-stamp-{_f}", _seen_w[_f] == _want)
+    # A VACUITY GUARD, because an AST change that matched nothing would pass
+    # all four assertions over four empty sets.
+    ck("the-field-stampers-were-found",
+       all(_seen_w[_f] for _f in _STAMPERS))
+
     # THE CONFIG DIR. One place, named for the command, and every config name
     # resolves under it. The per-file fallback to the pre-rename directory is
     # gone: both machines are migrated, so it could only ever resurrect a stale
