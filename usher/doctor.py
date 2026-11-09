@@ -72,7 +72,7 @@ def _doctor_surfaces(out):
         outs = {}
     out(f"  surfaces     {len(surfaces)} on this desk")
     for name, s in sorted(surfaces.items()):
-        bad = "" if engine.surface_cell_fits(s, outs) else \
+        bad = "" if engine.cell_fits(s, outs) else \
             "  CELL NOT IN THE LIVE GRID, so it is not seeded"
         out(f"                 {name:12} {s['output']:8} "
             f"ws{tuple(s['workspace'])} "
@@ -561,12 +561,23 @@ def _doctor_placement(out, kb, live, outs):
         if is_mux_term(app_of(lv), t):
             sess, host = mux_session_of(t), mux_host_of(t)
             shows = f"  [showing {sess}@{host or LOCAL_HOST}]" if sess else ""
-        if engine.entry_output(e, outs) is not None:
-            out(f"  placeable  {app_of(lv)[:14]:14} {e['title'][:34]:34}"
-                f" -> {where}{shows}")
-        else:
+        # THREE STATES, NOT TWO, and the third was printing as `placeable`: a
+        # slot whose OUTPUT is here but whose CELL this desk's grid does not
+        # have cannot be placed either, and saying it is placeable sends a
+        # reader looking for a fault in the placer. Which of the two refusals
+        # it is decides what to do about it, so they are worded apart.
+        _o = engine.entry_output(e, outs)
+        if _o is None:
             out(f"  UNPLACEABLE {app_of(lv)[:13]:13} {e['title'][:34]:34}"
                 f" -> {where} NOT ATTACHED")
+        elif not engine.cell_fits(e, {_o["name"]: _o}):
+            _ws = _o.get("workspace") or {}
+            out(f"  UNPLACEABLE {app_of(lv)[:13]:13} {e['title'][:34]:34}"
+                f" -> {where} OFF THIS GRID "
+                f"({_ws.get('grid_width')}x{_ws.get('grid_height')})")
+        else:
+            out(f"  placeable  {app_of(lv)[:14]:14} {e['title'][:34]:34}"
+                f" -> {where}{shows}")
     for lv in unlive:
         tag, why = _unmatched_why(lv)
         # THE ONE REPORT LINE THAT RENDERS A LIVE VIEW'S OWN TITLE, so it is

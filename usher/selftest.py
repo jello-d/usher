@@ -7572,6 +7572,102 @@ def _t_placement(ck):
     ck("match-consumes-an-entry-once",
        len(_pairs3) == 1 and len(_unlive3) == 1)
 
+    # ---- A CELL THIS DESK DOES NOT HAVE IS NOT A PLACEMENT --------------
+    # PRODUCT, measured live in a nested compositor: wayfire ACCEPTS a
+    # geometry past the edge of the virtual desktop exactly as asked, so the
+    # window is stranded where no workspace navigation reaches it; `place_of`
+    # then reads that position back CORRECTLY and `placement_landed` returns
+    # True, so the read-back confirms the stranding and the next capture
+    # re-learns the same slot. `cell_fits` existed and guarded only the
+    # surface SEED, and a LEARNED entry walked past it: the seventh instance
+    # in this package of a gate scoped to one category meeting something
+    # outside it.
+    from . import watch as _wgc
+
+    _go = {"id": 1, "name": "DP-1",
+           "geometry": {"x": 0, "y": 0, "width": 1000, "height": 800},
+           "workspace": {"x": 0, "y": 0, "grid_width": 2, "grid_height": 2}}
+    _ge = lambda ws: {"app_id": "zzz-unowned", "title": "t", "output": "DP-1",
+                      "workspace": ws, "pos": [10, 20], "size": [100, 100],
+                      "label": "x", "sticky": False, "inverted": False,
+                      "fullscreen": False, "panel": "", "surface": ""}
+    # THE ARITHMETIC IS STILL UNBOUNDED, deliberately: it is the inverse of
+    # place_of and bounding it there would make the pair disagree. So the gate
+    # has to sit upstream, and this is the number that strands a window.
+    ck("target-geometry-is-not-bounded-by-the-grid",
+       engine.target_geometry(_ge([2, 2]), _go)["x"] == 2 * 1000 + 10)
+    # AND THE READ-BACK CANNOT CATCH IT, which is why nothing downstream did.
+    ck("the-read-back-confirms-an-off-grid-placement",
+       engine.placement_landed(
+           {"id": 9, "output-name": "DP-1",
+            "geometry": {"x": 2010, "y": 1620, "width": 100, "height": 100}},
+           _ge([2, 2]), _go))
+
+    _gw = _wgc.Watcher(launch=False)
+    _gsent, _gsaid = [], []
+
+    class _GSock:
+        def send_json(self, d):
+            _gsent.append(d)
+
+        def list_outputs(self):
+            return [_go]
+
+        def list_views(self, filter_mapped_toplevel=False):
+            return []
+
+    _gw.place_sock = _GSock()
+    _gw._restate = lambda vid, e: None
+    # BOTH SPELLINGS, because watch.py imports `logline` BY NAME and so holds
+    # its own reference: patching engine's global alone leaves the daemon's
+    # copy live, which is the stale-copy hazard the package split is careful
+    # about and which this suite has already paid for once.
+    _gl_e, _gl_w = engine.logline, _wgc.logline
+    _gv = {"id": 9, "app-id": "zzz-unowned", "title": "t"}
+    # AND STDOUT TOO. `_seat_view` prints its own `placed` line as well as
+    # logging it, so the CONTROL below leaks a fixture row into the suite's
+    # own output. That output is the record this package reads to tell its
+    # noise from a daemon's, and this suite has had to be cleaned of exactly
+    # this twice already.
+    _gbuf = io.StringIO()
+    try:
+        engine.logline = _wgc.logline = lambda m: _gsaid.append(m)
+        with contextlib.redirect_stdout(_gbuf):
+            _gw._seat_view(_gv, _ge([2, 2]), _go)
+        ck("the-daemon-refuses-a-cell-off-this-desks-grid", not _gsent)
+        ck("and-says-so-naming-the-grid",
+           any("off this desk's grid" in m and "2x2" in m for m in _gsaid))
+        # ONCE PER WINDOW, NOT PER EVENT: this runs from every map and every
+        # rename, so a standing condition logged unconditionally becomes a
+        # line a second. Same reason the slot ledger dedups.
+        with contextlib.redirect_stdout(_gbuf):
+            _gw._seat_view(_gv, _ge([2, 2]), _go)
+        ck("and-only-once-per-window",
+           len([m for m in _gsaid if "off this desk's grid" in m]) == 1)
+        # THE CONTROL, and it is what makes the three above mean anything: a
+        # cell the grid DOES have is still placed. Without it a _seat_view
+        # that refused everything would pass all three.
+        with contextlib.redirect_stdout(_gbuf):
+            _gw._seat_view({"id": 10, "app-id": "zzz-unowned",
+                            "title": "t"}, _ge([1, 1]), _go)
+        ck("but-a-cell-the-grid-has-is-still-placed", len(_gsent) == 1)
+    finally:
+        engine.logline, _wgc.logline = _gl_e, _gl_w
+    # AND A FORGOTTEN VIEW IS SAID AGAIN, or a new window reusing the vid is
+    # refused in silence. A per-view set that only grows is also a leak in a
+    # process that runs for weeks.
+    # AND A FORGOTTEN VIEW IS SAID AGAIN, or a new window reusing the vid is
+    # refused in silence, and a per-view set that only grows is a leak in a
+    # process that runs for weeks.
+    # DRIVEN THROUGH THE REAL EVENT. The first version of this check asserted
+    # `discard` then re-read the set, which tests Python's set and not the
+    # handler: planting "never forgotten" into the unmap branch was NOT
+    # CAUGHT. The test must not supply the wiring it is checking.
+    ck("the-refusal-is-recorded", 9 in _gw.cell_said)
+    with contextlib.redirect_stdout(io.StringIO()):
+        _gw._on_event({"event": "view-unmapped", "view": {"id": 9}})
+    ck("the-refusal-is-forgotten-on-unmap", 9 not in _gw.cell_said)
+
 def _t_geometry(ck):
     """respawn geometry and the chrome profile fallback."""
     # respawn geometry: ask kitty for the size the window had, so it does not
@@ -8423,6 +8519,128 @@ def _t_displays(ck):
     # stopped calling the resolver at all, which is the same bug.
     ck("the-resolver-is-actually-wired", _uses >= 5)
 
+    # ---- and every placement path BOUNDS THE CELL against the grid --------
+    # Same hole one question over: `cell_fits` was proven and guarded only the
+    # surface SEED, so a LEARNED entry naming a cell this desk's grid does not
+    # have was placed past the edge of the virtual desktop. Four sites have to
+    # ask: the daemon's seat, the one-shot restore, the seed, and doctor's
+    # report. A count rather than a pattern, because there is no old form to
+    # match here: the sites simply did not ask at all.
+    _cf = sum(s.count("cell_fits(") for s in _srcs.values())
+    ck("the-grid-bound-is-wired-at-every-placement-path", _cf >= 5)
+
+    # ---- AND THE OTHER TWO CALLERS, DRIVEN FOR REAL ----------------------
+    # THE COUNT ABOVE CANNOT SEE ONE SITE GO, measured by planting rather
+    # than reasoned: with five call sites and a floor of four, removing the
+    # gate from `do_restore` and from doctor was NOT CAUGHT. Raising the floor
+    # fixes the arithmetic and still tests nothing about what either prints,
+    # so both are driven, and the PRODUCT constructs the reason rather than
+    # the test handing it in, which is what the collapsed-wording plant also
+    # walked past.
+    _rgo = {"id": 1, "name": "DP-1",
+            "geometry": {"x": 0, "y": 0, "width": 1000, "height": 800},
+            "workspace": {"x": 0, "y": 0, "grid_width": 2, "grid_height": 2}}
+    _rent = lambda ws, out="DP-1": {
+        "app_id": "zzz-unowned", "title": "t", "appid_only": True,
+        "label": "x", "output": out, "panel": "", "surface": "",
+        "workspace": ws, "pos": [10, 20], "size": [100, 100],
+        "last_seen": time.time(), "sticky": False, "inverted": False,
+        "fullscreen": False}
+    _rview = {"id": 11, "app-id": "zzz-unowned", "title": "t",
+              "output-name": "DP-1", "pid": os.getpid(), "role": "toplevel",
+              "geometry": {"x": 10, "y": 20, "width": 100, "height": 100}}
+
+    class _RSock:
+        def list_views(self, filter_mapped_toplevel=False):
+            return [_rview]
+
+        def list_outputs(self):
+            return [_rgo]
+
+    def _restore_text(ws, out="DP-1"):
+        _s = (engine.ipc, engine.load_knowledge, engine.panel_map,
+              engine.profile_id)
+        _b = io.StringIO()
+        try:
+            engine.ipc = lambda: _RSock()
+            engine.load_knowledge = lambda *_a, **_k: {
+                kkey("zzz-unowned", ""): _rent(ws, out)}
+            engine.panel_map = lambda *_a, **_k: {}
+            engine.profile_id = lambda *_a, **_k: "rigprof"
+            with contextlib.redirect_stdout(_b):
+                engine.do_restore(True)
+        finally:
+            (engine.ipc, engine.load_knowledge, engine.panel_map,
+             engine.profile_id) = _s
+        return _b.getvalue()
+
+    _rfit = _restore_text([1, 1])
+    _roff = _restore_text([2, 2])
+    _rgone = _restore_text([0, 0], out="DP-9")
+    ck("the-restore-matches-a-cell-the-grid-has", "matched 1/1" in _rfit
+       and "unplaceable 0" in _rfit)
+    ck("the-restore-calls-an-off-grid-cell-unplaceable",
+       "unplaceable 1" in _roff and "outside this desk's 2x2" in _roff)
+    ck("the-restore-still-calls-an-absent-output-unplaceable",
+       "unplaceable 1" in _rgone and "not attached" in _rgone)
+    # PAIRWISE, over text the PRODUCT built: collapsing the two reasons is the
+    # failure these three exist for, and checking each alone cannot see it.
+    ck("the-restores-two-refusals-are-worded-apart",
+       "not attached" not in _roff and "outside this desk's" not in _rgone)
+
+    # AND doctor's THREE STATES, which were a two-way branch over a three-way
+    # question: a slot whose output is here but whose cell is not printed as
+    # `placeable`, which sends a reader hunting a fault in the placer.
+    from . import doctor as _dgrid
+
+    def _doc_text(ws, out="DP-1"):
+        _lines = []
+        _pm = engine.panel_map
+        try:
+            engine.panel_map = lambda *_a, **_k: {}
+            _dgrid._doctor_placement(
+                _lines.append, {kkey("zzz-unowned", ""): _rent(ws, out)},
+                [_rview], {"DP-1": _rgo})
+        finally:
+            engine.panel_map = _pm
+        return "\n".join(_lines)
+
+    _dfit, _doff = _doc_text([1, 1]), _doc_text([2, 2])
+    _dgone = _doc_text([0, 0], out="DP-9")
+    ck("doctor-calls-a-fitting-cell-placeable", "placeable" in _dfit
+       and "UNPLACEABLE" not in _dfit)
+    ck("doctor-calls-an-off-grid-cell-unplaceable",
+       "UNPLACEABLE" in _doff and "OFF THIS GRID" in _doff)
+    ck("doctor-still-calls-an-absent-output-unplaceable",
+       "UNPLACEABLE" in _dgone and "NOT ATTACHED" in _dgone)
+    ck("doctors-three-placement-states-are-pairwise-distinct",
+       _dfit != _doff and _doff != _dgone and _dfit != _dgone)
+    # AND THE TWO REFUSALS ARE WORDED APART, pairwise, because an absent
+    # OUTPUT and an out-of-grid CELL want different things done about them and
+    # one wording for both sends a reader to the wrong one. Collapsing two
+    # into one is how this report has gone wrong before, and checking them
+    # individually cannot see it.
+    _ur = {"app_id": "zzz", "title": "t", "output": "DP-9",
+           "workspace": [0, 0], "pos": [0, 0], "size": [1, 1]}
+    _uc = {**_ur, "output": "DP-1", "workspace": [7, 7]}
+    _b1, _b2 = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(_b1):
+        engine._restore_report([], [], [], [], [(_trv("zzz", "t"), _ur,
+                                                 "saved on DP-9, not "
+                                                 "attached (have: DP-1)")],
+                               {}, True, 0)
+    with contextlib.redirect_stdout(_b2):
+        engine._restore_report([], [], [], [], [(_trv("zzz", "t"), _uc,
+                                                 "saved on ws(7, 7), outside "
+                                                 "this desk's 2x2 grid")],
+                               {}, True, 0)
+    ck("the-report-says-an-output-is-not-attached",
+       "not attached" in _b1.getvalue())
+    ck("the-report-says-a-cell-is-off-the-grid",
+       "outside this desk's" in _b2.getvalue())
+    ck("the-two-unplaceable-reasons-are-distinct",
+       _b1.getvalue() != _b2.getvalue())
+
     # ---- the SURFACE MAP: hwdp's contract, parsed and spent --------------
     _row = ("code DP-2 0 0 0 0 3840 2160\n"
             "comms DP-2 1 0 0 0 3840 1080\n"
@@ -8490,17 +8708,17 @@ def _t_displays(ck):
                    "workspace": {"x": 0, "y": 0, "grid_width": 3,
                                  "grid_height": 3}}}
     ck("a-cell-inside-the-grid-fits",
-       engine.surface_cell_fits(_m["comms"], _g))
+       engine.cell_fits(_m["comms"], _g))
     ck("a-cell-outside-the-grid-does-not",
-       not engine.surface_cell_fits(
+       not engine.cell_fits(
            {"output": "DP-2", "workspace": [5, 9]}, _g))
     ck("a-surface-on-an-unattached-output-does-not-fit",
-       not engine.surface_cell_fits(
+       not engine.cell_fits(
            {"output": "HDMI-9", "workspace": [0, 0]}, _g))
     # NO GRID REPORTED CONCLUDES NOTHING, the fail-safe direction this file
     # takes everywhere else (recorded_window_ids, seen_terms, panel_map).
     ck("no-grid-reported-concludes-nothing",
-       engine.surface_cell_fits(
+       engine.cell_fits(
            {"output": "DP-2", "workspace": [9, 9]},
            {"DP-2": {"name": "DP-2", "workspace": {"x": 0, "y": 0}}}))
 

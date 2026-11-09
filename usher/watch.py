@@ -503,6 +503,11 @@ class Watcher:
         # standing condition is reported once per window instead of on every
         # rename. Discarded with the rest of a view's state on unmap.
         self.slot_said = set()
+        # VIEWS WE HAVE ALREADY SAID ARE OFF THIS DESK'S GRID. Its own set
+        # rather than slot_said's, because that one keys on the slot a rival
+        # window holds and this is a property of the desk; one set would make
+        # either message suppress the other.
+        self.cell_said = set()
         # THE OUTPUT SET AS OF THE LAST POLL, or None before the first one.
         # None is not the empty set: the first poll must not read "everything
         # arrived" as a display change. See _poll_outputs.
@@ -966,7 +971,7 @@ class Watcher:
         # THE CELL IS hwdp's PASSTHROUGH, so it is ours to check: seeding into
         # a cell the live grid does not have puts the window where no
         # workspace navigation reaches it.
-        if not engine.surface_cell_fits(seed, outs):
+        if not engine.cell_fits(seed, outs):
             logline(f"surface `{seed['seeded_from']}` names cell "
                     f"{tuple(seed['workspace'])}, which this grid does not "
                     f"have: not seeding {app[:18]}")
@@ -1003,6 +1008,26 @@ class Watcher:
         there), carry the invert with it, and say so in the log."""
         vid = v["id"]
         app, title = app_of(v), engine.log_title(v)
+        # A CELL THIS DESK DOES NOT HAVE IS NOT A PLACEMENT, it is a window
+        # put where no workspace navigation reaches it. Measured live: wayfire
+        # accepts a geometry past the edge of the virtual desktop exactly as
+        # asked, and the read-back then CONFIRMS it, so nothing downstream can
+        # catch this. Left where it opened instead, which is what every other
+        # slot usher cannot honour already gets.
+        # ONCE PER WINDOW, NOT PER EVENT, and for the slot ledger's reason: a
+        # browser renames constantly, so logging a standing condition here
+        # unconditionally turns it into a line a second.
+        if not engine.cell_fits(e, {o["name"]: o}):
+            with self.lock:
+                _first = vid not in self.cell_said
+                if _first:
+                    self.cell_said.add(vid)
+            if _first:
+                _ws = o.get("workspace") or {}
+                logline(f"slot is off this desk's grid, left in place: "
+                        f"{app} ws{tuple(e['workspace'])} outside "
+                        f"{_ws.get('grid_width')}x{_ws.get('grid_height')}")
+            return
         # Skip if already exactly there (init-place over an in-place session
         # would otherwise re-issue every window). The event view carries
         # geometry for init (list_views); a freshly-mapped view may not, and
@@ -1981,6 +2006,7 @@ class Watcher:
                 # is a leak in a process that runs for weeks.
                 self.slot_said = {p for p in self.slot_said
                                   if p[0] != v["id"]}
+                self.cell_said.discard(v["id"])
             # and the identity chrome resolved for it once and remembered. A
             # cache that only ever grows is a leak in a process that runs for
             # weeks, and this is the one moment we know the view is gone.

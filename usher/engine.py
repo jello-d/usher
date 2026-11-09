@@ -497,23 +497,36 @@ def _parse_surfaces(text):
     return out, ""
 
 
-def surface_cell_fits(slot, outputs):
-    """Is a surface's workspace cell inside the live grid of its output?
+def cell_fits(slot, outputs):
+    """Is a slot's workspace cell inside the live grid of its output?
 
-    hwdp passes the cell through WITHOUT checking it, deliberately: the grid
-    size is the integrator's (tackup's shapes/<shape>/), not hwdp's. Measured
-    on a 3x3 desk, `cell 5 9` resolves and prints at status 0.
+    ASKED OF A SEED **AND** OF A LEARNED ENTRY, which is why it is no longer
+    named for the surface map. It was written for the seed, where hwdp passes
+    a cell through WITHOUT checking it (the grid size is the integrator's,
+    tackup's shapes/<shape>/, not hwdp's: measured on a 3x3 desk, `cell 5 9`
+    resolves and prints at status 0). A LEARNED entry can name a cell the grid
+    does not have too, and that path was unguarded.
 
-    USHER IS THE ONLY ONE THAT CAN CHECK IT, which is why it does. hwdp knows
-    the shape but not the grid, the integrator knows the grid but not the
-    surface file, and usher reads the LIVE grid straight off the compositor.
-    That is the same division as everything else here: a consumer reads
-    geometry, grid included, from the compositor, and asks hwdp only for what
-    the compositor cannot know.
+    USHER IS THE ONLY ONE THAT CAN CHECK IT. hwdp knows the shape but not the
+    grid, the integrator knows the grid but not the slot, and usher reads the
+    LIVE grid straight off the compositor. Same division as everything else
+    here: a consumer reads geometry, grid included, from the compositor, and
+    asks hwdp only for what the compositor cannot know.
 
-    AND IT MATTERS RATHER THAN BEING TIDY: seeding a window into a cell the
-    grid does not have puts it where no workspace navigation can reach it,
-    which is a shape this project has already met twice from other causes."""
+    HOW A LEARNED ENTRY COMES TO EXCEED THE GRID, since "the profile decides
+    the grid" makes it look impossible: the profile is the ATTACHED panel set
+    and the shape is the ENABLED head count, and those are different sets.
+    Turning a monitor off without unplugging it keeps the profile and changes
+    the shape, so the grid moves under a store keyed to the unchanged
+    profile. An edit to a shape's grid does the same thing.
+
+    AND IT MATTERS RATHER THAN BEING TIDY, measured live in a nested
+    compositor rather than argued: wayfire ACCEPTS a geometry past the edge of
+    the virtual desktop exactly as asked (x=2660 on a 2560px-wide desktop), so
+    the window is stranded where no workspace navigation reaches it. Worse,
+    `place_of` reads that position back correctly and `placement_landed`
+    returns True, so the read-back CONFIRMS the stranding and the next capture
+    re-learns the same slot: permanently wrong, and silent."""
     o = outputs.get(slot.get("output"))
     if not o:
         return False
@@ -5878,10 +5891,13 @@ def _restore_report(pairs, live, unlive, unlayout, unplaceable, outs, dry,
     if gone:
         print(f"  UNREACHABLE      {'google-chrome':20} | {len(gone)} slot(s)"
               f" from previous browser runs, ageing out on the TTL")
-    have = ", ".join(sorted(outs)) or "none"
-    for lv, e in unplaceable:
-        print(f"  UNPLACEABLE      {app_of(lv)[:20]:20} | saved on "
-              f"{e['output']}, not attached (have: {have})")
+    # THE REASON TRAVELS WITH THE ROW, because there are two now and they want
+    # different things done: an absent output means come back to that desk,
+    # and a cell outside the grid means this desk's grid shrank under a slot
+    # that was learned on a wider one. One wording for both would send a
+    # reader to the wrong one, which is the trap this report has met before.
+    for lv, e, why in unplaceable:
+        print(f"  UNPLACEABLE      {app_of(lv)[:20]:20} | {why}")
 
 
 PROFILE_MARK = "usher.profile"   # last profile we acted on, per boot
@@ -6774,7 +6790,21 @@ def do_restore(dry, only=None, source=None):
             # Nothing sane to do with it, but SAY SO: skipping in silence is
             # how a layout learned on another monitor set looks like usher
             # simply not working. See `doctor` and the per-profile store.
-            unplaceable.append((lv, e))
+            _have = ", ".join(sorted(outs)) or "none"
+            unplaceable.append((lv, e, f"saved on {e['output']}, not "
+                                f"attached (have: {_have})"))
+            continue
+        # AND THE CELL MUST EXIST ON THIS DESK, which is the same category as
+        # the output being absent: a slot this desk cannot honour. Placing it
+        # anyway strands the window past the edge of the virtual desktop,
+        # where no workspace navigation reaches it, and the read-back confirms
+        # the stranding rather than catching it.
+        if not cell_fits(e, {o["name"]: o}):
+            _ws = o.get("workspace") or {}
+            unplaceable.append((lv, e, f"saved on ws{tuple(e['workspace'])}, "
+                                f"outside this desk's "
+                                f"{_ws.get('grid_width')}x"
+                                f"{_ws.get('grid_height')} grid"))
             continue
         geom = target_geometry(e, o)
         g = lv.get("geometry", {}) or {}
