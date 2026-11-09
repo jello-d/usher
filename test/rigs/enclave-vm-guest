@@ -1,0 +1,398 @@
+#!/bin/sh
+# The guest half of enclave-vm. Runs as root via cloud-init runcmd.
+#
+# Output goes to /dev/ttyS0 and NOT /dev/console: a provisioned box has moved
+# its kernel console off serial, so a write to /dev/console reaches tty0 and
+# the host's file stays empty, which looks exactly like a guest that never
+# booted.
+#
+# NO INTERPOLATION ANYWHERE IN THIS FILE, which is why it is its own file
+# rather than a heredoc in the driver: a backtick inside an unquoted guest
+# heredoc runs on the HOST, comment lines included. A separate file the seed
+# delivers base64-encoded cannot have that class of fault at all.
+set -u
+
+# THE GUEST'S STDERR GOES TO THE SERIAL. cloud-init captures runcmd stderr to
+# its OWN log inside the guest, so a fatal shell error here is otherwise
+# silent: the script stops, the box never powers off, and the host sees only a
+# VM running to its timeout with no clue which line died.
+exec 2>/dev/ttyS0
+
+M() { printf 'EV_%s=%s\n' "$1" "$2" > /dev/ttyS0 2>&1; }
+R() { printf 'EV: %s\n' "$*" > /dev/ttyS0 2>&1; }
+D() { sed 's/^/EV| /' > /dev/ttyS0 2>&1; }
+
+U=$(sed -n 1p /usr/local/share/enclavevm/who)
+PW=$(sed -n 2p /usr/local/share/enclavevm/who)
+UID_=$(id -u "$U")
+H=/home/$U
+LOG=$H/.local/state/usher/watch.log
+ENC=${ENC_NAME:-titan}
+# A STRING THAT EXISTS ONLY INSIDE THE ENCLAVE, so "is this title visible
+# anywhere on the owner's side" is decidable rather than inferred.
+SECRET=EVONLYINSIDETITAN
+
+# WAYLAND_DISPLAY IS RESOLVED AT CALL TIME, not when this is defined: without
+# it a spawned window cannot reach the compositor and dies instantly, whose
+# only symptom is a defunct process beside a cheerful launch line. The session
+# does not exist when this function is defined, so the globs run per call.
+AS() {
+  _wd=$(basename "$(ls -1 /run/user/"$UID_"/wayland-? 2>/dev/null \
+    | head -1)" 2>/dev/null)
+  _wfs=$(ls -1 /run/user/"$UID_"/wayfire-*.socket 2>/dev/null | head -1)
+  su "$U" -c "PATH=$H/.local/bin:/usr/local/bin:/usr/bin:/bin \
+XDG_RUNTIME_DIR=/run/user/$UID_ \
+WAYLAND_DISPLAY=${_wd:-wayland-1} \
+WAYFIRE_SOCKET=${_wfs:-} \
+DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$UID_/bus $1" 2>&1
+}
+NP() { _n=$(pgrep -c "$@" 2>/dev/null) || _n=0; printf '%s' "${_n:-0}"; }
+
+# `grep -c` PRINTS ITS COUNT AND STILL EXITS 1 WHEN THE COUNT IS ZERO, so the
+# obvious `grep -c ... || echo 0` answers TWICE and yields "0 0", which is a
+# syntax error in arithmetic and killed this rig's sibling silently. A missing
+# file is different again: grep prints nothing and exits 2.
+_count() {
+  _c=$(grep -c "$1" "$LOG" 2>/dev/null) || :
+  printf '%s' "${_c:-0}"
+}
+# THE SAME TRAP READS STDIN, and a leak test is exactly where it bites: the
+# answer that matters is zero, which is the one input that makes the naive
+# form answer twice.
+_pipec() { _c=$(grep -c "$1" 2>/dev/null) || :; printf '%s' "${_c:-0}"; }
+_entries() { AS 'usher doctor' \
+  | sed -n 's/^ *knowledge  *\([0-9]*\) entr.*/\1/p' | head -1; }
+
+printf '%s:%s\n' "$U" "$PW" | chpasswd
+
+# ======================= PHASE 0: THE INVENTORY =======================
+# ANNOUNCED EITHER WAY. A suite reporting the same thing whether or not half
+# of it ran is the false green this fleet's rules exist to prevent, so every
+# precondition is a marker and a missing one names ITSELF rather than
+# surfacing later as an assertion failure nobody can attribute.
+R "===== phase 0: what this base gives ====="
+M SEVERANCE "$(command -v severance 2>/dev/null || echo MISSING)"
+M USHER_SYS "$(command -v usher-mgr 2>/dev/null || echo MISSING)"
+M HOOK_SRC "$([ -x "$H/.config/usher/window-source" ] && echo yes \
+  || echo MISSING)"
+M HOOK_TRIG "$([ -x "$H/.config/usher/source-trigger" ] && echo yes \
+  || echo MISSING)"
+M SUDOERS "$(grep -rlE '_source-(capture|resume)' /etc/sudoers.d 2>/dev/null \
+  | head -1 | sed 's|.*/||' || echo MISSING)"
+M SECCTX_SO "$(ls -1 /opt/wayfire/lib/*/wayfire/*security-context* \
+  2>/dev/null | head -1 | sed 's|.*/||' || echo MISSING)"
+
+# THE REGISTRY IS THE ONLY SOURCE FOR THE ACCOUNT AND THE SOCKET. Composing
+# `<share>/<enclave>/wayland-0` is the reach-into-a-package trap the
+# integrator's own hook refuses to take: column 2 is the account and column 6
+# is the display socket, PUBLISHED for exactly this.
+# CAPTURE FIRST, CUT AFTER: `severance enclaves | awk` would read AWK's
+# status, so an incomplete registry would read as complete.
+EACCT=
+ESOCK=
+if command -v severance >/dev/null 2>&1; then
+  _rows=$(severance enclaves </dev/null 2>/dev/null) && _rrc=0 || _rrc=$?
+  M REGISTRY_RC "$_rrc"
+  if [ "$_rrc" -eq 0 ]; then
+    _line=$(printf '%s\n' "$_rows" \
+      | awk -F'\t' -v n="$ENC" '$1 == n { print; exit }')
+    _nf=$(printf '%s' "$_line" | awk -F'\t' '{ print NF }')
+    M REGISTRY_NF "${_nf:-0}"
+    if [ "${_nf:-0}" -ge 9 ]; then
+      EACCT=$(printf '%s' "$_line" | cut -f2)
+      ESOCK=$(printf '%s' "$_line" | cut -f6)
+    fi
+  fi
+else
+  M REGISTRY_RC no-severance
+fi
+M ENC_NAME "$ENC"
+M ENC_ACCT "${EACCT:-MISSING}"
+M ENC_SOCK "${ESOCK:-MISSING}"
+M ENC_UID "$(id -u "${EACCT:-nosuchuser}" 2>/dev/null || echo MISSING)"
+
+# ONE GATE, READ ONCE, so every later phase asks the same question and the
+# verdict can say which half ran. The display socket is the pivot: without a
+# second uid reaching the compositor through a restricted socket there is no
+# foreign window, which is the whole subject.
+ENCLAVE_OK=no
+if [ -n "$EACCT" ] && [ -n "$ESOCK" ] \
+   && id -u "$EACCT" >/dev/null 2>&1; then
+  ENCLAVE_OK=yes
+fi
+M ENCLAVE_OK "$ENCLAVE_OK"
+
+# ------------------------------------------------- the code under test
+# CURRENT usher INTO EVERY COPY THE TEST WILL REACH. The base is weeks old, so
+# without this the rig measures the base's usher and reports it as today's.
+# BOTH copies matter and for different readers: jello's daemon runs the
+# per-user one if that is what is installed, and THE ENCLAVE ACCOUNT can only
+# reach the machine-wide one, because it may not read jello's home.
+tar xzf /usr/local/share/enclavevm/usher-py.tgz -C /tmp
+_seeded=0
+for _sp in "$H"/.local/share/usher/venv/lib/python*/site-packages/usher \
+           /opt/usher/venv/lib/python*/site-packages/usher; do
+  [ -d "$_sp" ] || continue
+  cp /tmp/usher/*.py "$_sp"/ 2>/dev/null || continue
+  case $_sp in
+    "$H"/*) chown -R "$U:$U" "$_sp" ;;
+  esac
+  _seeded=$((_seeded + 1))
+  R "seeded $(ls -1 "$_sp"/*.py | wc -l) .py into $_sp"
+done
+rm -rf /tmp/usher
+M SEEDED_TREES "$_seeded"
+M USHER_AT "$(AS 'command -v usher')"
+
+# A MINIMAL wayfire.ini CARRYING THE SECURITY-CONTEXT PLUGIN, which is the one
+# addition over this rig's sibling and is load-bearing: severance's display
+# helper exits 3 ("this compositor cannot do it") without
+# wp_security_context_manager_v1, and a view carries no security context for a
+# client that did not come through a restricted socket.
+# DELIBERATELY NOT the integrator's 951-line file, which names third-party
+# plugins a blank VM has not built: a rig must not fail for a plugin it does
+# not test. `place` with cascade IS included, because racing the compositor's
+# own placer is what the placement read-back exists for.
+install -d -o "$U" -g "$U" "$H/.config"
+cp /usr/local/share/enclavevm/wayfire.ini "$H/.config/wayfire.ini"
+chown "$U:$U" "$H/.config/wayfire.ini"
+M WF_INI "$(wc -l < "$H/.config/wayfire.ini")"
+
+# THE FOREGROUND VT MUST MATCH THE SESSION'S. greetd runs on vt 7 here and
+# nothing switches VT in a headless guest, so a session started while tty1 is
+# foreground is one some tools cannot find.
+chvt 7 2>/dev/null || true
+
+login() {
+  _i=0
+  while [ "$_i" -lt 60 ]; do
+    [ "$(NP -f regreet)" != 0 ] && break
+    _i=$((_i + 2)); sleep 2
+  done
+  printf '%s\n%s\n' "$PW" "$PW" | SUDO_UID="$UID_" SUDO_USER="$U" \
+    /usr/local/libexec/usher-greetd --session Wayfire 2>&1 \
+    | grep -vE 'GetPassWarning|fallback_getpass|echoed' | tail -3 | D
+  _i=0
+  while [ "$_i" -lt 90 ]; do
+    [ "$(NP -f 'opt/wayfire/bin/wayfire')" != 0 ] && break
+    _i=$((_i + 3)); sleep 3
+  done
+  _i=0
+  while [ "$_i" -lt 60 ]; do
+    grep -q 'watching,' "$LOG" 2>/dev/null && break
+    _i=$((_i + 2)); sleep 2
+  done
+}
+
+# THE ENCLAVE'S WINDOW, LAUNCHED AS ITS OWN ACCOUNT THROUGH THE RESTRICTED
+# SOCKET. Not `work run`, which goes through `sudo -iu` and wants a password
+# this script has no TTY to answer; root takes the same final step directly.
+# AN ABSOLUTE WAYLAND_DISPLAY, because the enclave's socket is NOT in its own
+# runtime dir and it cannot list the share dir, so being told the path is the
+# only route. The path comes from the REGISTRY, never composed.
+enclave_win() {
+  install -d -m 0700 -o "$EACCT" -g "$EACCT" "/run/user/$(id -u "$EACCT")" \
+    2>/dev/null || true
+  su "$EACCT" -s /bin/sh -c "XDG_RUNTIME_DIR=/run/user/$(id -u "$EACCT") \
+WAYLAND_DISPLAY=$ESOCK setsid $1 >/dev/null 2>&1 &" 2>&1 | D
+}
+
+# =============================== SESSION ONE ===============================
+R "===== phase 2: session 1 login ====="
+login
+M S1_WAYFIRE "$(NP -f 'opt/wayfire/bin/wayfire')"
+M S1_DAEMON "$(NP -f 'usher-mgr')"
+if [ "$(NP -f 'opt/wayfire/bin/wayfire')" = 0 ]; then
+  R "no compositor; the rest cannot run"
+  tail -20 "$LOG" 2>/dev/null | D
+  M RESULT no-session
+  sync
+  poweroff -f
+fi
+
+# SETTLED, NOT PLACE, FOR THE FIRST SESSION: a fresh login arms PLACE mode and
+# a window the placer has not reached is HELD out of the store until
+# map + PLACE_GRACE (120s). With an empty store nothing can be placed, so
+# every window would sit unlearned for two minutes and a rig reading the store
+# sooner would report a capture failure that is the hold working.
+AS 'usher settle' | tail -1 | D
+
+R "===== phase 3: the restricted display socket ====="
+if [ "$ENCLAVE_OK" = yes ]; then
+  AS "systemctl --user start severance-display@$ENC" | tail -3 | D
+  _i=0
+  while [ "$_i" -lt 30 ]; do
+    [ -S "$ESOCK" ] && break
+    _i=$((_i + 2)); sleep 2
+  done
+  M SOCK_UP "$([ -S "$ESOCK" ] && echo yes || echo NO)"
+  AS "systemctl --user is-active severance-display@$ENC" | tail -1 | D
+  # EXIT 3 IS THE COMPOSITOR SAYING IT CANNOT, which is a different fact from
+  # a crash and is worth reading rather than inferring from the socket.
+  M SOCK_UNIT "$(AS "systemctl --user show -p ExecMainStatus --value \
+severance-display@$ENC" | tr -d '\r' | tail -1)"
+else
+  M SOCK_UP SKIPPED
+fi
+
+R "===== phase 4: one native window and one enclave window ====="
+mkdir -p "$H/evA"
+chown "$U:$U" "$H/evA"
+AS "setsid kitty --directory $H/evA >/dev/null 2>&1 &" >/dev/null
+sleep 4
+AS 'setsid foot >/dev/null 2>&1 &' >/dev/null
+sleep 6
+if [ "$ENCLAVE_OK" = yes ] && [ -S "$ESOCK" ]; then
+  # A DISTINCTIVE TITLE, because the obvious leak test cannot work: the owner
+  # runs `foot` too, so counting log lines whose title is not the source tag
+  # matches the owner's own window and answers nothing. A string that exists
+  # ONLY inside the enclave is decidable on every surface at once.
+  enclave_win "foot --title $SECRET"
+  sleep 8
+  M ENC_PROCS "$(NP -u "$EACCT" foot)"
+else
+  M ENC_PROCS SKIPPED
+fi
+M S1_LIVE "$(AS 'usher doctor' | sed -n 's/^ *live  *//p' | head -1)"
+
+# WAIT FOR THE STORE, because capture is EVENT-DRIVEN: a rig that reads it at
+# a fixed time reads whatever the last event happened to leave.
+_i=0
+while [ "$_i" -lt 40 ]; do
+  _e=$(_entries)
+  [ -n "$_e" ] && [ "$_e" -ge 2 ] && break
+  _i=$((_i + 2)); sleep 2
+done
+M S1_STORE "$(_entries)"
+
+R "===== phase 5: the OWNER side of a foreign window ====="
+# THE THREE CLAIMS THESE NOTES MAKE ABOUT ANOTHER ACCOUNT'S WINDOWS, every one
+# of them so far a reading of one box's watch.log rather than an assertion.
+if [ "$ENCLAVE_OK" = yes ]; then
+  # 1. THE KEY CARRIES THE SOURCE NAME, asked through `forget`'s PREVIEW,
+  #    which selects on the identity and so answers "is anything keyed to this
+  #    source" without writing anything. ITS WORDING IS READ FROM THE CODE
+  #    rather than guessed (`N of M entries would be dropped`): a marker
+  #    scraped from an imagined line reads EMPTY for a whole run, which is how
+  #    this rig's sibling taught a reader nothing across five markers at once.
+  M KEY_SRC "$(AS "usher forget '*$ENC*'" \
+    | sed -n 's/^\([0-9]*\) of [0-9]* entries would be dropped.*/\1/p' \
+    | head -1)"
+  AS "usher forget '*$ENC*'" | head -6 | D
+  # 2. THE TITLE IS REDACTED ON ALL THREE SURFACES THIS FLEET HAS LEAKED BY:
+  #    the store, the log, and a report. Each was found separately and the
+  #    audit that enumerated them missed the row it did not enumerate, so the
+  #    rig asks the same question of each rather than trusting one.
+  M LOG_TAG "$(_count "\[$ENC\]")"
+  M LEAK_LOG "$(_count "$SECRET")"
+  M LEAK_STORE "$(grep -rl "$SECRET" "$H/.local/state/usher" 2>/dev/null \
+    | wc -l | tr -d ' ')"
+  M LEAK_REPORT "$(AS 'usher restore --dry-run' | _pipec "$SECRET")"
+  M LEAK_DOCTOR "$(AS 'usher doctor' | _pipec "$SECRET")"
+  # 3. THE HOOK WAS ASKED, and about the ENCLAVE's pid rather than ours.
+  _epid=$(pgrep -u "$EACCT" -n foot 2>/dev/null || echo "")
+  if [ -n "$_epid" ]; then
+    M HOOK_SAYS "$(AS "$H/.config/usher/window-source $_epid" | tail -1)"
+  else
+    M HOOK_SAYS NO-PID
+  fi
+else
+  M KEY_SRC SKIPPED
+  M LOG_TAG SKIPPED
+  M HOOK_SAYS SKIPPED
+fi
+
+R "===== phase 6: the reference, taken BEFORE the logout ====="
+AS 'usher predict' | tail -2 | D
+M PREDICTED "$(AS 'usher predict' \
+  | sed -n 's/^predicted \([0-9]*\) window.*/\1/p' | head -1)"
+
+R "===== phase 6: cleanly logoff ====="
+# NO PIPE BETWEEN THE COMMAND AND ITS STATUS: `cmd | tail` then `$?` is TAIL's
+# status, which is always 0, and these notes call that the single most
+# repeated measurement error in this tree.
+AS 'usher cleanly logoff' > /tmp/evl 2>&1
+M LOGOFF_RC "$?"
+tail -8 /tmp/evl | D
+_i=0
+while [ "$_i" -lt 90 ]; do
+  [ "$(NP -f 'opt/wayfire/bin/wayfire')" = 0 ] && break
+  _i=$((_i + 3)); sleep 3
+done
+M S1_ENDED "$([ "$(NP -f 'opt/wayfire/bin/wayfire')" = 0 ] && echo yes \
+  || echo STILL-UP)"
+M LOGOFF_CAPTURED "$(_count 'wind-down captured')"
+M LOGOFF_RETAINED "$(ls -1 "$H/.local/state/usher/logoff" 2>/dev/null \
+  | tr '\n' ' ')"
+# THE LINE THAT HAS NEVER RUN ANYWHERE. The logoff capture asks each source to
+# identify its own windows and then re-captures, so this is the one marker
+# whose absence means the cross-account half of wind-down did nothing.
+M RECAPTURED "$(_count 're-captured with')"
+M ASKED_CAPTURE "$(_count "asked $ENC to capture")"
+# THE ROSTER IS WRITTEN BY THE ACCOUNT, IN ITS OWN 0700 HOME, which is the
+# whole authority argument: the owner cannot read or forge it, and root here
+# can read it only because a rig is root. Its ROW COUNT is the strong reading,
+# because a roster of apps alone is what made a terminal come back as a bare
+# shell: one row per window is what the resume needs.
+if [ -n "$EACCT" ]; then
+  _eh=$(getent passwd "$EACCT" | cut -d: -f6)
+  _rj=$_eh/.local/state/usher/roster.json
+  M ENC_ROSTER "$([ -f "$_rj" ] && echo yes || echo MISSING)"
+  M ENC_ROSTER_N "$(python3 -I -c 'import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print("%d apps, %d windows" % (len(d.get("apps") or []),
+                                   len(d.get("windows") or [])))
+except Exception as e:
+    print("unreadable: %s" % type(e).__name__)' "$_rj" 2>/dev/null)"
+fi
+
+# =============================== SESSION TWO ===============================
+R "===== phase 7: session 2, and the cross-account restore ====="
+# DELIBERATELY NOT STARTING THE DISPLAY UNIT FIRST. The unit is
+# WantedBy=graphical-session.target and usher's resume fires seconds into the
+# session, so whether the socket is up in time is a RACE in the real system
+# and the honest thing is to measure it rather than engineer around it. If the
+# window does not come back, the rig retries explicitly below, which
+# distinguishes "the mechanism is broken" from "the mechanism raced".
+_before=$(_count ' placed ')
+login
+M S2_WAYFIRE "$(NP -f 'opt/wayfire/bin/wayfire')"
+sleep 45
+M S2_SOCK "$([ -S "${ESOCK:-/nonexistent}" ] && echo yes || echo NO)"
+M S2_ASKED "$(_count "asked $ENC to resume")"
+M S2_LAUNCHED "$(_count ' launch  ')"
+M S2_PLACED "$(( $(_count ' placed ') - _before ))"
+if [ "$ENCLAVE_OK" = yes ]; then
+  M S2_ENC_PROCS "$(NP -u "$EACCT" foot)"
+  # THE RETRY IS A SEPARATE MEASUREMENT, never folded into the first: a window
+  # that needs it tells us the resume outran the socket, which is a finding
+  # about ordering rather than about the mechanism.
+  if [ "$(NP -u "$EACCT" foot)" = 0 ]; then
+    R "no enclave window yet; starting the socket and re-asking"
+    AS "systemctl --user start severance-display@$ENC" | tail -2 | D
+    sleep 3
+    AS "$H/.config/usher/source-trigger $ENC resume" | tail -3 | D
+    sleep 10
+    M S2_ENC_RETRY "$(NP -u "$EACCT" foot)"
+  else
+    M S2_ENC_RETRY not-needed
+  fi
+else
+  M S2_ENC_PROCS SKIPPED
+  M S2_ENC_RETRY SKIPPED
+fi
+M S2_STORE "$(_entries)"
+
+R "===== the verdict: the SCREEN against the PRE-LOGOUT prediction ====="
+AS 'usher verify' > /tmp/evv 2>&1
+M VERIFY_RC "$?"
+sed 's/^/EV| /' /tmp/evv > /dev/ttyS0 2>&1
+M VERIFY "$(sed -n 's/^verify: //p' /tmp/evv | head -1)"
+
+R "===== the whole usher log ====="
+sed 's/^/EV| /' "$LOG" > /dev/ttyS0 2>&1
+
+M RESULT done
+sync
+poweroff -f

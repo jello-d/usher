@@ -1,0 +1,305 @@
+#!/bin/sh
+# enclave-vm - does ANOTHER ACCOUNT's window survive a real logout and login?
+#
+# RUN BY HAND, not by test/run: it boots a VM, logs in twice and takes several
+# minutes.
+#
+# WHY THIS EXISTS. Another account's windows are the one feature of usher with
+# no end-to-end coverage anywhere. Every claim these notes make about them is
+# a reading of ONE box's watch.log after a human logged in, which is evidence
+# and is not a test:
+#
+#     the source KEY      a foreign window keyed `<app> NUL <source>`
+#     the REDACTION       its title absent from the store, the log and the
+#                         reports, with the source tag in its place
+#     the roster ASK      the logoff capture asking each source to identify
+#                         its own windows, and the login asking it to resume
+#     the RE-CAPTURE      `re-captured with N account(s) identified`, a line
+#                         that has never run anywhere
+#
+# test/rigs/enclave-stub reaches the owner's HALF of that with a stub provider
+# and a nested compositor, and it cannot reach the rest: `window_origin` asks
+# the uid FIRST and never puts a same-uid window to the provider, so the key,
+# the placement and the redaction all need a SECOND uid. A second uid needs
+# severance, and severance needs a base provisioned from a current tree.
+#
+# WHAT IT STILL CANNOT DO, so a pass is not read as more than it is: DISPLAY
+# PERMUTATIONS. qemu's virtio-gpu reports no EDID in either headless mode, so
+# hwdp has nothing to hash, and virtio-gpu-pci does not hotplug, so the
+# attached set cannot change. test/rigs/dock-profile covers usher's half of a
+# dock with a stub hwdp instead.
+#
+# IT RUNS ON tackup-vmcheck's PROVISIONED DISK as a COW overlay, so the base
+# is never written and one expensive provision supports many runs.
+#
+#   test/rigs/enclave-vm [scratch-dir]        (default /var/tmp/tackupvm)
+#
+# Watch it live: tail -f <scratch>/ev-console.log
+set -eu
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+TREE=$(cd "$HERE/../.." && pwd)
+VM=${1:-/var/tmp/tackupvm}
+BASE=$VM/tackup.qcow2
+U=${EV_USER:-jello}
+PW=${EV_PASS:-enclave123}
+
+_die() { echo "enclave-vm: $*" >&2; exit 1; }
+
+# EV_REPLAY=<console.log> REPORTS AND JUDGES AN EXISTING RUN, booting nothing.
+# The verdict is the part of a rig most worth testing and the hardest to
+# reach, because it is normally welded to a 45-minute boot: this rig's sibling
+# shipped a verdict that passed a run which measured NOTHING, and that was
+# found by reading rather than by a check. With the boot behind a seam, every
+# cell of the table below is reachable from a planted console log in a second,
+# which is the same argument as making an external call bounded: THE SEAM THAT
+# MAKES IT SKIPPABLE IS THE SEAM THAT MAKES IT TESTABLE.
+REPLAY=${EV_REPLAY:-}
+if [ -n "$REPLAY" ]; then
+  [ -f "$REPLAY" ] || _die "no such console log: $REPLAY"
+  C=$REPLAY
+fi
+
+[ -n "$REPLAY" ] || [ -f "$BASE" ] || _die "no provisioned disk at $BASE;
+  tackup's test/vm/tackup-vmcheck builds it, and this rig only reads it.
+  A base older than severance's one-user-per-enclave model carries no second
+  account, so it can report the inventory and nothing else"
+# THE BOOT, SKIPPED ENTIRELY ON A REPLAY.
+if [ -z "$REPLAY" ]; then
+  command -v qemu-system-x86_64 >/dev/null 2>&1 || _die "qemu missing"
+  command -v xorriso >/dev/null 2>&1 || _die "xorriso missing"
+  [ -f "$HERE/enclave-vm-guest" ] || _die "the guest half is missing"
+
+  C=$VM/ev-console.log
+  rm -f "$C" "$VM/ev.qcow2" "$VM/ev-seed.iso"
+
+  # ---------------------------------------------------------------- the seed
+  # EVERY PAYLOAD IS A FILE, base64-encoded by cloud-init, so there is no guest
+  # heredoc anywhere and therefore none of the host-side backtick execution this
+  # fleet's other VM checks have to guard against by hand.
+  echo "== seed: current usher, a wayfire.ini with security-context, creds =="
+  rm -rf "$VM/ev-seed"
+  mkdir -p "$VM/ev-seed"
+  printf 'instance-id: ev-%s\nlocal-hostname: tackuptest\n' "$(date +%s)" \
+    > "$VM/ev-seed/meta-data"
+
+  # THE CODE UNDER TEST, as a tarball of the payload's python ALONE, which needs
+  # no pip and no network and is exactly the file set the deploy digest compares
+  # on a real box. The guest seeds it into EVERY copy it finds, because the
+  # enclave account can only reach the machine-wide one.
+  tar czf "$VM/ev-usher-py.tgz" -C "$TREE" $(cd "$TREE" && ls usher/*.py)
+
+  # THE ONE ADDITION OVER THIS RIG'S SIBLING IS LOAD-BEARING:
+  # `security-context-v1`. severance's display helper exits 3 ("this compositor
+  # cannot do it") without wp_security_context_manager_v1, and a view carries no
+  # security context at all for a client that did not arrive on a restricted
+  # socket, so without the plugin there is no foreign window to test.
+  # STILL NOT the integrator's 951-line file, which names third-party plugins a
+  # blank VM has not built: a rig must not fail for a plugin it does not test.
+  cat > "$VM/ev-wayfire.ini" <<'INIEOF'
+[core]
+plugins = ipc ipc-rules stipc place autostart security-context-v1
+vwidth = 3
+vheight = 3
+close_top_view = none
+[place]
+mode = cascade
+[autostart]
+autostart_wf_shell = false
+0_environment = dbus-update-activation-environment --systemd \
+WAYLAND_DISPLAY WAYFIRE_SOCKET XDG_SESSION_TYPE
+session_restore = usher-mgr watch
+[input]
+xkb_layout = us
+INIEOF
+
+  printf '%s\n%s\n' "$U" "$PW" > "$VM/ev-who"
+
+  {
+    printf '#cloud-config\n'
+    printf 'write_files:\n'
+    printf '  - path: /usr/local/bin/ev-guest\n'
+    printf '    permissions: "0755"\n    encoding: b64\n'
+    printf '    content: %s\n' "$(base64 -w0 "$HERE/enclave-vm-guest")"
+    printf '  - path: /usr/local/share/enclavevm/usher-py.tgz\n'
+    printf '    permissions: "0644"\n    encoding: b64\n'
+    printf '    content: %s\n' "$(base64 -w0 "$VM/ev-usher-py.tgz")"
+    printf '  - path: /usr/local/share/enclavevm/wayfire.ini\n'
+    printf '    permissions: "0644"\n    encoding: b64\n'
+    printf '    content: %s\n' "$(base64 -w0 "$VM/ev-wayfire.ini")"
+    printf '  - path: /usr/local/share/enclavevm/who\n'
+    printf '    permissions: "0600"\n    encoding: b64\n'
+    printf '    content: %s\n' "$(base64 -w0 "$VM/ev-who")"
+    printf 'runcmd:\n  - [ /usr/local/bin/ev-guest ]\n'
+  } > "$VM/ev-seed/user-data"
+  xorriso -as mkisofs -R -J -V CIDATA -o "$VM/ev-seed.iso" \
+    "$VM/ev-seed/user-data" "$VM/ev-seed/meta-data" >/dev/null 2>&1
+
+  echo "== COW overlay on the provisioned base (base stays untouched) =="
+  qemu-img create -q -f qcow2 -F qcow2 -b "$BASE" "$VM/ev.qcow2" 60G
+
+  echo "== boot: two logins and a second account, so this takes minutes =="
+  echo "   live: tail -f $C"
+  timeout "${EV_TIMEOUT:-2700}" qemu-system-x86_64 -enable-kvm \
+    -m "${EV_MEM:-6144}" -smp "${EV_SMP:-6}" -cpu host \
+    -drive file="$VM/ev.qcow2",if=virtio,format=qcow2 \
+    -drive file="$VM/ev-seed.iso",if=virtio,format=raw \
+    -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+    -device virtio-vga,edid=on,xres=2880,yres=1800 \
+    -display none -serial file:"$C" -monitor none -no-reboot || true
+fi
+
+# NOT anchored at line start: the guest's serial is shared with a getty, so a
+# marker arrives as "tackuptest login: EV_FOO=bar".
+_val() { sed -n "s/.*EV_$1=//p" "$C" 2>/dev/null | tail -1 | tr -d '\r'; }
+
+echo ""
+echo "===== THE INVENTORY (what this base can be asked) ====="
+for k in SEVERANCE USHER_SYS HOOK_SRC HOOK_TRIG SUDOERS SECCTX_SO \
+         REGISTRY_RC REGISTRY_NF ENC_NAME ENC_ACCT ENC_SOCK ENC_UID \
+         ENCLAVE_OK; do
+  printf '  %-16s %s\n' "$k" "$(_val "$k")"
+done
+echo "===== SESSION 1 ====="
+for k in SEEDED_TREES USHER_AT WF_INI S1_WAYFIRE S1_DAEMON SOCK_UP \
+         SOCK_UNIT ENC_PROCS S1_LIVE S1_STORE; do
+  printf '  %-16s %s\n' "$k" "$(_val "$k")"
+done
+echo "===== THE FOREIGN WINDOW, ON THE OWNER'S SIDE ====="
+for k in KEY_SRC LOG_TAG LEAK_LOG LEAK_STORE LEAK_REPORT LEAK_DOCTOR \
+         HOOK_SAYS; do
+  printf '  %-16s %s\n' "$k" "$(_val "$k")"
+done
+echo "===== THE LOGOUT ====="
+for k in PREDICTED LOGOFF_RC LOGOFF_CAPTURED LOGOFF_RETAINED ASKED_CAPTURE \
+         RECAPTURED ENC_ROSTER ENC_ROSTER_N S1_ENDED; do
+  printf '  %-16s %s\n' "$k" "$(_val "$k")"
+done
+echo "===== SESSION 2 ====="
+for k in S2_WAYFIRE S2_SOCK S2_ASKED S2_LAUNCHED S2_PLACED S2_ENC_PROCS \
+         S2_ENC_RETRY S2_STORE VERIFY VERIFY_RC; do
+  printf '  %-16s %s\n' "$k" "$(_val "$k")"
+done
+printf '  %-16s %s\n' RESULT "$(_val RESULT)"
+echo ""
+
+if [ "$(_val RESULT)" != done ]; then
+  echo "RIG INCONCLUSIVE: the guest did not finish (see $C)"
+  exit 2
+fi
+
+# ------------------------------------------------------------- the verdict
+# TWO HALVES, JUDGED SEPARATELY, because they fail for different reasons and
+# collapsing them is how a base that simply predates severance reads as a
+# product fault. The native round trip is this rig's control: if THAT fails,
+# nothing it says about the enclave means anything.
+_fail=""
+_add() { _fail="$_fail
+  - $1"; }
+
+_v=$(_val VERIFY)
+_ok=$(printf '%s' "$_v" | sed -n 's/^\([0-9]*\) ok.*/\1/p')
+_pred=$(_val PREDICTED)
+
+# A VACUITY FLOOR. `0 ok, 0 wrong, 0 gone` is what a session where NOTHING was
+# learned and NOTHING placed reports, and it matches every naive pass test.
+# The rig opens two owner windows deliberately, so two is the honest floor.
+if [ "${_ok:-0}" -lt 2 ]; then
+  echo "RIG INCONCLUSIVE: only ${_ok:-0} window(s) verified, so this run"
+  echo "            measured nothing (verify: ${_v:-nothing reported})"
+  exit 2
+fi
+[ -n "$_pred" ] && [ "$_ok" != "$_pred" ] &&
+  _add "verified $_ok of $_pred predicted windows"
+case "$_v" in
+  *"0 wrong, 0 gone"*) ;;
+  *) _add "the native round trip: $_v" ;;
+esac
+
+if [ "$(_val ENCLAVE_OK)" != yes ]; then
+  echo "ENCLAVE HALF SKIPPED, and the inventory above says which precondition"
+  echo "  is missing. A base provisioned before severance's"
+  echo "  one-user-per-enclave model has no second account at all, which is a"
+  echo "  fact about the base and not about usher."
+  if [ -n "$_fail" ]; then
+    echo "NATIVE HALF FAILED:$_fail"
+    exit 1
+  fi
+  echo "NATIVE HALF PASSED: the layout survived a real logout and login"
+  echo "            ($_v, rc $(_val VERIFY_RC))"
+  exit 2
+fi
+
+# THE ENCLAVE HALF. Each row is one claim these notes make, and every one of
+# them is a first assertion rather than a re-test.
+[ "$(_val SOCK_UP)" = yes ] ||
+  _add "no restricted display socket (unit status $(_val SOCK_UNIT);
+    3 means the compositor has no security-context plugin)"
+case "$(_val ENC_PROCS)" in
+  ""|0) _add "the enclave opened no window, so nothing foreign was on
+    screen and every row below is vacuous" ;;
+esac
+# THE HOOK MUST NAME THE ENCLAVE, not merely answer: it resolves to
+# `severance enclave-of pid`, whose contract is exit 0 plus ONE WORD, and an
+# exit of 1 would have usher claim the window as the session user's own. So
+# the assertion is on the WORD rather than on there being output at all.
+if [ "$(_val HOOK_SAYS)" != "$(_val ENC_NAME)" ]; then
+  _add "the window-source hook answered '$(_val HOOK_SAYS)' for the
+    enclave's own pid, not '$(_val ENC_NAME)'"
+fi
+case "$(_val KEY_SRC)" in
+  ""|0) _add "no store entry is keyed to the source, so the foreign window
+    was never remembered as anybody's" ;;
+esac
+case "$(_val LOG_TAG)" in
+  ""|0) _add "the source tag never appears in the log, so the redaction
+    cannot be shown to have run at all" ;;
+esac
+# AN ABSENT LEAK MARKER IS NOT A CLEAN ONE, which is the one cell of this
+# verdict that was wrong in the expensive direction: every other row can read
+# an empty marker as a failure to do the thing, but "no evidence" on a PRIVACY
+# assertion must never read as "no leak". A test that did not report is
+# inconclusive, and the four surfaces are separate because each was found
+# separately and the audit that enumerated them missed the row it did not.
+for _s in LEAK_LOG LEAK_STORE LEAK_REPORT LEAK_DOCTOR; do
+  case "$(_val "$_s")" in
+    0) ;;
+    "") _add "$_s never reported, so the redaction is unproven on that
+    surface rather than clean" ;;
+    *) _add "A LEAK: the enclave's own title is visible in $_s
+    ($(_val "$_s") hit(s))" ;;
+  esac
+done
+case "$(_val RECAPTURED)" in
+  ""|0) _add "no re-capture at logoff, so the identities the logoff asked for
+    never reached the store (this line has never run anywhere)" ;;
+esac
+case "$(_val ASKED_CAPTURE)" in
+  ""|0) _add "the logoff never asked the source to capture" ;;
+esac
+case "$(_val S2_ASKED)" in
+  ""|0) _add "the login never asked the source to resume" ;;
+esac
+_e2=$(_val S2_ENC_PROCS)
+_er=$(_val S2_ENC_RETRY)
+if [ "${_e2:-0}" = 0 ] && [ "$_er" = not-needed ]; then
+  _add "contradictory: no enclave window and no retry attempted"
+elif [ "${_e2:-0}" = 0 ] && [ "${_er:-0}" = 0 ]; then
+  _add "the enclave window did not come back, even after the socket was
+    started and the resume re-asked"
+elif [ "${_e2:-0}" = 0 ]; then
+  echo "NOTE: the enclave window came back only on the RETRY, so the resume"
+  echo "  outran the restricted socket. That is an ORDERING finding about the"
+  echo "  real system rather than a broken mechanism, and it is why this rig"
+  echo "  does not start the display unit before the login."
+fi
+
+if [ -n "$_fail" ]; then
+  echo "RIG FAILED:$_fail"
+  exit 1
+fi
+echo "RIG PASSED: another account's window was keyed, redacted, captured"
+echo "            across a real logout and brought back by its own account"
+echo "            ($_v, rc $(_val VERIFY_RC))"
+rm -f "$VM/ev.qcow2" "$VM/ev-seed.iso" "$VM/ev-usher-py.tgz" \
+  "$VM/ev-wayfire.ini" "$VM/ev-who"
