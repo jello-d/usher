@@ -204,8 +204,16 @@ grep -q . "$T/pip.log" 2>/dev/null \
 # AND NOT ON THE SOURCE. That is the whole assertion.
 grep -qx -- "$RO" "$T/pip.log" \
   && fail "pip was pointed AT THE SOURCE: $(cat "$T/pip.log")"
-[ -z "$(ls -a "$RO" | grep -E 'egg-info|^build$')" ] \
-  || fail "the install wrote build detritus into the source"
+# A GLOB RATHER THAN `ls | grep`, which is SC2143 plus SC2010: an unmatched
+# glob stays literal and `-e` is false for it, so this needs no pipeline and
+# names the offending path. Found because mux borrowed this check and MUX'S
+# LINT SHELLCHECKS ITS `.t` FILES where usher's only syntax-checks them, so
+# the same line was clean here and rejected there. A borrowed check is only
+# as good as the borrower's linter.
+for _det in "$RO"/*.egg-info "$RO/build"; do
+  [ -e "$_det" ] \
+    && fail "the install wrote build detritus into the source: $_det"
+done
 
 # --- THE RULE FILES ARE A CHECK, and its three outcomes are the point ------
 # A rule can now be REFUSED for being able to freeze the daemon (see
