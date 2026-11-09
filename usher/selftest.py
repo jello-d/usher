@@ -6986,6 +6986,111 @@ def _t_learn(ck):
        sum(1 for _, u, _l in _rows if u) == 5
        and sum(1 for _, u, _l in _rows if not u) == 4)
 
+    # --- AND THE DECISION IS ONE FUNCTION, not two copies ----------------
+    # The table above catches a divergence AFTER it exists. `stamp_key` makes
+    # it impossible: the two writers had been brought into agreement by
+    # COPYING three times, and the third time was a divergence found in
+    # production. Measured before extracting: a ten-line identical run, 46%
+    # of the smaller function, carrying the cross-file guard.
+    _c = engine.own_app_counts
+    _one = {"app_id": "zzz-unowned", "title": "T", "pid": os.getpid()}
+
+    def _sk(w, key=""):
+        return engine.stamp_key(w, w["app_id"], key,
+                                _c([dict(_one), w] if w is not _one else
+                                   [w]))
+    # THE SOURCE IS ASKED FIRST, which is the branch ORDER with teeth: this
+    # window is the only one of its app, so `is_unique` would hand it
+    # `kkey(app, "")`, the OWNER's key, which matches every window of that
+    # app. Reversing the two is the bug that keyed a work Slack as the
+    # owner's.
+    _f = {"app_id": "slack", "title": "", "source": "acct", "key": "acct",
+          "owner": 997}
+    # THE FIXTURE IS THE MEASURED SHAPE: ONE SLACK OF EACH ACCOUNT. With the
+    # foreign row alone `own_app_counts` excludes it, so `is_unique` is
+    # already False and the branch ORDER cannot matter: a plant reordering
+    # the two passed this cell until the owner's row was added. That is the
+    # real bug's input, and asking what a guard DISTINGUISHES is how to pick
+    # a fixture rather than what it merely reaches.
+    _mine = {"app_id": "slack", "title": "Slack"}
+    _both = engine.own_app_counts([_mine, _f])
+    ck("stamp-key-fixture-makes-the-order-matter",
+       _both == {"slack": 1} and engine.is_unique("slack", _both))
+    ck("stamp-key-asks-the-source-before-app-id-only",
+       engine.stamp_key(_f, "slack", "", _both) == ("acct", "acct", False))
+    # ...and the OWNER's own window of that same app still gets the
+    # app-id-only key, which is the control: without it the cell above passes
+    # over a stamp_key that has stopped returning that shape at all.
+    ck("stamp-key-still-gives-the-owner-the-app-id-only-key",
+       engine.stamp_key(_mine, "slack", "", _both)
+       == ("", "Slack", True))
+    # AND A STAMPED KEY NAMING ANOTHER SOURCE IS REFUSED, falling back to the
+    # one this window actually belongs to: cross-filing it would put one
+    # account's window under another's prefix.
+    _x = dict(_f, key="elsewhere:deadbeef")
+    ck("stamp-key-never-cross-files-a-source",
+       engine.stamp_key(_x, "slack", "", engine.own_app_counts([_x]))
+       == ("acct", "acct", False))
+    # ...while the source's OWN per-window identity is kept, or the per-window
+    # work is thrown away at the one place it is stored.
+    _p = dict(_f, key="acct:abc123")
+    ck("stamp-key-keeps-a-per-window-identity",
+       engine.stamp_key(_p, "slack", "", engine.own_app_counts([_p]))[0]
+       == "acct:abc123")
+    # A TITLE IS THE CALLER'S OWN CASE, so this says so rather than guessing:
+    # learn has title GROUPS where upsert has one row and one title.
+    _two = [{"app_id": "zzz-unowned", "title": "A"},
+            {"app_id": "zzz-unowned", "title": "B"}]
+    ck("stamp-key-falls-through-for-a-title",
+       engine.stamp_key(_two[0], "zzz-unowned", "",
+                        engine.own_app_counts(_two)) is None)
+    # AND THE COUNT EXCLUDES FOREIGN ROWS, which is the fact the branch above
+    # depends on: counting them made the OWNER's app look non-unique and
+    # flipped it off its app-id-only key.
+    ck("own-app-counts-excludes-another-account",
+       engine.own_app_counts([{"app_id": "slack", "title": "x"},
+                              {"app_id": "slack", "title": "y",
+                               "source": "acct", "owner": 997}])
+       == {"slack": 1})
+
+    # THE WIRING, which the function's own cells say nothing about: neither
+    # writer may still decide for itself. Eleventh instance of that hole in
+    # this package, so it is asserted rather than trusted.
+    import ast as _ast2
+    import inspect as _i2
+    _esrc = _i2.getsource(engine)
+    _etree = _ast2.parse(_esrc)
+    _own2 = {}
+    for _n2 in _ast2.walk(_etree):
+        if isinstance(_n2, _ast2.FunctionDef):
+            for _s2 in _ast2.walk(_n2):
+                if hasattr(_s2, "lineno"):
+                    _own2.setdefault(_s2.lineno, _n2.name)
+    _hand, _calls = [], []
+    for _n2 in _ast2.walk(_etree):
+        if not isinstance(_n2, _ast2.Call):
+            continue
+        _f2 = _n2.func
+        _nm = (_f2.id if isinstance(_f2, _ast2.Name)
+               else getattr(_f2, "attr", ""))
+        _in = _own2.get(_n2.lineno, "?")
+        if _nm == "stamp_key":
+            _calls.append(_in)
+        # the owner's app-id-only key, built anywhere but the definitions
+        if (_nm == "kkey" and len(_n2.args) == 2
+                and isinstance(_n2.args[1], _ast2.Constant)
+                and _n2.args[1].value == ""
+                and _in not in ("match_keys", "stamp_key", "entry_matches",
+                                "matched_key", "is_unique",
+                                "source_per_window_slots")):
+            _hand.append(f"{_in}:{_n2.lineno}")
+    if _hand:
+        print("selftest: the owner's app-id-only key is built outside the "
+              f"definitions: {_hand}", file=sys.stderr)
+    ck("no-writer-builds-the-owner-key-for-itself", not _hand)
+    ck("both-writers-decide-through-stamp-key",
+       {"upsert", "_learn_stamp"} <= set(_calls))
+
 def _t_placement(ck):
     """place_of and target_geometry: the two halves of WHERE a window goes.
 

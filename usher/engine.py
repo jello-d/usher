@@ -2902,6 +2902,71 @@ def prune_kb(kb, when):
         del kb[k]
 
 
+def own_app_counts(windows):
+    """How many of OUR OWN windows each app has, which is what decides
+    whether an app is keyed by its app-id alone.
+
+    FOREIGN ROWS ARE EXCLUDED BY DESIGN, and that exclusion is the whole
+    reason this is a named function rather than a Counter comprehension at
+    each writer: it is the fact `stamp_key` depends on, so the two have to
+    travel together. With one Slack of each account, a count that included
+    the foreign row saw TWO, `is_unique` went False, and the OWNER's Slack
+    flipped off its app-id-only key, orphaning its learned slot in silence."""
+    return Counter(w["app_id"] for w in windows
+                   if not w.get("source") and w.get("owner") is None)
+
+
+def stamp_key(w, app, key, counts):
+    """Which key this window's entry takes: (identity, key-title, appid_only),
+    or None when the caller must fall through to its own title handling.
+
+    THE ONE DEFINITION FOR BOTH STORE WRITERS. `learn` and `upsert` are the
+    only two things that write the store, so a window they key differently is
+    two sites with a different idea of what a window IS. They had been brought
+    into agreement by COPYING, three times, and the third time was a
+    divergence found in production rather than by the suite.
+
+    MEASURED BEFORE EXTRACTING, because "these look similar" is not a reason:
+    a TEN-LINE identical run, 46% of the smaller function, carrying the
+    cross-file guard, which is the line with teeth.
+
+    THE TITLE CASES STAY WITH THE CALLER, and that is not laziness: they
+    legitimately differ. `learn` has title GROUPS (one view id owning every
+    title it has worn) where `upsert` has one row and one title, so there is
+    no shared answer to give. Everything ABOVE the title fallback is identical
+    and is what this holds.
+
+    THE GATES ALSO STAY, deliberately and for the same kind of reason: upsert
+    asks `unreadable_placement` here while `learn` folds it into its `hold`
+    set, which its own note records as load-bearing, since `hold` must not
+    reach the terminal purge. Sharing those would break that.
+
+    A FOREIGN WINDOW IS KEYED ON ITS SOURCE AND NEVER app_id-ONLY.
+    `kkey(app, "")` is the OWNER's key and matches every window of that app,
+    so writing a foreign window there overwrites the owner's slot with it.
+    Asked FIRST, because `is_unique` looks only at the app and cannot know
+    whose window it is: with one Slack of each, `counts` saw ONE (it excludes
+    foreign rows by design), `is_unique` was therefore True for BOTH, and the
+    foreign window took the owner's key."""
+    src = source_of(w)
+    if src:
+        # THE RESOLVED KEY, NOT THE BARE SOURCE, so a per-window identity the
+        # account reported is what gets stored. `w["key"]` is what `snapshot`
+        # stamped while the window was live, which is the only moment it could
+        # be computed: the title this joins on is redacted in that very row,
+        # so re-deriving here would answer the source-alone key for every
+        # window.
+        k = w.get("key") or src
+        if k != src and not k.startswith(src + ":"):
+            k = src            # not this source's: never cross-file it
+        return k, k, False
+    if is_unique(app, counts):
+        return "", w["title"], True
+    if key:
+        return key, key, False
+    return None
+
+
 def upsert(kb, windows, when, outputs=None):
     """One-shot knowledge update (no view-id grouping): record each window's
     CURRENT identity. Unique-app_id windows key by app_id alone; the rest by
@@ -2914,9 +2979,7 @@ def upsert(kb, windows, when, outputs=None):
     are the only things that write the store, so a window one remembers and
     the other declines is two sites with a different idea of what may be
     keyed, and `upsert-and-learn-agree` pins the agreement as a table."""
-    counts = Counter(w["app_id"] for w in windows
-                      if not w.get("source") and
-                      w.get("owner") is None)
+    counts = own_app_counts(windows)
     for w in windows:
         # THE GATES FIRST, WHATEVER KEY SHAPE THE WINDOW WOULD HAVE TAKEN.
         # Asked ahead of the branches because that ordering is itself the
@@ -2935,33 +2998,13 @@ def upsert(kb, windows, when, outputs=None):
             continue
         app = w["app_id"]
         key = _single_id(w)   # plugin single identity (chrome/mux/kitty)
-        # A FOREIGN WINDOW IS KEYED ON ITS SOURCE AND NEVER app_id-ONLY.
-        # `kkey(app, "")` is the OWNER's key and matches every window of that
-        # app, so writing a foreign window there overwrites the owner's slot
-        # with it.
-        #
-        # MEASURED, because `is_unique` looks only at the app and cannot know
-        # whose window it is: with one Slack of each, `counts` saw ONE (it
-        # excludes foreign rows by design), `is_unique` was therefore True for
-        # BOTH, and the foreign window took the owner's key. Asked here rather
-        # than inside `is_unique`, whose question really is about the app.
-        _src_w = source_of(w)
-        if _src_w:
-            # THE RESOLVED KEY, NOT THE BARE SOURCE, so a per-window identity
-            # the account reported is what gets stored. `w["key"]` is what
-            # `snapshot` stamped while the window was live, which is the only
-            # moment it could be computed: the title this joins on is redacted
-            # in this very row, so re-deriving here would answer the
-            # source-alone key for every window.
-            _k_w = w.get("key") or _src_w
-            if _k_w != _src_w and not _k_w.startswith(_src_w + ":"):
-                _k_w = _src_w      # not this source's: never cross-file it
-            kb[kkey(app, _k_w)] = kb_entry(w, _k_w, False, when)
-        elif is_unique(app, counts):
-            kb[kkey(app, "")] = kb_entry(w, w["title"], True, when)
-        elif key:
-            kb[kkey(app, key)] = kb_entry(w, key, False, when)
+        decided = stamp_key(w, app, key, counts)
+        if decided is not None:
+            _i, _kt, _only = decided
+            kb[kkey(app, _i)] = kb_entry(w, _kt, _only, when)
         elif w["title"]:
+            # THE TITLE FALLBACK IS THIS WRITER'S OWN: one row, one title,
+            # where learn() has a view id owning every title it has worn.
             kb[kkey(app, w["title"])] = kb_entry(w, w["title"], False, when)
     prune_kb(kb, when)
 
@@ -3042,32 +3085,10 @@ def _learn_stamp(kb, groups, windows, counts, when, hold=()):
         if unidentified(w):
             continue
         key = _single_id(w)
-        # A FOREIGN WINDOW IS KEYED ON ITS SOURCE AND NEVER app_id-ONLY.
-        # `kkey(app, "")` is the OWNER's key and matches every window of that
-        # app, so writing a foreign window there overwrites the owner's slot
-        # with it.
-        #
-        # MEASURED, because `is_unique` looks only at the app and cannot know
-        # whose window it is: with one Slack of each, `counts` saw ONE (it
-        # excludes foreign rows by design), `is_unique` was therefore True for
-        # BOTH, and the foreign window took the owner's key. Asked here rather
-        # than inside `is_unique`, whose question really is about the app.
-        _src_w = source_of(w)
-        if _src_w:
-            # THE RESOLVED KEY, NOT THE BARE SOURCE, so a per-window identity
-            # the account reported is what gets stored. `w["key"]` is what
-            # `snapshot` stamped while the window was live, which is the only
-            # moment it could be computed: the title this joins on is redacted
-            # in this very row, so re-deriving here would answer the
-            # source-alone key for every window.
-            _k_w = w.get("key") or _src_w
-            if _k_w != _src_w and not _k_w.startswith(_src_w + ":"):
-                _k_w = _src_w      # not this source's: never cross-file it
-            kb[kkey(app, _k_w)] = kb_entry(w, _k_w, False, when)
-        elif is_unique(app, counts):
-            kb[kkey(app, "")] = kb_entry(w, w["title"], True, when)
-        elif key:
-            kb[kkey(app, key)] = kb_entry(w, key, False, when)
+        decided = stamp_key(w, app, key, counts)
+        if decided is not None:
+            _i, _kt, _only = decided
+            kb[kkey(app, _i)] = kb_entry(w, _kt, _only, when)
         elif vid is not None and vid in groups:
             for t in groups[vid]["titles"]:
                 kb[kkey(app, t)] = kb_entry(w, t, False, when)
@@ -3142,9 +3163,7 @@ def learn(kb, groups, windows, when, hold=(), seen=None, outputs=None):
     fresh ids next session, self-healing. Unique-app_id windows (--app Gmail)
     stay keyed by app_id alone; kitty is forced to per-title keys; Chrome keys
     by its active-tab URL identity (see identity(), stamped below)."""
-    counts = Counter(w["app_id"] for w in windows
-                      if not w.get("source") and
-                      w.get("owner") is None)
+    counts = own_app_counts(windows)
     tcount = Counter((w["app_id"], w["title"]) for w in windows if w["title"])
     ambiguous = {k for k, c in tcount.items() if c >= 2}
     live = {w["id"] for w in windows if w.get("id") is not None}
