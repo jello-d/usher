@@ -1109,35 +1109,47 @@ class Watcher:
         event loop only records the latest view + a due time in `pending`; this
         thread does the actual place when the churn stops, reusing place_sock
         (nothing else touches it once init is done, so it has one writer)."""
+        streak = 0
         while True:
             time.sleep(0.1)
-            now = time.time()
-            ready = []
-            with self.lock:
-                for vid in list(self.pending):
-                    if vid in self.placed:
-                        self.pending.pop(vid, None)
-                    elif now >= self.pending[vid]["due"]:
-                        ready.append(self.pending.pop(vid))
-            for item in ready:
-                v = item["v"]
-                if item.get("refetch"):
-                    v = self._fresh_view(v.get("id")) or v
-                self._try_place(v)
-            # Read back placements already issued. AFTER the places above, so
-            # one issued on this very tick is never verified before the
-            # compositor has had its delay to apply it.
-            checks = []
-            with self.lock:
-                for vid in list(self.verify):
-                    if now >= self.verify[vid]["due"]:
-                        checks.append((vid, self.verify.pop(vid)))
-            for vid, item in checks:
-                self._guarded("verify", self._verify_one, vid, item)
-            with self.lock:
-                again = self.st.pop("recheck", False)
-            if again:
-                self._recheck_all()
+            try:
+                self._placer_step()
+            except Exception as e:                         # noqa: BLE001
+                streak += 1
+                self._loop_failed("placer", e, streak)
+            else:
+                streak = 0
+
+    def _placer_step(self):
+        """One placer tick. Separate from the loop so the loop can guard the
+        WHOLE of it: see _loop_failed."""
+        now = time.time()
+        ready = []
+        with self.lock:
+            for vid in list(self.pending):
+                if vid in self.placed:
+                    self.pending.pop(vid, None)
+                elif now >= self.pending[vid]["due"]:
+                    ready.append(self.pending.pop(vid))
+        for item in ready:
+            v = item["v"]
+            if item.get("refetch"):
+                v = self._fresh_view(v.get("id")) or v
+            self._try_place(v)
+        # Read back placements already issued. AFTER the places above, so
+        # one issued on this very tick is never verified before the
+        # compositor has had its delay to apply it.
+        checks = []
+        with self.lock:
+            for vid in list(self.verify):
+                if now >= self.verify[vid]["due"]:
+                    checks.append((vid, self.verify.pop(vid)))
+        for vid, item in checks:
+            self._guarded("verify", self._verify_one, vid, item)
+        with self.lock:
+            again = self.st.pop("recheck", False)
+        if again:
+            self._recheck_all()
 
     def _fresh_view(self, vid):
         """The compositor's CURRENT view dict for vid, or None if it is gone.
@@ -1225,12 +1237,22 @@ class Watcher:
                 "sweep": store_mtime(SWEEP_FILE),
                 "plugins": plugins_sig(),
                 "chrome": chrome.session_sig()}
-        errstreak = 0
+        errstreak = pollstreak = 0
         while True:
             time.sleep(1)
-            self._poll_files(seen)
-            cap = self._poll_outputs(cap)
-            self._write_status()
+            # THESE THREE SAT OUTSIDE THE GUARD BELOW, so anything they
+            # failed to catch internally killed the capture thread and
+            # snapshots simply stopped. The tick still proceeds to the
+            # capture step afterwards: that work is independent of the polls,
+            # and it is the half whose loss costs the layout.
+            try:
+                self._poll_files(seen)
+                cap = self._poll_outputs(cap)
+                self._write_status()
+                pollstreak = 0
+            except Exception as e:                         # noqa: BLE001
+                pollstreak += 1
+                self._loop_failed("poll", e, pollstreak)
             with self.lock:
                 due = (self.st["dirty"]
                        and time.time() - self.st["last"] >= DEBOUNCE)
@@ -1822,6 +1844,36 @@ class Watcher:
             self.st["layout"] = False
             save_knowledge(self.kb, self.kb_profile)
         persist(snap, roll=roll)
+
+    def _loop_failed(self, what, e, streak):
+        """Report an error that escaped a daemon thread's loop BODY, and
+        escalate rather than limp.
+
+        **A THREAD WHOSE TARGET RAISES EXITS THAT THREAD ALONE.** The process
+        lives, the status file may keep ticking, and whatever the thread was
+        for stops dead: for the placer that is NOTHING IS EVER PLACED AGAIN
+        this session, with no line anywhere. That is this package's "restore
+        works, mostly" shape with the diagnostic removed.
+
+        AND THE THREAD'S SURVIVAL MUST NOT DEPEND ON EVERY CALLEE HOLDING,
+        which is the reason this is a BODY guard rather than more per-call
+        ones. Measured by classifying each loop statement: the capture
+        thread's `_poll_files`, `_poll_outputs` and `_write_status` all sat
+        OUTSIDE its try, and the placer's `_recheck_all` guards its own
+        `list_views` and its own place loop and not the elimination step
+        between them. Auditing every raise path of every callee is an
+        invariant nobody can hold, and the sweep says it was not held.
+
+        THE POLICY IS THE CAPTURE STEP'S, deliberately, rather than a second
+        one: log with the streak, and at the limit EXIT so the supervisor
+        does a clean full respawn with fresh sockets. A guard that merely
+        continued for ever would turn a dead thread into a silent one, which
+        trades a loud failure for a quiet one. See respawn_report, which
+        bounds the log when the respawn itself keeps failing."""
+        logline(f"{what} loop error: {e} (streak {streak})")
+        if streak >= CAPTURE_FAIL_LIMIT:
+            logline(f"{what} loop failing {streak}x; exit for respawn")
+            os._exit(1)
 
     def _capture_failed(self, e, cap, errstreak):
         """Handle a failed capture and return the socket to keep using. A

@@ -5824,6 +5824,95 @@ def _t_cli_split(ck):
     ck("every-json-reader-establishes-its-shape",
        all(ok for _mod, _fn, ok in _loads))
 
+    # --- EVERY STATEMENT IN A DAEMON THREAD'S LOOP IS GUARDED ------------
+    # A thread whose target raises exits THAT THREAD alone. The process
+    # lives, the status file may keep ticking, and whatever the thread was
+    # for stops dead: for the placer that is NOTHING IS EVER PLACED AGAIN
+    # this session, with no line anywhere.
+    #
+    # MEASURED BY CLASSIFYING EACH LOOP STATEMENT, which is how this was
+    # found: the capture thread's `_poll_files`, `_poll_outputs` and
+    # `_write_status` all sat OUTSIDE its try, and the placer's
+    # `_recheck_all` guards its own `list_views` and its own place loop but
+    # not the elimination step between them.
+    #
+    # THE CHECK IS THE POINT, not the two fixes: a FUTURE statement added
+    # outside the guard is the failure mode, and auditing every callee's
+    # raise paths by hand is an invariant nobody can hold.
+    # IMPORTED HERE: `_wt` is an area-LOCAL import in another function, and
+    # using it across the boundary is a NameError this file has recorded
+    # twice.
+    from . import watch as _wt
+    _wsrc = _i.getsource(_wt)
+    _wtree = _ast.parse(_wsrc)
+    _wfuncs = {n.name: n for n in _ast.walk(_wtree)
+               if isinstance(n, _ast.FunctionDef)}
+    # the thread TARGETS, derived rather than listed, so a third thread is
+    # covered the day it is started
+    _tgts = []
+    for _n in _ast.walk(_wtree):
+        if isinstance(_n, _ast.Call) and getattr(
+                _n.func, "id", getattr(_n.func, "attr", "")) == "Thread":
+            for _kw in _n.keywords:
+                if _kw.arg == "target":
+                    _v = _kw.value
+                    _tgts.append(getattr(_v, "attr", getattr(_v, "id", "?")))
+    _bare = []
+    for _tg in _tgts:
+        _node = _wfuncs.get(_tg)
+        if _node is None:
+            _bare.append(f"{_tg}: no such function")
+            continue
+        for _lp in [s for s in _node.body if isinstance(s, _ast.While)]:
+            for _s in _lp.body:
+                if isinstance(_s, _ast.Try):
+                    continue
+                _txt = _ast.unparse(_s)
+                # TWO ALLOWED SHAPES, each with its reason. A `sleep` cannot
+                # meaningfully raise, and a `with self.lock` block that only
+                # reads keys set in __init__ is as close to non-raising as
+                # this gets; anything else must be inside the guard.
+                if _txt.startswith("time.sleep("):
+                    continue
+                if (_txt.startswith("with self.lock:")
+                        and "self.st[" in _txt and "(" not in
+                        _txt.split("self.st[")[1][:20]):
+                    continue
+                if isinstance(_s, (_ast.Assign, _ast.If)) and not [
+                        c for c in _ast.walk(_s)
+                        if isinstance(c, _ast.Call)]:
+                    continue
+                _bare.append(f"{_tg}: {_txt.splitlines()[0][:50]}")
+    if _bare:
+        print("selftest: statements outside a daemon thread's loop guard: "
+              f"{_bare}", file=sys.stderr)
+    ck("every-thread-loop-statement-is-guarded", not _bare)
+    # A VACUITY GUARD, since an AST change that found no threads would pass
+    # the assertion over an empty list.
+    ck("the-thread-targets-were-found", len(_tgts) >= 2)
+
+    # AND THE ESCALATION IS THE CAPTURE STEP'S, not a second policy: log
+    # with the streak, and at the limit EXIT so the supervisor does a clean
+    # full respawn. A guard that merely continued for ever would trade a
+    # dead thread for a silent one.
+    _rexit, _rlog = os._exit, _wt.logline
+    _said, _exited = [], []
+    try:
+        os._exit = lambda c: _exited.append(c)
+        _wt.logline = lambda s: _said.append(s)
+        _w = _wt.Watcher.__new__(_wt.Watcher)
+        _w._loop_failed("placer", RuntimeError("planted"), 1)
+        ck("a-loop-error-is-logged-with-its-streak",
+           any("placer loop error" in s and "streak 1" in s for s in _said))
+        ck("a-single-loop-error-does-not-exit", not _exited)
+        _w._loop_failed("placer", RuntimeError("planted"),
+                        _wt.CAPTURE_FAIL_LIMIT)
+        ck("a-sustained-loop-failure-exits-for-respawn", _exited == [1])
+        ck("and-it-says-so-before-exiting",
+           any("exit for respawn" in s for s in _said))
+    finally:
+        os._exit, _wt.logline = _rexit, _rlog
+
     # --- WHO STAMPS A FIELD EVERY DOWNSTREAM READ TRUSTS -----------------
     # Twelve sites read `w.get("source")` bare, and whether that is
     # hand-rolling the question or consuming a single-sourced answer depends
