@@ -44,10 +44,10 @@ from datetime import date
 # there is nothing here that can go stale. The engine's users of it are
 # ChromePlugin, chrome_profiles_for, and the selftest fixtures.
 from .chrome import (CHROME_FLAGS, CHROME_STAGGER, browser_pids,
-                     chrome_bind_windows, chrome_profile_map, chrome_slot,
-                     chrome_window_for, chrome_window_tabs, is_chrome,
-                     is_chrome_slot, recorded_window_ids, session_history,
-                     window_slot)
+                     browser_started, chrome_bind_windows, chrome_profile_map,
+                     chrome_slot, chrome_window_for, chrome_window_tabs,
+                     is_chrome, is_chrome_slot, recorded_window_ids,
+                     seed_slots, session_history, window_slot)
 
 # usher.toplevels is the other leaf, and is imported QUALIFIED rather than by
 # name so a test can stub `toplevels.list_toplevels` and have the engine see
@@ -2240,6 +2240,11 @@ class ChromePlugin(WindowPlugin):
         does not record those anywhere, by design, so no amount of waiting,
         title normalising or tab-set widening will ever join it. Telling them
         apart is the difference between "wait" and "stop asking"."""
+        # THE ONE LOOKUP, so the one place the adoption hooks. Lazy and not
+        # per verb, which is the sources map's own argument: a list of the
+        # verbs that need it is a SELECTOR, and a listed selector silently
+        # covers less the moment something is added.
+        adopt_snapshot_slots()
         slot = window_slot(v.get("id"), v["title"])
         if slot:
             return Resolution.ready(slot)
@@ -4733,6 +4738,59 @@ def adopt_published_sources():
             _SOURCE_WINDOWS[src] = dict(m)
             n += 1
     return n
+
+
+# WHETHER THE SNAPSHOT'S CHROME SLOTS HAVE BEEN ADOPTED IN THIS PROCESS.
+# Read-once for the same reason as the sources flag above.
+_SNAP_SLOTS_ADOPTED = False
+
+
+def adopt_snapshot_slots():
+    """Fill chrome's view-to-slot cache from the daemon's snapshot, ONCE.
+
+    THE SAME BLINDNESS THE SOURCES MAP EXISTS FOR, one app over. That cache
+    is per PROCESS, filled by whoever resolved a view first and kept for the
+    life of the view, so the daemon holds answers a one-shot verb cannot
+    reach: Chrome records a title at NAVIGATION time, measured stale by two
+    and a half hours, so a window whose title has since drifted is
+    unresolvable from scratch while the daemon still has its slot.
+
+    MEASURED ON manifold 2026-11-09, four owner chrome windows: the daemon
+    stamped 4 of 4 as slots and a fresh process resolved 3, falling back to
+    the RAW TITLE for the fourth. The matcher never looks a title up for an
+    owned app, so that window was `unmatched-live` and its slot
+    `unmatched-layout` in the dry run, absent from a prediction, and NOT
+    PLACED by a hand-run `usher restore`. Reads were wrong and the one write
+    path was safe, because `unidentified` already refuses to key on a title.
+
+    NO NEW PUBLISH IS NEEDED, which is why this is small: a snapshot row
+    already carries the wayfire view `id` and the `key` the daemon stamped
+    for it, so `current.json` is both halves of the join already.
+
+    THE FRESHNESS TEST IS EXACT RATHER THAN A HEURISTIC, and it has to be: a
+    view id means nothing across compositor sessions, and a `chrome:win:<id>`
+    from a previous BROWSER run names an id no live window has, which is the
+    sticky-wrong-slot hazard rather than a miss. A snapshot written AFTER the
+    running browser started cannot hold either, since Chrome's ids are minted
+    per run and a client cannot outlive its compositor. With no browser
+    running there is nothing to adopt for, so it declines."""
+    global _SNAP_SLOTS_ADOPTED
+    if _SNAP_SLOTS_ADOPTED:
+        return 0
+    _SNAP_SLOTS_ADOPTED = True
+    started = browser_started()
+    if not started:
+        return 0
+    snap = load_snapshot()
+    when = snap.get("time") if isinstance(snap, dict) else None
+    if not isinstance(when, (int, float)) or isinstance(when, bool):
+        return 0
+    if when <= started:
+        return 0
+    return seed_slots(
+        (w.get("id"), w.get("key") or "")
+        for w in (snap.get("windows") or [])
+        if isinstance(w, dict) and not (w.get("source") or ""))
 
 
 def forget_source_window(vid):

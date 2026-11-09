@@ -6874,6 +6874,103 @@ def _t_chrome(ck):
            window_slot(90001, "Inbox (99) - nothing like this") is None)
         forget_window(90002)
 
+    # A ONE-SHOT VERB IS BLIND WHERE THE DAEMON IS NOT, which is the sources
+    # map's shape one app over: the cache is per PROCESS, and because Chrome
+    # records a title at NAVIGATION time a window whose title has drifted is
+    # unresolvable from scratch while the daemon still holds its slot.
+    # Measured on manifold: the daemon stamped 4 of 4 as slots and a fresh
+    # process resolved 3, so a hand-run `restore` left the fourth unplaced.
+    # SYNTHETIC, deliberately: the cells above are guarded on the real
+    # session files existing, which makes them a check on the host, and these
+    # need no host at all.
+    _SEED = "chrome:win:424242"
+    chrome._slot_cache.clear()
+    ck("seed-takes-a-slot-for-a-view",
+       chrome.seed_slots([(70001, _SEED)]) == 1
+       and window_slot(70001, "a title no session file names") == _SEED)
+    # NEVER OVERWRITES: an answer this process resolved itself came from the
+    # live session file and is at least as good as somebody else's.
+    ck("seed-never-overwrites",
+       chrome.seed_slots([(70001, "chrome:win:999")]) == 0
+       and window_slot(70001, "another title") == _SEED)
+    # AND IT VALIDATES THE SHAPE, or a hand-edited or half-written snapshot
+    # puts a RAW TITLE into the cache `identity` reads, which is precisely
+    # the fallback the slot key replaced.
+    chrome._slot_cache.clear()
+    ck("seed-refuses-a-raw-title",
+       chrome.seed_slots([(70002, "Inbox - Gmail - Google Chrome")]) == 0)
+    ck("seed-refuses-a-view-with-no-id",
+       chrome.seed_slots([(None, _SEED)]) == 0)
+
+    def _adopt(when, started, src="", vid=70003, keep_flag=False):
+        """Drive the real adoption with both seams chosen.
+
+        `keep_flag` leaves the read-once flag alone while still clearing the
+        CACHE, which is the only input that can tell the flag apart from the
+        never-overwrite rule: with the flag gone a second call finds an empty
+        cache and seeds again, and with it the call does not happen at all.
+        """
+        chrome._slot_cache.clear()
+        if not keep_flag:
+            engine._SNAP_SLOTS_ADOPTED = False
+        _ls, _bs = engine.load_snapshot, engine.browser_started
+        engine.load_snapshot = lambda *a, **k: {
+            "time": when,
+            "windows": [{"id": vid, "key": _SEED, "source": src}]}
+        engine.browser_started = lambda: started
+        try:
+            return engine.adopt_snapshot_slots()
+        finally:
+            engine.load_snapshot, engine.browser_started = _ls, _bs
+
+    # THE FRESHNESS TEST IS EXACT RATHER THAN A HEURISTIC, and it has to be:
+    # a `chrome:win:<id>` from a PREVIOUS browser run names an id no live
+    # window has, which is a sticky wrong slot rather than a miss.
+    ck("adopt-takes-a-snapshot-newer-than-the-browser", _adopt(2000.0, 1000.0)
+       == 1)
+    ck("adopt-refuses-a-snapshot-older-than-the-browser",
+       _adopt(500.0, 1000.0) == 0)
+    ck("adopt-refuses-with-no-browser-running", _adopt(2000.0, None) == 0)
+    # A BOOL IS AN INT IN PYTHON, so `True` passes a bare isinstance and
+    # dates the snapshot to 1970. The input that tells the guard apart from
+    # the staleness test is a started time BELOW one.
+    ck("adopt-refuses-a-bool-for-the-time", _adopt(True, 0.5) == 0)
+    ck("adopt-skips-another-account-s-row",
+       _adopt(2000.0, 1000.0, src="titan") == 0)
+    # READ ONCE, for the same reason the sources flag is: the answer only
+    # changes when the daemon publishes, and this runs on every resolve.
+    ck("adopt-reads-once", _adopt(2000.0, 1000.0) == 1
+       and _adopt(2000.0, 1000.0, keep_flag=True) == 0)
+
+    # AND THE WIRING, which the resolver's own cells say nothing about: a
+    # pure function with perfect checks is dead code until something calls
+    # it, and that hole has cost this package eleven findings.
+    _cp = ps.get("chrome")
+    if _cp:
+        _v = {"app": "google-chrome", "id": 70004,
+              "title": "a title no session file names"}
+        chrome._slot_cache.clear()
+        engine._SNAP_SLOTS_ADOPTED = False
+        _r0 = _cp.resolve(dict(_v))
+        # THE CONTROL FIRST: without a seed this window is PENDING, or a
+        # resolve that answered Ready unconditionally would satisfy the cell
+        # below and the wiring would be unproven.
+        ck("chrome-resolve-is-pending-with-no-seed", not _r0.is_ready)
+        _ls, _bs = engine.load_snapshot, engine.browser_started
+        engine.load_snapshot = lambda *a, **k: {
+            "time": 2000.0,
+            "windows": [{"id": 70004, "key": _SEED, "source": ""}]}
+        engine.browser_started = lambda: 1000.0
+        engine._SNAP_SLOTS_ADOPTED = False
+        try:
+            _r1 = _cp.resolve(dict(_v))
+        finally:
+            engine.load_snapshot, engine.browser_started = _ls, _bs
+        ck("chrome-resolve-adopts-the-snapshot-slot",
+           _r1.is_ready and _r1.key == _SEED)
+    chrome._slot_cache.clear()
+    engine._SNAP_SLOTS_ADOPTED = False
+
     # A TITLE TWO WINDOWS SHARE IS NOT A DISCRIMINATOR, and it matters more
     # now that the answer STICKS: two "New Tab" windows would otherwise both
     # be handed the same slot, permanently. Same rule learn() applies to its

@@ -408,6 +408,40 @@ def chrome_window_for(title):
 _slot_cache = {}
 
 
+def seed_slots(pairs):
+    """Adopt resolutions somebody else made for these views. Returns the
+    count taken.
+
+    WHY A ONE-SHOT VERB NEEDS THIS AT ALL: the cache below is per PROCESS and
+    is filled by whoever resolved a view FIRST, so the daemon accumulates
+    answers a verb cannot have. The title is only a bootstrap and Chrome
+    records it at NAVIGATION time, so a window whose title has since drifted
+    is unresolvable from scratch while the daemon still holds its slot. The
+    daemon is right and the verb is blind, which is the same shape the
+    published sources map exists for.
+
+    IT NEVER OVERWRITES, because a resolution this process made itself came
+    from the live session file and is at least as good. And it validates the
+    SHAPE, so a hand-edited or half-written snapshot cannot put a raw title
+    into the cache that identity reads: that fallback is exactly what the
+    slot key replaced.
+
+    THE CALLER OWNS THE FRESHNESS TEST. This takes pairs and asks nothing
+    about where they came from, which is what keeps this module a leaf."""
+    n = 0
+    for vid, slot in pairs:
+        if vid is None or not is_chrome_slot(slot):
+            continue
+        if vid not in _slot_cache:
+            # THE SLOT VERBATIM. This cache holds the whole `chrome:win:<id>`
+            # string, which `window_slot` returns and `claim_by_elimination`
+            # reads back with `held[len(_CHROME_SLOT):]`: storing the bare id
+            # here would hand every caller a key the matcher never looks up.
+            _slot_cache[vid] = slot
+            n += 1
+    return n
+
+
 def window_slot(vid, title):
     """The slot for a LIVE window: resolved ONCE from the title, then
     remembered for as long as the window exists.
