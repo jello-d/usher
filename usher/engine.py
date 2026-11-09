@@ -1251,6 +1251,30 @@ class WindowPlugin:
         defaulting to Pending would defer it forever."""
         return Resolution.ready(v["title"])
 
+    def owns_key(self, ident):
+        """Could `resolve` EVER answer this identity? True, False, or None
+        for "I cannot say". Asked of a STORED entry, with no live window.
+
+        WHY THE PLUGIN IS THE ONE TO ASK: it is already the authority on what
+        a window's identity IS, so it is the only honest authority on what
+        its own keys look like. The alternative is a table of key shapes in
+        the engine, which is the second copy of another component's facts
+        that `PLUGIN_HOOKS` itself exists to have removed.
+
+        WHAT IT IS FOR: an entry no window can ever match is LITTER rather
+        than memory, and only the TTL removes it. `match_keys` offers an
+        owned app its app_id-only key and the key its plugin RESOLVED, never
+        anything else, so a stored identity this plugin could not have
+        produced is unreachable by construction.
+
+        NONE IS THE DEFAULT AND MUST DEGRADE TO MATCHABLE, which is the
+        fail-safe direction and the reason this can be added without
+        breaking a plugin that has never heard of it: reporting a real slot
+        as litter invites a human to delete memory that was working, where
+        failing to report one costs an entry the TTL was going to take
+        anyway."""
+        return None
+
     def relaunch_missing(self, saved, live):
         # respawn this app's saved-but-absent windows; return WHICH app-ids
         # were started. A count still works (see launched_apps) and costs
@@ -1283,7 +1307,7 @@ class WindowPlugin:
 # The hooks a plugin may implement, named ONCE: `plugins` and `doctor` both
 # report which of them a plugin defines, and listing them separately is how
 # relaunch_command and wind_down came to be missing from both.
-PLUGIN_HOOKS = ("owns", "resolve", "relaunch_command",
+PLUGIN_HOOKS = ("owns", "resolve", "owns_key", "relaunch_command",
                 "relaunch_missing", "wind_down")
 
 PLUGIN_DIR = config_path("plugins")
@@ -2256,6 +2280,12 @@ class ChromePlugin(WindowPlugin):
             "Chrome has not written this window to its session file yet; an "
             "incognito or guest window is never written at all")
 
+    def owns_key(self, ident):
+        """Only a `chrome:win:<SessionID>` slot, which is all `resolve`
+        answers. A raw TITLE here is the identity fallback that no longer
+        exists, and schema 7 purged 265 of them on one box."""
+        return is_chrome_slot(ident)
+
     def wind_down(self, live):
         """SIGTERM the BROWSER process. Measured on Chrome 154: it exits in
         about a second and records profile.exit_type = "SessionEnded".
@@ -2365,6 +2395,16 @@ class MuxPlugin(WindowPlugin):
         slot was resolved at capture and recorded in the snapshot's `key`."""
         return Resolution.ready(_mux_slot(_term_latch_target(v.get("pid", -1))))
 
+    def owns_key(self, ident):
+        """A terminal slot, which is what `_mux_slot` builds. BUT it shares
+        the kitty app-id with KittyPlugin, so this says nothing about a
+        `kitty:<cwd>` key: ownership here is TITLE-based while the key is
+        COMMAND-based, so one window flips between the two plugins depending
+        on whether mux is attached when it is captured, and both key shapes
+        are legitimately reachable for the same app."""
+        return bool(TERM_KEY_RE.match(ident or "")) or (
+            ident or "").startswith("kitty:")
+
     def relaunch_command(self, v):
         """A latch if one is running here, otherwise nothing, which the
         relaunch reads as `mux resume`. See MUX_RESUME for why that default is
@@ -2445,6 +2485,15 @@ class KittyPlugin(WindowPlugin):
             return Resolution.ready(f"kitty:{cwd}")
         return Resolution.pending(
             "the shell's cwd is not readable yet (a kitty needs ~0.25s)")
+
+    def owns_key(self, ident):
+        """`kitty:<cwd>`, or a terminal slot. BOTH, for the reason MuxPlugin
+        gives: these two share an app-id and a window moves between them as
+        mux attaches and detaches, so either key shape is reachable for a
+        kitty and a plugin that claimed only its own would report the other's
+        working slots as litter."""
+        return (ident or "").startswith("kitty:") or bool(
+            TERM_KEY_RE.match(ident or ""))
 
     def relaunch_missing(self, saved, live):
         return kitty_relaunch_missing(saved, live)
@@ -2591,32 +2640,91 @@ def dormancy_rescued(kb, now, gap, ttl=KNOWLEDGE_TTL):
     return n
 
 
-def stale_chrome_titles(kb):
-    """Chrome entries keyed on a RAW TITLE, which nothing can match. PURE.
+def unmatchable_entries(kb, plugins_=None):
+    """Entries no window can EVER match, as (key, why). PURE given the
+    registry.
 
-    NOT MEMORY, LITTER. `match_keys` offers a chrome window its app_id-only
-    key and the slot its plugin RESOLVED, never a title, so such an entry can
-    never be looked up again and only the 30-day TTL removes it. The
-    readiness gate stops them being created (a chrome window whose session
-    file has not caught up answers Pending and is not learned) and schema 7
-    purged 265 of them on one box.
+    AN ORPHAN HAS ONE DECIDABLE DEFINITION and this is it: a key `match_keys`
+    can never return. That replaces a hand-written list of shapes somebody
+    noticed, which is what the orphan watch outside this repo had to be, and
+    it is derived from the matcher and the plugins rather than maintained
+    beside them. `stale_chrome_titles` was this idea for ONE app and is
+    retired rather than wrapped.
 
-    NOTHING REPORTED THE ONES A STORE STILL HOLDS, which is why this exists:
-    three sat on manifold until a content sweep of the dry run found them,
-    one dating to before the pre-profile store and one created after the
-    gate was in place. A class the store can hold, that no window can match
-    and no check names, is a gap whatever its size.
+    WHY THAT IS THE RIGHT DEFINITION rather than "an entry whose window is
+    gone": a store that remembers closed windows is the whole point, and a
+    purge keyed on absence is the shape that eventually deletes something
+    present, which this package has recorded twice. Unmatchability is
+    decidable from the KEY alone, with no reference to what is on screen, and
+    that is exactly what makes it safe to report.
 
-    ANOTHER ACCOUNT'S ENTRY IS SKIPPED, because a source-keyed identity is
-    the source name plus an OPAQUE DIGEST and so is correctly not a slot.
-    Reading those as stale would report every per-window foreign key."""
+    EVERY UNCERTAIN ANSWER READS AS MATCHABLE. A plugin that does not
+    implement `owns_key` says None, an app no plugin claims keys by TITLE and
+    so can match anything, and the app_id-only key is offered to every owner
+    window. So this reports only what it can prove, which is the direction
+    that matters: naming a working slot as litter invites a human to delete
+    memory, where missing one costs an entry the TTL was going to take.
+
+    WHAT IT CAN PROVE, and each row is a class this store has actually held:
+
+        wildcard       no app-id AND no identity. `is_unique` refuses an
+                       empty app-id so there is no app_id-only key, and
+                       `resolution` answers NEVER, so nothing offers it. It
+                       is also a WILDCARD: every handle-less window would
+                       have matched it.
+        plugin-shape   an owned app's entry whose identity its own plugin
+                       could not have produced. The chrome case is the
+                       measured one: 265 went in schema 7, and three more
+                       were found a month later by a CONTENT SWEEP of the
+                       dry run rather than by any check.
+        source-shape   another account's entry whose identity is neither the
+                       source name nor `<source>:<digest>`, so `match_keys`'
+                       foreign branch offers it nothing.
+    """
+    reg = plugins() if plugins_ is None else plugins_
     out = []
     for k, e in kb.items():
         app, _, ident = k.partition("\0")
-        if not ident or (e.get("source") or ""):
+        src = e.get("source") or ""
+        # NO APP-ID AND NO DISCRIMINATING IDENTITY IS A WILDCARD, and this
+        # is the one class that is worse than litter: it matches TOO MUCH
+        # rather than nothing, so the next handle-less window is dragged
+        # onto it. Both measured instances are this shape, and a first cut
+        # here tested `not ident` alone and missed the second:
+        #
+        #     `\0`        no app, no identity          (d9dbc9f)
+        #     `\0titan`   no app, the SOURCE as the    (5c5fdb0)
+        #                 identity, which is that
+        #                 account's own fallback and
+        #                 so discriminates nothing
+        #
+        # A BLANK APP-ID WITH A REAL TITLE IS NOT THIS. `is_unique` refuses
+        # an empty app-id, so such a window keys by its TITLE, which is
+        # narrow and matches again the moment it reopens.
+        if not app and (not ident or ident == src):
+            out.append((k, "wildcard"))
             continue
-        if is_chrome(app) and not is_chrome_slot(ident):
-            out.append(k)
+        if src:
+            # THE FOREIGN BRANCH IS EXACTLY `match_keys`', which is why this
+            # cannot drift from it: that function offers a foreign window
+            # `kkey(app, source)` always and `kkey(app, ident)` only when
+            # `source_ident` holds.
+            if ident != src and not source_ident(src, ident):
+                out.append((k, "source-shape"))
+            continue
+        if not ident:
+            continue             # the app_id-only key, offered to every one
+        for p in reg:
+            try:
+                if not p.owns({"app": app, "title": "", "pid": -1}):
+                    continue
+                if p.owns_key(ident) is False:
+                    out.append((k, "plugin-shape"))
+            except Exception:                                  # noqa: BLE001
+                # A BROKEN PLUGIN CANNOT GET AN ENTRY CONDEMNED, the same
+                # policy `resolution` applies to one that raises.
+                pass
+            break
     return sorted(out)
 
 
@@ -2871,7 +2979,7 @@ def load_knowledge(profile=None):
     # AND ONE BAD ENTRY MUST NOT COST THE STORE, which is the more reachable
     # half: a hand edit touches one ROW. Measured with a control, a single
     # non-dict entry beside good ones raised in prune_kb (so every capture)
-    # and in stale_chrome_titles (so doctor's own TTL note), while the rest
+    # and in unmatchable_entries (so doctor's own note), while the rest
     # of the store was perfectly readable.
     #
     # DROPPED RATHER THAN REFUSED, because the asymmetry runs the other way

@@ -136,12 +136,18 @@ every time you switched:
 Add your own: drop a `*.py` file into `~/.config/usher/plugins/` defining a
 top-level `PLUGIN` object. See [`share/plugins/example.py`](
 share/plugins/example.py). Each plugin claims an app's windows (`owns`) and may
-implement `resolve` / `relaunch_command` /
+implement `resolve` / `owns_key` / `relaunch_command` /
 `relaunch_missing` / `wind_down`, each taking a normalized view (`v["app"]`,
 
 `v["title"]`, `v["pid"]`, `v["id"]`). `v["id"]` is the compositor's view id,
 stable for exactly one window's lifetime and `None` for a window replayed from
 the store, so it is what to cache a hard-won identity against.
+`owns_key` answers whether `resolve` could EVER have produced a stored
+identity, so usher can report an entry no window can match: a plugin is the
+authority on its own key shapes, and `None` ("I cannot say") is the default
+and reads as matchable, since calling a working slot litter invites deleting
+real memory.
+
 `relaunch_missing` returns the **app-ids it started**, which is how usher knows
 whether to let the registry default start an app a plugin claims but did not
 actually launch; a count still works and is read as "I may have started

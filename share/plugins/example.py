@@ -83,6 +83,22 @@ class SpotifyPlugin:
 
     # Optional hooks. Every default is a no-op, so omit what you do not need.
     #
+    #   def owns_key(self, ident):
+    #       # Could `resolve` EVER answer this identity? True, False, or
+    #       # None for "I cannot say", which is the default.
+    #       #
+    #       # Asked of a STORED entry, with no live window, so usher can
+    #       # report an entry no window can ever match: it offers an owned
+    #       # app its app-id-only key and the key its plugin RESOLVED and
+    #       # nothing else, so a stored identity you could not have produced
+    #       # is unreachable and only the 30-day TTL removes it.
+    #       #
+    #       # YOU ARE THE AUTHORITY ON YOUR OWN KEY SHAPES, which is why
+    #       # this is asked of you rather than tabulated in usher. Say False
+    #       # only where you are certain; None is read as matchable, since
+    #       # calling a working slot litter invites deleting real memory.
+    #       return ident.startswith("spotify")
+    #
     #   def relaunch_command(self, v):
     #       # How to bring THIS window back, read from the live window while
     #       # it can still be asked, and recorded in the snapshot. This is

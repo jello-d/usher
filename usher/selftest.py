@@ -1110,7 +1110,14 @@ def _t_resolution(ck):
                 {"source": "titan"}}
     # NOT `_st`, which is already a resolution helper in this area and
     # which a bare assignment shadows: the suite named it at once.
-    _stl = engine.stale_chrome_titles(_kbt)
+    #
+    # AND IT IS THE GENERAL DETECTOR NOW. `stale_chrome_titles` was this
+    # idea for ONE app and is retired rather than wrapped, so these cells
+    # read the same facts out of `unmatchable_entries`: the chrome case is
+    # the measured one and remains the fixture, which is what keeps the
+    # generalisation honest rather than merely wider.
+    _stl = [k for k, _w in engine.unmatchable_entries(_kbt)
+            if _w == "plugin-shape"]
     ck("a-chrome-title-key-is-reported-as-stale", _stl == [_ttl])
     ck("a-chrome-slot-is-not-stale", _slot not in _stl)
     ck("the-app-id-only-chrome-key-is-not-stale", _only not in _stl)
@@ -1120,8 +1127,202 @@ def _t_resolution(ck):
        not any(k.startswith("signal") for k in _stl))
     # AND THE WIRING, the hole this file records ten times over: the pure
     # function's checks say nothing about whether doctor prints it.
-    ck("doctor-reports-the-stale-chrome-titles",
-       "stale_chrome_titles(kb)" in _dsrc)
+    #
+    # ASKED OF WHAT IT PRINTS, not of its source. A plant that left the
+    # call COMMENTED OUT passed a `"unmatchable_entries(kb)" in _dsrc`
+    # scan, because the string was still there: a pattern scan is satisfied
+    # by a MENTION, which is the fault the redaction wiring check already
+    # had to be rewritten for. doctor imports its loaders BY NAME, so its
+    # own copies are what must be stubbed.
+    from . import doctor as _dun
+    _dsv = (_dun.load_knowledge, _dun.load_snapshot, _dun._doctor_surfaces,
+            _dun.profile_id)
+    try:
+        _dun._doctor_surfaces = lambda *a, **k: None
+        _dun.profile_id = lambda *a, **k: "P"
+        _dun.load_snapshot = lambda *a, **k: {"windows": [],
+                                              "time": time.time()}
+
+        def _un_rows(kb):
+            _dun.load_knowledge = lambda *a, **k: kb
+            rows = []
+            _dun._doctor_store(rows.append)
+            return [r for r in rows if "no window can ever match" in r]
+
+        ck("doctor-reports-the-unmatchable-entries",
+           len(_un_rows({engine.kkey("", ""):
+                         {"last_seen": time.time()}})) == 1)
+        # THE CONTROL, or the row above is satisfied by a doctor that says
+        # it unconditionally: a store with nothing unmatchable is silent.
+        ck("doctor-is-silent-with-nothing-unmatchable",
+           not _un_rows({engine.kkey("signal", ""):
+                         {"last_seen": time.time()}}))
+
+        # AND EVERY OTHER STORE, which is the hole that actually cost
+        # something: five wildcards sat in dormant stores for 51 days,
+        # invisible because every check read the loaded one. This drives the
+        # real walk over real files, since the LIVE store being clean is
+        # exactly the state that hid them.
+        _dst = _dun.STATE
+        _tmp = tempfile.mkdtemp()
+        try:
+            _dun.STATE = _tmp
+            _pl.Path(_tmp, "knowledge-P.json").write_text("{}")
+            _pl.Path(_tmp, "knowledge-OTHER.json").write_text(
+                json.dumps({engine.kkey("", ""): {"last_seen": 1}}))
+
+            def _oth_rows():
+                _dun.load_knowledge = lambda *a, **k: {}
+                rows = []
+                _dun._doctor_store(rows.append)
+                return [r for r in rows if "OTHER monitor sets" in r]
+
+            ck("doctor-reports-an-orphan-in-a-dormant-store",
+               len(_oth_rows()) == 1)
+            # THE CONTROL, and it is the same file emptied rather than a
+            # different fixture, so nothing but the orphan differs.
+            _pl.Path(_tmp, "knowledge-OTHER.json").write_text("{}")
+            ck("doctor-is-silent-when-the-dormant-stores-are-clean",
+               not _oth_rows())
+            # AND THE LIVE PROFILE IS SKIPPED, which needs the orphan to be
+            # in the LIVE store to be decidable at all: with an empty live
+            # file, including it in the walk adds nothing and a plant that
+            # dropped the skip passed. The ninth time a fixture here has
+            # been too neat, and the rule is the same each time: ask what
+            # INPUTS a guard distinguishes.
+            _wild = {engine.kkey("", ""): {"last_seen": 1}}
+            _pl.Path(_tmp, "knowledge-P.json").write_text(json.dumps(_wild))
+
+            def _live_and_other():
+                _dun.load_knowledge = lambda *a, **k: _wild
+                rows = []
+                _dun._doctor_store(rows.append)
+                return ([r for r in rows if "no window can ever match" in r],
+                        [r for r in rows if "OTHER monitor sets" in r])
+
+            _lr, _orr = _live_and_other()
+            ck("the-live-store-s-own-orphan-is-reported-once",
+               len(_lr) == 1 and not _orr)
+            # AND AN UNREADABLE ONE IS SKIPPED RATHER THAN FATAL: a dormant
+            # store is hand-editable and nothing else ever opens it, so a
+            # half-written one must not take the whole report down.
+            _pl.Path(_tmp, "knowledge-OTHER.json").write_text("{not json")
+            _bad = "ok"
+            try:
+                _oth_rows()
+            except Exception as _e:                            # noqa: BLE001
+                _bad = "RAISED-%s" % type(_e).__name__
+            ck("an-unreadable-dormant-store-is-skipped", _bad == "ok")
+        finally:
+            _dun.STATE = _dst
+            shutil.rmtree(_tmp, ignore_errors=True)
+    finally:
+        (_dun.load_knowledge, _dun.load_snapshot, _dun._doctor_surfaces,
+         _dun.profile_id) = _dsv
+
+    # THE OTHER TWO CLASSES, each one a shape this store has actually held.
+    _uw = dict(engine.unmatchable_entries({
+        engine.kkey("", ""): {},                       # the WILDCARD
+        engine.kkey("", "Some Window Title"): {},      # narrow, and matchable
+        engine.kkey("signal", ""): {},                 # the app_id-only key
+        engine.kkey("slack", "titan"): {"source": "titan"},
+        engine.kkey("slack", "titan:" + ("a" * 16)): {"source": "titan"},
+        engine.kkey("slack", "Alex (DM)"): {"source": "titan"},
+    }))
+    ck("wildcard-is-unmatchable",
+       _uw.get(engine.kkey("", "")) == "wildcard")
+    # AND THE SECOND MEASURED WILDCARD, which a first cut here missed: no
+    # app-id with the SOURCE as the identity is that account's own fallback,
+    # so it discriminates nothing and every handle-less window of that
+    # account matches it. Found by tabulating the detector against each
+    # historical class rather than by assuming the first branch covered them.
+    ck("a-source-alone-key-with-no-app-id-is-a-wildcard",
+       dict(engine.unmatchable_entries(
+           {engine.kkey("", "titan"): {"source": "titan"}})).get(
+               engine.kkey("", "titan")) == "wildcard")
+    # A BLANK APP-ID WITH A TITLE IS NOT THE WILDCARD, which is the half of
+    # that conjunction a probe here once read wrongly: `is_unique` refuses an
+    # empty app-id so it keys by the TITLE, and a title key matches again the
+    # moment such a window reopens.
+    ck("a-blank-app-id-with-a-title-is-matchable",
+       engine.kkey("", "Some Window Title") not in _uw)
+    ck("the-app-id-only-key-is-matchable",
+       engine.kkey("signal", "") not in _uw)
+    # THE FOREIGN BRANCH IS `match_keys`' OWN: the source alone always, and
+    # a per-window key only where `source_ident` holds.
+    ck("the-source-alone-key-is-matchable",
+       engine.kkey("slack", "titan") not in _uw)
+    ck("a-source-digest-key-is-matchable",
+       engine.kkey("slack", "titan:" + ("a" * 16)) not in _uw)
+    ck("a-foreign-key-of-another-shape-is-unmatchable",
+       _uw.get(engine.kkey("slack", "Alex (DM)")) == "source-shape")
+
+    # AND EVERY UNCERTAIN ANSWER READS AS MATCHABLE, which is the whole
+    # fail-safe story and the reason this could be added to the contract
+    # without breaking a plugin that has never heard of it.
+    class _Claims:
+        name = "claims-all"
+
+        def owns(self, v):
+            return True
+
+        def owns_key(self, ident):
+            return None          # the BASE default: "I cannot say"
+
+    class _Denies(_Claims):
+        name = "denies-all"
+
+        def owns_key(self, ident):
+            return False
+
+    class _Raises(_Claims):
+        name = "raises"
+
+        def owns_key(self, ident):
+            raise RuntimeError("a broken plugin")
+
+    _kbq = {engine.kkey("whatever", "some-identity"): {}}
+    ck("a-plugin-that-cannot-say-leaves-the-entry-alone",
+       engine.unmatchable_entries(_kbq, [_Claims()]) == [])
+    # THE CONTROL: without it the row above passes over a detector that
+    # never reports anything at all.
+    ck("a-plugin-that-denies-the-key-condemns-the-entry",
+       [w for _k, w in engine.unmatchable_entries(_kbq, [_Denies()])]
+       == ["plugin-shape"])
+    # GUARDED, because the plant for this NARROWS the except and the
+    # exception then aborts the whole area rather than naming the cell: a
+    # guarded call beats a raise, which is this file's own rule and which I
+    # broke four lines from writing it down.
+    try:
+        _rq = engine.unmatchable_entries(_kbq, [_Raises()])
+    except Exception as _e:                                    # noqa: BLE001
+        _rq = "RAISED-%s" % type(_e).__name__
+    ck("a-broken-plugin-cannot-condemn-an-entry", _rq == [])
+    # AN APP NO PLUGIN CLAIMS KEYS BY TITLE, so anything matches.
+    ck("an-unclaimed-app-is-never-unmatchable",
+       engine.unmatchable_entries(_kbq, []) == [])
+    # AND THE BASE CLASS IS THE DEFAULT, asserted rather than assumed: the
+    # hook is in PLUGIN_HOOKS, so `plugins` and `doctor` enumerate it, and a
+    # base that answered True or False would decide for every plugin that
+    # omits it.
+    ck("the-base-plugin-cannot-say", engine.WindowPlugin().owns_key("x")
+       is None)
+    ck("owns_key-is-a-named-hook", "owns_key" in engine.PLUGIN_HOOKS)
+    # THE THREE BUILT-INS ANSWER FOR THEIR OWN SHAPES, and the terminal pair
+    # deliberately accept EACH OTHER's: ownership there is title-based while
+    # the key is command-based, so one window moves between them as mux
+    # attaches and either shape is reachable for a kitty.
+    _byname = {getattr(p, "name", "?"): p for p in engine.plugins()}
+    if "chrome" in _byname:
+        ck("chrome-owns-a-slot-and-not-a-title",
+           _byname["chrome"].owns_key("chrome:win:12") is True
+           and _byname["chrome"].owns_key("Inbox - Gmail") is False)
+    if "mux" in _byname and "kitty" in _byname:
+        ck("the-terminal-plugins-accept-both-terminal-shapes",
+           all(p.owns_key("term:resume") and p.owns_key("kitty:/home/x")
+               for p in (_byname["mux"], _byname["kitty"])))
+        ck("a-terminal-plugin-refuses-a-raw-title",
+           _byname["kitty"].owns_key("some window title") is False)
 
     # A DESK UNVISITED FOR LONGER THAN THE TTL used to lose its memory on
     # the first visit back, AFTER placing from it once: the prune is

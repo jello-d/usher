@@ -512,7 +512,7 @@ object: see the shipped
 Each plugin claims an app's windows
 .RB ( owns )
 and may implement
-.BR resolve ", " relaunch_command ", "
+.BR resolve ", " owns_key ", " relaunch_command ", "
 .BR relaunch_missing ", and " wind_down ,
 each taking a normalized view
 .RB ( v["app"] ", " v["title"] ", " v["pid"] ", " v["id"] ).
@@ -534,6 +534,22 @@ than waiting. The reason is what
 .B doctor
 prints for an unmatched window, so the plugin that knows supplies it. The
 2-tuple keeps plugins free of any usher import.
+.PP
+.B owns_key
+asks the opposite question of a STORED entry, with no live window: could
+.B resolve
+ever have answered this identity?
+.IR True ", " False ", or " None
+for "I cannot say", which is the default. usher offers an owned app its
+app-id-only key and the key its plugin resolved and nothing else, so a stored
+identity a plugin could not have produced can never be looked up again, and
+only the 30-day TTL removes it;
+.B doctor
+reports those. A plugin is the authority on its own key shapes, which is why
+this is asked of it rather than tabulated in usher, and
+.I None
+reads as matchable: naming a working slot as litter invites deleting memory
+that was doing its job.
 .SH FILES
 .TP
 .I ~/.config/usher/{exclude,include}

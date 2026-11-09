@@ -115,12 +115,48 @@ def _doctor_store(out):
     # them and nothing said they were there. Counted rather than named: the
     # dry run already lists them as UNMATCHED-LAYOUT rows, and a count plus
     # the remedy is what a reader needs here.
-    _ct = engine.stale_chrome_titles(kb)
-    if _ct:
-        out(f"  NOTE         {len(_ct)} chrome entr"
-            f"{'y' if len(_ct) == 1 else 'ies'} keyed by a raw TITLE, which"
-            " no window can ever match: litter the 30-day TTL removes, or"
-            " `usher forget` now")
+    # EVERY CLASS, not chrome's alone. This was `stale_chrome_titles`, which
+    # was the same idea for one app and is retired rather than wrapped: two
+    # shipped detectors over one fact is the drift `match_keys` and
+    # `PLUGIN_HOOKS` both exist to have removed.
+    _un = engine.unmatchable_entries(kb)
+    if _un:
+        _by = {}
+        for _k, _w in _un:
+            _by[_w] = _by.get(_w, 0) + 1
+        out(f"  NOTE         {len(_un)} entr"
+            f"{'y' if len(_un) == 1 else 'ies'} no window can ever match ("
+            + ", ".join(f"{w} {n}" for w, n in sorted(_by.items()))
+            + "): litter the 30-day TTL removes, or `usher forget` now")
+    # AND EVERY OTHER STORE, which is the hole that actually cost something:
+    # five wildcard entries sat in manifestor's DORMANT stores for 51 days,
+    # invisible to every check because they all read the store you happen to
+    # be plugged into. doctor already globs these to NAME them, so looking
+    # inside is the same walk.
+    #
+    # A DORMANT STORE IS ALSO WHERE THE TTL CANNOT REACH: it prunes on the
+    # load and save of its own profile, so a store for a monitor set that
+    # never comes back keeps whatever it holds forever. So this is not a
+    # smaller version of the line above, it is the only thing that will ever
+    # say so.
+    _oth = 0
+    for _p in sorted(glob.glob(os.path.join(STATE, "knowledge-*.json"))):
+        if os.path.basename(_p)[len("knowledge-"):-len(".json")] \
+                == profile_id():
+            continue
+        _k2 = engine.json_object(_p)
+        if isinstance(_k2, dict):
+            _oth += len(engine.unmatchable_entries(_k2))
+    if _oth:
+        # AND THE REMEDY IS NOT THE SAME ONE. `usher forget` edits the store
+        # the daemon has LOADED and cannot reach a dormant file at all, so
+        # naming it here would send a reader somewhere that is nowhere to go,
+        # which is a fault this report has had four times.
+        out(f"  NOTE         {_oth} such entr"
+            f"{'y' if _oth == 1 else 'ies'} in OTHER monitor sets' stores,"
+            " which no TTL reaches (it prunes a store on its own profile's"
+            " load) and which `usher forget` cannot edit: those want the"
+            " file itself, and have no writer to race")
     # An un-adopted pre-profile store is invisible otherwise: placement simply
     # goes quiet while the knowledge sits in a file nothing opens.
     legacy = os.path.join(STATE, "knowledge.json")
