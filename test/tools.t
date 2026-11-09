@@ -55,9 +55,14 @@ _compile_group providers 1 "$HERE/share/providers"/*
 # `*.t` files the shell sweep already covers.
 _compile_group helpers   1 "$HERE/test"/no-provider-vocabulary
 _sh=0
+# AND THE RIGS, GLOBBED rather than listed, so one written next month is
+# covered the day it exists. A rig is not run by `test/run` (it starts a
+# nested compositor and a real worker), so nothing else would ever parse it,
+# and this file's own comment above records what an unswept shell file
+# costs: `harness_lib` and the pre-commit hook went unchecked for months.
 for _f in "$HERE/setup.sh" "$HERE/indicator/setup.sh" "$HERE/test/run" \
           "$HERE/test/harness_lib" "$HERE/.githooks/pre-commit" \
-          "$HERE/share/hooks"/*; do
+          "$HERE/share/hooks"/* "$HERE/test/rigs"/*; do
   [ -f "$_f" ] || continue
   _sh=$((_sh + 1))
   { dash -n "$_f" 2>/dev/null || sh -n "$_f" 2>/dev/null; } \
@@ -362,5 +367,5 @@ fi
 # is how a renamed package went uncompiled behind a green test. The numbers only
 # have to be low enough never to need touching and high enough to catch a
 # collapse; they are not an inventory.
-[ "$_sh" -ge 5 ] || fail "only $_sh shell file(s): a selector is gone"
+[ "$_sh" -ge 7 ] || fail "only $_sh shell file(s): a selector is gone"
 pass "$_py python, $_sh shell, $_nk tunables, $_nv verbs, $_opc opcodes"

@@ -1,0 +1,220 @@
+#!/bin/sh
+# dock-outputs - does a REAL daemon notice a monitor ARRIVING and LEAVING?
+#
+# RUN BY HAND, not by test/run: it starts a nested compositor and a real
+# worker, so it is slow, needs a host compositor to nest inside, and spawns
+# processes. The unit checks drive `_poll_outputs` directly; only this says
+# the poll is WIRED into the loop that actually runs.
+#
+# WHY IT EXISTS AT ALL: the compositor does NOT announce an arrival. Measured
+# on wayfire 0.11.0 and again on 0.12.0, `output-added` SUBSCRIBES fine and
+# never fires, while destroying an output emits `output-removed`. So half the
+# dock cycle, the half a laptop user meets every morning, has no event behind
+# it and rests entirely on the poll.
+#
+# AND THE DOCK PATH HAS NEVER FIRED IN PRODUCTION ON THIS FLEET: derived from
+# every logline the code can emit against both boxes' whole logs,
+# `displays changing (` and `display profile is now` are cold. These are
+# desktops; the hardware this was built for does not exist yet. Until it
+# does, this rig is the only thing that exercises it.
+#
+# IT LIVES IN THE REPO BECAUSE ITS FIX WAS LOST ONCE. The /var/tmp copy of
+# this rig had the baseline settle below, the notes recorded it as fixed, and
+# the surviving copy did not have it: a rig kept in scratch is a rig whose
+# fixes evaporate. That is the whole reason for this path.
+#
+# ISOLATION IS THE WHOLE TRICK, and getting it wrong breaks the user's
+# desktop rather than the test: a nested compositor sharing the live
+# XDG_RUNTIME_DIR puts a SECOND wayfire socket in it, and `pick_socket`
+# refuses on two candidates, so every usher verb on the box stops working.
+# Done once, by a previous session. So: its own XDG_RUNTIME_DIR, its own
+# XDG_STATE_HOME, and the host reached by an ABSOLUTE WAYLAND_DISPLAY, which
+# libwayland accepts and which does not depend on XDG_RUNTIME_DIR at all.
+set -eu
+
+SBX=${USHER_SBX:-/var/tmp/usher-dock-rig}
+TREE=${USHER_TREE:-$(cd "$(dirname "$0")/../.." && pwd)}
+_C="'$SBX'"
+# shellcheck disable=SC2064  # the literal is baked in at ARM time, per this
+# tree's rule that `rm -rf` never runs with a variable expansion
+trap "rm -rf $_C" EXIT
+
+rm -rf "$SBX"
+mkdir -p "$SBX/run" "$SBX/state"
+chmod 700 "$SBX/run"
+
+# THE INSTALLED INTERPRETER, resolved from the command rather than named: the
+# per-user venv this rig used to hardcode was REMOVED by the machine-wide
+# install mode, and `readlink -f` on the command cannot go stale.
+PY=$(dirname "$(readlink -f "$(command -v usher-mgr)")")/python3
+[ -x "$PY" ] || { echo "no venv python at $PY"; exit 1; }
+
+HOST_SOCK="${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY:-wayland-1}"
+[ -S "$HOST_SOCK" ] || { echo "no host wayland socket at $HOST_SOCK"; exit 1; }
+echo "tree $TREE"
+echo "interpreter $PY"
+
+cat > "$SBX/wayfire.ini" <<'INI'
+[core]
+plugins = ipc ipc-rules stipc
+vwidth = 3
+vheight = 3
+[output:WL-1]
+mode = 1280x720@60000
+INI
+
+env -u WAYFIRE_SOCKET XDG_RUNTIME_DIR="$SBX/run" XDG_STATE_HOME="$SBX/state" \
+    WAYLAND_DISPLAY="$HOST_SOCK" WAYFIRE_CONFIG_FILE="$SBX/wayfire.ini" \
+    WLR_BACKENDS=wayland \
+    setsid /opt/wayfire/bin/wayfire > "$SBX/wayfire.log" 2>&1 &
+
+_n=0
+while ! ls "$SBX/run"/wayfire-*.socket >/dev/null 2>&1; do
+  _n=$((_n + 1))
+  [ "$_n" -gt 60 ] && { echo "nested wayfire never came up"
+    tail -5 "$SBX/wayfire.log"; exit 1; }
+  sleep 0.5
+done
+NSOCK=$(ls "$SBX/run"/wayfire-*.socket | head -1)
+echo "nested socket $NSOCK"
+
+# --no-launch SO IT CANNOT SPAWN ANYTHING, and an empty store so it can place
+# nothing: this runs against a real compositor on somebody's live machine.
+env XDG_RUNTIME_DIR="$SBX/run" XDG_STATE_HOME="$SBX/state" \
+    WAYFIRE_SOCKET="$NSOCK" WAYLAND_DISPLAY=wayland-1 \
+    PYTHONPATH="$TREE" \
+    setsid "$PY" -m usher _worker --no-launch > "$SBX/worker.log" 2>&1 &
+
+LOG="$SBX/state/usher/watch.log"
+_n=0
+while [ ! -f "$LOG" ] || ! grep -q "watching," "$LOG" 2>/dev/null; do
+  _n=$((_n + 1))
+  [ "$_n" -gt 60 ] && { echo "worker never started watching"
+    tail -5 "$SBX/worker.log"; exit 1; }
+  sleep 0.5
+done
+
+# LET THE BASELINE SETTLE, which is the fix that was lost and the fourth
+# instance of this trap in this package. `_poll_outputs` adopts on CHANGE, so
+# an output created before its FIRST tick becomes the baseline and the
+# arrival is invisible: instrumented, it read `saw [HEADLESS-1, WL-1]
+# (remembered None)` and the rig reported a product failure that was its own.
+# WAITING FOR `watching,` IS NOT ENOUGH: that line comes from the EVENT loop,
+# which beats the capture thread's first tick.
+sleep 3
+
+_fail=0
+echo ""
+echo "--- a monitor ARRIVES (the half with no event behind it) ---"
+env XDG_RUNTIME_DIR="$SBX/run" WAYFIRE_SOCKET="$NSOCK" "$PY" -c "
+import os
+from wayfire import WayfireSocket
+s = WayfireSocket(os.environ['WAYFIRE_SOCKET'])
+print('   before', [o['name'] for o in s.list_outputs()])
+s.create_headless_output(1920, 1080)
+print('   after ', [o['name'] for o in s.list_outputs()])
+"
+sleep 4
+if grep -q "displays changing (outputs polled: +" "$LOG"; then
+  echo "   NOTICED: $(grep -m1 'outputs polled: +' "$LOG")"
+else
+  echo "   FAIL: the arrival produced nothing"
+  _fail=1
+fi
+
+# WAIT THE HOLD OUT BEFORE THE SECOND DIRECTION, or the departure logs
+# NOTHING and the rig reports a product failure that is the product working.
+# `_begin_transition` deliberately EXTENDS a hold already in force rather
+# than restarting it, and says so silently, so two changes inside one
+# DOCK_HOLD produce exactly one line. The first version of this rig asserted
+# a line per direction, which is a belief the product intentionally
+# violates.
+#
+# READ FROM THE MODULE, not hardcoded: a rig carrying its own copy of a
+# tunable goes stale the day the tunable moves.
+_hold=$(PYTHONPATH="$TREE" "$PY" -c 'from usher.watch import DOCK_HOLD
+print(int(DOCK_HOLD) + 2)')
+echo ""
+echo "--- waiting ${_hold}s for the hold to expire (see above) ---"
+sleep "$_hold"
+
+echo ""
+echo "--- and it LEAVES ---"
+env XDG_RUNTIME_DIR="$SBX/run" WAYFIRE_SOCKET="$NSOCK" "$PY" -c "
+import os
+from wayfire import WayfireSocket
+WayfireSocket(os.environ['WAYFIRE_SOCKET']).destroy_headless_output(
+    output_name='HEADLESS-1')
+" || true
+sleep 3
+if grep -q "displays changing (output-removed" "$LOG"; then
+  echo "   NOTICED: $(grep -m1 'output-removed' "$LOG")"
+else
+  echo "   FAIL: the departure produced nothing"
+  _fail=1
+fi
+
+echo ""
+echo "--- the whole log ---"
+sed 's/^/    /' "$LOG"
+
+# CLEAN UP BY ENVIRON, EXCLUDING OUR OWN PIDS, and tolerating every /proc
+# entry we may not read: the previous version died partway through on
+# `Permission denied` for another user's process and LEAKED six processes
+# (two nested compositors, two Xwaylands, two workers) onto the live box.
+# Reading the process table by pattern is banned here for the self-match
+# reason; this reads environ and skips what it cannot.
+echo ""
+echo "--- cleanup ---"
+"$PY" - "$SBX" <<'PYEOF'
+import os
+import signal
+import sys
+import time
+
+sbx = sys.argv[1]
+me = {os.getpid(), os.getppid()}
+
+
+def mine():
+    out = []
+    for d in os.listdir("/proc"):
+        if not d.isdigit() or int(d) in me:
+            continue
+        try:
+            with open(f"/proc/{d}/environ", "rb") as f:
+                env = f.read().decode(errors="replace")
+        except OSError:
+            continue                      # not ours to read: skip, never die
+        if sbx in env:
+            out.append(int(d))
+    return out
+
+
+targets = mine()
+print(f"    signalling {len(targets)} sandbox process(es)")
+for pid in targets:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        pass
+for _ in range(20):
+    time.sleep(0.5)
+    if not mine():
+        break
+left = mine()
+# AND IT VERIFIES, because "I sent a signal" is not "nothing is left": this
+# rig leaked six processes once and only a later sweep found them.
+print("    leaked afterwards:", left or "none")
+sys.exit(1 if left else 0)
+PYEOF
+_crc=$?
+[ "$_crc" = 0 ] || _fail=1
+
+echo ""
+if [ "$_fail" = 0 ]; then
+  echo "RIG PASSED: both directions noticed, nothing leaked"
+else
+  echo "RIG FAILED"
+fi
+exit "$_fail"
