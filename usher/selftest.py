@@ -1199,6 +1199,31 @@ def _t_resolution(ck):
        _fd({"k": "not an entry", "j": {"last_seen": _n0 - 60 * 86400}}, _n0)
        > 0)
 
+    # THE RESCUE COUNT, which is what the report must say rather than the
+    # store SIZE. An entry counts only if it sat OUTSIDE the cutoff before
+    # the shift and INSIDE it after, which makes the line rare and always
+    # meaningful with no threshold to tune.
+    _dres = engine.dormancy_rescued
+    _day = 86400.0
+    ck("dormancy-rescue-counts-what-crossed-the-cutoff",
+       _dres({"k": {"last_seen": _n0 - (_ttl - 2 * _day)}},
+             _n0, 10 * _day) == 1)
+    # THE QUIET-DESK CASE, which is the whole defect: an entry nowhere near
+    # the cutoff is not rescued by a gap that moved it.
+    ck("dormancy-rescue-ignores-what-was-never-at-risk",
+       _dres({"k": {"last_seen": _n0 - 60.0}}, _n0, 600.0) == 0)
+    # AND ONE STILL STALE AFTERWARDS IS NOT A RESCUE, which is the other half
+    # of the shift's own promise: dormancy is forgiven, staleness is not.
+    ck("dormancy-rescue-ignores-what-is-still-stale",
+       _dres({"k": {"last_seen": _n0 - (_ttl + 2 * _day)}},
+             _n0, 60.0) == 0)
+    ck("no-gap-rescues-nothing",
+       _dres({"k": {"last_seen": _n0 - _ttl + 60}}, _n0, 0.0) == 0)
+    ck("a-non-dict-entry-does-not-break-the-rescue-count",
+       _dres({"k": "not an entry",
+              "j": {"last_seen": _n0 - (_ttl - 2 * _day)}},
+             _n0, 10 * _day) == 1)
+
     # AND THE WIRING: the shift happens at LOAD, which is the only moment
     # before the first capture with the whole store in hand. The function's
     # own cells say nothing about whether anything calls it, which is the
@@ -1232,6 +1257,64 @@ def _t_resolution(ck):
         engine.prune_kb(_l2, time.time())
         ck("load-forgiveness-still-prunes-what-was-stale-at-that-desk",
            len(_l2) == 1)
+
+        # AND THE LINE REPORTS THE RESCUE, NOT THE STORE SIZE, which is the
+        # defect this closes. Measured on manifestor: NINE lines in one day,
+        # four from the real daemon and three inside one second, every one
+        # `away 0.0 day(s), so 1 entr(ies) are not aged for it` over a store
+        # where nothing was within the TTL's reach.
+        _said = []
+        _rl = engine.logline
+        try:
+            engine.logline = _said.append
+            # A QUIET DESK: one entry, fresh, and a gap just over the floor.
+            # The shift is REAL and saves nothing, so nothing is said. This
+            # is the manifestor shape exactly.
+            engine.write_json(
+                os.path.join(_tdir, "knowledge-DESK.json"),
+                json.dumps({"k\x00q": {
+                    "last_seen": _n0 - engine.DORMANT_FLOOR - 60}}))
+            engine.load_knowledge("DESK")
+            _quiet = [m for m in _said if "not aged out" in m]
+            _said.clear()
+            # ...and a desk away two months, where BOTH entries really are
+            # saved from the next capture's prune.
+            engine.write_json(
+                os.path.join(_tdir, "knowledge-DESK.json"),
+                json.dumps(_store(60, 70)))
+            engine.load_knowledge("DESK")
+            _loud = [m for m in _said if "not aged out" in m]
+            _said.clear()
+            # AND THE UNITS MUST FIT THE GAP, which was the other half of the
+            # noise: `0.0 day(s)` cannot express anything under 72 minutes,
+            # and a rescue can be driven by a gap of HOURS. Two entries, so
+            # the NEWEST sets a two-hour gap and the other is what it saves.
+            #
+            # THE OLD ENTRY MUST START OUTSIDE THE CUTOFF, which a first
+            # fixture got wrong: at `_ttl - 1800` it was already SAFE, so
+            # nothing was rescued, the line was correctly silent, and the
+            # cell failed over the product working. Ask what inputs a guard
+            # tells apart.
+            engine.write_json(
+                os.path.join(_tdir, "knowledge-DESK.json"),
+                json.dumps({"k\x00new": {"last_seen": _n0 - 2 * 3600},
+                            "k\x00old": {"last_seen": _n0 - _ttl - 1800}}))
+            engine.load_knowledge("DESK")
+            _hours = [m for m in _said if "not aged out" in m]
+        finally:
+            engine.logline = _rl
+        ck("a-trivial-gap-is-forgiven-in-silence", not _quiet)
+        # THE CONTROL, or the cell above passes over a line that was deleted
+        # outright rather than one that learned when to speak.
+        ck("a-real-dormancy-reports-what-it-rescued",
+           len(_loud) == 1 and "2 entr" in _loud[0]
+           and "day(s)" in _loud[0])
+        # AND THE COUNT IS THE RESCUE AND NOT THE STORE SIZE, which this
+        # fixture can tell apart where the one above cannot: TWO entries are
+        # stored and exactly ONE of them was saved.
+        ck("the-gap-is-reported-in-units-that-fit-it",
+           len(_hours) == 1 and "hour(s)" in _hours[0]
+           and "0.0 day" not in _hours[0] and "1 entr" in _hours[0])
     finally:
         engine.STATE, engine.profile_id = _rstate, _rprof
         shutil.rmtree(_tdir, ignore_errors=True)

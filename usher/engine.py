@@ -2537,6 +2537,42 @@ def forgive_dormancy(kb, now, floor=DORMANT_FLOOR):
     return gap
 
 
+def dormancy_rescued(kb, now, gap, ttl=KNOWLEDGE_TTL):
+    """How many entries the dormancy shift just saved from the TTL. PURE.
+
+    **A LINE THAT REPORTS A FORGIVENESS MUST REPORT WHAT IT SAVED**, and the
+    first version reported `len(kb)`, the store SIZE, dressed as a rescue
+    count. Measured on manifestor: NINE lines in one day, four of them from
+    the real daemon and three inside one second, every one reading
+    `away 0.0 day(s), so 1 entr(ies) are not aged for it` over a store where
+    nothing was within the TTL's reach. A quiet desk's newest entry goes
+    stale between captures, so the gap clears the floor routinely and the
+    shift is both real and inconsequential.
+
+    SO THE CONDITION IS THE VALUE: an entry counts only if it sat OUTSIDE the
+    cutoff before the shift and INSIDE it after. That makes the line rare and
+    always meaningful with no threshold to tune, where raising the floor would
+    have traded one arbitrary number for another and silenced the real case
+    along with the noise.
+
+    AND AN ENTRY STILL STALE AFTERWARDS IS NOT COUNTED, which is the other
+    half of forgive_dormancy's own promise: only the dormancy is forgiven,
+    never staleness earned while the desk was in use.
+
+    NO ZERO-GAP GUARD, deliberately: the comparison below already answers 0
+    for any gap at or below zero, since `age <= ttl < age + gap` cannot hold,
+    so a guard here would be code no plant could catch. The CALLER skips the
+    walk when there is no gap, which is where the saving actually lives."""
+    n = 0
+    for e in kb.values():
+        if not isinstance(e, dict) or not e.get("last_seen"):
+            continue
+        age = now - e["last_seen"]
+        if age <= ttl < age + gap:
+            n += 1
+    return n
+
+
 def stale_chrome_titles(kb):
     """Chrome entries keyed on a RAW TITLE, which nothing can match. PURE.
 
@@ -2840,10 +2876,20 @@ def load_knowledge(profile=None):
     # and the only moment before that with the whole store in hand is the
     # load. There is nothing to save explicitly either, since the shifted
     # values go to disk with the next ordinary save.
-    _gap = forgive_dormancy(kb, time.time())
-    if _gap:
-        logline(f"store {profile}: away {_gap / 86400:.1f} day(s), so "
-                f"{len(kb)} entr(ies) are not aged for it")
+    _now = time.time()
+    _gap = forgive_dormancy(kb, _now)
+    # REPORTED ONLY WHEN IT SAVED SOMETHING, and counting what it saved
+    # rather than the store SIZE. See dormancy_rescued: the first version
+    # wrote nine lines in one day on a quiet box, every one of them
+    # `away 0.0 day(s), so 1 entr(ies) are not aged for it` over a store
+    # where nothing was within the TTL's reach.
+    _saved = dormancy_rescued(kb, _now, _gap) if _gap else 0
+    if _saved:
+        _away = (f"{_gap / 86400:.1f} day(s)" if _gap >= 86400
+                 else f"{_gap / 3600:.1f} hour(s)" if _gap >= 3600
+                 else f"{_gap / 60:.0f} minute(s)")
+        logline(f"store {profile}: away {_away}, so {_saved} entr(ies) are "
+                "not aged out for it")
     return kb
 
 
