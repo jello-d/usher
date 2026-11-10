@@ -3379,8 +3379,20 @@ def unreadable_placement(w, outputs):
     version of this predicate was a report that condemned the whole desk. Same
     trap this tree records for `app_id` versus `app` and for the four geometry
     helpers' argument shapes: the fix belongs in the predicate, where no call
-    site can get it wrong."""
-    names = {o.get("name") for o in (outputs or [])}
+    site can get it wrong.
+
+    AND BOTH SHAPES OF THE OUTPUT ARGUMENT, for the same reason and measured
+    the hard way: the writers pass `snap["outputs"]`, a LIST of outputs, while
+    `doctor` passes the NAME-KEYED MAP that `entry_output`, `cell_fits` and
+    `place_of` all take. Iterating the map yields its string KEYS, so reading
+    only the list shape raised `'str' object has no attribute 'get'` out of
+    every `doctor` run on a box with an unmatched live window, which is most
+    boxes. The package genuinely carries both conventions among these four
+    helpers, and that is the root; tolerating both here is the fix that no
+    caller can get wrong, which is the same call the field spelling above
+    took."""
+    _o = outputs or []
+    names = set(_o) if isinstance(_o, dict) else {o.get("name") for o in _o}
     here = w.get("output") or w.get("output-name")
     return bool(names) and here not in names
 

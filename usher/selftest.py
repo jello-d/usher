@@ -909,6 +909,17 @@ def _t_resolution(ck):
                                              "width": 1920, "height": 1080}}]
         ck("doctor-parked-is-parked", _uw(_lvp, _o1)[0] == "parked")
         ck("doctor-parked-names-the-output", "DP-9" in _uw(_lvp, _o1)[1])
+        # THROUGH THE SHAPE doctor ACTUALLY PASSES, which is a name-keyed MAP
+        # and not a list. Every fixture here was a list, so the suite was
+        # green on both boxes while `doctor` raised on manifold the moment it
+        # met an unmatched live window.
+        def _uwg(v, o):   # guarded: see _rk, for the same reason
+            try:
+                return _uw(v, o)[0]
+            except Exception:                              # noqa: BLE001
+                return "RAISED"
+        ck("doctor-parked-through-the-map-shape",
+           _uwg(_lvp, {o["name"]: o for o in _o1}) == "parked")
         # AND AN ATTACHED WINDOW IS NOT PARKED, which is the control: without
         # it a predicate reading only the snapshot's `output` spelling labels
         # EVERY raw view parked, and doctor passes raw views.
@@ -7925,7 +7936,14 @@ def _t_learn(ck):
 
     # --- THE LABELLING ITSELF, including the row shape that condemned a desk
     def _rk(w, outs=_OUT):
-        r = engine.refusal_of(w, outs)
+        # GUARDED, because the shape bug below makes this RAISE rather than
+        # answer badly, and an unguarded call aborts a 500-check area instead
+        # of naming the cell. This file's own rule, broken four rounds running
+        # before a plant said so.
+        try:
+            r = engine.refusal_of(w, outs)
+        except Exception:                                  # noqa: BLE001
+            return "RAISED"
         return None if r is None else r[0]
     # THE TWO ROW SHAPES DISAGREE ABOUT THE OUTPUT FIELD and this predicate is
     # asked about both: a SNAPSHOT row carries `output`, a RAW view carries
@@ -7942,6 +7960,16 @@ def _t_learn(ck):
     ck("refusal-reads-a-snapshot-row-s-output",
        _rk(_uw("zzz-unowned", "T", output="DP-9")) == "parked"
        and _rk(_uw("zzz-unowned", "T")) is None)
+    # AND BOTH SHAPES OF THE OUTPUT ARGUMENT, which is the other half of the
+    # same trap and cost a live `doctor`: the writers pass a LIST and `doctor`
+    # passes the NAME-KEYED MAP that entry_output, cell_fits and place_of all
+    # take, so reading only the list shape raised `'str' object has no
+    # attribute 'get'` on every box with an unmatched live window. The
+    # fixtures here were all lists, so the suite was green on both machines.
+    _omap = {o["name"]: o for o in _OUT}
+    ck("refusal-takes-the-name-keyed-output-map",
+       _rk(_uw("zzz-unowned", "T", output="DP-9"), _omap) == "parked"
+       and _rk(_uw("zzz-unowned", "T"), _omap) is None)
     # NO OUTPUT LIST ASKS THE IDENTITY HALF ALONE, which is what _learn_stamp
     # relies on: by the time it runs, `learn` has folded the parked windows
     # into `hold` and reported them.
@@ -9202,6 +9230,13 @@ def _t_displays(ck):
             _dgrid._doctor_placement(
                 _lines.append, {kkey("zzz-unowned", ""): _rent(ws, out)},
                 [view or _rview], {"DP-1": _rgo})
+        except Exception as _e:                            # noqa: BLE001
+            # THE REPORT ITSELF CAN RAISE, which is how a live `doctor` lost
+            # its whole output to an argument-shape mistake. Returning the
+            # exception rather than letting it abort the area is what makes a
+            # plant name the cell, and the text is in the string so a failure
+            # says WHAT raised.
+            return "RAISED %s: %s" % (type(_e).__name__, _e)
         finally:
             engine.panel_map = _pm
         return "\n".join(_lines)
@@ -9230,6 +9265,25 @@ def _t_displays(ck):
         # AND IT SAYS WHOSE, which is the whole value of printing the
         # plugin's own reason rather than a label.
         ck("doctor-says-why-it-will-not-place-it", "uid" in _dnot)
+    # AND THE UNMATCHED LOOP IS DRIVEN AT ALL, which is the hole that let a
+    # live `doctor` ship broken: every check above called `_unmatched_why`
+    # DIRECTLY with a list, and the loop that calls it passes the name-keyed
+    # map, so nothing in the suite ever took that path. Measured on manifold
+    # within the hour: `'str' object has no attribute 'get'`, rc 1, the whole
+    # report lost, on any box with an unmatched live window.
+    #
+    # AN UNMATCHED WINDOW, which is what makes it reachable: the store here
+    # knows `zzz-unowned` and this view is a different app, so `match` leaves
+    # it unpaired and the loop runs.
+    _dun = _doc_text([1, 1], view=dict(_rview, **{"app-id": "zzz-other",
+                                                  "output-name": "DP-9"}))
+    ck("doctor-drives-its-unmatched-loop-with-the-map-shape",
+       "parked" in _dun and "DP-9" in _dun)
+    # ...and the control, or a loop that raised would be indistinguishable
+    # from one that simply said nothing: an ATTACHED stranger is `unmatched`.
+    _dua = _doc_text([1, 1], view=dict(_rview, **{"app-id": "zzz-other"}))
+    ck("doctor-calls-an-attached-stranger-unmatched",
+       "unmatched" in _dua and "parked" not in _dua)
     # AND THE TWO REFUSALS ARE WORDED APART, pairwise, because an absent
     # OUTPUT and an out-of-grid CELL want different things done about them and
     # one wording for both sends a reader to the wrong one. Collapsing two
