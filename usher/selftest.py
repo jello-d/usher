@@ -11290,6 +11290,63 @@ def _t_contracts(ck):
     ck("every-roster-field-read-is-written", _rread <= _rwritten)
     ck("every-roster-field-written-is-read", _rwritten <= _rread)
 
+    # --- AND THE SNAPSHOT ROW, which is 25 fields and the oldest record ---
+    # THE FIVE ORIGINAL INSTANCES WERE ALL IN IT, and they split three ways:
+    # `fullscreen` was an UNFINISHED RESTORE (captured, never carried into
+    # `kb_entry`, so it never reached `place()`), `version` and `host` have
+    # since been given readers, and two are FORENSIC. So the triage is done
+    # and this exists to catch a SIXTH, which is the point of asking a class
+    # rather than meeting an instance.
+    #
+    # THE TWO EXCEPTIONS ARE DATA WITH A MEASURED REASON, not a list that
+    # grows: a third unread field has to be added here deliberately, which is
+    # the whole value.
+    #
+    #   raw_geometry  VIEWPORT-relative, where `pos` is workspace-relative.
+    #                 `history/` is read by a human reconstructing a login
+    #                 and that is the number the compositor reported.
+    #   tiled         `tiled-edges` is REPORTED and cannot be set: measured
+    #                 against the live pywayfire, whose only per-view setters
+    #                 are fullscreen/alpha/sticky/minimized/always-on-top,
+    #                 and `set_tiling_layout` is the tiling plugin's
+    #                 WHOLE-WORKSPACE layout (wset + cell + a layout tree).
+    #                 So it can only ever be forensic, which was recorded as
+    #                 "wayfire may not let you set it" and is now measured.
+    _FORENSIC = {"raw_geometry", "tiled"}
+    _snap = _ebody.split("def snapshot", 1)[1].split("\n\ndef ", 1)[0]
+    _swritten = set(re.findall(r'["\'](\w+)["\']\s*:', _snap.split(
+        "\n        w = {", 1)[1].split("\n        }", 1)[0]))
+    # ...PLUS THE CONDITIONAL ONES, which is where `owner`, `source` and
+    # `identifier` arrive: the field's PRESENCE is the fact, so a scrape of
+    # the literal alone would call all three unwritten.
+    _swritten |= set(re.findall(r'w\[["\'](\w+)["\']\]\s*=', _snap))
+    # THE READERS ARE SCRAPED BY NAME across the package, which is LOOSE and
+    # loose in a stated direction: a `.get("name")` on some other dict counts,
+    # so a field whose name is read elsewhere reads as covered. It therefore
+    # catches a NEW unread field with a name of its own, which is what a new
+    # field has, and cannot cry wolf over a field that really is read.
+    _allsrc = "".join(inspect.getsource(_m) for _m in
+                      (engine, sys.modules["usher.watch"],
+                       sys.modules["usher.doctor"],
+                       sys.modules["usher.cli"]))
+    _sread = set(re.findall(r"""\.get\(["'](\w+)["']""", _allsrc))
+    ck("snapshot-writer-scrape-is-not-vacuous", len(_swritten) >= 15)
+    # AND THE CONDITIONAL THREE BY NAME, because the floor cannot see them
+    # go: the row has 18 fields and exactly 3 arrive that way, so dropping
+    # the second regex leaves 15 and clears a floor of 15, and all three are
+    # read so neither assertion below notices. They are also the three whose
+    # PRESENCE is the fact (another account's window), which is the half of
+    # this record a reader is most likely to add a field beside.
+    ck("the-conditional-snapshot-fields-are-scraped",
+       {"owner", "source", "identifier"} <= _swritten)
+    ck("every-snapshot-field-written-is-read-or-named-forensic",
+       _swritten <= (_sread | _FORENSIC))
+    # AND THE EXCEPTION LIST IS NOT A DUMPING GROUND: each name must still be
+    # a field the snapshot writes, so a field that is REMOVED cannot leave a
+    # dead exemption behind for a later unread field to hide under.
+    ck("every-forensic-exception-is-still-a-field",
+       _FORENSIC <= _swritten)
+
     ck("exit-codes-are-distinct", len(_declared) == 3)
     ck("exit-codes-are-0-1-2", set(_declared) == {0, 1, 2})
     # Every INTEGER literal handed to sys.exit anywhere in the package must be
