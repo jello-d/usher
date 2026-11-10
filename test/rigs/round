@@ -1,0 +1,126 @@
+#!/bin/sh
+# round: dump this box's whole store, rebuild it from the live session, and
+# verify the SCREEN against a prediction taken BEFORE the dump.
+#
+# NOT RUN BY test/run: it drives the live daemon and rewrites the real store.
+# `tools.t` syntax-checks it, which is what the rigs directory is for.
+#
+# WHY A PRE-DUMP PREDICTION. `restore --dry-run` compares the STORE against
+# the SCREEN, so when something teaches the store a wrong answer the two
+# AGREE and it reports everything fine: measured twice, 9/9 ok over a store
+# taught a cascade position. A prediction PREDATES the event, so the
+# reference cannot have been written by the thing under test. It is the only
+# non-circular check this package has.
+#
+# AND THE CONTROL IS WHAT MAKES A DIRTY ROUND READABLE. On an actively used
+# desk the round's own window (a dump, a relearn, a verify) is long enough
+# for the human to move a window or for a browser to churn, and the round
+# then reports the DESK rather than usher. So it takes a second prediction
+# and verifies it immediately, over a window too short for anything to have
+# changed:
+#
+#     dirty round + CLEAN control   the desk moved. Not a finding.
+#     dirty control                 drift. The only reading worth acting on.
+#
+# THREE THINGS THIS SCRIPT HAS BEEN WRONG ABOUT, each recorded because the
+# wrong version read as a pass:
+#
+#   - `$?` AFTER A PIPE is the LAST command's status, so `verify | tail`
+#     then `$?` read TAIL's and was always 0. Every "verify rc=0" this
+#     script reported for several rounds was a reading of tail. Captured
+#     with no pipe in between now.
+#   - A FIELD NAME GUESSED AT reads EMPTY for every run: it scraped
+#     `store: N entr` where doctor prints `knowledge N entries`, so the
+#     count printed `?` for the whole life of the script. Read the wording
+#     from what the tool actually prints.
+#   - `grep -c` PRINTS ITS COUNT AND STILL EXITS 1 WHEN THE COUNT IS ZERO,
+#     so `grep -c ... || echo 0` yields "0 0" and the arithmetic using it is
+#     a syntax error. `_count` handles that and the missing-file case.
+set -eu
+
+U=${U:-usher}
+command -v "$U" >/dev/null || { echo "round: no $U on PATH" >&2; exit 2; }
+
+_say() { printf '%s\n' "$*"; }
+_hdr() { printf '\n== %s ==\n' "$*"; }
+
+# ONE field, read with no pipe between the command and its status.
+_field() {   # _field <text> <awk-pattern> <awk-field>
+  printf '%s\n' "$1" | awk "$2 {print \$$3; exit}"
+}
+
+_count() {   # lines matching a pattern in a file: 0 for none, 0 for absent
+  [ -f "$2" ] || { echo 0; return; }
+  _n=$(grep -c -- "$1" "$2" 2>/dev/null) || _n=0
+  echo "${_n:-0}"
+}
+
+_doctor() { "$U" doctor 2>&1 || true; }
+
+_store_n() { # doctor prints `knowledge N entries`
+  _field "$(_doctor)" '/knowledge/' 2
+}
+
+_hdr "before"
+_d0=$(_doctor)
+_say "store            $(_field "$_d0" '/knowledge/' 2)"
+# THE CODE AGE IS doctor's, NOT status's, and I guessed `status` here in the
+# very script whose comment above warns that a guessed field name reads
+# EMPTY for every run. It printed a blank for exactly one round before the
+# output was read. The remedy is the one already written: ask the tool what
+# it prints.
+_say "daemon code      $(printf '%s\n' "$_d0" \
+  | sed -n 's/.*\] *\(the daemon .*code.*\)/\1/p' | head -1)"
+
+_hdr "1. the reference, BEFORE anything is dropped"
+_pre=$("$U" predict 2>&1) || true
+_say "$_pre"
+
+_hdr "2. the dump, handed to the daemon"
+# `usher forget '*' --apply` is the dump: deleting the FILE is not, because
+# the worker holds self.kb and writes it back on the next capture.
+_fg=$("$U" forget '*' --apply 2>&1) || true
+_say "$_fg"
+
+_hdr "3. relearn"
+# Capture is EVENT-DRIVEN, so "drop the keys and wait" relearns nothing on a
+# quiet desk. `save` hands the daemon a forced capture, which is also the
+# only writer allowed to touch the store while it runs.
+_sv=$("$U" save 2>&1) || true
+_say "$_sv"
+sleep 3
+_say "store            $(_store_n)"
+
+_hdr "4. verify the SCREEN against the PRE-DUMP prediction"
+_rc=0
+_vf=$("$U" verify 2>&1) || _rc=$?
+_say "$_vf"
+_say "rc               $_rc"
+
+_hdr "5. the control: predict and verify with nothing in between"
+_cpre=$("$U" predict 2>&1) || true
+_crc=0
+_cvf=$("$U" verify 2>&1) || _crc=$?
+_say "$_cvf"
+_say "rc               $_crc"
+
+_hdr "verdict"
+if [ "$_rc" -eq 0 ] && [ "$_crc" -eq 0 ]; then
+  _say "CLEAN: the store round-trips and the desk agrees"
+elif [ "$_crc" -eq 0 ]; then
+  _say "THE DESK MOVED under the round (control is clean). Not a finding."
+else
+  _say "DRIFT: the control itself disagrees with the screen. Act on this."
+fi
+
+_hdr "the other instruments"
+python3 "$(dirname "$0")/orphan-watch.py" 2>&1 | tail -6 || true
+python3 "$(dirname "$0")/content-sweep.py" 2>&1 | tail -4 || true
+
+_hdr "backups this round left"
+# `usher forget` backs the store up BY DESIGN, which is right for a mistaken
+# purge and exactly wrong for a privacy one, so the paths are named rather
+# than left for a later sweep to find. This package has needed that three
+# times.
+ls -1 "${XDG_STATE_HOME:-$HOME/.local/state}"/usher/*.pre-forget-* 2>/dev/null \
+  || _say "(none)"
