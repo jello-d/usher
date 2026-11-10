@@ -968,6 +968,27 @@ def snapshot(sock):
         title = v.get("title", "")
         if SKIP_TITLE.search(title) or is_transient(v):
             continue   # work / scratch / transient-chrome: never record it
+        # A CHILD VIEW IS NOT A WINDOW TO REMEMBER, and the PLACER has always
+        # said so: it refuses a view with a parent, because a dialog must
+        # stay on its parent's output and wayfire refuses to move it anyway
+        # ("view in a different output than its parent"). The CAPTURE never
+        # asked, so a dialog could be learned, given a slot, and then never
+        # placed from it: a store entry with no reachable consumer.
+        #
+        # AND IT IS THE PRECONDITION FOR GIVING N WINDOWS OF ONE APP N SLOTS.
+        # Those slots are interchangeable by assumption, and the ONE case
+        # where that is false is two windows of one app where one is a
+        # DIALOG, which is not interchangeable with a main window. Refusing
+        # it here makes the assumption true by construction rather than by
+        # inference, which matters because `filter_mapped_toplevel`'s own
+        # definition is not readable on this box (wayfire's source is not
+        # checked out and the installed headers do not define it).
+        #
+        # -1 IS THE RELIABLE TELL, which is the placer's own measured note:
+        # `role` and `type` read `toplevel` even for a splash screen, and the
+        # parent field is what separates a child from a sibling.
+        if v.get("parent", -1) != -1:
+            continue
         p = place_of(v, outputs)
         pid = v.get("pid", -1)
         _src, _own = window_origin(pid)

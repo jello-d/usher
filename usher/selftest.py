@@ -9031,6 +9031,42 @@ def _t_snapshots(ck):
 
         _snapped = engine.snapshot(_SnapSock)["windows"]
         _by = {w["app_id"]: w for w in _snapped}
+
+        # A PARENTED VIEW IS NOT A WINDOW usher OWNS, and capture is where
+        # that has to be said, because a dialog reaching the store is a slot
+        # for something transient: it carries its parent's app-id, so it
+        # matches that app's app-id-only key and takes a real window's slot.
+        # The placer has always refused one on `parent`; capture never asked,
+        # so the refusal and the learning disagreed about what a window is.
+        #
+        # AND THE CONTROL IS WHAT MAKES IT MEAN ANYTHING: a gate that
+        # dropped everything passes the first row on its own.
+        class _ParentSock(_SnapSock):
+            @staticmethod
+            def list_views(**_kw):
+                return [_trv("signal", "Signal", pid=os.getpid(), vid=1),
+                        dict(_trv("signal", "Save As", pid=os.getpid(),
+                                  vid=2), parent=1)]
+
+        # AND -1 IS THE COMPOSITOR'S "NO PARENT", reported EXPLICITLY on a
+        # real toplevel, so a gate testing truthiness rather than the
+        # sentinel refuses every window on the box. That is the shape to get
+        # wrong here, so it is its own row rather than a repeat of the one
+        # above, where the key is simply absent.
+        class _TopSock(_SnapSock):
+            @staticmethod
+            def list_views(**_kw):
+                return [dict(_trv("signal", "Signal", pid=os.getpid(),
+                                  vid=1), parent=-1)]
+
+        _ps = engine.snapshot(_ParentSock)["windows"]
+        ck("capture-refuses-a-parented-view",
+           [w["title"] for w in _ps] == ["Signal"])
+        ck("capture-keeps-a-toplevel-whose-parent-key-is-absent",
+           len(engine.snapshot(_SnapSock)["windows"]) == 2)
+        ck("capture-keeps-a-toplevel-reporting-parent-minus-one",
+           [w["title"] for w in engine.snapshot(_TopSock)["windows"]]
+           == ["Signal"])
         # AND IT SURVIVES A PLUGIN WITH NO `name`, which is the BLAST RADIUS
         # rather than the fault: resolution reading that label bare raised
         # all the way out through identity into here, and a capture that
