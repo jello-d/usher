@@ -36,7 +36,8 @@ Nothing, for the part most people want. Three tiers, and each is only worth
 reaching for when the one below it falls short.
 
 - **The window back where and how big it was** needs **nothing**. Any window
-  with a title is captured, keyed and placed.
+  the compositor gives an app-id is captured, keyed and placed, and if you
+  have several of one app they each get their own remembered slot.
 - **The app started for you** at login needs a **desktop entry**, because the
   only command usher ever runs is an `Exec=` out of a desktop file it read.
 - **Windows told apart from each other**, a per-window relaunch, or a clean
@@ -84,10 +85,13 @@ that is honoured everywhere, including your own entries.
 Reach for one when identity is the problem, not launching. Any single answer
 of yes means the tiers above cannot serve you:
 
-- **Several windows of one app must be told apart.** Without a plugin, two or
-  more windows of the same app fall back to per-**title** keys, so the slot
-  follows the document rather than the window. One window is fine; several is
-  what needs a plugin. This is the whole reason the chrome plugin exists.
+- **A particular window must get a particular slot.** Without a plugin,
+  several windows of one app all get placed, but their slots are
+  *interchangeable*: the app-id is the key and a slot index assigns one per
+  window, so which of your three windows lands in which remembered rect is
+  not something usher can promise. If that matters, something has to say
+  WHICH window each one is, and only a plugin can. This is the whole reason
+  the chrome plugin exists.
 - **The identity is not in the title.** chrome reads a SessionID out of the
   browser's session file; kitty reads the shell's cwd out of `/proc`; mux reads
   the command the window is running. A title that has to be right at the

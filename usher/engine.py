@@ -1367,11 +1367,15 @@ _PLUGINS = None
 def plugins():
     """The loaded plugin list (built-ins first, then user plugins) lazily
     built and cached. reload_plugins() drops the cache. mux is BEFORE kitty so a
-    mux-attached kitty window is claimed by mux, the rest by kitty."""
+    mux-attached kitty window is claimed by mux, the rest by kitty.
+
+    LOUPE'S ORDER DOES NOT MATTER, unlike that pair: its app-id is its own,
+    so no other built-in can claim the window and nothing can claim Loupe's.
+    It is last of the built-ins simply because it was added last."""
     global _PLUGINS
     if _PLUGINS is None:
-        _PLUGINS = [ChromePlugin(), MuxPlugin(), KittyPlugin()] \
-            + _load_user_plugins()
+        _PLUGINS = [ChromePlugin(), MuxPlugin(), KittyPlugin(),
+                    LoupePlugin()] + _load_user_plugins()
     return _PLUGINS
 
 
@@ -1403,7 +1407,7 @@ def reload_plugins():
     A user editing a plugin now sees it take effect within a second, which is
     what usher/exclude and usher/include already promise. Safe because
     _load_user_plugins is best-effort: a half-saved file is logged and skipped,
-    leaving the three built-ins, and the next save fixes it."""
+    leaving the built-ins, and the next save fixes it."""
     global _PLUGINS
     _PLUGINS = None
     ps = plugins()
@@ -1831,8 +1835,9 @@ def resolution(v):
         # geometry the last one had.
         #
         # FIFTH INSTANCE OF ONE SHAPE: a rule scoped to one category, met by
-        # something outside it. `is_unique` has refused an empty app-id since
-        # `d9dbc9f` killed the `'\0'` wildcard, and the source branch above
+        # something outside it. `is_appid_keyed` has refused an empty
+        # app-id since `d9dbc9f` killed the `'\0'` wildcard, and the
+        # source branch above
         # runs FIRST and never consulted it. Found on manifold as a live
         # `'\x00titan'` entry beside the five legitimate source keys, by
         # sweeping the store by SHAPE after a content filter had twice missed
@@ -1868,10 +1873,26 @@ def resolution(v):
             f"handle to key it on")
     p = _owner(v)
     if p is None:
-        if not v["app"] and not v["title"].strip():
+        if not v["app"]:
+            # NO APP-ID IS NO HANDLE, FULL STOP, and the title does not make
+            # one. It used to answer Ready(title) for a titled window, which
+            # is the ONE remaining way a title became a store KEY, and it is
+            # the same guess this package spent three schema bumps removing
+            # from chrome: a title is what a window is SHOWING, not which
+            # window it is. The five such entries measured on manifold were
+            # Chrome's own chrome-less bars (a screen-sharing indicator, a
+            # terms dialog, `New Tab`), all inert and all purged as noise.
             return Resolution.never(
-                "the compositor reports neither an app-id nor a title, so "
-                "there is nothing to key this window on")
+                "the compositor reports no app-id, and a title is not a"
+                " handle: there is nothing durable to key this window on")
+        # AN UNOWNED APP STILL ANSWERS ITS TITLE, and that is deliberate
+        # rather than an oversight: this key is not what the window is STORED
+        # under (`stamp_key` answers the app-id-only key for it), it is what
+        # `verify` pairs a predicted row with and what the snapshot's `key`
+        # field carries. Making it "" here was tried and reverted in the same
+        # sitting: `verify_index` skips a row with no key, so every unowned
+        # app's window would have fallen back to LABEL matching. The title is
+        # payload here and a key nowhere.
         return Resolution.ready(v["title"])
     # A PLUGIN'S `name` IS FOR MESSAGES, SO IT MUST NEVER BE LOAD-BEARING.
     # These two sites read it bare while the other eleven in the tree, two of
@@ -2531,6 +2552,108 @@ class KittyPlugin(WindowPlugin):
         return kitty_relaunch_missing(saved, live)
 
 
+_APP_NAMES = {"at": 0.0, "map": {}}
+APP_NAME_TTL = 60.0
+
+
+def app_display_name(app):
+    """The `Name=` an app's own desktop entry gives it, or "". Cached.
+
+    THE REGISTRY IS THE AUTHORITY ON WHAT AN APP CALLS ITSELF, so this is not
+    a second copy of that fact. It is read through a TTL because `resolution`
+    runs per window per capture and `desktop_entries` parses 189 files here:
+    re-reading it there is the measurable pause this report already records
+    for the relaunch section.
+
+    CASE-INSENSITIVE, which `desktop_launch_for` already is for the reason
+    this file records twice: XWayland reports `Google-chrome` where native
+    Wayland reports `google-chrome` and both are in a real store, and the
+    entry FILENAMES are lowercased on the way in. An exact lookup answered
+    "" for `org.gnome.Loupe` against the key `org.gnome.loupe`, so the one
+    arm this exists to serve silently never fired."""
+    now = time.time()
+    if now - _APP_NAMES["at"] > APP_NAME_TTL:
+        try:
+            _APP_NAMES["map"] = {k.lower(): (v.get("name") or "")
+                                 for k, v in desktop_entries().items()}
+        except Exception:                                  # noqa: BLE001
+            _APP_NAMES["map"] = {}
+        _APP_NAMES["at"] = now
+    return _APP_NAMES["map"].get((app or "").lower(), "")
+
+
+class LoupePlugin(WindowPlugin):
+    """GNOME's image viewer: one window per picture, keyed on the picture.
+
+    WHY A PLUGIN AT ALL, since the identity it answers IS the title. A plugin
+    CHOOSING the title and the engine GUESSING it are different things, and
+    the difference is that a plugin is the AUTHORITY: it can say `owns_key`
+    so the orphan detector works for its entries, and it can say PENDING and
+    NEVER, which a blind title fallback cannot express at all.
+
+    AND /proc CANNOT ANSWER, measured rather than assumed, in a nested
+    compositor with three Loupe windows open:
+
+        3 mapped toplevels, ONE pid        a GApplication, DBusActivatable,
+                                           so the second invocation hands off
+                                           over D-Bus. chrome's shape.
+        argv  `loupe`                      the FIRST invocation's, which here
+                                           had no file at all
+        open fds  no image files           it reads a picture and closes it;
+                                           the fds are logs and dmabufs
+        cwd  /                             and no GIO_LAUNCHED_DESKTOP_FILE
+
+    So there is no per-window handle in /proc and not even a SET of paths to
+    join a basename against, which is what killed the obvious design (the
+    chrome title -> SessionID bootstrap, applied to basename -> path). The
+    title is the whole of what exists.
+
+    THE EMPTY VIEWER IS WHAT MAKES THIS WORTH DOING. A Loupe window with no
+    picture titles itself with the app's own display name (measured:
+    `Image Viewer`, which is `Name=` in its desktop entry), so a blind title
+    fallback mints a slot for "the empty viewer" and every later empty window
+    is dragged onto it. That is the transient-title class schema 7 purged.
+    Here it is NEVER, with a reason.
+
+    IT IS PLACED AND NOT STARTED, deliberately. The title is a BASENAME, not
+    a path, so this plugin could not name the file even if it wanted to, and
+    the standing invariant is that THE ONLY COMMAND usher EVER RUNS IS AN
+    `Exec=` OUT OF A DESKTOP FILE IT READ: `loupe.desktop`'s `%U` is stripped
+    for exactly the reason that reopening a document may reopen one that is
+    gone. So no `relaunch_command` and no `relaunch_missing`: open the
+    picture again and it goes back where you had it.
+
+    WHAT THIS REPLACES is an EXCLUSION. `usher/exclude` carries
+    `org.gnome.Loupe :: ^.*$`, whose own comment says "no plugin claims it,
+    so there is no better handle to key on". There is now, so the rule can
+    go, and a window usher gave up on is remembered instead."""
+    name = "loupe"
+    APP = "org.gnome.Loupe"
+
+    def owns(self, v):
+        return v["app"] == self.APP
+
+    def resolve(self, v):
+        t = (v["title"] or "").strip()
+        if not t:
+            return Resolution.pending(
+                "the viewer has not said which picture it is showing yet")
+        # THE APP'S OWN `Name=`, asked of the registry rather than hardcoded,
+        # which also makes a localised desktop work: a French entry titles
+        # its empty window in French and the comparison still holds. With no
+        # entry at all the name is "" and nothing matches it, so the window
+        # keys on its title, which is the blind fallback's answer and no
+        # worse: a clean degradation rather than a second mechanism.
+        if t == app_display_name(self.APP):
+            return Resolution.never(
+                "no picture is open, so there is nothing to key this window"
+                " on: its title is just the app's own name")
+        return Resolution.ready(f"loupe:{t}")
+
+    def owns_key(self, ident):
+        return (ident or "").startswith("loupe:")
+
+
 # --- knowledge base: identity -> latest placement -------------------------
 # The daemon matches against this, not raw snapshots. Each capture upserts
 # every window's (app_id, title) with its newest placement, so it is a
@@ -2620,57 +2743,6 @@ def slot_keys(kb, app, ident, source=""):
                    if k.startswith(pre) and k[len(pre):].isdigit()),
                   key=lambda k: int(k[len(pre):]))
     return out
-
-
-# THE ONE WORDING for a window refused because another wears its title, so
-# the two store writers and the report cannot describe it three ways. Not a
-# `refusal_of` kind, because that asks about the WINDOW and this is a property
-# of the window SET; the pair is shaped the same so every caller is uniform.
-AMBIGUOUS_REFUSAL = (
-    "ambiguous",
-    "another live window wears this title too, so it cannot tell them apart")
-
-
-def ambiguous_titles(windows):
-    """The `(app_id, title)` pairs that TWO OR MORE of these windows wear.
-    PURE.
-
-    THROUGH `app_of`, so it takes a SNAPSHOT row (`app_id`) or a RAW view
-    (`app-id`) alike. The writers hand it rows and `doctor` hands it views,
-    and reading one spelling would answer `("", title)` for every view, which
-    calls two windows of DIFFERENT apps with one title ambiguous. Same trap,
-    and the same fix, as `unreadable_placement`'s output field: in the
-    predicate, where no call site can get it wrong.
-
-    A TITLE TWO LIVE VIEWS WEAR IS NOT A WINDOW DISCRIMINATOR, which is the
-    degroup rule, and both store writers have to refuse one. ONE DEFINITION,
-    because they did not: `learn` computed this inline and refused, while
-    `upsert` wrote a title key anyway, so the two writers disagreed about
-    this shape and the table that exists to catch exactly that had no row
-    for it. Found by adding one.
-
-    WHAT upsert's ENTRY COSTS, which is why this is a defect and not untidy:
-    two windows wear the title, one entry is stored, and at the next login
-    whichever of them the matcher reaches first takes it. That is a window
-    placed on another window's remembered rect, which is the class this
-    package has bled over, and `window_slot`'s stickiness then keeps it."""
-    tc = Counter((app_of(w), w.get("title") or "")
-                 for w in windows if w.get("title"))
-    return {k for k, c in tc.items() if c >= 2}
-
-
-def is_ambiguous(v, amb):
-    """Is this window's `(app, title)` one that `ambiguous_titles` named?
-    PURE.
-
-    A FUNCTION SO `doctor` NEED NOT READ A RAW TITLE. The lookup itself is
-    harmless there (nothing is printed), but `doctor-does-not-parse-a-raw-
-    live-title` is a SOURCE SCAN and fired on the mention, which is the check
-    being conservative in the right direction: every title leak this package
-    has had was doctor reading `lv.get("title")` for one reason and a later
-    edit printing it. The engine reads raw titles by the hundred; it is the
-    REPORT that must not."""
-    return (app_of(v), v.get("title") or "") in amb
 
 
 def slot_order(windows):
@@ -2900,11 +2972,14 @@ def unmatchable_entries(kb, plugins_=None):
 
     WHAT IT CAN PROVE, and each row is a class this store has actually held:
 
-        wildcard       no app-id AND no identity. `is_unique` refuses an
-                       empty app-id so there is no app_id-only key, and
-                       `resolution` answers NEVER, so nothing offers it. It
-                       is also a WILDCARD: every handle-less window would
-                       have matched it.
+        wildcard       no app-id AND no discriminating identity, so every
+                       handle-less window would have matched it. The class
+                       that is WORSE than litter, since it matches too much
+                       rather than nothing.
+        no-app-id      an app-id-less entry with a real title. Narrow once,
+                       and dead since `resolution` began answering NEVER for
+                       a window with no app-id: a title is not a handle, so
+                       nothing will ever key one again.
         plugin-shape   an owned app's entry whose identity its own plugin
                        could not have produced. The chrome case is the
                        measured one: 265 went in schema 7, and three more
@@ -2936,11 +3011,17 @@ def unmatchable_entries(kb, plugins_=None):
         #                 account's own fallback and
         #                 so discriminates nothing
         #
-        # A BLANK APP-ID WITH A REAL TITLE IS NOT THIS. `is_unique` refuses
-        # an empty app-id, so such a window keys by its TITLE, which is
-        # narrow and matches again the moment it reopens.
-        if not app and (not ident or ident == src):
-            out.append((k, "wildcard"))
+        # A BLANK APP-ID WITH A REAL TITLE IS A DIFFERENT CLASS AND NOT
+        # THIS, which is why the two reasons stay apart: that one matches
+        # NOTHING where a wildcard matches too much, so the cost of leaving
+        # one differs and a reader deserves to be told which they have.
+        # AGAINST `reg` AND NOT `is_owned`, which reads the live registry:
+        # this function's whole contract is to be pure given the registry it
+        # was handed, and the table below passes its own.
+        if not app and not any(p.owns({"app": app, "title": "", "pid": -1})
+                               for p in reg):
+            out.append((k, "wildcard" if not ident or ident == src
+                        else "no-app-id"))
             continue
         if src:
             # THE FOREIGN BRANCH IS EXACTLY `match_keys`', which is why this
@@ -3275,16 +3356,30 @@ def load_knowledge(profile=None):
     return kb
 
 
-def is_unique(app, counts):
-    """True if this app_id identifies exactly one window (so it can key by
-    app_id alone, title-independent). A plugin-owned app is never unique, even
-    when momentarily alone: its windows share an app_id (see is_owned).
+def is_appid_keyed(app):
+    """True if this app's windows key by APP-ID ALONE, title-independent.
+
+    AN UNOWNED APP ALWAYS DOES NOW, however many windows it has, and the
+    COUNT is gone. It used to require exactly one window, because a second
+    one would have shared the single slot, so N windows fell back to
+    per-TITLE keys. ONE SLOT PER WINDOW removed that reason: N windows take N
+    indexed slots under this key, so the layout comes back and no title
+    enters the keyspace.
+
+    THE TITLE WAS NEVER A GOOD ANSWER, it was the only one available. A
+    plugin CHOOSING to key on a title (see LoupePlugin, where /proc provably
+    cannot answer) and the ENGINE guessing one are different things: the
+    plugin is the authority, so it can also say `owns_key`, PENDING and
+    NEVER, none of which a blind fallback can express.
+
+    A PLUGIN-OWNED APP IS NEVER APP-ID KEYED, even when momentarily alone:
+    its windows share an app_id, and collapsing them to one key would prune
+    the whole per-identity set (kitty's mux terminals hit exactly that).
 
     AN EMPTY APP-ID IS NOT AN IDENTIFIER, it is the absence of one, and
-    treating it as a unique app is how a window with no app-id came to be
-    stored under `kkey("", "")`, a key EVERY app-id-less toplevel matches. It
-    also DISCARDED the title, which was the only handle such a window had."""
-    return bool(app) and counts[app] == 1 and not is_owned(app)
+    treating it as an app is how a window with no app-id came to be stored
+    under `kkey("", "")`, a key EVERY app-id-less toplevel matches."""
+    return bool(app) and not is_owned(app)
 
 
 def kb_entry(w, title, appid_only, when):
@@ -3347,18 +3442,30 @@ def prune_kb(kb, when):
     "a different account's slot for the same app".
 
     FOURTH INSTANCE OF THE SAME SHAPE here: a rule scoped to one category,
-    met by something outside the category."""
-    appid_keyed = {k[:-1] for k in kb
-                   if k.endswith("\x00") and not is_owned(k[:-1])}
+    met by something outside the category.
+
+    AND AN INDEXED SIBLING IS THE FIFTH, which is why every key read here
+    goes through `slot_base`. `app NUL NUL 1` is the SECOND slot of an
+    app-id-only key and reads, to a single-NUL split, as a per-title entry
+    for an app now keyed by its app-id alone: exactly what this sweep
+    deletes. So the second and later windows of an unowned app were learned
+    and dropped within one call, and `_learn_stamp` alone looked perfect.
+    Latent while two windows of such an app took a title key each; live the
+    moment the title keyspace was retired and both took indexed slots."""
+    appid_keyed = {slot_base(k)[:-1] for k in kb
+                   if slot_base(k).endswith("\x00")
+                   and not is_owned(slot_base(k)[:-1])}
     cutoff = when - KNOWLEDGE_TTL
     for k in [k for k, v in kb.items()
               if v.get("last_seen", 0) < cutoff
               or SKIP_TITLE.search(v.get("title", ""))
               or is_transient(v)
-              or (k.endswith("\x00") and is_owned(k[:-1]))
-              or ("\x00" in k and not k.endswith("\x00")
+              or (slot_base(k).endswith("\x00")
+                  and is_owned(slot_base(k)[:-1]))
+              or ("\x00" in slot_base(k)
+                  and not slot_base(k).endswith("\x00")
                   and not v.get("source")
-                  and k.split("\x00", 1)[0] in appid_keyed)]:
+                  and slot_base(k).split("\x00", 1)[0] in appid_keyed)]:
         del kb[k]
 
 
@@ -3370,15 +3477,21 @@ def own_app_counts(windows):
     reason this is a named function rather than a Counter comprehension at
     each writer: it is the fact `stamp_key` depends on, so the two have to
     travel together. With one Slack of each account, a count that included
-    the foreign row saw TWO, `is_unique` went False, and the OWNER's Slack
+    the foreign row saw TWO, `is_appid_keyed` went False, and the OWNER's Slack
     flipped off its app-id-only key, orphaning its learned slot in silence."""
     return Counter(w["app_id"] for w in windows
                    if not w.get("source") and w.get("owner") is None)
 
 
 def stamp_key(w, app, key, counts):
-    """Which key this window's entry takes: (identity, key-title, appid_only),
-    or None when the caller must fall through to its own title handling.
+    """Which key this window's entry takes: (identity, key-title, appid_only).
+
+    NONE IS NOW UNREACHABLE FROM EITHER WRITER and is kept as the honest
+    answer for "I cannot key this", not as a fall-through: `is_appid_keyed`
+    is True for every app a plugin does not own, and `resolution` answers
+    NEVER for a window with no app-id, so anything passing the readiness
+    gate above has a key. Both callers assert as much in a comment where
+    their title branch used to be.
 
     THE ONE DEFINITION FOR BOTH STORE WRITERS. `learn` and `upsert` are the
     only two things that write the store, so a window they key differently is
@@ -3390,11 +3503,10 @@ def stamp_key(w, app, key, counts):
     a TEN-LINE identical run, 46% of the smaller function, carrying the
     cross-file guard, which is the line with teeth.
 
-    THE TITLE CASES STAY WITH THE CALLER, and that is not laziness: they
-    legitimately differ. `learn` has title GROUPS (one view id owning every
-    title it has worn) where `upsert` has one row and one title, so there is
-    no shared answer to give. Everything ABOVE the title fallback is identical
-    and is what this holds.
+    THE TITLE IS NOT A KEY AT ALL NOW, so the asymmetry this used to have to
+    leave with the caller (`learn` had title GROUPS where `upsert` had one
+    row and one title) is gone with it: the two writers share the WHOLE
+    decision rather than everything above a fallback.
 
     THE GATES ALSO STAY, deliberately and for the same kind of reason: upsert
     asks `unreadable_placement` here while `learn` folds it into its `hold`
@@ -3404,10 +3516,9 @@ def stamp_key(w, app, key, counts):
     A FOREIGN WINDOW IS KEYED ON ITS SOURCE AND NEVER app_id-ONLY.
     `kkey(app, "")` is the OWNER's key and matches every window of that app,
     so writing a foreign window there overwrites the owner's slot with it.
-    Asked FIRST, because `is_unique` looks only at the app and cannot know
-    whose window it is: with one Slack of each, `counts` saw ONE (it excludes
-    foreign rows by design), `is_unique` was therefore True for BOTH, and the
-    foreign window took the owner's key."""
+    Asked FIRST, because `is_appid_keyed` looks only at the app and cannot
+    know whose window it is: with one Slack of each it was True for BOTH, and
+    the foreign window took the owner's key."""
     src = source_of(w)
     if src:
         # THE RESOLVED KEY, NOT THE BARE SOURCE, so a per-window identity the
@@ -3420,7 +3531,7 @@ def stamp_key(w, app, key, counts):
         if k != src and not k.startswith(src + ":"):
             k = src            # not this source's: never cross-file it
         return k, k, False
-    if is_unique(app, counts):
+    if is_appid_keyed(app):
         return "", w["title"], True
     if key:
         return key, key, False
@@ -3428,11 +3539,9 @@ def stamp_key(w, app, key, counts):
 
 
 def upsert(kb, windows, when, outputs=None, refused=None):
-    """One-shot knowledge update (no view-id grouping): record each window's
-    CURRENT identity. Unique-app_id windows key by app_id alone; the rest by
-    title. Used by `usher capture` and the seed-from-snapshot path;
-    the watch daemon uses learn() instead, which groups a window's tabs by
-    view id.
+    """One-shot knowledge update: record each window's CURRENT identity. Used
+    by `usher capture` and the seed-from-snapshot path; the watch daemon uses
+    learn() instead.
 
     THE TWO WRITERS MUST REFUSE THE SAME WINDOWS, which is the whole reason
     the gates below are here rather than at either call site. This and learn()
@@ -3440,9 +3549,6 @@ def upsert(kb, windows, when, outputs=None, refused=None):
     the other declines is two sites with a different idea of what may be
     keyed, and `upsert-and-learn-agree` pins the agreement as a table."""
     counts = own_app_counts(windows)
-    # THE SAME AMBIGUITY RULE `learn` APPLIES, which this writer did not: see
-    # ambiguous_titles. A title two of these rows wear is refused by both now.
-    amb = ambiguous_titles(windows)
     # ONE SLOT PER WINDOW, so N sharing an identity get N entries rather than
     # overwriting each other. BY VIEW ID, which is the only per-window handle
     # stable for a window's life: any other order (the compositor's view list
@@ -3479,79 +3585,16 @@ def upsert(kb, windows, when, outputs=None, refused=None):
             _k = next_slot_key(app, _i, used)
             used.add(_k)
             kb[_k] = kb_entry(w, _kt, _only, when)
-        elif w["title"] and (app, w["title"]) not in amb:
-            # THE TITLE FALLBACK IS THIS WRITER'S OWN: one row, one title,
-            # where learn() has a view id owning every title it has worn.
-            #
-            # AND IT IS NOT INDEXED, which is the one place `next_slot_key`
-            # must not be used. A TITLE TWO WINDOWS WEAR IS NOT A
-            # DISCRIMINATOR, which is the degroup rule, so there is nothing
-            # to give a second slot TO: indexing it mints a key for a window
-            # that cannot be told from the other.
-            #
-            # MEASURED, because the first cut did index it: two windows of an
-            # unowned app sharing a title had `upsert` write TWO entries while
-            # `learn` wrote NONE, so the two writers diverged, which is the
-            # exact fault `stamp_key` and `upsert-and-learn-agree` exist to
-            # prevent. And the damage outlived the divergence: one `learn`
-            # pass over that store pops the base key by the degroup rule and
-            # leaves the SIBLING, an entry nothing can ever match and which
-            # the orphan detector cannot see, because `slot_base` makes it
-            # look like an ordinary title key.
-            #
-            # AND IT IS UNREACHABLE NOW RATHER THAN MERELY WRONG, which a
-            # plant established: the `amb` skip above means this line is only
-            # ever reached for a title ONE window wears, so an index would
-            # always be 0 and re-introducing `next_slot_key` here changes
-            # nothing. The two are not independent guards, so only the skip
-            # is worth a check and it has three. Said out loud because a
-            # reader removing the skip would reopen this.
-            kb[kkey(app, w["title"])] = kb_entry(w, w["title"], False, when)
-        elif w["title"]:
-            # AND SAY SO, because a refusal in silence is this package's most
-            # repeated failure. Not a `refusal_of` kind: that asks about the
-            # WINDOW, and this is a property of the window SET, so it is
-            # reported here with its own reason. Not logged by the daemon
-            # either, for `pending`'s reason: it is transient (close one of
-            # them and the other is keyable again) and two `New Tab` windows
-            # would put a line in watch.log for nothing. `doctor`'s COLLISION
-            # line is the user-facing half.
-            _refuse(refused, w, AMBIGUOUS_REFUSAL)
+        # NO TITLE FALLBACK, because there is no longer a shape that
+        # reaches one. `is_appid_keyed` answers True for every unowned app and
+        # `resolution` answers NEVER for a window with no app-id, so a window
+        # that passes the readiness gate above ALWAYS gets a key from
+        # `stamp_key`. Proved by a plant: making this branch raise changes
+        # nothing, over every shape the writers have ever met.
     prune_kb(kb, when)
 
 
-def _learn_degroup(kb, groups, ambiguous, live):
-    """Drop titles two live views share, and retire groups whose window closed.
-    A title on two windows at once is not a discriminator."""
-    # Degroup: purge now-ambiguous titles from every group and the store.
-    for app, title in ambiguous:
-        kb.pop(kkey(app, title), None)
-    for g in groups.values():
-        g["titles"] -= {t for a, t in ambiguous if a == g["app"]}
-
-    # Retire groups whose window closed (their kb entries linger under the TTL).
-    for vid in [v for v in groups if v not in live]:
-        del groups[vid]
-
-
-def _learn_fold(groups, windows, ambiguous):
-    """Fold each live view's current title into its group."""
-    # Fold each live view's current title into its group.
-    for w in windows:
-        vid = w.get("id")
-        if vid is None:
-            continue
-        g = groups.setdefault(vid, {"app": w["app_id"], "titles": set()})
-        g["app"] = w["app_id"]
-        if w["title"] and (w["app_id"], w["title"]) not in ambiguous:
-            if is_mux_term(w["app_id"], w["title"]):
-                g["titles"] = {w["title"]}   # terminal: only current session
-            else:
-                g["titles"].add(w["title"])
-
-
-def _learn_stamp(kb, groups, windows, counts, when, hold=(), refused=None,
-                 amb=()):
+def _learn_stamp(kb, groups, windows, counts, when, hold=(), refused=None):
     """Write each live view's placement under the right key. `hold` is the set
     of view ids whose CURRENT position must not be believed yet: see the
     watcher's _held: a window the placer has not got to is sitting where its
@@ -3584,8 +3627,9 @@ def _learn_stamp(kb, groups, windows, counts, when, hold=(), refused=None,
         # trade: an entry nothing can ever match is not memory, it is litter,
         # and it crowds out the entries that work.
         #
-        # IT USED TO SIT THIRD, reached only after is_unique and the plugin key
-        # had both declined, which made it a rule about OWNED windows whose
+        # IT USED TO SIT THIRD, reached only after is_appid_keyed and the
+        # plugin key had both declined, which made it a rule about OWNED
+        # windows whose
         # plugin could not answer. An app_id-only window never reached it,
         # because for that key shape there is no identity to be unsure about:
         # the app-id IS the handle.
@@ -3613,25 +3657,11 @@ def _learn_stamp(kb, groups, windows, counts, when, hold=(), refused=None,
             _k = next_slot_key(app, _i, used)
             used.add(_k)
             kb[_k] = kb_entry(w, _kt, _only, when)
-        else:
-            # THE TITLE GROUP IS NOT INDEXED, and that is not an oversight: a
-            # group is every title ONE view has worn, so its keys are already
-            # per-window. Two views sharing a title are dropped from both
-            # groups by the degroup rule before this runs, because a title on
-            # two windows at once is not a discriminator.
-            _wrote = 0
-            for t in (groups.get(vid) or {}).get("titles", ()):
-                kb[kkey(app, t)] = kb_entry(w, t, False, when)
-                _wrote += 1
-            # AND IF NOTHING WAS WRITTEN AND THE TITLE IS AMBIGUOUS, SAY SO,
-            # symmetric with `upsert`: both writers refuse a title another
-            # live window wears, and both must report it or a user asking the
-            # daemon why a window is not remembered gets silence. Scoped to
-            # "nothing was written", because a window whose group still holds
-            # other titles IS remembered and is not refused at all.
-            if not _wrote and (app, w.get("title") or "") in amb:
-                _refuse(refused, w, AMBIGUOUS_REFUSAL)
-
+        # NO TITLE-GROUP BRANCH, for upsert's reason: every window that
+        # passes the readiness gate now gets a key from `stamp_key`, so the
+        # fallback this used to need is unreachable. The GROUPS themselves go
+        # with it: a group was every title ONE view had worn, and its only
+        # consumer was this branch.
 
 def _learn_purge_terminals(kb, windows, seen):
     """Drop the terminal entries whose window we WATCHED GO.
@@ -3776,28 +3806,22 @@ def _refuse(refused, w, r):
 
 def learn(kb, groups, windows, when, hold=(), seen=None, outputs=None,
           refused=None):
-    """Watch-time knowledge update with view-id tab-grouping.
+    """Watch-time knowledge update: each live view's placement, under the key
+    its identity and slot index give it.
 
-    Each live view: keyed by its wayfire id, stable for the window's whole
-    life: owns the set of titles it has shown. Every title in the set is
-    stamped to the view's CURRENT placement, so a window drags its whole learned
-    tab-set with it when it moves (no stragglers pointing at the old screen),
-    and on restore it lands correctly whatever tab happens to be active.
-
-    A title shown by two live views at once is not a window discriminator, so it
-    is dropped from every group and from the store (the degroup rule). Groups
-    are in-session only (view ids do not survive a restart); they re-form under
-    fresh ids next session, self-healing. Unique-app_id windows (--app Gmail)
-    stay keyed by app_id alone; kitty is forced to per-title keys; Chrome keys
-    by its active-tab URL identity (see identity(), stamped below)."""
+    THE TITLE IS NOT PART OF ANY KEY. An app no plugin owns keys by its
+    app-id ALONE, with the slot INDEX telling its windows apart, and an
+    owned app keys on what its plugin says (Chrome's window id, mux's
+    command, kitty's cwd, Loupe's picture). So the degroup rule and the
+    title GROUPS are both retired: there is nothing for two views to share,
+    and `groups` survives only as a parameter the callers still pass."""
     counts = own_app_counts(windows)
-    ambiguous = ambiguous_titles(windows)
     live = {w["id"] for w in windows if w.get("id") is not None}
     # A WINDOW ON AN OUTPUT NOBODY HAS JOINS THE HOLD, which is the right
     # mechanism rather than a second one: `hold` deliberately does not reach
-    # the degroup or the terminal purge, and those ask "is this window still
-    # HERE", which a parked window plainly is. A purge on absence would
-    # otherwise drop the slot of every terminal on the unplugged monitor.
+    # the terminal purge, which asks "is this window still HERE" and a parked
+    # window plainly is. A purge on absence would otherwise drop the slot of
+    # every terminal on the unplugged monitor.
     #
     # THROUGH `refusal_of` rather than the bare predicate, so the parked
     # windows are REPORTED by the same call that decides to hold them. It
@@ -3813,13 +3837,15 @@ def learn(kb, groups, windows, when, hold=(), seen=None, outputs=None,
             parked.add(w["id"])
             _refuse(refused, w, _r)
     hold = set(hold) | parked
-    _learn_degroup(kb, groups, ambiguous, live)
-    _learn_fold(groups, windows, ambiguous)
-    _learn_stamp(kb, groups, windows, counts, when, hold, refused,
-                 ambiguous)
-    # `hold` deliberately does NOT reach the degroup or the terminal purge:
-    # those ask "is this window still HERE", which a held window plainly is.
-    # Hiding it from them would drop the very entry we are protecting.
+    # NO DEGROUP AND NO FOLD. Both existed only to maintain the title
+    # GROUPS, whose only consumer was `_learn_stamp`'s title branch, and the
+    # degroup rule itself ("a title two live views wear is not a
+    # discriminator") is answered at the source now: a title is not a key at
+    # all, so there is nothing for two windows to share.
+    _learn_stamp(kb, groups, windows, counts, when, hold, refused)
+    # `hold` deliberately does NOT reach the terminal purge: that asks "is
+    # this window still HERE", which a held window plainly is. Hiding it
+    # would drop the very entry we are protecting.
     #
     # `seen` is the daemon generation's memory of which terminals have actually
     # been observed alive, and it is what makes "gone" decidable. A caller that
@@ -4507,7 +4533,7 @@ def kitty_relaunch_missing(saved, live):
 # a FEATURE: stripping them is exactly the no-document launch we want.
 #
 # IT IS NOT A PLUGIN IN THE REGISTRY, and that distinction is load-bearing.
-# `owns()` gates identity as well as relaunch, and `is_unique()` reads
+# `owns()` gates identity as well as relaunch, and `is_appid_keyed()` reads
 # `is_owned()` to decide whether an app may key by app_id ALONE. A catch-all
 # plugin would therefore make is_owned true everywhere, flip every unowned app
 # off its app_id-only key, and silently invalidate those slots: Signal is
@@ -6280,7 +6306,7 @@ def entries_from_snapshot(snap):
     out = []
     for w in windows:
         app = w.get("app_id", "")
-        if is_unique(app, counts):
+        if is_appid_keyed(app):
             out.append(kb_entry(w, w.get("title", ""), True, snap["time"]))
             continue
         key = saved_key(w)

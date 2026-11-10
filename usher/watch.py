@@ -550,8 +550,10 @@ class Watcher:
         #                           (see _recognise: the grace runs from that
         #                           moment, not from the map, so a slow login
         #                           sequence still lands)
-        self.groups = {}       # vid -> {"app", "titles": set}: the in-session
-        #                        tab-group, fed to learn()
+        self.groups = {}       # fed to learn() and read by nothing: the
+        #                        in-session title groups went with the title
+        #                        keyspace, and the parameter is retired on
+        #                        its own rather than inside that change
         self.seen_terms = set()   # terminal identities this generation has
         #                           actually OBSERVED alive. The terminal purge
         #                           may only drop what is in here, because a

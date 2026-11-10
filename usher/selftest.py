@@ -61,7 +61,7 @@ from .chrome import (
 from .engine import (
     PLACE_CAP, CONFIG_DIR, EXCLUDE_FILE, IDLE_SETTLE, INCLUDE_FILE,
     KB_SCHEMA, MUX_BIN, MUX_RESUME, PLACE_TOL, PLUGIN_DIR, Resolution,
-    START_FLOOR, WindowPlugin, _as_resolution, _derived_id,
+    START_FLOOR, LoupePlugin, WindowPlugin, _as_resolution, _derived_id,
     _latch_target_in, _migrate_store, _mux_pending_in, _mux_slot,
     _safe_profile, _single_id, _size_opts, _spec_to_date, _verify_deltas,
     _verify_find,
@@ -74,7 +74,7 @@ from .engine import (
     mux_host_of, mux_relaunch_missing, mux_session_of, mux_sessions,
     pick_socket, place_of, placement_landed, profile_id, pview,
     rekey_chrome, resolution, save_knowledge, saved_sizes, schema_path,
-    is_unique, seated_session, target_geometry, unidentified,
+    is_appid_keyed, seated_session, target_geometry, unidentified,
     upsert, verify_index, verify_row_name, verify_verdict,
     wayfire_socket)
 
@@ -253,7 +253,7 @@ def _t_registry(ck):
     """the plugin registry: who claims which window, and the
     title parsers that feed it."""
     ps = {getattr(p, "name", "?"): p for p in engine.plugins()}
-    # the registry loads the three built-ins; each claims the right windows
+    # the registry loads the built-ins; each claims the right windows
     ps = {getattr(p, "name", "?"): p for p in engine.plugins()}
     ck("plugins-builtin", all(n in ps for n in ("chrome", "mux", "kitty")))
     ck("owns-chrome", ps["chrome"].owns(_tv("google-chrome")))
@@ -756,17 +756,31 @@ def _t_resolution(ck):
     ck("resolution-no-handle-is-never", _st(_none) == Resolution.NEVER)
     ck("resolution-no-handle-says-why", bool(_wh(_none)))
     ck("no-handle-is-unidentified", unidentified(_none))
-    #     A TITLE IS STILL A HANDLE for an unowned app, and must not be
-    #     discarded just because the app-id is missing: is_unique() used to
-    #     call the empty app-id unique, which keyed by app_id ALONE and threw
-    #     the title away.
+    # 1c. AND A TITLE DOES NOT RESCUE IT, which is the change, and which the
+    #     first two rows here used to assert the opposite of: a blank app-id
+    #     WITH a title was Ready(title), and that was THE ONE REMAINING WAY a
+    #     title became a store KEY. It is NEVER now, with a reason. Sixth
+    #     check in this file to have pinned behaviour a fix then changed.
+    #
+    #     WHAT IT COSTS, measured rather than waved at: the five such
+    #     entries in the live store were Chrome's own chrome-less bars (a
+    #     screen-sharing indicator, a terms dialog, `New Tab`), every one
+    #     inert and all five purged as noise on 2026-11-04. Refusing them is
+    #     that same judgement, one pass earlier.
     _titled = _trv("", "Volume Control")
-    ck("blank-app-with-a-title-is-ready", _st(_titled) == Resolution.READY)
-    ck("blank-app-keeps-its-title", not unidentified(_titled))
-    ck("blank-app-is-never-appid-keyed",
-       not is_unique("", Counter({"": 1})))
-    ck("a-real-app-alone-is-still-appid-keyed",
-       is_unique("signal", Counter({"signal": 1})))
+    ck("blank-app-with-a-title-is-never", _st(_titled) == Resolution.NEVER)
+    ck("blank-app-says-a-title-is-not-a-handle",
+       "not a handle" in (_wh(_titled) or ""))
+    ck("blank-app-is-not-remembered", unidentified(_titled))
+    ck("blank-app-is-never-appid-keyed", not is_appid_keyed(""))
+    ck("a-real-app-is-appid-keyed", is_appid_keyed("signal"))
+    # AND IT NO LONGER DEPENDS ON THE COUNT, which is the other half: N
+    # windows of an unowned app take N indexed slots under this key, so the
+    # title fallback that the count used to trigger is gone.
+    ck("an-unowned-app-is-appid-keyed-however-many-windows",
+       is_appid_keyed("signal") and is_appid_keyed("zzz-unowned"))
+    ck("a-plugin-owned-app-is-never-appid-keyed",
+       not is_appid_keyed("kitty") and not is_appid_keyed("google-chrome"))
 
     # 2. EVERY PLUGIN, including the base and anything a user registered.
     #    A plugin that answers at all must answer with a Resolution, must
@@ -925,52 +939,32 @@ def _t_resolution(ck):
         # EVERY raw view parked, and doctor passes raw views.
         ck("doctor-an-attached-window-is-not-parked",
            _uw(dict(_lv, **{"output-name": "DP-1"}), _o1)[0] == "unmatched")
-        # AND THE FIFTH: a title ANOTHER LIVE WINDOW WEARS is not "no slot
-        # YET". Both store writers refuse such a window every pass, with a
-        # reason, for as long as both are open, where `unmatched` promises
-        # the next capture fixes it. SIXTH time this report has put two
-        # opposite facts under one word, and the same shape as `parked`.
+        # AND `ambiguous` IS GONE, which five cells here used to pin: a
+        # title another live window wore meant one slot and no way to say
+        # which window owned it, so BOTH writers refused one and the report
+        # had to say which refusal it was. The title is out of the keyspace
+        # now, both writers INDEX such a pair, and a label naming a refusal
+        # nobody makes is worse than none: it answers a question the reader
+        # then stops asking. So the two views below are `unmatched`, which
+        # is the truth (identified fine, no slot yet), and the row that
+        # proves it is the DISTINCTNESS one, which is four labels now.
         _P.st = Resolution.READY
         _lva = _trv("zzz-unowned", "Untitled Document", pid=os.getpid(),
                     vid=71)
         _lvb = _trv("zzz-unowned", "Untitled Document", pid=os.getpid(),
                     vid=72)
-        _amb = engine.ambiguous_titles([_lva, _lvb])
-        ck("doctor-an-ambiguous-title-is-not-unmatched",
-           _uw(_lva, None, _amb)[0] == "ambiguous")
-        ck("doctor-ambiguous-says-why",
-           "wears this title" in _uw(_lva, None, _amb)[1])
-        # ...AND A DIFFERENT APP WEARING THE SAME TITLE IS NOT AMBIGUOUS,
-        # which is the control AND what proves `ambiguous_titles` reads both
-        # spellings of the app field: through `app_id` alone every RAW view
-        # answers `("", title)` and two windows of DIFFERENT apps sharing one
-        # title would be called ambiguous.
-        _lvc = _trv("zzz-other", "Untitled Document", pid=os.getpid(),
-                    vid=73)
-        ck("doctor-a-different-app-with-that-title-is-not-ambiguous",
-           _uw(_lvc, None,
-               engine.ambiguous_titles([_lva, _lvb, _lvc]))[0] == "unmatched")
-        # AND A UNIQUE TITLE IS STILL `unmatched`, or the rows above are a
-        # label that fires for everything.
-        ck("doctor-a-unique-title-is-still-unmatched",
-           _uw(_trv("zzz-unowned", "only me", pid=os.getpid(), vid=74),
-               None, _amb)[0] == "unmatched")
-        # AND ONE WORDING, so the report and the two writers cannot describe
-        # the same refusal three ways: the engine holds the pair.
-        #
-        # BEFORE THE DISTINCTNESS ROW, not after: that row's comprehension
-        # assigns `_P.st` and an ATTRIBUTE is not comprehension-scoped, so it
-        # LEAKS at NEVER and this check then asked about a window the plugin
-        # had started refusing. It failed over correct code until the order
-        # was fixed, which is the same leak the pre-existing four-label row
-        # has always had and gets away with by being last.
-        ck("the-ambiguous-wording-is-one-definition",
-           engine.AMBIGUOUS_REFUSAL[0] == "ambiguous"
-           and engine.AMBIGUOUS_REFUSAL[1] in _uw(_lva, None, _amb)[1])
-        ck("doctor-labels-are-five-distinct", len(
-            {_uw(_lvp, _o1)[0], _uw(_lva, None, _amb)[0]}
+        ck("doctor-a-shared-title-is-plain-unmatched-now",
+           _uw(_lva)[0] == "unmatched" and _uw(_lvb)[0] == "unmatched")
+        ck("doctor-a-shared-title-claims-no-reason",
+           _uw(_lva)[1] == "")
+        # PAIRWISE DISTINCT, which is the assertion that catches a label
+        # collapsing into its neighbour: checking each one individually
+        # passes while two share a word. Four now rather than five, because
+        # `ambiguous` went with the title keyspace.
+        ck("doctor-labels-are-four-distinct", len(
+            {_uw(_lvp, _o1)[0]}
             | {_uw(_lv)[0] for _P.st in (Resolution.READY, Resolution.PENDING,
-                                         Resolution.NEVER)}) == 5)
+                                         Resolution.NEVER)}) == 4)
         _P.st = Resolution.PENDING
         ck("doctor-prints-the-plugin-reason", "not yet" in _uw(_lv)[1])
     finally:
@@ -1383,12 +1377,18 @@ def _t_resolution(ck):
        dict(engine.unmatchable_entries(
            {engine.kkey("", "titan"): {"source": "titan"}})).get(
                engine.kkey("", "titan")) == "wildcard")
-    # A BLANK APP-ID WITH A TITLE IS NOT THE WILDCARD, which is the half of
-    # that conjunction a probe here once read wrongly: `is_unique` refuses an
-    # empty app-id so it keys by the TITLE, and a title key matches again the
-    # moment such a window reopens.
-    ck("a-blank-app-id-with-a-title-is-matchable",
-       engine.kkey("", "Some Window Title") not in _uw)
+    # A BLANK APP-ID WITH A TITLE IS NOT THE WILDCARD, and this row used to
+    # assert it was MATCHABLE, which was true while such a window keyed by
+    # its title. It is dead now (resolution answers NEVER for a window with
+    # no app-id) and it reports under its own reason, because it matches
+    # NOTHING where a wildcard matches too much and a reader deserves to be
+    # told which of the two they are looking at.
+    ck("a-blank-app-id-with-a-title-is-its-own-class",
+       _uw.get(engine.kkey("", "Some Window Title")) == "no-app-id")
+    ck("the-two-blank-app-reasons-are-distinct",
+       _uw.get(engine.kkey("", "Some Window Title"))
+       != dict(engine.unmatchable_entries(
+           {engine.kkey("", ""): {}})).get(engine.kkey("", "")))
     ck("the-app-id-only-key-is-matchable",
        engine.kkey("signal", "") not in _uw)
     # THE FOREIGN BRANCH IS `match_keys`' OWN: the source alone always, and
@@ -1754,13 +1754,13 @@ def _t_resolution(ck):
     # print to see and is the twenty-second instance of reasoning about a
     # value this file could have printed.
     ck("a-named-terminal-gets-its-own-app-id-only-key",
-       engine.is_unique("work-logs", _nc)
+       engine.is_appid_keyed("work-logs")
        and set(engine.match_keys("work-logs", "", ""))
        == {engine.kkey("work-logs", "")})
     # ...and the control: the two unnamed ones still share, or the row above
     # would pass over a predicate that gave everything its own key.
     ck("and-the-unnamed-ones-still-share-the-cwd-key",
-       not engine.is_unique("kitty", _nc))
+       not engine.is_appid_keyed("kitty"))
     _ndir = tempfile.mkdtemp(prefix="usher-named-")
     try:
         with open(os.path.join(_ndir, "work-logs.desktop"), "w") as _f:
@@ -2976,8 +2976,9 @@ def _t_resolution(ck):
 
         # AND AGAIN WITH AN UNOWNED, SINGLE-WINDOW APP, which is a DIFFERENT
         # PATH THROUGH learn and the one that was actually broken. The check
-        # above uses chrome, which a plugin OWNS, so `is_unique` is False and
-        # it reaches the gate by the third branch; an app_id-only window takes
+        # above uses chrome, which a plugin OWNS, so `is_appid_keyed` is
+        # False and it reaches the gate by the third branch; an
+        # app_id-only window takes
         # the FIRST branch, which did not ask. It passed for the wrong reason
         # and a live box found what the suite could not: a work account's
         # Slack kept being learned into `slack\0` with the resolution fix in
@@ -3559,6 +3560,155 @@ def _t_desktop(ck):
         engine.logline = _rl
         engine._announce = _ra
 
+def _t_loupe(ck):
+    """The image viewer's plugin, and WHY it is a plugin rather than a rule.
+
+    LOUPE IS THE WORKED EXAMPLE OF AN APP /proc CANNOT ANSWER FOR, measured
+    rather than assumed: it is a GApplication with `DBusActivatable=true`, so
+    three open pictures are THREE WINDOWS ON ONE PID, its argv names only the
+    first invocation, it holds no fd for any image, and its cwd is `/`. So
+    `kitty`'s technique (read the child shell's /proc) cannot work here and no
+    launch marker exists to fall back on.
+
+    SO THIS PLUGIN CHOOSES THE TITLE, and that is a different thing from the
+    engine GUESSING one, which is what the title keyspace used to do: a
+    plugin is the AUTHORITY on its app, so it can say that for this viewer
+    the title IS the picture, and it can say the two cases where it is not.
+    The engine had no standing to make either claim."""
+    _P = [p for p in engine.plugins() if p.name == "loupe"]
+    ck("loupe-is-registered", len(_P) == 1)
+    if not _P:
+        return
+    _p = _P[0]
+    ck("loupe-owns-its-app", _p.owns(pview(_tv(LoupePlugin.APP, "a.png"))))
+    ck("loupe-claims-nothing-else",
+       not _p.owns(pview(_tv("org.gnome.Nautilus", "a.png"))))
+
+    def _r(title):
+        return _p.resolve(pview(_tv(LoupePlugin.APP, title)))
+
+    # 1. A PICTURE IS THE HANDLE, and it is the only one there is.
+    ck("loupe-keys-on-the-picture", _r("photo.png").key == "loupe:photo.png")
+    # 2. NOT READY YET is PENDING, not a key: a window that has mapped and
+    #    not yet said what it is showing resolves seconds later, and keying
+    #    it on an empty title would mint the wildcard this package has
+    #    already had to purge twice.
+    ck("loupe-with-no-title-is-pending", _r("").state == Resolution.PENDING)
+    ck("loupe-pending-says-why", bool(_r("").why))
+    ck("loupe-pending-carries-no-key", _r("").key is None)
+    # 3. AND AN EMPTY VIEWER IS NEVER, which is the case only a plugin can
+    #    know: with no picture open Loupe titles its window with its OWN
+    #    `Name=`, so that string is not a handle, it is the app saying there
+    #    is nothing to key on. Waiting cannot change it.
+    _own = engine.app_display_name(LoupePlugin.APP)
+    if _own:
+        ck("loupe-with-only-its-own-name-is-never",
+           _r(_own).state == Resolution.NEVER)
+        ck("loupe-never-says-why", bool(_r(_own).why))
+    else:
+        ck("loupe-own-name-cell (no desktop entry here: skipped)", True)
+    # AND THE NAME COMES FROM THE REGISTRY, never from a literal here: the
+    # string is localised, so a hardcoded "Image Viewer" is wrong on any box
+    # that is not in English, and it would be a second copy of a fact the
+    # desktop entry already holds.
+    _re = engine.desktop_entries
+    _rn = dict(engine._APP_NAMES)
+    try:
+        engine._APP_NAMES["at"] = 0.0
+        engine._APP_NAMES["map"] = {}
+        engine.desktop_entries = lambda: {
+            LoupePlugin.APP.lower(): {"name": "Visionneuse d'images",
+                                      "exec": "/bin/true"}}
+        ck("loupe-reads-its-own-name-from-the-registry",
+           engine.app_display_name(LoupePlugin.APP) == "Visionneuse d'images")
+        ck("a-localised-own-name-is-still-never",
+           _r("Visionneuse d'images").state == Resolution.NEVER)
+        # ...and an app with no entry at all answers nothing rather than
+        # raising, so the NEVER arm simply does not fire. The alternative
+        # (treating "no entry" as "every title is the app's own name") would
+        # refuse every window of it.
+        ck("an-app-with-no-entry-has-no-display-name",
+           engine.app_display_name("org.example.NoSuchApp") == "")
+    finally:
+        engine.desktop_entries = _re
+        engine._APP_NAMES.clear()
+        engine._APP_NAMES.update(_rn)
+
+    # THE STORED SIDE: its keys are its own to vouch for, which is what
+    # keeps the orphan detector out of the business of knowing key shapes.
+    ck("loupe-vouches-for-its-own-key", _p.owns_key("loupe:photo.png"))
+    ck("loupe-disowns-a-key-it-could-not-have-made",
+       _p.owns_key("Some Window Title") is False)
+    ck("loupe-disowns-a-raw-title-in-the-store",
+       dict(engine.unmatchable_entries(
+           {engine.kkey(LoupePlugin.APP, "photo.png"): {}})).get(
+               engine.kkey(LoupePlugin.APP, "photo.png"))
+       == "plugin-shape")
+    ck("loupe-keeps-a-key-it-did-make",
+       engine.unmatchable_entries(
+           {engine.kkey(LoupePlugin.APP, "loupe:photo.png"): {}}) == [])
+
+    # END TO END THROUGH THE REAL WRITER, which is the half the cells above
+    # say nothing about: two pictures are two slots with two identities.
+    #
+    # WITH THE USER'S EXCLUDE RULES CLEARED, and that is not a convenience.
+    # This fleet's `usher/exclude` carries `org.gnome.Loupe :: ^.*$`, written
+    # when no plugin could identify a viewer window, so `prune_kb`'s
+    # `is_transient` drops every Loupe entry on the pass that writes it:
+    # measured, learn answers `{}` on this box with everything above
+    # correct. A check reading that file is a CHECK ON THE HOST, which is
+    # the class this suite has been caught by four times, so the rules are
+    # cleared and the plugin is tested rather than the deployment.
+    #
+    # THE RULE IS STILL LIVE AND THE PLUGIN IS INERT UNTIL IT GOES, which is
+    # the integrator's to retire and is filed rather than worked around.
+    _rex = engine.EXCLUDE_RULES
+    try:
+        engine.EXCLUDE_RULES = []
+        _kb, _g = {}, {}
+        _ws = [dict(_trv(LoupePlugin.APP, t, pid=os.getpid(), vid=i),
+                    app_id=LoupePlugin.APP,
+                    workspace=[0.0, 0.0], pos=[1.0, 1.0], size=[8.0, 6.0],
+                    output="DP-1")
+               for i, t in enumerate(["a.png", "b.png"], start=1)]
+        engine.learn(_kb, _g, _ws, 1_800_000_000)
+        ck("learn-gives-two-pictures-two-slots",
+           sorted(k.split("\x00")[1] for k in _kb)
+           == ["loupe:a.png", "loupe:b.png"])
+        # ...and an unresolvable viewer beside them is not remembered at
+        # all, which is the control: a learn that keyed everything passes
+        # the row above on its own.
+        _kb2, _g2 = {}, {}
+        engine.learn(_kb2, _g2,
+                     [dict(_ws[0], title="", id=5, **{"app-id":
+                                                      LoupePlugin.APP})],
+                     1_800_000_000)
+        ck("learn-does-not-remember-a-viewer-with-no-picture", not _kb2)
+    finally:
+        engine.EXCLUDE_RULES = _rex
+    # AND AN EXCLUDE RULE STILL OUTRANKS A PLUGIN IDENTITY, which is why
+    # the plugin is inert on this fleet and is correct rather than a bug:
+    # the rule is the user saying "do not remember this", where the plugin
+    # answers "here is what it is", and policy beating readiness is the
+    # distinction `plugin_transient` was deleted to preserve.
+    #
+    # PLANTED HERE rather than read off the box, for the same reason the
+    # cells above clear them.
+    try:
+        engine.EXCLUDE_RULES = [(re.compile("^org\\.gnome\\.Loupe$"),
+                                 re.compile("^.*$"))]
+        _kb3, _g3 = {}, {}
+        engine.learn(_kb3, _g3,
+                     [dict(_trv(LoupePlugin.APP, "a.png", pid=os.getpid(),
+                                vid=1), app_id=LoupePlugin.APP,
+                           workspace=[0.0, 0.0], pos=[1.0, 1.0],
+                           size=[8.0, 6.0], output="DP-1")],
+                     1_800_000_000)
+        ck("an-exclude-rule-outranks-a-plugin-identity", not _kb3)
+    finally:
+        engine.EXCLUDE_RULES = _rex
+
+
 def _t_slots(ck):
     """ONE WINDOW PER SLOT, driven through the real Watcher.
 
@@ -3643,7 +3793,7 @@ def _t_slots(ck):
         #
         # A PER-WINDOW IDENTITY, not the app_id-only key above: that one
         # means "every window of this app" and is deliberately never indexed,
-        # since `is_unique` gives it up the moment a second window exists.
+        # since `is_appid_keyed` gives it up the moment a second window exists.
         _SI, _SA = "shared ident", "zzz-unowned"
         w.place_sock.live = {11, 12, 13, 14}
         with w.lock:
@@ -4133,9 +4283,10 @@ def _t_slots(ck):
         # NUMBERS so the check reads as the incident.
         #
         # A FOREIGN WINDOW IS THE RIGHT SHAPE and the owner's app is NOT:
-        # two windows of one of the owner's apps are TITLE-keyed, because
-        # `is_unique` needs a count of one, so they would not share a key and
-        # the fixture would not model the bug. A foreign window keys on its
+        # two windows of one of the owner's apps now take INDEXED slots
+        # under one app_id-only key rather than a title key each, so a
+        # fixture built from them no longer models the collapse this check
+        # is about at all. A foreign window keys on its
         # SOURCE ALONE whatever the count, which is why ten of them collided.
         # The first attempt got this wrong and would have tested nothing.
         #
@@ -4277,17 +4428,23 @@ def _t_slots(ck):
            len(engine.forget_matches(_kb6, ["titan"])) == 4)
         ck("none-of-the-family-is-unmatchable",
            engine.unmatchable_entries(_kb6) == [])
-        # THE DEGROUP RULE IS UNTOUCHED, which is the boundary of this change
-        # and worth pinning: windows sharing a TITLE are still refused, since
-        # a title two live views wear is not a discriminator and a transient
-        # one (two `New Tab` windows) would otherwise mint slots that stick.
-        # Only a PLUGIN identity or a SOURCE key is indexed.
+        # AND A SHARED TITLE IS NO LONGER A PROBLEM TO BE REFUSED, which is
+        # where this cell used to sit and is the boundary that moved. The
+        # degroup rule existed because the TITLE WAS THE KEY, so two live
+        # views wearing one title meant one slot and a stranger; with the
+        # title out of the keyspace they are two indexed slots under the
+        # app-id-only key, assigned by view id, and the ledger places both.
+        # The transient case (two `New Tab` windows) is answered by a
+        # different mechanism now: Chrome is OWNED, so a window its plugin
+        # cannot identify is refused by the readiness gate above.
         _kb9 = {}
         _same = [{"id": i, "app_id": "zzz-unowned", "title": "one title",
                   "workspace": [0.0, 0.0], "pos": [1.0, 1.0],
                   "size": [8.0, 6.0], "output": "DP-1"} for i in (1, 2)]
         engine.learn(_kb9, {}, _same, _t.time())
-        ck("a-shared-TITLE-is-still-refused-by-the-degroup-rule", not _kb9)
+        ck("two-views-sharing-a-title-get-a-slot-each",
+           len(_kb9) == 2
+           and {engine.slot_base(k) for k in _kb9} == {"zzz-unowned\x00"})
 
         # AND THE HOLD GATE MUST ASK THE SAME QUESTION AS THE PLACER, which
         # is the wiring half: with a slot per window it asked `matched_key`,
@@ -5159,9 +5316,9 @@ def _t_roster(ck):
     # legitimate source keys: an app-id-less foreign window keyed on the
     # source ALONE, which matches every handle-less window of that whole
     # account and would drag the next one onto the last one's geometry. Fifth
-    # instance of a rule scoped to one category meeting something outside it:
-    # `is_unique` has refused an empty app-id since the `'\0'` wildcard fix,
-    # and the source branch runs FIRST and never asked it.
+    # instance of a rule scoped to one category meeting something outside
+    # it: `is_appid_keyed` has refused an empty app-id since the `'\0'`
+    # wildcard fix, and the source branch runs FIRST and never asked it.
     _fw = {"app_id": "", "title": "SOMETHING", "source": "titan", "pid": -1}
     ck("a-source-key-needs-an-app-id",
        not engine.resolution(_fw).is_ready
@@ -8190,8 +8347,11 @@ def _t_learn(ck):
     # AN OWNED WINDOW ITS PLUGIN CANNOT IDENTIFY IS NOT LEARNED AT ALL. A
     # Chrome window whose title is in no session file has no slot, and the
     # title it happens to be wearing is not one: storing it was 86% of a real
-    # 333-entry store, none of it ever matchable again. An UNOWNED app still
-    # keys by title, which for it is the only handle there is.
+    # 333-entry store, none of it ever matchable again. AND AN UNOWNED APP
+    # NO LONGER KEYS BY TITLE EITHER, which is what this pair used to
+    # assert: two windows of one unowned app take two INDEXED slots under
+    # the one app-id-only key, and each title is carried as PAYLOAD rather
+    # than as any part of the key.
     _kbc, _gc = {}, {}
     learn(_kbc, _gc, [LW(9, "Nothing Like This - Google Chrome",
                          app="google-chrome"),
@@ -8201,9 +8361,14 @@ def _t_learn(ck):
           1_800_000_000)
     ck("learn-skips-unidentified-chrome",
        not any(k.split("\x00")[0].lower() == "google-chrome" for k in _kbc))
-    ck("learn-keeps-unowned-title-keys",
-       sorted(k.split("\x00")[1] for k in _kbc)
-       == ["Other Document", "Some Document"])
+    _lo = {k: v for k, v in _kbc.items() if k.startswith("libreoffice\x00")}
+    ck("learn-gives-an-unowned-app-one-indexed-slot-per-window",
+       len(_lo) == 2
+       and {engine.slot_base(k) for k in _lo} == {"libreoffice\x00"})
+    ck("learn-keeps-an-unowned-title-as-payload-only",
+       sorted(v["title"] for v in _lo.values())
+       == ["Other Document", "Some Document"]
+       and all(v["appid_only"] for v in _lo.values()))
 
     # A HELD WINDOW IS NOT LEARNED, but is still LIVE for everything else.
     # Holding is how the capture loop stops overwriting the slot the placer is
@@ -8224,7 +8389,7 @@ def _t_learn(ck):
                         LW(3, "Other Document", app="libreoffice")],
           1_800_000_000, hold={2})
     ck("learn-hold-skips-only-the-held",
-       [k.split("\x00")[1] for k in _kbh2] == ["Other Document"])
+       [v["title"] for v in _kbh2.values()] == ["Other Document"])
 
     # THE TWO HALVES OF "GONE", which one boolean used to answer for both and
     # got the login case exactly backwards. The old check here demonstrated the
@@ -8309,15 +8474,27 @@ def _t_learn(ck):
          _OUT),
         # TWO WINDOWS OF AN UNOWNED APP SHARING A TITLE, which is the row
         # that caught the keyspace change's own regression: `upsert` indexed
-        # its TITLE fallback and `learn` does not (the degroup rule drops a
-        # title two live views wear), so upsert wrote TWO and learn wrote
+        # its TITLE fallback and `learn` did not (the degroup rule dropped a
+        # title two live views wore), so upsert wrote TWO and learn wrote
         # NONE. And the damage outlived the divergence, because one `learn`
-        # pass over upsert's store pops the base key and leaves the SIBLING,
-        # an entry nothing can ever match and which the orphan detector
-        # cannot see. Both writers must refuse it.
+        # pass over upsert's store popped the base key and left the SIBLING,
+        # an entry nothing can ever match. BOTH NOW INDEX IT, which is the
+        # title keyspace being retired: the shared title is no longer part
+        # of either key, so there is nothing for the two to share.
         ("unowned, two windows, ONE title",
          [_uw("zzz-unowned", "same title", 31),
           _uw("zzz-unowned", "same title", 32)],
+         _OUT),
+        # ...AND TWO WITH DIFFERENT TITLES, which is the ordinary case and
+        # had no row because it used to take a title key each and so could
+        # not share. It is the shape that found `prune_kb` deleting an
+        # INDEXED SIBLING: `app NUL NUL 1` reads, to a single-NUL split, as
+        # a stale per-title entry for an app now keyed by its app-id alone,
+        # which is exactly what that sweep drops. So the second window was
+        # learned and deleted inside one call, with `_learn_stamp` alone
+        # looking perfect.
+        ("unowned, two windows, two titles",
+         [_uw("zzz-unowned", "A", 41), _uw("zzz-unowned", "B", 42)],
          _OUT),
         # PARKED BETWEEN AN UNDOCK AND A REDOCK: upsert wrote a slot naming
         # an output nobody has, which nothing can ever place.
@@ -8344,7 +8521,7 @@ def _t_learn(ck):
     # wrote NOTHING would agree perfectly and assert nothing at all. Five
     # shapes must be learned and four refused, by both.
     ck("upsert-and-learn-agree-is-not-vacuous",
-       sum(1 for _, u, _l in _rows if u) == 6
+       sum(1 for _, u, _l in _rows if u) == 7
        and sum(1 for _, u, _l in _rows if not u) == 5)
     # AND THE SHARED-IDENTITY ROW REALLY WROTE TWO KEYS, or the row above is
     # satisfied by two writers that both wrote one and the agreement says
@@ -8352,6 +8529,73 @@ def _t_learn(ck):
     ck("upsert-and-learn-both-index-a-shared-identity",
        [len(u) for _n, u, _l in _rows
         if _n == "foreign, TWO windows, one identity"] == [2])
+
+    # AND `prune_kb` MUST READ A KEY THROUGH `slot_base`, which the row above
+    # exercises end to end and this asks directly, because the sweep is the
+    # thing that was wrong and a writer check can only see the symptom.
+    #
+    # THE SHAPE IS THE WHOLE FAULT: an app-id-only key ends in NUL, and its
+    # SECOND slot is `app NUL NUL 1`, which does not, so a single-NUL split
+    # reads it as a stale per-title entry for an app now keyed by its app-id
+    # alone. That is precisely what this sweep deletes, so the sibling went
+    # on the pass that wrote it.
+    _sib = {engine.slot_key("zzz-unowned", "", 0):
+            {"app_id": "zzz-unowned", "title": "A", "appid_only": True,
+             "last_seen": 1_800_000_000},
+            engine.slot_key("zzz-unowned", "", 1):
+            {"app_id": "zzz-unowned", "title": "B", "appid_only": True,
+             "last_seen": 1_800_000_000}}
+    engine.prune_kb(_sib, 1_800_000_000)
+    ck("prune-keeps-an-indexed-sibling-of-an-app-id-only-key",
+       len(_sib) == 2)
+    # ...AND THE SWEEP STILL FIRES ON WHAT IT IS FOR, which is the control:
+    # a prune that had simply stopped sweeping passes the row above. A REAL
+    # per-title leftover beside an app-id-only key is what it exists to
+    # remove, and that entry is unmatchable, since the matcher never offers
+    # an app-id-only app a title key.
+    _stale = {engine.slot_key("zzz-unowned", "", 0):
+              {"app_id": "zzz-unowned", "title": "A", "appid_only": True,
+               "last_seen": 1_800_000_000},
+              engine.kkey("zzz-unowned", "Old Title"):
+              {"app_id": "zzz-unowned", "title": "Old Title",
+               "last_seen": 1_800_000_000}}
+    engine.prune_kb(_stale, 1_800_000_000)
+    ck("prune-still-drops-a-real-stale-title-key",
+       list(_stale) == [engine.slot_key("zzz-unowned", "", 0)])
+    # AND A SIBLING IS EVIDENCE THE APP IS APP-ID-ONLY even with the BASE
+    # key gone, which is the only state where the two halves of the sweep's
+    # `slot_base` read differ and is why that read is uniform rather than
+    # applied where it looked load-bearing. Reached by a `forget` on one key
+    # of a family, or a hand edit: the family's first slot is gone, a
+    # sibling remains, and a STALE TITLE KEY sits beside it. Read raw, the
+    # app looks title-keyed and the leftover survives for the 30-day TTL.
+    #
+    # FOUND BY A PLANT THAT NOTHING CAUGHT, which this package's habit reads
+    # as evidence about the code. It was evidence about the FIXTURE: the
+    # read really does differ, in a state no cell had built.
+    _orph = {engine.slot_key("zzz-unowned", "", 1):
+             {"app_id": "zzz-unowned", "title": "B", "appid_only": True,
+              "last_seen": 1_800_000_000},
+             engine.kkey("zzz-unowned", "Old Title"):
+             {"app_id": "zzz-unowned", "title": "Old Title",
+              "last_seen": 1_800_000_000}}
+    engine.prune_kb(_orph, 1_800_000_000)
+    ck("prune-reads-a-sibling-as-evidence-of-an-app-id-only-app",
+       list(_orph) == [engine.slot_key("zzz-unowned", "", 1)])
+
+    # AND A SIBLING OF AN OWNED APP'S KEY IS UNTOUCHED TOO, which is the
+    # other direction the index can be misread in: `kitty NUL kitty:/x NUL 1`
+    # must not be read as the app-id-only key of an owned app, which the
+    # sweep deletes outright.
+    _own = {engine.slot_key("kitty", "kitty:/x", 0):
+            {"app_id": "kitty", "title": "kitty:/x",
+             "last_seen": 1_800_000_000},
+            engine.slot_key("kitty", "kitty:/x", 1):
+            {"app_id": "kitty", "title": "kitty:/x",
+             "last_seen": 1_800_000_000}}
+    engine.prune_kb(_own, 1_800_000_000)
+    ck("prune-keeps-an-indexed-sibling-of-an-owned-apps-key",
+       len(_own) == 2)
 
     # --- AND A REFUSAL IS REPORTED, over the SAME table -------------------
     # THE DESIGN RULE HAS TWO HALVES: never write an entry that cannot round
@@ -8471,14 +8715,14 @@ def _t_learn(ck):
                                 _c([dict(_one), w] if w is not _one else
                                    [w]))
     # THE SOURCE IS ASKED FIRST, which is the branch ORDER with teeth: this
-    # window is the only one of its app, so `is_unique` would hand it
+    # window is the only one of its app, so `is_appid_keyed` would hand it
     # `kkey(app, "")`, the OWNER's key, which matches every window of that
     # app. Reversing the two is the bug that keyed a work Slack as the
     # owner's.
     _f = {"app_id": "slack", "title": "", "source": "acct", "key": "acct",
           "owner": 997}
     # THE FIXTURE IS THE MEASURED SHAPE: ONE SLACK OF EACH ACCOUNT. With the
-    # foreign row alone `own_app_counts` excludes it, so `is_unique` is
+    # foreign row alone `own_app_counts` excludes it, so `is_appid_keyed` is
     # already False and the branch ORDER cannot matter: a plant reordering
     # the two passed this cell until the owner's row was added. That is the
     # real bug's input, and asking what a guard DISTINGUISHES is how to pick
@@ -8486,7 +8730,7 @@ def _t_learn(ck):
     _mine = {"app_id": "slack", "title": "Slack"}
     _both = engine.own_app_counts([_mine, _f])
     ck("stamp-key-fixture-makes-the-order-matter",
-       _both == {"slack": 1} and engine.is_unique("slack", _both))
+       _both == {"slack": 1} and engine.is_appid_keyed("slack"))
     ck("stamp-key-asks-the-source-before-app-id-only",
        engine.stamp_key(_f, "slack", "", _both) == ("acct", "acct", False))
     # ...and the OWNER's own window of that same app still gets the
@@ -8508,13 +8752,19 @@ def _t_learn(ck):
     ck("stamp-key-keeps-a-per-window-identity",
        engine.stamp_key(_p, "slack", "", engine.own_app_counts([_p]))[0]
        == "acct:abc123")
-    # A TITLE IS THE CALLER'S OWN CASE, so this says so rather than guessing:
-    # learn has title GROUPS where upsert has one row and one title.
+    # AND THE COUNT NO LONGER CHANGES THE ANSWER, which is what retiring the
+    # title keyspace means here: this row used to assert that TWO windows of
+    # an unowned app fell through to the caller's title handling, and both
+    # now take the app-id-only key with the slot INDEX doing the
+    # discriminating. So `stamp_key` answers the same shape whatever the
+    # count, which is the property the indexed keyspace rests on.
     _two = [{"app_id": "zzz-unowned", "title": "A"},
             {"app_id": "zzz-unowned", "title": "B"}]
-    ck("stamp-key-falls-through-for-a-title",
+    ck("stamp-key-does-not-depend-on-the-count",
        engine.stamp_key(_two[0], "zzz-unowned", "",
-                        engine.own_app_counts(_two)) is None)
+                        engine.own_app_counts(_two))
+       == engine.stamp_key(_two[0], "zzz-unowned", "", {"zzz-unowned": 1})
+       == ("", "A", True))
     # AND THE COUNT EXCLUDES FOREIGN ROWS, which is the fact the branch above
     # depends on: counting them made the OWNER's app look non-unique and
     # flipped it off its app-id-only key.
@@ -8552,7 +8802,7 @@ def _t_learn(ck):
                 and isinstance(_n2.args[1], _ast2.Constant)
                 and _n2.args[1].value == ""
                 and _in not in ("match_keys", "stamp_key", "entry_matches",
-                                "matched_key", "is_unique",
+                                "matched_key", "is_appid_keyed",
                                 "source_per_window_slots")):
             _hand.append(f"{_in}:{_n2.lineno}")
     if _hand:
@@ -9781,25 +10031,20 @@ def _t_displays(ck):
     _dua = _doc_text([1, 1], view=dict(_rview, **{"app-id": "zzz-other"}))
     ck("doctor-calls-an-attached-stranger-unmatched",
        "unmatched" in _dua and "parked" not in _dua)
-    # AND THE PLACEMENT SECTION COMPUTES THE AMBIGUITY SET ITSELF, which is
-    # the wiring half: `_unmatched_why` has five cells for the label and NONE
-    # of them asks whether its caller works the set out. A plant replacing
-    # `amb = engine.ambiguous_titles(live)` with `()` passed them all.
-    # TWELFTH instance of that hole in this file.
+    # AND TWO LIVE VIEWS SHARING A TITLE ARE BOTH PLAIN `unmatched` NOW,
+    # which is where the placement section used to compute an ambiguity set
+    # and label them. The set went with the title keyspace: both store
+    # writers index such a pair, so there is no refusal left to report, and
+    # a report naming one would send a reader hunting a fault that is not
+    # there. The row is kept rather than deleted because the SHAPE is the
+    # one that used to be special, so this is what says it no longer is.
     _dtwo = _doc_text([1, 1], views=[
         dict(_rview, **{"app-id": "zzz-other", "title": "shared doc",
                         "id": 81}),
         dict(_rview, **{"app-id": "zzz-other", "title": "shared doc",
                         "id": 82})])
-    ck("doctor-s-placement-section-finds-the-ambiguity-itself",
-       _dtwo.count("ambiguous") == 2)
-    # ...and the control, so the row above is not a label that fires for
-    # every unmatched window: two DIFFERENT titles are plain `unmatched`.
-    _dtwd = _doc_text([1, 1], views=[
-        dict(_rview, **{"app-id": "zzz-other", "title": "one", "id": 83}),
-        dict(_rview, **{"app-id": "zzz-other", "title": "two", "id": 84})])
-    ck("doctor-s-placement-control-two-titles-are-unmatched",
-       "ambiguous" not in _dtwd and _dtwd.count("unmatched") == 2)
+    ck("doctor-two-views-sharing-a-title-are-both-unmatched",
+       "ambiguous" not in _dtwo and _dtwo.count("unmatched") == 2)
     # AND THE TWO REFUSALS ARE WORDED APART, pairwise, because an absent
     # OUTPUT and an out-of-grid CELL want different things done about them and
     # one wording for both sends a reader to the wrong one. Collapsing two
@@ -11293,7 +11538,8 @@ def selftest():
     try:
         for area in (_t_registry, _t_resolution, _t_lock,
                      _t_toplevels, _t_roster,
-                     _t_lifecycle, _t_desktop, _t_slots, _t_verify,
+                     _t_lifecycle, _t_desktop, _t_loupe, _t_slots,
+                     _t_verify,
                      _t_terminals, _t_cli_split,
                      _t_launch_source,
                      _t_relaunch, _t_chrome, _t_learn,

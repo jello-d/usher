@@ -370,7 +370,7 @@ def collision_fix(ident, source="", per_window=0):
     app-id (`kitty --app-id work-logs`): no plugin claims that app-id, so it
     is keyed by the app-id ALONE and gets its own slot, and an authored
     `work-logs.desktop` starts it again. MEASURED end to end rather than
-    reasoned: `is_unique` answers True for it, `match_keys` offers
+    reasoned: `is_appid_keyed` answers True for it, `match_keys` offers
     `work-logs NUL`, and `desktop_launch_for` returns the entry's argv with
     the field codes stripped. That is the README's SECOND TIER doing exactly
     what it is for, with no new identity shape.
@@ -632,9 +632,6 @@ def _doctor_placement(out, kb, live, outs):
     """Per live window: does it match a remembered slot, and is that slot's
     output actually attached."""
     out("== live windows -> placement ==")
-    # COMPUTED ONCE over the whole live set, because ambiguity is a property
-    # of the SET and the per-window labeller below cannot see it.
-    amb = engine.ambiguous_titles(live)
     pairs, unlive, _ = match(live, list(kb.values()))
     for lv, e in pairs:
         where = f"{e['output']} ws{tuple(e['workspace'])}"
@@ -682,7 +679,7 @@ def _doctor_placement(out, kb, live, outs):
             out(f"  placeable  {app_of(lv)[:14]:14} {e['title'][:34]:34}"
                 f" -> {where}{shows}")
     for lv in unlive:
-        tag, why = _unmatched_why(lv, outs, amb)
+        tag, why = _unmatched_why(lv, outs)
         # THE ONE REPORT LINE THAT RENDERS A LIVE VIEW'S OWN TITLE, so it is
         # the one that needs redacting: every other line here prints a kb
         # entry's key-title, which for another account is already its source
@@ -691,7 +688,7 @@ def _doctor_placement(out, kb, live, outs):
             f" {engine.log_title(lv)[:34]:34}{why}")
 
 
-def _unmatched_why(lv, outs=None, amb=()):
+def _unmatched_why(lv, outs=None):
     """(label, reason) for a live window with no slot, in the words of the
     plugin that knows.
 
@@ -709,21 +706,16 @@ def _unmatched_why(lv, outs=None, amb=()):
     # here rather than in the engine: `unjoinable` is the word this package's
     # notes quote verbatim, and renaming it to match an internal kind would
     # falsify every one of them.
+    # AND `ambiguous` IS RETIRED, which is this rule enforced against itself.
+    # It reported a window whose title another live window wore, because both
+    # store writers refused one: the TITLE was the key, so two views wearing
+    # it meant one slot and no way to say which window owned it. With the
+    # title out of the keyspace the writers INDEX them instead, a slot each,
+    # so the label named a refusal nobody makes any more. A report that
+    # describes a mechanism the code has retired is worse than one that says
+    # nothing, because it answers a question the reader then stops asking.
     r = engine.refusal_of(lv, outs)
     if r is None:
-        # A TITLE ANOTHER LIVE WINDOW WEARS IS NOT "no slot YET". Both store
-        # writers refuse such a window every pass, with a reason, for as long
-        # as both are open, where `unmatched` means nothing is remembered yet
-        # and the next capture fixes it. Two opposite facts under one word,
-        # which is the SIXTH time this report has done that and the same
-        # shape as `parked`.
-        #
-        # NOT A `refusal_of` KIND, because that asks about the WINDOW and
-        # this is a property of the window SET, so the set has to be passed
-        # in; the WORDING is shared, so the report and the two writers cannot
-        # describe it three ways.
-        if engine.is_ambiguous(lv, amb):
-            return "ambiguous", f"  ({engine.AMBIGUOUS_REFUSAL[1]})"
         return "unmatched", ""      # identified fine; no slot yet
     kind, why = r
     # FOUR STATES, FOUR LABELS, and the fourth was printing as `unmatched`: a

@@ -7,7 +7,12 @@
 # normalized view dict:
 #
 #   v["app"]     the app-id
-#   v["title"]   the current window title, which is usually too volatile to key
+#   v["title"]   the current window title. usher NEVER keys on this itself:
+#                a plugin may choose to, and that is a different thing,
+#                because a plugin is the AUTHORITY on its own app and can
+#                say when the title is NOT a handle. The loupe plugin does
+#                exactly that (the title is the picture, except when it is
+#                the app's own name, which means no picture is open).
 #   v["pid"]     the process, or -1 for a window replayed from the store
 #   v["id"]      the compositor's view id, or None when there is no live window
 #
@@ -17,13 +22,13 @@
 # a title that has to be right at the instant you look is a bootstrap and not
 # an identity.
 #
-# Registry order is chrome, mux, kitty, then user plugins; the FIRST plugin
-# whose owns() is true handles the window.
+# Registry order is chrome, mux, kitty, loupe, then user plugins; the FIRST
+# plugin whose owns() is true handles the window.
 #
 # EDITS APPLY AUTOMATICALLY: the running watcher notices this directory change
 # within a second and rebuilds the registry, exactly as it does for
 # usher/exclude and usher/include. A file that does not import is logged
-# and skipped, leaving the three built-ins, so a half-saved edit cannot take
+# and skipped, leaving the built-ins, so a half-saved edit cannot take
 # the daemon down. Watch ~/.local/state/usher/watch.log for the
 # "plugins reloaded" line.
 #
@@ -31,9 +36,12 @@
 # a plugin is only worth it when both fall short:
 #
 #   nothing           the window comes back WHERE AND HOW BIG it was already.
-#                     Any window with a title is captured, keyed and placed,
-#                     and a single-window app is keyed by its app-id ALONE, so
-#                     the slot does not follow the document.
+#                     Any window the compositor gives an app-id is captured,
+#                     keyed and placed, and SEVERAL windows of one app each
+#                     get a slot: the app-id is the key and an index assigns
+#                     one per window. What you do not get is a promise about
+#                     WHICH window lands in which slot, since nothing but a
+#                     plugin can say which one is which.
 #   a desktop entry   also gets the app STARTED for you at login, out of the
 #                     freedesktop registry. One file in
 #                     ~/.local/share/applications, no Python, and it benefits

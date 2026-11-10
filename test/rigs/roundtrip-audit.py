@@ -14,10 +14,10 @@ deadlock no reboot escapes, and it cost this fleet two terminals for three
 days.
 
     1  IDENTIFIABLE   resolution() answers Ready, with a key
-    2  IN THE DB      some key match_keys offers has an entry
+    2  IN THE DB      some key slot_keys offers has an entry
     3  PLACEABLE      that entry's output is attached AND its cell is on
-                      this desk's grid, AND no other live window is holding
-                      the same key (the slot ledger places ONE)
+                      this desk's grid, AND the store holds a slot for EVERY
+                      live window of that identity, not just the first
     4  WOULD START    some mechanism would make the window EXIST at a login
 
 THE LOGIN CONDITION IS SIMULATED FOR (4), with NOTHING live, which is the
@@ -149,9 +149,10 @@ def starts(w):
 
 
 # ---- the per-window table -------------------------------------------------
-# WHICH LIVE WINDOWS HOLD EACH KEY, because the slot ledger gives a shared
-# slot to exactly ONE and leaves the rest where they open. A window counted
-# as "placed" when three others share its key is the report lying.
+# WHICH LIVE WINDOWS RESOLVE TO EACH BASE KEY, so the table can ask whether
+# the store holds a slot EACH. The ledger gives one slot to one window and
+# leaves any shortfall where it opened, so a window counted as "placed" when
+# more windows than slots share its identity is the report lying.
 held = {}
 for w in rows:
     k = E.matched_key(kb, w.get("app_id") or "", w.get("key") or "",
@@ -160,7 +161,7 @@ for w in rows:
 
 print("\n%-3s %-22s %-7s %-34s %-5s %-9s %s"
       % ("#", "app_id", "source", "key", "db", "place", "start"))
-tally = {"full": 0, "no-start": 0, "no-slot": 0, "shared": 0,
+tally = {"full": 0, "no-start": 0, "no-slot": 0, "short": 0,
          "unidentified": 0, "unplaceable": 0}
 rowsout = []
 for i, w in enumerate(sorted(rows, key=lambda x: (x.get("app_id") or "",
@@ -170,9 +171,13 @@ for i, w in enumerate(sorted(rows, key=lambda x: (x.get("app_id") or "",
     key = w.get("key") or ""
     # (1) identifiable
     ident = "yes" if r.is_ready else (r.state or "?")
-    # (2) in the db: the first offered key that EXISTS, not matched_key's
-    #     fallback, which answers a key whether or not anything is stored.
-    ks = E.match_keys(app, key, src)
+    # (2) in the db: THROUGH `slot_keys`, which is the product's own answer
+    #     and enumerates the INDEXED SIBLINGS from the store. `match_keys`
+    #     gives only the BASE keys, so N windows of one identity all read as
+    #     one slot and the rig reported `1 of 4` over a store holding four.
+    #     The rig lagging the keyspace is the shape this file names: a hand
+    #     probe that disagrees with a shipped definition is worse than none.
+    ks = E.slot_keys(kb, app, key, src) or list(E.match_keys(app, key, src))
     dbk = next((k for k in ks if kb.get(k)), None)
     # (3) placeable
     place = "-"
@@ -184,8 +189,14 @@ for i, w in enumerate(sorted(rows, key=lambda x: (x.get("app_id") or "",
         elif not E.cell_fits(e, {o["name"]: o}):
             place = "OFF GRID"
         else:
-            n = len(held.get(dbk, []))
-            place = "yes" if n <= 1 else "1 of %d" % n
+            # ONE SLOT PER WINDOW: the family is as usable as it has
+            # slots, so the question is how many the STORE holds against
+            # how many live windows resolve to it, not whether the base key
+            # is shared. A shortfall is what the ledger leaves in place.
+            n = len(held.get(E.matched_key(kb, app, key, src), []))
+            n_slot = sum(1 for k in ks if kb.get(k))
+            place = ("yes" if n_slot >= n
+                     else "%d of %d" % (n_slot, n))
     # (4) would start
     how, why = starts(w)
     rowsout.append((i, app, src, key, ident, dbk, place, how, why,
@@ -198,8 +209,8 @@ for i, w in enumerate(sorted(rows, key=lambda x: (x.get("app_id") or "",
         tally["unplaceable"] += 1
     elif how is None:
         tally["no-start"] += 1
-    elif place.startswith("1 of"):
-        tally["shared"] += 1
+    elif " of " in place:
+        tally["short"] += 1
     else:
         tally["full"] += 1
     print("%-3d %-22s %-7s %-34s %-5s %-9s %s"
@@ -207,7 +218,7 @@ for i, w in enumerate(sorted(rows, key=lambda x: (x.get("app_id") or "",
              ident[:5], place, how or "NOTHING"))
 
 print("\nthe verdict, per window:")
-for k in ("full", "shared", "no-slot", "no-start", "unplaceable",
+for k in ("full", "short", "no-slot", "no-start", "unplaceable",
           "unidentified"):
     print("  %-13s %d" % (k, tally[k]))
 print("  total         %d" % len(rows))
