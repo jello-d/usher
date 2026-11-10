@@ -5448,6 +5448,48 @@ def _t_roster(ck):
         ck("roster-three-states-are-pairwise-distinct",
            len({"", engine.load_roster(os.path.join(d, "none.json"))[1],
                 engine.load_roster(bad)[1]}) == 3)
+        # THE AGE, which `when` is stamped for and which NOTHING read until
+        # it was asked who reads each field a record type writes. A resume's
+        # shortfall has two explanations (the apps are genuinely up, or the
+        # roster predates them because the logoff capture refused) and only
+        # the age tells them apart.
+        #
+        # FIVE CELLS BECAUSE FOUR INPUTS MUST ANSWER NONE, each of them a
+        # shape a real file takes: a roster written before the field, a
+        # `when` that is not a number, a BOOL (which is an int in Python, so
+        # `True` would date a roster to 1970), and a FUTURE instant, which a
+        # clock step produces and which the tray's reader guards for the same
+        # reason. The FRESH cell is the control: without it all four pass
+        # over a reader that answers None unconditionally.
+        # GUARDED, because a regression that stops TYPE-TESTING `when` makes
+        # this RAISE rather than answer badly, and an unguarded call aborts
+        # the area instead of naming the cell. This file's own rule, and a
+        # plant is what showed me breaking it again.
+        def _rage(p, now):
+            try:
+                return engine.roster_age(p, now=now)
+            except Exception:                                  # noqa: BLE001
+                return "RAISED"
+
+        _rt = 1_000_000.0
+        _rp = os.path.join(d, "age.json")
+        engine.save_roster(["slack"], when=_rt, path=_rp)
+        ck("roster-age-is-read-from-when",
+           _rage(_rp, _rt + 7200) == 7200)
+        for _nm, _blob in (
+                ("no-when", '{"version": %d, "apps": ["x"]}'),
+                ("a-non-numeric-when",
+                 '{"version": %d, "when": "soon", "apps": ["x"]}'),
+                ("a-bool-when",
+                 '{"version": %d, "when": true, "apps": ["x"]}')):
+            _bp = os.path.join(d, f"age-{_nm}.json")
+            open(_bp, "w").write(_blob % engine.ROSTER_VERSION)
+            ck(f"roster-age-concludes-nothing-from-{_nm}",
+               _rage(_bp, _rt) is None)
+        ck("roster-age-concludes-nothing-from-a-future-when",
+           _rage(_rp, _rt - 60) is None)
+        ck("roster-age-of-an-unreadable-roster-is-none",
+           _rage(bad, _rt) is None)
         shape = os.path.join(d, "shape.json")
         open(shape, "w").write('{"version": 1, "apps": "slack"}')
         ck("roster-app-list-must-be-a-list",
@@ -6138,9 +6180,48 @@ def _t_roster(ck):
             ck("resume-drops-a-relayed-pid-that-is-not-this-accounts",
                _rl_kw and [v.get("pid")
                            for v in (_rl_kw[-1].get("seen") or [])] == [-1])
+            # NOT `endswith`, which is what this asserted until the AGE was
+            # appended: the suffix is deliberate, so the anchor is that the
+            # missing app is NAMED and that the count agrees, which is the
+            # claim. An app that is already up must not appear, or the line
+            # would read as a cold start.
             ck("resume-names-only-what-is-missing",
-               out.rstrip().endswith(": google-chrome")
-               and "1 missing app(s)" in out)
+               ": google-chrome" in out and "1 missing app(s)" in out
+               and "slack" not in out)
+            # AND IT SAYS HOW OLD THE ROSTER IS, which is the one fact that
+            # interprets a shortfall: the apps are genuinely up, or the
+            # roster predates them because the logoff capture refused. This
+            # fixture's roster went through `save_roster`, so it carries a
+            # `when` and the clause must be there.
+            ck("resume-reports-the-roster-s-age", "captured " in out
+               and " ago)" in out)
+            # AND IT IS SILENT WHEN IT CANNOT SAY, which is the control: a
+            # clause that always appears passes the cell above whatever
+            # `roster_age` answers, and a resume claiming an age over a
+            # roster with no readable `when` is the kind of invented fact
+            # this report has had to retire five times. The file is REWRITTEN
+            # without the field, which is the shape a roster from before it
+            # existed really has.
+            _rp2 = engine.roster_path()
+            _blob2 = json.loads(open(_rp2).read())
+            _blob2.pop("when", None)
+            engine.write_json(_rp2, json.dumps(_blob2))
+            _rl_kw.clear()
+            try:
+                engine.roster_launch = \
+                    lambda apps, live, spawn=None, **kw: (
+                        _rl_kw.append(kw) or 1)
+                # GUARDED: a `roster_age` that stops type-testing `when`
+                # RAISES on exactly this file, so an unguarded call here
+                # aborts the area rather than naming the cell.
+                try:
+                    _out_na = _capture_out(engine.do_source_resume)
+                except Exception as _e:                        # noqa: BLE001
+                    _out_na = f"RAISED {_e}"
+            finally:
+                engine.roster_launch = real_launch
+            ck("resume-says-nothing-about-an-age-it-cannot-read",
+               "captured " not in _out_na and "missing app(s)" in _out_na)
 
             # AND THE LAUNCHER ITSELF, with no plugin able to claim the app
             # and the spawn injected, so nothing real can start. An app-id no
@@ -11181,6 +11262,33 @@ def _t_contracts(ck):
     # long as it has existed, which is this file's published-and-never-read
     # shape for the sixth time.
     ck("every-status-field-written-is-read", _written <= _read)
+
+    # --- AND THE SAME CONTRACT OVER THE ROSTER BLOB ---
+    # THE SEVENTH PUBLISHED-AND-NEVER-READ FIELD WAS IN IT: `when` has been
+    # stamped since `save_roster` existed and nothing read it, so a reader of
+    # `asked for 1 of 3 missing app(s)` could not tell a roster written a
+    # minute ago from one six days old, which is the only thing that
+    # explains a shortfall.
+    #
+    # ASKED AS A CLASS rather than met as an eighth instance, which is what
+    # the status check above already does for the one record type that had a
+    # second party. A roster has no second party (it is written and read by
+    # the one account), so the direction that bites here is the LITTER one.
+    _ebody = inspect.getsource(engine)
+    _rsave = _ebody.split("def save_roster", 1)[1].split("\n\ndef ", 1)[0]
+    # THE BLOB'S OWN KEYS, which is the `blob = {...}` literal plus any
+    # `blob["x"] =` added conditionally: `windows` arrives that way, so a
+    # scrape of the literal alone would call it unwritten.
+    _rwritten = set(re.findall(r'["\'](\w+)["\']\s*:', _rsave.split(
+        "blob = {", 1)[1].split("}", 1)[0]))
+    _rwritten |= set(re.findall(r'blob\[["\'](\w+)["\']\]\s*=', _rsave))
+    # THE READERS are every `blob.get("<name>")` in the engine, which is
+    # where all four of this record's readers live.
+    _rread = set(re.findall(r"""blob\.get\(["'](\w+)["']""", _ebody))
+    ck("roster-writer-scrape-is-not-vacuous", len(_rwritten) >= 3)
+    ck("roster-reader-scrape-is-not-vacuous", len(_rread) >= 3)
+    ck("every-roster-field-read-is-written", _rread <= _rwritten)
+    ck("every-roster-field-written-is-read", _rwritten <= _rread)
 
     ck("exit-codes-are-distinct", len(_declared) == 3)
     ck("exit-codes-are-0-1-2", set(_declared) == {0, 1, 2})

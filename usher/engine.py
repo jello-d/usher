@@ -2844,6 +2844,20 @@ def free_slot(kb, held, app, ident, src, vid, live):
 
 
 
+def human_age(seconds):
+    """A duration for a human, in the unit it is actually in. PURE.
+
+    THE UNITS ARE THE POINT, measured rather than chosen: the dormancy line
+    printed `0.0 day(s)` for a 310-second gap, which cannot express anything
+    under 72 minutes, so a reader could not tell five minutes from three
+    hours. One definition, because a second copy of a wording is how the two
+    come to disagree, and this is now wanted by the dormancy line and by a
+    roster's age."""
+    return (f"{seconds / 86400:.1f} day(s)" if seconds >= 86400
+            else f"{seconds / 3600:.1f} hour(s)" if seconds >= 3600
+            else f"{seconds / 60:.0f} minute(s)")
+
+
 def forgive_dormancy(kb, now, floor=DORMANT_FLOOR):
     """A desk's memory must not AGE while the desk is ASLEEP. Shift every
     entry forward by the gap since this store was last written, and return
@@ -3365,11 +3379,8 @@ def load_knowledge(profile=None):
     # where nothing was within the TTL's reach.
     _saved = dormancy_rescued(kb, _now, _gap) if _gap else 0
     if _saved:
-        _away = (f"{_gap / 86400:.1f} day(s)" if _gap >= 86400
-                 else f"{_gap / 3600:.1f} hour(s)" if _gap >= 3600
-                 else f"{_gap / 60:.0f} minute(s)")
-        logline(f"store {profile}: away {_away}, so {_saved} entr(ies) are "
-                "not aged out for it")
+        logline(f"store {profile}: away {human_age(_gap)}, so {_saved} "
+                "entr(ies) are not aged out for it")
     return kb
 
 
@@ -5737,6 +5748,46 @@ def load_roster(path=None):
     return sorted({a for a in apps if isinstance(a, str) and a}), ""
 
 
+def roster_age(path=None, now=None):
+    """How long ago this account was captured, in seconds, or None.
+
+    THE SEVENTH PUBLISHED-AND-NEVER-READ FIELD. `save_roster` has stamped
+    `when` since the roster existed and nothing read it, which is the shape
+    these notes count after the milestones, `wid`, the SNSS window id, the
+    URL rules, five snapshot fields and `recording`.
+
+    AND ITS AGE IS THE ONE FACT THAT INTERPRETS A RESUME. The roster is all
+    that stands between a REFUSED logoff capture and a restored desk, and
+    this fleet has had that state: three `source-trigger capture ... refused`
+    lines, the roster surviving from an earlier capture, and the login
+    correctly restoring from it. Reading `asked for 1 of 3 missing app(s)` a
+    reader cannot tell a roster written a minute ago from one written six
+    days ago, and only the second explains a shortfall.
+
+    IT DISCLOSES NOTHING NEW ACROSS THE BOUNDARY, which is what makes it
+    free to relay: the owner's own daemon is what TRIGGERS every capture, so
+    it already knows when the last one happened. The roster itself never
+    crosses at all, living in this account's own 0700 state.
+
+    NONE RATHER THAN A GUESS for a roster with no `when` (one written before
+    the field, or by hand), a `when` that is not a number, and a FUTURE
+    instant, which a clock step produces and which `read_status` guards for
+    the same reason. A bool is an int in Python, so it is excluded by name
+    or `True` dates a roster to 1970.
+
+    IT REPORTS AND DOES NOT DECIDE. No threshold has been measured, and a
+    verb that refused a stale roster would cost the desk to prevent a window
+    somebody then reopens."""
+    blob, why = read_roster(path)
+    if why:
+        return None
+    w = blob.get("when")
+    if isinstance(w, bool) or not isinstance(w, (int, float)):
+        return None
+    age = (time.time() if now is None else now) - float(w)
+    return age if age >= 0 else None
+
+
 def roster_windows(path=None):
     """The per-window rows, each `{"app_id", "key", "cmd"}`. [] when the roster
     has none, which is every roster written before this existed.
@@ -6172,9 +6223,16 @@ def do_source_resume():
     if why:
         print(f"usher: {why}", file=sys.stderr)
         return EXIT_CANNOT
+    # THE AGE, on every line that crosses to the owner's log. A resume's
+    # shortfall has two explanations and only this one tells them apart: the
+    # apps really are up, or the roster predates them because the logoff
+    # capture refused. See roster_age; a roster with no readable `when` says
+    # nothing rather than guessing.
+    _ra = roster_age()
+    _as = "" if _ra is None else f" (captured {human_age(_ra)} ago)"
     if not apps:
         print(f"usher: this account's roster is empty, so there is nothing "
-              "to start")
+              f"to start{_as}")
         return EXIT_OK
     # LIVENESS IS REQUIRED, NOT OPTIONAL. Without it we cannot tell a cold
     # start from a second trigger, and starting a second copy of everything is
@@ -6199,15 +6257,18 @@ def do_source_resume():
         rows, {k: p for k, p in _pids.items() if own_pid(p)})]
     want = roster_plan(apps, live)
     if not want and not wins:
-        print(f"usher: all {len(apps)} remembered app(s) are already running")
+        print(f"usher: all {len(apps)} remembered app(s) are already "
+              f"running{_as}")
         return EXIT_OK
     n = roster_launch(apps, live, windows=wins, seen=seen)
     if not want and not n:
-        print(f"usher: all {len(apps)} remembered app(s) are already running")
+        print(f"usher: all {len(apps)} remembered app(s) are already "
+              f"running{_as}")
         return EXIT_OK
     print(f"usher: asked for {n} of {len(want)} missing app(s)"
           + ((": " + " ".join(want)) if want else "")
-          + (f", from {len(wins)} remembered window(s)" if wins else ""))
+          + (f", from {len(wins)} remembered window(s)" if wins else "")
+          + _as)
     return EXIT_OK if n else EXIT_FAIL
 
 
