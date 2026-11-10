@@ -546,6 +546,7 @@ def _doctor_relaunch(out, snap, live):
     # window of that app whatever its title, which is the worse case of the
     # two and was not reported at all.
     live_dupes = Counter()
+    _byfam = {}
     for lv in live:
         _a = app_of(lv)
         if not _a:
@@ -556,10 +557,36 @@ def _doctor_relaunch(out, snap, live):
         # asking which keys a window may match, and the reason match_keys
         # exists.
         _src = engine.source_of(lv)
+        # THE FAMILY, which `matched_key` already answers: it only ever
+        # returns a key `match_keys` OFFERS, and those are never indexed, so
+        # it is the family key by construction. A `slot_base` around it was
+        # dead code and a plant said so, which is this package's signal for
+        # exactly that.
         _k = engine.matched_key(kb, _a, identity(lv), _src)
         live_dupes[_k] += 1
+        _byfam[_k] = (_a, identity(lv), _src)
     for key, n in live_dupes.items():
-        if n < 2:
+        _fa, _fi, _fs = _byfam[key]
+        # IT IS A COLLISION ONLY IF THERE ARE FEWER SLOTS THAN WINDOWS, which
+        # is the fix rather than the refinement: once an identity can hold a
+        # slot PER WINDOW, "N windows share this key" stopped meaning any
+        # window loses its place. Measured LIVE on manifold the hour the
+        # keyspace change deployed, with four slots stored and all four
+        # windows placed:
+        #
+        #   COLLISION kitty (titan)  4 live windows share this key; 1 gets
+        #   the remembered place, 3 stay where they opened
+        #
+        # Every clause of that was false, and the remedy it named was no
+        # longer the thing to do. FIFTH time this report has named a fault
+        # that was not happening.
+        #
+        # AND ZERO SLOTS IS NOT A COLLISION EITHER, which the old `n < 2`
+        # also got wrong: with nothing stored NO window gets a remembered
+        # place, so there is nothing to contend for, and after one capture
+        # there will be a slot each.
+        _slots = len(engine.slot_keys(kb, _fa, _fi, _fs))
+        if not _slots or n <= _slots:
             continue
         _app, _ident = key.split("\0", 1)
         _csrc = (kb.get(key) or {}).get("source", "")
@@ -582,9 +609,14 @@ def _doctor_relaunch(out, snap, live):
                 f" share this key IN THIS REPORT"
                 f" ({collision_fix(_ident, _csrc, _pw)})")
             continue
-        out(f"  COLLISION  {_shown[:40]:40}  {n} live windows share this"
-            f" key; 1 gets the remembered place, {n - 1} stay where they"
-            f" opened ({collision_fix(_ident, _csrc)})")
+        # THE SLOT COUNT IS IN THE LINE, because with a slot per window the
+        # interesting fact is the SHORTFALL rather than the sharing: "4
+        # windows, 1 slot" says what to expect where "4 share this key" no
+        # longer does. Phrased so no count ever needs a plural.
+        out(f"  COLLISION  {_shown[:40]:40}  {n} live windows and {_slots}"
+            f" remembered slot(s), so {_slots} get a remembered place and"
+            f" {n - _slots} stay where they opened"
+            f" ({collision_fix(_ident, _csrc)})")
 
 
 def _doctor_placement(out, kb, live, outs):

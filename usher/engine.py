@@ -650,7 +650,18 @@ def entry_matches(e, app, ident, source=""):
 def other_profile_entries(app, ident, profile=None, source=""):
     """This identity's learned entries from every OTHER display profile,
     newest first. Reads the stores directly, since the point is the desks that
-    are not attached."""
+    are not attached.
+
+    IT SEES ONLY SLOT 0 OF AN INDEXED FAMILY, and that is RECORDED RATHER
+    THAN FIXED because it changes nothing observable. The only consumer is
+    `surface_seed`, which uses the entry to learn WHICH SURFACE the window
+    belongs to and derives the rect from the surface map, so four windows
+    asking for a seed would all be handed the same surface and the same rect
+    whether this returned one entry or four; the slot ledger then places one
+    and leaves three, exactly as it does today. Distributing seeds among
+    windows is a ledger-aware SEED, which is a feature nobody has asked for
+    and not what this function is missing. Noted so the limit is not
+    rediscovered as a defect."""
     profile = profile or profile_id()
     keys = match_keys(app, ident, source, ident_first=True)
     found = []
@@ -2590,6 +2601,27 @@ def slot_keys(kb, app, ident, source=""):
     return out
 
 
+def ambiguous_titles(windows):
+    """The `(app_id, title)` pairs that TWO OR MORE of these windows wear.
+    PURE.
+
+    A TITLE TWO LIVE VIEWS WEAR IS NOT A WINDOW DISCRIMINATOR, which is the
+    degroup rule, and both store writers have to refuse one. ONE DEFINITION,
+    because they did not: `learn` computed this inline and refused, while
+    `upsert` wrote a title key anyway, so the two writers disagreed about
+    this shape and the table that exists to catch exactly that had no row
+    for it. Found by adding one.
+
+    WHAT upsert's ENTRY COSTS, which is why this is a defect and not untidy:
+    two windows wear the title, one entry is stored, and at the next login
+    whichever of them the matcher reaches first takes it. That is a window
+    placed on another window's remembered rect, which is the class this
+    package has bled over, and `window_slot`'s stickiness then keeps it."""
+    tc = Counter((w.get("app_id") or "", w.get("title") or "")
+                 for w in windows if w.get("title"))
+    return {k for k, c in tc.items() if c >= 2}
+
+
 def slot_order(windows):
     """The windows in a STABLE per-window order, for assigning slot keys.
 
@@ -2982,28 +3014,37 @@ def rekey_chrome(kb):
                 prev.setdefault(w, urls)     # the newest previous file wins
     if not cur or not prev:
         return 0
+    # A LIST PER OLD ID, not one key, and through `slot_base`: several entries
+    # can share one identity now (see next_slot_key). Keyed on the id alone, a
+    # family collapsed to whichever member was seen last and the rest stayed
+    # under the dead id, which is an entry nothing can match. `is_chrome_slot`
+    # refuses an indexed key outright, so the old scan SKIPPED the siblings
+    # rather than choking on them: measured 1 of 3, no raise. LATENT, since a
+    # SessionID is per window and so a chrome family cannot arise today, but
+    # the shape is wrong and the failure is silent.
     stale = {}
     for k in kb:
-        key = k.split("\x00", 1)[-1]
+        key = slot_base(k).split("\x00", 1)[-1]
         if is_chrome_slot(key) and int(key.rsplit(":", 1)[1]) not in cur:
-            stale[int(key.rsplit(":", 1)[1])] = k
+            stale.setdefault(int(key.rsplit(":", 1)[1]), []).append(k)
     if not stale:
         return 0
     bound = chrome_bind_windows(
         cur, {w: u for w, u in prev.items() if w in stale})
     moved = 0
     for old, new in bound.items():
-        app = stale[old].split("\x00", 1)[0]
-        newkey = kkey(app, chrome_slot(new))
-        if newkey in kb:
-            continue
-        e = kb.pop(stale[old])
-        # "title" in a kb entry is the KEY-title, i.e. identity(), which is the
-        # trap
-        # this file keeps falling into. It has to move with the key.
-        e["title"] = chrome_slot(new)
-        kb[newkey] = e
-        moved += 1
+        for _k in stale[old]:
+            app = slot_base(_k).split("\x00", 1)[0]
+            # AND THE INDEX IS CARRIED, so the family lands as a family.
+            newkey = kkey(app, chrome_slot(new)) + _k[len(slot_base(_k)):]
+            if newkey in kb:
+                continue
+            e = kb.pop(_k)
+            # "title" in a kb entry is the KEY-title, i.e. identity(), which
+            # is the trap this file keeps falling into. It moves with the key.
+            e["title"] = chrome_slot(new)
+            kb[newkey] = e
+            moved += 1
     return moved
 
 
@@ -3348,6 +3389,9 @@ def upsert(kb, windows, when, outputs=None, refused=None):
     the other declines is two sites with a different idea of what may be
     keyed, and `upsert-and-learn-agree` pins the agreement as a table."""
     counts = own_app_counts(windows)
+    # THE SAME AMBIGUITY RULE `learn` APPLIES, which this writer did not: see
+    # ambiguous_titles. A title two of these rows wear is refused by both now.
+    amb = ambiguous_titles(windows)
     # ONE SLOT PER WINDOW, so N sharing an identity get N entries rather than
     # overwriting each other. BY VIEW ID, which is the only per-window handle
     # stable for a window's life: any other order (the compositor's view list
@@ -3384,12 +3428,46 @@ def upsert(kb, windows, when, outputs=None, refused=None):
             _k = next_slot_key(app, _i, used)
             used.add(_k)
             kb[_k] = kb_entry(w, _kt, _only, when)
-        elif w["title"]:
+        elif w["title"] and (app, w["title"]) not in amb:
             # THE TITLE FALLBACK IS THIS WRITER'S OWN: one row, one title,
             # where learn() has a view id owning every title it has worn.
-            _k = next_slot_key(app, w["title"], used)
-            used.add(_k)
-            kb[_k] = kb_entry(w, w["title"], False, when)
+            #
+            # AND IT IS NOT INDEXED, which is the one place `next_slot_key`
+            # must not be used. A TITLE TWO WINDOWS WEAR IS NOT A
+            # DISCRIMINATOR, which is the degroup rule, so there is nothing
+            # to give a second slot TO: indexing it mints a key for a window
+            # that cannot be told from the other.
+            #
+            # MEASURED, because the first cut did index it: two windows of an
+            # unowned app sharing a title had `upsert` write TWO entries while
+            # `learn` wrote NONE, so the two writers diverged, which is the
+            # exact fault `stamp_key` and `upsert-and-learn-agree` exist to
+            # prevent. And the damage outlived the divergence: one `learn`
+            # pass over that store pops the base key by the degroup rule and
+            # leaves the SIBLING, an entry nothing can ever match and which
+            # the orphan detector cannot see, because `slot_base` makes it
+            # look like an ordinary title key.
+            #
+            # AND IT IS UNREACHABLE NOW RATHER THAN MERELY WRONG, which a
+            # plant established: the `amb` skip above means this line is only
+            # ever reached for a title ONE window wears, so an index would
+            # always be 0 and re-introducing `next_slot_key` here changes
+            # nothing. The two are not independent guards, so only the skip
+            # is worth a check and it has three. Said out loud because a
+            # reader removing the skip would reopen this.
+            kb[kkey(app, w["title"])] = kb_entry(w, w["title"], False, when)
+        elif w["title"]:
+            # AND SAY SO, because a refusal in silence is this package's most
+            # repeated failure. Not a `refusal_of` kind: that asks about the
+            # WINDOW, and this is a property of the window SET, so it is
+            # reported here with its own reason. Not logged by the daemon
+            # either, for `pending`'s reason: it is transient (close one of
+            # them and the other is keyable again) and two `New Tab` windows
+            # would put a line in watch.log for nothing. `doctor`'s COLLISION
+            # line is the user-facing half.
+            _refuse(refused, w, ("ambiguous",
+                                 "another live window wears this title too,"
+                                 " so it cannot tell them apart"))
     prune_kb(kb, when)
 
 
@@ -3423,7 +3501,8 @@ def _learn_fold(groups, windows, ambiguous):
                 g["titles"].add(w["title"])
 
 
-def _learn_stamp(kb, groups, windows, counts, when, hold=(), refused=None):
+def _learn_stamp(kb, groups, windows, counts, when, hold=(), refused=None,
+                 amb=()):
     """Write each live view's placement under the right key. `hold` is the set
     of view ids whose CURRENT position must not be believed yet: see the
     watcher's _held: a window the placer has not got to is sitting where its
@@ -3485,14 +3564,27 @@ def _learn_stamp(kb, groups, windows, counts, when, hold=(), refused=None):
             _k = next_slot_key(app, _i, used)
             used.add(_k)
             kb[_k] = kb_entry(w, _kt, _only, when)
-        elif vid is not None and vid in groups:
+        else:
             # THE TITLE GROUP IS NOT INDEXED, and that is not an oversight: a
             # group is every title ONE view has worn, so its keys are already
             # per-window. Two views sharing a title are dropped from both
             # groups by the degroup rule before this runs, because a title on
             # two windows at once is not a discriminator.
-            for t in groups[vid]["titles"]:
+            _wrote = 0
+            for t in (groups.get(vid) or {}).get("titles", ()):
                 kb[kkey(app, t)] = kb_entry(w, t, False, when)
+                _wrote += 1
+            # AND IF NOTHING WAS WRITTEN AND THE TITLE IS AMBIGUOUS, SAY SO,
+            # symmetric with `upsert`: both writers refuse a title another
+            # live window wears, and both must report it or a user asking the
+            # daemon why a window is not remembered gets silence. Scoped to
+            # "nothing was written", because a window whose group still holds
+            # other titles IS remembered and is not refused at all.
+            if not _wrote and (app, w.get("title") or "") in amb:
+                _refuse(refused, w,
+                        ("ambiguous",
+                         "another live window wears this title too, so it"
+                         " cannot tell them apart"))
 
 
 def _learn_purge_terminals(kb, windows, seen):
@@ -3653,8 +3745,7 @@ def learn(kb, groups, windows, when, hold=(), seen=None, outputs=None,
     stay keyed by app_id alone; kitty is forced to per-title keys; Chrome keys
     by its active-tab URL identity (see identity(), stamped below)."""
     counts = own_app_counts(windows)
-    tcount = Counter((w["app_id"], w["title"]) for w in windows if w["title"])
-    ambiguous = {k for k, c in tcount.items() if c >= 2}
+    ambiguous = ambiguous_titles(windows)
     live = {w["id"] for w in windows if w.get("id") is not None}
     # A WINDOW ON AN OUTPUT NOBODY HAS JOINS THE HOLD, which is the right
     # mechanism rather than a second one: `hold` deliberately does not reach
@@ -3678,7 +3769,8 @@ def learn(kb, groups, windows, when, hold=(), seen=None, outputs=None,
     hold = set(hold) | parked
     _learn_degroup(kb, groups, ambiguous, live)
     _learn_fold(groups, windows, ambiguous)
-    _learn_stamp(kb, groups, windows, counts, when, hold, refused)
+    _learn_stamp(kb, groups, windows, counts, when, hold, refused,
+                 ambiguous)
     # `hold` deliberately does NOT reach the degroup or the terminal purge:
     # those ask "is this window still HERE", which a held window plainly is.
     # Hiding it from them would drop the very entry we are protecting.
@@ -4921,13 +5013,21 @@ def rekey_source(kb, src, binding):
         return 0
     moved = 0
     for k in list(kb):
-        app, _, ident = k.partition("\x00")
+        # THROUGH `slot_base`, AND THE INDEX IS CARRIED ONTO THE NEW KEY, so a
+        # FAMILY MOVES AS A FAMILY. Without it `binding.get` is handed
+        # `<digest> NUL 2` and answers nothing, so slot 0 moved and the
+        # siblings were left under the OLD digest: an entry nothing can match,
+        # which `unmatchable_entries` cannot see either (slot_base makes it
+        # read as an ordinary per-window key). Measured 1 of 4 moved over a
+        # planted family. LATENT today, because a digest is of a chrome
+        # SessionID and so is per window, but the shape is wrong and silent.
+        app, _, ident = slot_base(k).partition("\x00")
         if not ident.startswith(src + ":"):
             continue
         new = binding.get(ident[len(src) + 1:])
         if not new:
             continue
-        newkey = kkey(app, f"{src}:{new}")
+        newkey = kkey(app, f"{src}:{new}") + k[len(slot_base(k)):]
         if newkey in kb:
             continue
         e = kb.pop(k)

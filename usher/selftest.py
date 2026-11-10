@@ -1124,6 +1124,78 @@ def _t_resolution(ck):
     ck("doctor-reserves-the-blind-tag-for-a-source-alone-key",
        "_pw and _ident == _csrc" in _dsrc)
 
+    # AND IT IS A COLLISION ONLY ON A SHORTFALL, driven rather than scraped:
+    # every check above this is a SOURCE SCAN, which a MENTION satisfies, and
+    # the fault was in the condition rather than in the words. Measured LIVE
+    # on manifold the hour the keyspace change deployed, with four slots
+    # stored and all four windows placed:
+    #
+    #   COLLISION kitty (titan)  4 live windows share this key; 1 gets the
+    #   remembered place, 3 stay where they opened
+    #
+    # Every clause false, and the remedy it named no longer the thing to do.
+    # FIFTH time this report has named a fault that was not happening.
+    from . import doctor as _dcol
+
+    # FOUR IDENTIFIERS, ONE DIGEST, which is the real shape and not a
+    # convenience: four shells in one directory resolve to ONE identity
+    # inside that account, so it reports a distinct per-window identifier for
+    # each and the SAME digest for all of them. The first version of this
+    # fixture put `key` on the view, which `resolution` ignores for a foreign
+    # window (the per-window part comes from the PUBLISHED MAP), so all four
+    # resolved to the source ALONE, the kb matched nothing, and the check
+    # failed for its own reason.
+    _CD = engine.identity_digest("kitty:/home/jello-titan")
+
+    def _coll(nwin, nslot):
+        """The collision lines for `nwin` windows and `nslot` stored slots."""
+        _ID = "titan:" + _CD
+        _kbc = {engine.slot_key("kitty", _ID, n):
+                {"app_id": "kitty", "title": _ID, "appid_only": False,
+                 "source": "titan", "output": "DP-1", "workspace": [0.0, 0.0],
+                 "pos": [float(n), 0.0], "size": [8.0, 6.0],
+                 "last_seen": time.time()} for n in range(nslot)}
+        # A VALID IDENTIFIER SHAPE, 32 hex: `is_toplevel_identifier`
+        # refuses anything else, so a made-up `ident0` reads as NO
+        # identifier and the window resolves to the source alone. The
+        # fixture has to look like what the compositor reports.
+        _lv = [dict(_trv("kitty", "", pid=-1, vid=40 + i,
+                         tlid="%032x" % (0xA0 + i)),
+                    **{"source": "titan", "owner": 997,
+                       "output-name": "DP-1"}) for i in range(nwin)]
+        _rl2, _rk2 = _dcol.load_knowledge, engine.desktop_entries
+        _got = []
+        try:
+            engine.set_source_windows(
+                "titan", {"%032x" % (0xA0 + i): _CD for i in range(nwin)})
+            _dcol.load_knowledge = lambda *_a, **_k: _kbc
+            engine.desktop_entries = lambda *_a, **_k: {}
+            _dcol._doctor_relaunch(_got.append, {"windows": []}, _lv)
+        finally:
+            _dcol.load_knowledge, engine.desktop_entries = _rl2, _rk2
+            engine._SOURCE_WINDOWS.clear()
+            engine._SOURCE_SLOT.clear()
+        return [r for r in _got if "COLLISION" in r or "NOT RESOLVED" in r]
+    # THE PRECONDITION, so none of the rows below can pass vacuously: the
+    # fixture must really produce ONE shared per-window identity.
+    ck("collision-fixture-really-shares-a-per-window-identity",
+       len(_coll(4, 4)) == 0 and len(_coll(4, 1)) == 1)
+
+    ck("doctor-is-silent-when-every-window-has-a-slot",
+       _coll(4, 4) == [])
+    # ...and the control, or the row above is a line that never fires.
+    _short = _coll(4, 1)
+    ck("doctor-reports-a-real-shortfall", len(_short) == 1)
+    ck("doctor-names-both-counts-in-the-shortfall",
+       "4 live windows" in _short[0] and "1 remembered slot" in _short[0])
+    ck("doctor-says-how-many-stay-put",
+       "3 stay where they opened" in _short[0])
+    # AND ZERO SLOTS IS NOT A COLLISION EITHER, which the old `n < 2` also
+    # got wrong: with nothing stored NO window gets a remembered place, so
+    # there is nothing to contend for, and one capture gives each a slot.
+    ck("doctor-is-silent-when-nothing-is-stored-at-all",
+       _coll(4, 0) == [])
+
     # A CHROME ENTRY KEYED BY A RAW TITLE is litter nothing can match, and
     # until this nothing named it: three sat on manifold, found by a content
     # sweep of the dry run rather than by any check.
@@ -2666,6 +2738,32 @@ def _t_resolution(ck):
        == _sk("kitty", _FI, 2))
     ck("free-slot-nothing-stored-is-no-slot",
        _fs({}, {}, "kitty", _FI, "titan", 9, {9}) == (None, None))
+    # A FAMILY MOVES AS A FAMILY. Both re-keys REWRITE store keys, and both
+    # reached them by an exact lookup: `rekey_source` handed `binding.get` a
+    # `<digest> NUL 2` and got nothing, and `rekey_chrome`'s `is_chrome_slot`
+    # refuses an indexed key outright. Measured 1 of 4 and 1 of 3 moved, the
+    # rest left under the DEAD identity, which `unmatchable_entries` cannot
+    # see either because `slot_base` makes them read as ordinary per-window
+    # keys. LATENT (a digest is of a per-window SessionID, so a family cannot
+    # arise there today) and silent, which is the pair worth closing.
+    _rkf = {_sk("kitty", _FI, n): {"app_id": "kitty", "title": _FI,
+                                   "appid_only": False, "source": "titan",
+                                   "pos": [float(n), 0.0]} for n in range(4)}
+    _nmov = engine.rekey_source(_rkf, "titan", {"abc": "zzz"})
+    ck("rekey-source-moves-the-whole-family", _nmov == 4)
+    ck("rekey-source-leaves-nothing-under-the-old-identity",
+       not [k for k in _rkf if _FI in k])
+    # AND THE INDICES AND THE GEOMETRY SURVIVE, or the family lands as four
+    # entries that no longer describe four windows.
+    ck("rekey-source-keeps-the-indices-and-the-rects",
+       sorted(engine.slot_keys(_rkf, "kitty", "titan:zzz", "titan"))
+       == sorted(_sk("kitty", "titan:zzz", n) for n in range(4))
+       and sorted(_rkf[k]["pos"][0] for k in _rkf) == [0.0, 1.0, 2.0, 3.0])
+    # NAMED APART from the single-entry check of the same property above: a
+    # duplicate name makes a FAIL line ambiguous about which input broke it,
+    # which is why the suite counts duplicates at all.
+    ck("rekey-source-moves-every-key-title-in-the-family",
+       {_rkf[k]["title"] for k in _rkf} == {"titan:zzz"})
     _own_e = {"app_id": "slack", "title": "", "appid_only": True}
     # CARRIES `source` AS A FIELD, which is what the matcher asks: inferring
     # it from `title == source` was loose, and the field is also what stops
@@ -7686,6 +7784,27 @@ def _t_chrome(ck):
         ck("chrome-rekey-moves-the-key-title",
            _kb[kkey("google-chrome", "chrome:win:91")]["title"]
            == "chrome:win:91")
+        # AND A FAMILY MOVES AS A FAMILY. `is_chrome_slot` refuses an INDEXED
+        # key, so the stale scan skipped the siblings rather than choking on
+        # them (measured 1 of 3, no raise) and they stayed under the dead
+        # SessionID: entries nothing can ever match, which the orphan
+        # detector cannot see either because `slot_base` makes them read as
+        # ordinary per-window keys. LATENT, since a SessionID is per window,
+        # so this is the shape rather than a live fault; the symmetry with
+        # `rekey_source` is the point, because half a fix is how this tree's
+        # laws come undone.
+        _kbf = {engine.slot_key("google-chrome", "chrome:win:7", n):
+                {"title": "chrome:win:7", "pos": [n, n]} for n in range(3)}
+        with _tsession(_newf, _oldf):
+            _nf = rekey_chrome(_kbf)
+        ck("chrome-rekey-moves-an-indexed-family", _nf == 3)
+        ck("chrome-rekey-keeps-the-family-indices-and-rects",
+           sorted(engine.slot_keys(_kbf, "google-chrome", "chrome:win:91"))
+           == sorted(engine.slot_key("google-chrome", "chrome:win:91", n)
+                     for n in range(3))
+           and sorted(_kbf[k]["pos"][0] for k in _kbf) == [0, 1, 2])
+        ck("chrome-rekey-leaves-nothing-under-the-dead-id",
+           not [k for k in _kbf if "chrome:win:7" in k])
         ck("chrome-rekey-leaves-others",
            kkey("kitty", "kitty:/tmp") in _kb and len(_kb) == 3)
 
@@ -8146,6 +8265,18 @@ def _t_learn(ck):
           _uw("slack", "", 22, source="titan", owner=997,
               key="titan:aabbccdd")],
          _OUT),
+        # TWO WINDOWS OF AN UNOWNED APP SHARING A TITLE, which is the row
+        # that caught the keyspace change's own regression: `upsert` indexed
+        # its TITLE fallback and `learn` does not (the degroup rule drops a
+        # title two live views wear), so upsert wrote TWO and learn wrote
+        # NONE. And the damage outlived the divergence, because one `learn`
+        # pass over upsert's store pops the base key and leaves the SIBLING,
+        # an entry nothing can ever match and which the orphan detector
+        # cannot see. Both writers must refuse it.
+        ("unowned, two windows, ONE title",
+         [_uw("zzz-unowned", "same title", 31),
+          _uw("zzz-unowned", "same title", 32)],
+         _OUT),
         # PARKED BETWEEN AN UNDOCK AND A REDOCK: upsert wrote a slot naming
         # an output nobody has, which nothing can ever place.
         ("parked on a lost output", [_uw("zzz-unowned", "T", output="DP-9")],
@@ -8172,7 +8303,7 @@ def _t_learn(ck):
     # shapes must be learned and four refused, by both.
     ck("upsert-and-learn-agree-is-not-vacuous",
        sum(1 for _, u, _l in _rows if u) == 6
-       and sum(1 for _, u, _l in _rows if not u) == 4)
+       and sum(1 for _, u, _l in _rows if not u) == 5)
     # AND THE SHARED-IDENTITY ROW REALLY WROTE TWO KEYS, or the row above is
     # satisfied by two writers that both wrote one and the agreement says
     # nothing about the indexing.
@@ -8193,7 +8324,7 @@ def _t_learn(ck):
     # gates drifting into.
     for _n, _nw, _ru, _rl in _said:
         _u_quiet = [r for r in _ru if r[3] not in ("never", "pending",
-                                                   "parked")]
+                                                   "parked", "ambiguous")]
         if _u_quiet or [r[3] for r in _ru] != [r[3] for r in _rl]:
             print("  %s: upsert said %s vs learn said %s"
                   % (_n, [r[3] for r in _ru], [r[3] for r in _rl]),
