@@ -3211,9 +3211,26 @@ def _migrate_store(kb, frm):
         for k in [k for k in kb
                   if _migrate_wholesale(k.split("\x00", 1)[0])]:
             del kb[k]
+    # THROUGH `slot_base` FOR THE IDENTITY HALF, which is the difference
+    # between dropping a title key and dropping an indexed SIBLING of a
+    # working slot. `is_chrome_slot` answers False for
+    # `chrome:win:<id> NUL 2`, so the raw split read every sibling of a
+    # chrome family as title-keyed spam and deleted it.
+    #
+    # REACHABLE AT THE NEXT SCHEMA BUMP rather than today: no store at a
+    # stamp below 7 can hold an indexed key, since the index postdates that
+    # schema by six weeks, but a store AT 7 is full of them and this runs
+    # over it the moment KB_SCHEMA moves again. Third instance of one shape,
+    # after both re-keys in `57cd71a`, which is why the rule below is a
+    # check rather than a third fix.
+    #
+    # THE APP HALF NEEDS NOTHING, and that asymmetry is the whole rule: an
+    # index is appended, so `split(NUL, 1)[0]` is the app whatever follows,
+    # and only `[1]` carries the index with it.
     for k in [k for k in kb
               if is_chrome(k.split("\x00", 1)[0])
-              and not is_chrome_slot(k.split("\x00", 1)[1])]:
+              and not is_chrome_slot(
+                  slot_base(k).split("\x00", 1)[1])]:
         del kb[k]
     return before - len(kb)
 
@@ -3950,7 +3967,10 @@ def forget_apply(kb, selectors, profile=None):
     logline(f"forget: backed the store up to {_bk}")
     for k in gone:
         del kb[k]
-        app, _, ident = k.partition("\x00")
+        # `slot_base` so an indexed sibling logs its IDENTITY rather than
+        # `ident NUL 2`, which would put a raw control character into the
+        # one record this package reads back to settle what happened.
+        app, _, ident = slot_base(k).partition("\x00")
         logline(f"forget: dropped {app} | {ident or '(by app-id)'}")
     save_knowledge(kb, profile)
     return gone
@@ -7347,7 +7367,27 @@ def _verify_find(row, live_by_pair, live_by_label):
 
 
 def _verify_deltas(w, row, tol):
-    """Which of a row's three expectations this window misses. PURE."""
+    """Which of a row's four expectations this window misses. PURE.
+
+    THE OUTPUT IS ONE OF THEM, and it was not: `expect_output` was written
+    into every prediction row and read by NOTHING, so `verify` could not see
+    a window that came back ON THE WRONG MONITOR.
+
+    `place_of` returns the position WITHIN its workspace, so `pos` is
+    output-relative: the same cell and the same offset on a different panel
+    is a numerically IDENTICAL row, and the output name is the only thing
+    that separates them. Measured: a row expecting DP-2 against a live
+    window at the same ws/pos/size on eDP-1 answered `ok` with no deltas.
+
+    LATENT ONLY WHILE A BOX HAS ONE OUTPUT, which is both of this fleet's
+    today and neither of them historically (one has six profile stores). It
+    is the DOCK case outright: a window returning to the right cell on the
+    laptop panel instead of the external is exactly what the per-panel slot
+    work exists to prevent, and the one non-circular check could not say so.
+
+    NOT TOLERANCED, because a name is not a measurement: `tol` exists for a
+    client that rounds a size to whole cells, and there is no near-miss
+    version of being on another monitor."""
     bad = []
     for field, exp in (("workspace", row["expect_workspace"]),
                        ("pos", row["expect_pos"]),
@@ -7357,6 +7397,13 @@ def _verify_deltas(w, row, tol):
             continue
         if any(abs(float(a) - float(b)) > tol for a, b in zip(got, exp)):
             bad.append(f"{field} {got} != {exp}")
+    # AND EITHER SIDE DECLINING TO SAY CONCLUDES NOTHING, the same rule the
+    # three numeric fields follow: `expect_output` is None when the entry's
+    # panel resolves to no attached output, and a live row carries no
+    # `output` at all if the snapshot predates the field.
+    _eo, _go = row.get("expect_output"), w.get("output")
+    if _eo is not None and _go is not None and _eo != _go:
+        bad.append(f"output {_go} != {_eo}")
     return bad
 
 
@@ -7922,7 +7969,11 @@ def do_forget(selectors, apply=False):
         print(f"nothing matches {' '.join(selectors)} in {len(kb)} entries")
         return EXIT_OK
     for k in hits:
-        app, _, ident = k.partition("\x00")
+        # THE PREVIEW SHOWS THE IDENTITY, not the identity plus an index: the
+        # index is an ASSIGNMENT nobody has seen, so a row naming it reads as
+        # a key the user wrote. Each member of a family still prints its own
+        # row, which is what says how many are going.
+        app, _, ident = slot_base(k).partition("\x00")
         e = kb[k]
         print(f"  {app[:20]:20} | {(ident or '(by app-id)')[:40]:40}"
               f" ws{[int(x) for x in e['workspace']]}")

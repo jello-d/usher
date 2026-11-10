@@ -440,6 +440,50 @@ def _t_registry(ck):
            {"workspace": [1, 0], "pos": [80, 10], "size": [100, 100]},
            _vexp, 2)] == ["pos"])
 
+    # AND THE OUTPUT IS THE FOURTH EXPECTATION, which it was not:
+    # `expect_output` was written into every prediction row and read by
+    # NOTHING, so a window that came back ON THE WRONG MONITOR verified as
+    # `ok`. `place_of` returns the position WITHIN its workspace, so `pos` is
+    # output-relative and the same cell at the same offset on another panel
+    # is a numerically IDENTICAL row: the name is the only discriminator.
+    #
+    # FOUND BY A DERIVED SWEEP of every field each record type writes against
+    # every site that reads one, which is the published-and-never-read family
+    # (six instances in these notes) asked as a CLASS rather than met as a
+    # seventh instance.
+    _vout = dict(_vexp, expect_output="DP-2")
+    _vsame = {"workspace": [1, 0], "pos": [10, 10], "size": [100, 100]}
+    ck("verify-the-right-monitor-is-ok",
+       _verify_deltas(dict(_vsame, output="DP-2"), _vout, 2) == [])
+    ck("verify-the-wrong-monitor-is-wrong",
+       [b.split()[0] for b in _verify_deltas(
+           dict(_vsame, output="eDP-1"), _vout, 2)] == ["output"])
+    # ...and it is REPORTED rather than merely counted, because `ok` on a
+    # window that is on the wrong screen is the expensive direction in the
+    # one check that exists to break the store-agrees-with-itself circle.
+    # READ WITHOUT AN INDEX, because a regression here empties the list and
+    # `[0]` then RAISES, which aborts a 200-check area instead of naming
+    # this cell. A guarded read beats a raise, and a plant is what said so.
+    _vmiss = " ".join(_verify_deltas(dict(_vsame, output="eDP-1"), _vout, 2))
+    ck("verify-the-wrong-monitor-names-both-sides",
+       "eDP-1" in _vmiss and "DP-2" in _vmiss)
+    # AND EITHER SIDE DECLINING TO SAY CONCLUDES NOTHING, the same rule the
+    # three numeric fields follow. Both arms, because a one-sided guard reads
+    # as correct until the other shape arrives: `expect_output` is None when
+    # the entry's panel resolves to no attached output, and a live row from
+    # an older snapshot carries no `output` at all.
+    ck("verify-no-expected-output-concludes-nothing",
+       _verify_deltas(dict(_vsame, output="eDP-1"),
+                      dict(_vexp, expect_output=None), 2) == [])
+    ck("verify-no-live-output-concludes-nothing",
+       _verify_deltas(_vsame, _vout, 2) == [])
+    # AND A NAME IS NOT TOLERANCED, which is what `tol` is for: a client that
+    # rounds a size to whole cells has a near-miss, and there is no near-miss
+    # version of being on another monitor. A huge tolerance must not excuse
+    # it.
+    ck("verify-the-wrong-monitor-is-not-toleranced",
+       _verify_deltas(dict(_vsame, output="eDP-1"), _vout, 10_000) != [])
+
     # A ROW A SHARED KEY LEFT BEHIND IS NOT A FAULT: one slot, N windows, and
     # the slot ledger leaves the rest where they opened. So the row is
     # satisfied if ANY of them is at the remembered place, and requiring ALL
@@ -6855,6 +6899,111 @@ def _t_cli_split(ck):
     ck("json-readers-were-found", len(_loads) >= 3)
     ck("every-json-reader-establishes-its-shape",
        all(ok for _mod, _fn, ok in _loads))
+
+    # --- TAKING THE IDENTITY HALF OF A STORE KEY GOES THROUGH slot_base ---
+    # THE THIRD INSTANCE IS WHAT MADE THIS A CHECK rather than a third fix.
+    # A store key is `app NUL identity`, and ONE SLOT PER WINDOW appends
+    # `NUL <n>` to it, so:
+    #
+    #     split(NUL, 1)[0]   the APP, index-safe: an index is appended, so
+    #                        whatever follows the first NUL, the head is the
+    #                        app and nothing else.
+    #     split(NUL, 1)[1]   the IDENTITY, and it CARRIES THE INDEX. For
+    #                        `chrome:win:9 NUL 2` every exact test fails:
+    #                        measured, `is_chrome_slot` answers False, and
+    #                        `source_ident` reads the index as part of a
+    #                        digest.
+    #
+    # So the rule is decidable and narrow, which is what lets it be a check
+    # at all: a blanket "every key split goes through slot_base" would cry
+    # wolf on the nine sites that legitimately want the app. The three
+    # instances were `rekey_source`, `rekey_chrome` (both `57cd71a`, which
+    # measured 1 of 4 and 1 of 3 members moved) and `_migrate_store`'s
+    # chrome rule, which would have deleted every indexed sibling of a
+    # working chrome slot at the next schema bump.
+    # TWO SPELLINGS REACH THE IDENTITY HALF, and the first cut of this
+    # scrape saw only one: `x.split(NUL, 1)[1]` is a SUBSCRIPT, where
+    # `a, _, i = x.partition(NUL)` is a tuple ASSIGN and matches no
+    # subscript at all. Both forms are live in this package and the narrow
+    # version reported a clean tree over two real sites. A DERIVED LIST IS
+    # ONLY AS WIDE AS ITS PATTERN, which these notes record costing a false
+    # green once already.
+    #
+    # ONE MATCHER, CALLED BY BOTH THE SWEEP AND ITS PROBE. The first guard
+    # here REIMPLEMENTED the predicate, so narrowing the real one back to
+    # subscripts passed it: a check that re-encodes what it guards is a
+    # check on itself, and a plant is what said so.
+    def _idbare(n):
+        """Does `n` read a key's identity half WITHOUT going through
+        slot_base?  The WHOLE predicate, so the probe below exercises the
+        slot_base test as well as the shape match: with that test alone
+        made always-false the sweep reported a clean tree, and a matcher
+        probe could not see it."""
+        c = _idcall(n)
+        return (c is not None
+                and "slot_base" not in ast.unparse(c.func.value))
+
+    def _idcall(n):
+        """The call whose identity half `n` reads, or None."""
+        c = None
+        if (isinstance(n, ast.Subscript)
+                and isinstance(n.slice, ast.Constant)
+                and n.slice.value == 1
+                and isinstance(n.value, ast.Call)):
+            c = n.value
+        elif (isinstance(n, ast.Assign)
+                and isinstance(n.value, ast.Call)
+                and len(n.targets) == 1
+                and isinstance(n.targets[0], ast.Tuple)
+                and len(n.targets[0].elts) == 3):
+            c = n.value
+        if (c is not None
+                and isinstance(c.func, ast.Attribute)
+                and c.func.attr in ("split", "partition")
+                and c.args
+                and isinstance(c.args[0], ast.Constant)
+                and c.args[0].value == "\x00"):
+            return c
+        return None
+
+    _idhalf = []
+    for _m in (engine, _doc, _w, cli, _ch):
+        _msrc = inspect.getsource(_m)
+        for _fn in ast.walk(ast.parse(_msrc)):
+            if not isinstance(_fn, ast.FunctionDef):
+                continue
+            for _n in ast.walk(_fn):
+                # ...and the thing split must go through slot_base. Reading
+                # the SPLIT TARGET is what makes this exact rather than a
+                # guess about the enclosing function.
+                if _idbare(_n):
+                    _idhalf.append(f"{_m.__name__}.{_fn.name}:{_n.lineno}")
+    # AND THE PREDICATE IS PROVEN the only way it can be: by asking IT about
+    # PLANTED code, since a clean tree has nothing for it to find and
+    # `all([])` is True. THREE ROWS, because each half fails separately:
+    # both spellings must be SEEN (a matcher narrowed to one leaves the
+    # other's real sites unreported, which is the false green this scrape
+    # already shipped once), and the slot_base test must still BITE.
+    _probe = ast.parse('def _f(k):\n'
+                       '    a, _, i = k.partition("\\x00")\n'
+                       '    b, _, j = slot_base(k).partition("\\x00")\n'
+                       '    return k.split("\\x00", 1)[1]\n')
+    _hits = {type(_n).__name__ for _n in ast.walk(_probe) if _idbare(_n)}
+    ck("the-identity-half-scrape-sees-both-spellings",
+       _hits == {"Subscript", "Assign"})
+    ck("the-identity-half-scrape-clears-a-slot-base-call",
+       sum(1 for _n in ast.walk(_probe) if _idcall(_n) is not None) == 3
+       and sum(1 for _n in ast.walk(_probe) if _idbare(_n)) == 2)
+    ck("every-identity-half-of-a-key-goes-through-slot-base",
+       not _idhalf)
+    # AND THE PARTITION FORM IS THE SAME FAULT, pinned so a reader does not
+    # read the rule as being about `split` alone: the two are one shape and
+    # the scrape above tests both.
+    ck("slot-base-is-what-makes-the-identity-half-index-safe",
+       engine.slot_base(engine.slot_key("a", "chrome:win:9", 2)
+                        ).split("\x00", 1)[1] == "chrome:win:9"
+       and engine.slot_key("a", "chrome:win:9", 2
+                           ).split("\x00", 1)[1] != "chrome:win:9")
 
     # --- EVERY STATEMENT IN A DAEMON THREAD'S LOOP IS GUARDED ------------
     # A thread whose target raises exits THAT THREAD alone. The process
