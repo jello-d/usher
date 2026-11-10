@@ -854,10 +854,17 @@ class Watcher:
         # that app: a work Slack would be placed onto the owner's Slack slot
         # and the owner's onto the work one. match_keys is the one definition.
         _src = engine.window_origin(v.get("pid"))[0]
+        # ONE SLOT PER WINDOW, so this asks for a FREE one rather than for
+        # the identity's only one. N windows sharing an identity now have N
+        # entries (see next_slot_key), and `free_slot` is the one definition
+        # that picks among them: the base keys in `match_keys` order, then
+        # the indexed siblings, skipping any a LIVE window already holds.
+        # Resolved once here and reused for the ledger below, or the entry
+        # placed and the slot recorded could be two different slots.
+        _live = self._live_ids()
         with self.lock:
-            e = next((self.kb[k] for k in
-                      engine.match_keys(app, identity(v), _src or "")
-                      if k in self.kb), None)
+            skey, e = engine.free_slot(self.kb, self.slot_held, app,
+                                       identity(v), _src or "", vid, _live)
         # CAPTURED BEFORE _recognise, which is what records the identification:
         # read it afterwards and this is always False.
         first_look = e is not None and vid not in self.identified
@@ -919,13 +926,19 @@ class Watcher:
         # which is the same answer place-vs-settled already gives a window
         # opened mid-session, and it refuses to invent geometry rather than
         # guessing an offset. Stacking is never what anyone wanted.
-        # THE LEDGER KEY IS THE ONE THAT MATCHED, by the same rule: a
-        # foreign window must not take (or be refused by) the owner's
-        # app_id-only slot.
-        skey = engine.matched_key(self.kb, app, identity(v), _src or "")
+        # THE LEDGER KEY IS THE ONE `free_slot` CHOSE, which is also the one
+        # the entry above came from: picking it again here is what let the
+        # two drift, and with several slots per identity they would be
+        # different keys rather than the same one twice.
+        if skey is None:
+            # A SEED has no slot key of its own: the entry came from another
+            # desk's store, so there is nothing in THIS store to hold. The
+            # identity's own key is the right ledger entry, since that is
+            # what the next capture will write it under.
+            skey = engine.matched_key(self.kb, app, identity(v), _src or "")
         with self.lock:
             holder = self.slot_held.get(skey)
-        own = live_holder(holder, vid, self._live_ids())
+        own = live_holder(holder, vid, _live)
         if own == "held":
             # ONCE PER WINDOW, NOT PER EVENT. This runs from every map and
             # every rename, and a browser renames constantly, so logging it
@@ -1592,8 +1605,22 @@ class Watcher:
             vid = w.get("id")
             if vid is None or vid in held:
                 continue
-            k = engine.matched_key(self.kb, w.get("app_id") or "",
-                                   w.get("key") or "", w.get("source") or "")
+            # THROUGH `free_slot`, THE SAME DEFINITION THE PLACER USES, and
+            # it has to be: with a slot per window this asked `matched_key`,
+            # which answers the IDENTITY's key for all N of them, so the
+            # ledger showed one holder and the other N-1 were held out of the
+            # capture. That would suppress the learning of exactly the
+            # windows the extra slots exist to serve.
+            #
+            # SO THE QUESTION IS "IS EVERY SLOT TAKEN", not "is the identity's
+            # slot taken". A window with a free one is going to be placed into
+            # it and its position is then worth learning; one with none owns
+            # nothing, so there is nowhere its position could honestly go.
+            k, _e = engine.free_slot(self.kb, ledger, w.get("app_id") or "",
+                                     w.get("key") or "",
+                                     w.get("source") or "", vid, live)
+            if k is None:
+                continue          # no slot at all: nothing to be refused by
             h = ledger.get(k)
             if h is not None and h != vid and h in live:
                 held.add(vid)

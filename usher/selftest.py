@@ -2568,6 +2568,104 @@ def _t_resolution(ck):
     ck("match-keys-ident-first-is-preserved",
        engine.match_keys("slack", "ident", ident_first=True)
        == (engine.kkey("slack", "ident"), engine.kkey("slack", "")))
+
+    # --- ONE SLOT PER WINDOW ------------------------------------------------
+    # N windows sharing an identity need N entries, and the store is a dict,
+    # so the second write overwrote the first and N-1 windows had nowhere to
+    # go. The matcher was always capable (`match` is consume-once and
+    # `entry_matches` reads the entry's `title`, not the key), so the whole
+    # gap was the KEYSPACE.
+    _sk = engine.slot_key
+    # n=0 IS TODAY'S KEY, which is what makes this additive: no existing
+    # entry moves and nothing migrates.
+    ck("slot-key-zero-is-the-key-it-has-today",
+       _sk("kitty", "kitty:/x", 0) == engine.kkey("kitty", "kitty:/x")
+       and _sk("kitty", "kitty:/x") == engine.kkey("kitty", "kitty:/x"))
+    ck("slot-key-n-appends-an-indexed-field",
+       _sk("kitty", "kitty:/x", 2)
+       == engine.kkey("kitty", "kitty:/x") + "\x002")
+    # A SECOND NUL IS THE ONLY SEPARATOR THAT CANNOT COLLIDE. `#` or `:` can
+    # appear in a window TITLE, and a title-keyed window landing on another
+    # window's indexed slot is the place-it-on-somebody-else's-rect class
+    # this package has bled over.
+    ck("slot-key-separator-cannot-come-from-a-title",
+       "\x00" not in "a title with # and : in it")
+    ck("slot-base-strips-an-index",
+       engine.slot_base(_sk("kitty", "kitty:/x", 3))
+       == engine.kkey("kitty", "kitty:/x"))
+    ck("slot-base-leaves-an-unindexed-key-alone",
+       engine.slot_base(engine.kkey("kitty", "kitty:/x"))
+       == engine.kkey("kitty", "kitty:/x"))
+    # AND IT MUST NOT EAT THE APP SEPARATOR, which is the one way this could
+    # answer the app_id-only key (matching EVERY window of that app): a
+    # window titled `42` has a key whose tail is all digits.
+    ck("slot-base-does-not-eat-the-app-separator",
+       engine.slot_base(engine.kkey("zzz", "42")) == engine.kkey("zzz", "42"))
+    # STABLE ORDER OR THE ENTRIES RESHUFFLE EVERY CAPTURE. By VIEW ID, the
+    # only per-window handle stable for a window's life; the compositor's
+    # view list order is not promised.
+    _so = [w["id"] for w in engine.slot_order(
+        [{"id": 7}, {"id": 2}, {"id": None}, {"id": 4}])]
+    ck("slot-order-is-by-view-id", _so[:3] == [2, 4, 7])
+    ck("slot-order-puts-an-idless-row-last", _so[-1] is None)
+    # THE IDENTITY FOR THESE IS THIS SOURCE'S, i.e. `titan:...`, or
+    # `source_ident` refuses it and `match_keys` offers only the source-alone
+    # key. The first version of this fixture used a bare `i` and so tested the
+    # REFUSING path, which is how it found that `slot_keys` offered the
+    # siblings of a key the foreign gate had already declined.
+    _FI = "titan:abc"
+    ck("next-slot-key-takes-the-first-unused",
+       engine.next_slot_key("kitty", _FI, set()) == _sk("kitty", _FI, 0)
+       and engine.next_slot_key("kitty", _FI, {_sk("kitty", _FI, 0)})
+       == _sk("kitty", _FI, 1))
+    # THE CANDIDATES ARE ENUMERATED FROM THE STORE, never generated, so this
+    # cannot invent a key nothing wrote.
+    _fam = {_sk("kitty", _FI, n): {"app_id": "kitty", "title": _FI,
+                                   "appid_only": False, "source": "titan"}
+            for n in (0, 1, 2)}
+    ck("slot-keys-offers-the-family-in-order",
+       engine.slot_keys(_fam, "kitty", _FI, "titan")
+       == [_sk("kitty", _FI, 0), _sk("kitty", _FI, 1), _sk("kitty", _FI, 2)])
+    ck("slot-keys-invents-nothing",
+       engine.slot_keys({}, "kitty", _FI, "titan") == [])
+    # AND A SIBLING OF A KEY THE FOREIGN GATE REFUSED IS NOT OFFERED, which
+    # is the gate-scoped-to-one-category shape: the first cut added the
+    # siblings of `kkey(app, ident)` unconditionally, so a foreign window
+    # whose identity is not its source's was offered the indexed siblings of
+    # it even though `match_keys` declines the base. Found by a fixture using
+    # a bare identity, then not caught until this cell existed.
+    _bad = "not-titans"
+    _badfam = {_sk("kitty", _bad, n): {"app_id": "kitty", "title": _bad,
+                                       "appid_only": False,
+                                       "source": "titan"} for n in (0, 1, 2)}
+    ck("slot-keys-refuses-the-siblings-of-a-refused-key",
+       engine.slot_keys(_badfam, "kitty", _bad, "titan") == []
+       and not engine.source_ident("titan", _bad))
+    # NUMERIC ORDER, not lexical: 10 must not sort between 1 and 2.
+    _f10 = dict(_fam, **{_sk("kitty", _FI, 10):
+                         dict(_fam[_sk("kitty", _FI, 0)])})
+    ck("slot-keys-sorts-the-family-numerically",
+       engine.slot_keys(_f10, "kitty", _FI, "titan")[-1]
+       == _sk("kitty", _FI, 10))
+    # free_slot: the placer's pick, PURE so every cell is checkable with no
+    # compositor and no ledger.
+    _fs = engine.free_slot
+    ck("free-slot-takes-a-free-one",
+       _fs(_fam, {_sk("kitty", _FI, 0): 1}, "kitty", _FI, "titan", 9,
+           {1, 9})[0] == _sk("kitty", _FI, 1))
+    # A SLOT THIS WINDOW ALREADY HOLDS WINS, or a re-place shuffles
+    # interchangeable windows among their own rects.
+    ck("free-slot-prefers-the-one-we-already-hold",
+       _fs(_fam, {_sk("kitty", _FI, 0): 1, _sk("kitty", _FI, 2): 9},
+           "kitty", _FI, "titan", 9, {1, 9})[0] == _sk("kitty", _FI, 2))
+    # ALL TAKEN NAMES THE LAST, so the caller's own live_holder answers
+    # "held" against a real key and the refusal is reported, not silent.
+    _all = {_sk("kitty", _FI, n): n + 1 for n in (0, 1, 2)}
+    ck("free-slot-all-held-names-a-real-key",
+       _fs(_fam, _all, "kitty", _FI, "titan", 9, {1, 2, 3, 9})[0]
+       == _sk("kitty", _FI, 2))
+    ck("free-slot-nothing-stored-is-no-slot",
+       _fs({}, {}, "kitty", _FI, "titan", 9, {9}) == (None, None))
     _own_e = {"app_id": "slack", "title": "", "appid_only": True}
     # CARRIES `source` AS A FIELD, which is what the matcher asks: inferring
     # it from `title == source` was loose, and the field is also what stops
@@ -3397,6 +3495,59 @@ def _t_slots(ck):
         ck("slot-ledger-records-the-holder",
            w.slot_held.get(kkey("signal", "")) == 1)
 
+        # ...AND WITH A SLOT PER WINDOW, ALL OF THEM ARE PLACED. The wiring
+        # check: `free_slot` has a dozen cells of its own and NONE of them
+        # asks whether the placer calls it. Driven through the real
+        # `_try_place` with four entries under one identity, which is the
+        # shape four shells in one directory produce.
+        #
+        # A PER-WINDOW IDENTITY, not the app_id-only key above: that one
+        # means "every window of this app" and is deliberately never indexed,
+        # since `is_unique` gives it up the moment a second window exists.
+        _SI, _SA = "shared ident", "zzz-unowned"
+        w.place_sock.live = {11, 12, 13, 14}
+        with w.lock:
+            w.slot_held.clear()
+        for _n in range(4):
+            w.kb[engine.slot_key(_SA, _SI, _n)] = {
+                "app_id": _SA, "title": _SI, "appid_only": False,
+                "label": "x", "output": "DP-1", "workspace": [1.0, 1.0],
+                "pos": [float(_n), 1.0], "size": [10.0, 10.0],
+                "last_seen": now, "sticky": False, "inverted": False,
+                "fullscreen": False}
+        seated[:] = []
+        for _v in (11, 12, 13, 14):
+            w.deadline[_v] = now + PLACE_GRACE
+            w.identified.add(_v)
+            w._try_place({"id": _v, "app-id": _SA, "title": _SI, "pid": -1,
+                          "parent": -1,
+                          "geometry": {"x": 0, "y": 0, "width": 1,
+                                       "height": 1}})
+        ck("slot-four-slots-place-all-four-windows",
+           sorted(seated) == [11, 12, 13, 14])
+        ck("slot-each-window-holds-a-distinct-key",
+           len({k for k, v in w.slot_held.items() if v in
+                {11, 12, 13, 14}}) == 4)
+        # AND THE CONTROL, which is the whole before/after in one place: with
+        # only ONE entry for that identity the other three are still left
+        # where they opened, so the rows above measure the SLOTS and not a
+        # placer that seats everything.
+        for _n in range(1, 4):
+            del w.kb[engine.slot_key(_SA, _SI, _n)]
+        with w.lock:
+            w.slot_held.clear()
+        seated[:] = []
+        for _v in (11, 12, 13, 14):
+            w.placed.discard(_v)
+            w._try_place({"id": _v, "app-id": _SA, "title": _SI, "pid": -1,
+                          "parent": -1,
+                          "geometry": {"x": 0, "y": 0, "width": 1,
+                                       "height": 1}})
+        ck("slot-control-one-entry-still-places-exactly-one",
+           len(seated) == 1)
+        del w.kb[engine.slot_key(_SA, _SI, 0)]
+        w.place_sock.live = {1, 2, 3}
+
         # STEP 2: A WINDOW FROM ANOTHER ACCOUNT IS PLACED FROM ITS OWN
         # SLOT, AND NEVER FROM THE OWNER'S. Both slots exist here on purpose:
         # `signal\0` is the owner's app_id-only key and matches every window
@@ -3898,13 +4049,133 @@ def _t_slots(ck):
         ck("gate-the-slot-did-not-take-the-cascade",
            (_kb4.get(_SK) or {}).get("workspace") == [0.0, 1.0])
         # AND THE CONTROL, or both of those pass over a learn that wrote
-        # nothing at all: with no holder the pass DOES reach the store, and
-        # with the measured cascade values.
+        # nothing at all: with no holder the pass DOES reach the store.
+        #
+        # IT USED TO ASSERT THE CASCADE VALUE IN THE HOLDER'S KEY, which was
+        # the OVERWRITE: window 2 reached that key only by replacing window
+        # 1's entry, because the store is a dict and there was one slot for
+        # two windows. Fifth check in this file to have pinned the behaviour
+        # a fix then changed. What the control is FOR is that the pass is not
+        # inert, and ONE SLOT PER WINDOW says it better: both windows reach
+        # the store, each under its own key, each with its OWN geometry.
         _kb5 = {_SK: dict(_base)}
         g.slot_held.clear()
         engine.learn(_kb5, {}, _wins, _t.time(), hold=g._held(_wins))
-        ck("gate-control-a-learn-with-no-holder-does-write",
-           (_kb5.get(_SK) or {}).get("pos") == [172.0, 150.0])
+        _fam = sorted(k for k in _kb5 if engine.slot_base(k) == _SK)
+        ck("gate-control-a-learn-with-no-holder-does-write", len(_fam) == 2)
+        ck("gate-control-each-window-keeps-its-own-geometry",
+           sorted((_kb5[k]["pos"][0], _kb5[k]["workspace"][0])
+                  for k in _fam) == [(128.0, 0.0), (172.0, 2.0)])
+        # AND THE FIRST WINDOW KEEPS TODAY'S KEY, which is what makes the
+        # whole change additive: no existing entry moves and nothing
+        # migrates. Sorted by VIEW ID, so vid 1 is the one holding it.
+        ck("gate-control-the-first-window-keeps-the-unindexed-key",
+           _kb5[_SK]["pos"] == [128.0, 155.0])
+
+        # --- ONE SLOT PER WINDOW, END TO END ---------------------------
+        # The whole chain on the shape that prompted it: four shells of
+        # another account in one directory, which resolve to ONE identity
+        # because there is no per-window handle behind the uid wall. They had
+        # one slot between them, so one was placed and three sat at the
+        # cascade. The matcher was always capable; the keyspace was not.
+        _FOUR = [_fw(4, [0.0, 0.0], [10.0, 10.0]),
+                 _fw(2, [1.0, 0.0], [20.0, 20.0]),
+                 _fw(7, [2.0, 0.0], [30.0, 30.0]),
+                 _fw(5, [0.0, 1.0], [40.0, 40.0])]
+        _kb6 = {}
+        engine.learn(_kb6, {}, _FOUR, _t.time())
+        _f6 = sorted(k for k in _kb6 if engine.slot_base(k) == _SK)
+        ck("four-same-identity-windows-get-four-slots", len(_f6) == 4)
+        # THE RECTS ARE A BIJECTION, which is the property that makes the
+        # layout a FIXED POINT: however the labels permute, the SET of
+        # remembered rects is the set of live ones, so cycling logins cannot
+        # drift it. Asserting four KEYS alone would pass over four entries
+        # that all held the same geometry.
+        ck("each-of-the-four-keeps-its-own-rect",
+           sorted(tuple(_kb6[k]["pos"]) for k in _f6)
+           == sorted(tuple(w["pos"]) for w in _FOUR))
+        # AND A SECOND PASS IS IDEMPOTENT, or the entries reshuffle on every
+        # capture: the writer sorts by VIEW ID for exactly this.
+        _kb7 = {k: dict(v) for k, v in _kb6.items()}
+        engine.learn(_kb7, {}, _FOUR, _t.time())
+        ck("a-second-pass-assigns-the-same-slots",
+           all(_kb7[k]["pos"] == _kb6[k]["pos"] for k in _f6)
+           and sorted(_kb7) == sorted(_kb6))
+        # ...AND SO IS A RESHUFFLED WINDOW LIST, which is the real risk: the
+        # compositor's view order is not promised, and iterating it as given
+        # would churn the labels a hundred times an hour.
+        _kb8 = {k: dict(v) for k, v in _kb6.items()}
+        engine.learn(_kb8, {}, list(reversed(_FOUR)), _t.time())
+        ck("the-window-list-order-does-not-change-the-assignment",
+           all(_kb8[k]["pos"] == _kb6[k]["pos"] for k in _f6))
+        # THE PLACER DISTRIBUTES THEM, each window taking a free one, and the
+        # FIFTH is refused because they are genuinely all taken, which is a
+        # different statement from "somebody got here first".
+        _led, _lv = {}, {w["id"] for w in _FOUR}
+        _got = []
+        for _w4 in _FOUR:
+            _k4, _e4 = engine.free_slot(_kb6, _led, "google-chrome", "titan",
+                                        "titan", _w4["id"], _lv)
+            _led[_k4] = _w4["id"]
+            _got.append((_k4, tuple(_e4["pos"])))
+        ck("the-placer-gives-all-four-a-distinct-slot",
+           len({k for k, _p in _got}) == 4)
+        ck("and-between-them-they-cover-every-remembered-rect",
+           sorted(p for _k, p in _got)
+           == sorted(tuple(w["pos"]) for w in _FOUR))
+        _k5, _e5 = engine.free_slot(_kb6, _led, "google-chrome", "titan",
+                                    "titan", 99, _lv | {99})
+        ck("a-fifth-window-with-all-four-taken-is-refused",
+           _k5 is not None
+           and engine.live_holder(_led.get(_k5), 99, _lv | {99})
+           == "held")
+        # AND THE WHOLE FAMILY IS ONE SUBJECT to `forget` and to the orphan
+        # detector: the index is an assignment, never something a reader has
+        # seen, so a selector naming the identity must take all four and the
+        # detector must condemn none.
+        ck("forget-takes-the-whole-family",
+           len(engine.forget_matches(_kb6, ["titan"])) == 4)
+        ck("none-of-the-family-is-unmatchable",
+           engine.unmatchable_entries(_kb6) == [])
+        # THE DEGROUP RULE IS UNTOUCHED, which is the boundary of this change
+        # and worth pinning: windows sharing a TITLE are still refused, since
+        # a title two live views wear is not a discriminator and a transient
+        # one (two `New Tab` windows) would otherwise mint slots that stick.
+        # Only a PLUGIN identity or a SOURCE key is indexed.
+        _kb9 = {}
+        _same = [{"id": i, "app_id": "zzz-unowned", "title": "one title",
+                  "workspace": [0.0, 0.0], "pos": [1.0, 1.0],
+                  "size": [8.0, 6.0], "output": "DP-1"} for i in (1, 2)]
+        engine.learn(_kb9, {}, _same, _t.time())
+        ck("a-shared-TITLE-is-still-refused-by-the-degroup-rule", not _kb9)
+
+        # AND THE HOLD GATE MUST ASK THE SAME QUESTION AS THE PLACER, which
+        # is the wiring half: with a slot per window it asked `matched_key`,
+        # which answers the IDENTITY's key for all four, so the ledger showed
+        # one holder and the other three were held OUT of the capture, i.e.
+        # the learning of exactly the windows the extra slots serve was
+        # suppressed. A plant restoring that passed everything until this
+        # cell existed, because every other gate fixture has ONE entry, where
+        # the two helpers agree.
+        g.kb = dict(_kb6)
+        with g.lock:
+            g.slot_held.clear()
+            g.slot_held[sorted(_f6)[0]] = _FOUR[0]["id"]
+        _h4 = g._held(_FOUR)
+        ck("gate-a-window-with-a-free-slot-is-not-held",
+           _h4 == frozenset())
+        # ...and the control, which needs a FIFTH window: with four windows
+        # and four slots every one of them always has a free slot (its own
+        # holder reads as "free"), so the only way to be genuinely refused is
+        # to have more windows than slots. The first version of this control
+        # held the slots for ids that were not LIVE, which `live_holder`
+        # correctly calls "stale", so it asserted something impossible.
+        _FIVE = _FOUR + [_fw(9, [1.0, 1.0], [99.0, 99.0])]
+        with g.lock:
+            for _i, _k6 in enumerate(sorted(_f6)):
+                g.slot_held[_k6] = _FOUR[_i]["id"]
+        ck("gate-holds-the-window-that-has-no-slot-left",
+           g._held(_FIVE) == frozenset({9}))
     finally:
         pass
 
@@ -7864,6 +8135,17 @@ def _t_learn(ck):
         ("foreign, per-window key", [_uw("slack", "", source="titan",
                                          owner=997, key="titan:aabbccdd")],
          _OUT),
+        # TWO WINDOWS OF ONE IDENTITY, which is the shape ONE SLOT PER WINDOW
+        # exists for and which this table had no row for: with no row the two
+        # writers agreed by both writing ONE key, so a plant that stopped
+        # `upsert` indexing passed everything. A FOREIGN pair, because two of
+        # the owner's windows are title-keyed and so do not share at all.
+        ("foreign, TWO windows, one identity",
+         [_uw("slack", "", 21, source="titan", owner=997,
+              key="titan:aabbccdd"),
+          _uw("slack", "", 22, source="titan", owner=997,
+              key="titan:aabbccdd")],
+         _OUT),
         # PARKED BETWEEN AN UNDOCK AND A REDOCK: upsert wrote a slot naming
         # an output nobody has, which nothing can ever place.
         ("parked on a lost output", [_uw("zzz-unowned", "T", output="DP-9")],
@@ -7889,8 +8171,14 @@ def _t_learn(ck):
     # wrote NOTHING would agree perfectly and assert nothing at all. Five
     # shapes must be learned and four refused, by both.
     ck("upsert-and-learn-agree-is-not-vacuous",
-       sum(1 for _, u, _l in _rows if u) == 5
+       sum(1 for _, u, _l in _rows if u) == 6
        and sum(1 for _, u, _l in _rows if not u) == 4)
+    # AND THE SHARED-IDENTITY ROW REALLY WROTE TWO KEYS, or the row above is
+    # satisfied by two writers that both wrote one and the agreement says
+    # nothing about the indexing.
+    ck("upsert-and-learn-both-index-a-shared-identity",
+       [len(u) for _n, u, _l in _rows
+        if _n == "foreign, TWO windows, one identity"] == [2])
 
     # --- AND A REFUSAL IS REPORTED, over the SAME table -------------------
     # THE DESIGN RULE HAS TWO HALVES: never write an entry that cannot round

@@ -2525,6 +2525,109 @@ def kkey(app_id, title):
     return f"{app_id}\x00{title}"
 
 
+# A SECOND NUL, which is the only separator that cannot collide. N windows
+# sharing one identity need N entries, and the store is a dict, so the second
+# write overwrote the first and N-1 windows had nowhere to go. The suffix
+# makes them coexist.
+#
+# WHY NOT A READABLE SEPARATOR: `#` or `:` can appear in a window TITLE, and a
+# title-keyed window colliding with another window's indexed slot is the
+# place-it-on-somebody-else's-rect class this package has bled over. A NUL
+# cannot reach a key from a title (the compositor does not deliver one, and
+# every reader here uses the BOUNDED split form, measured: 13 product sites,
+# 0 unbounded). So the shape is `app NUL ident NUL n`, and `n` is never 0: the
+# FIRST window keeps exactly the key it has today, which is what makes this
+# additive with no migration and no existing entry touched.
+SLOT_SEP = "\x00"
+
+
+def slot_key(app, ident, n=0):
+    """The nth store key for this identity. n=0 is the key it has today."""
+    base = kkey(app, ident)
+    return base if not n else f"{base}{SLOT_SEP}{n}"
+
+
+def slot_base(k):
+    """`k` with any slot index stripped: the key its first window holds.
+
+    THE GUARD IS THAT THE HEAD STILL CARRIES A NUL, which is what stops this
+    eating the app separator: a window titled `42` has the key `app NUL 42`,
+    whose tail is all digits, and stripping it would answer the bare app-id,
+    i.e. the app_id-only key that matches every window of that app."""
+    head, sep, tail = k.rpartition(SLOT_SEP)
+    if sep and tail.isdigit() and SLOT_SEP in head:
+        return head
+    return k
+
+
+def slot_keys(kb, app, ident, source=""):
+    """Every key in `kb` this window may match, most specific first.
+
+    `match_keys` IS STILL THE RULE and this does not restate it: the base
+    keys come from there, in its order, and only the INDEXED SIBLINGS of the
+    per-window key are added. A sibling is enumerated from the STORE rather
+    than generated, so this cannot invent a key nothing wrote.
+
+    PURE, and the one definition the placer, the learn gate and the report
+    all read, because three sites choosing a window's key independently is
+    how every silent failure in this package has started."""
+    offered = match_keys(app, ident, source)
+    out = [k for k in offered if kb.get(k)]
+    # AND THE SIBLINGS ARE SIBLINGS OF A KEY THIS WINDOW MAY MATCH, which is
+    # the gate this very function first walked past: it added the siblings of
+    # `kkey(app, ident)` unconditionally, so a foreign window whose identity
+    # `source_ident` REFUSES was offered the indexed siblings of it anyway.
+    # That is the shape every silent failure here has: a gate scoped to one
+    # category (the base keys) met by something outside it. A planted
+    # fixture is what said so.
+    base = kkey(app, ident)
+    if base not in offered:
+        return out
+    pre = base + SLOT_SEP
+    out += sorted((k for k in kb
+                   if k.startswith(pre) and k[len(pre):].isdigit()),
+                  key=lambda k: int(k[len(pre):]))
+    return out
+
+
+def slot_order(windows):
+    """The windows in a STABLE per-window order, for assigning slot keys.
+
+    BY VIEW ID, which is the only handle stable for a window's whole life.
+    The compositor's view list order is not promised, so iterating it as
+    given would reshuffle which window owns which entry on every capture: the
+    rects would be right and the labels would churn a hundred times an hour.
+
+    A ROW WITH NO ID SORTS LAST and keeps its relative order (`sorted` is
+    stable), which is a replayed snapshot written before that field existed.
+    """
+    return sorted(windows,
+                  key=lambda w: (w.get("id") is None, w.get("id") or 0))
+
+
+def next_slot_key(app, ident, used):
+    """The first key for this identity that `used` does not already hold.
+
+    THE WRITER'S ASSIGNMENT, and it is deliberately an assignment rather than
+    an identity: nothing distinguishes two shells in one directory, so there
+    is nothing to track. What this buys is MULTIPLICITY, and the layout is a
+    fixed point under it: N windows are written to N keys bijectively, so the
+    SET of remembered rects is unchanged however the labels permute. Which
+    window lands in which rect at the next login is arbitrary, which is the
+    honest trade for windows that are interchangeable and the reason a window
+    you think of as a ROLE wants its own app-id instead (see collision_fix).
+
+    CALLERS MUST ITERATE IN A STABLE ORDER or the entries reshuffle on every
+    capture; both writers sort by VIEW ID, the only per-window handle stable
+    for a window's life."""
+    n = 0
+    while True:
+        k = slot_key(app, ident, n)
+        if k not in used:
+            return k
+        n += 1
+
+
 def matched_key(kb, app, ident, src=""):
     """The store key this window matches, or the fallback it would take. PURE.
 
@@ -2532,9 +2635,56 @@ def matched_key(kb, app, ident, src=""):
     placer's slot ledger, doctor's collision count, and now the learn gate)
     and this package's silent failures all start with two sites disagreeing
     about what a window's key is.
+
+    IT IGNORES SLOT INDICES, deliberately: this answers "which identity is
+    this window's", and the index is an assignment rather than part of the
+    identity. Anything asking WHICH OF the slots for that identity is free
+    wants `free_slot`, which is ledger-aware and is the only thing that can
+    answer it.
     """
     ks = match_keys(app, ident, src)
     return next((k for k in ks if kb.get(k)), ks[-1])
+
+
+def free_slot(kb, held, app, ident, src, vid, live):
+    """The slot this window may take: (key, entry).
+
+    `(None, None)` when the identity is not remembered at all, and the LAST
+    candidate when every slot for it is owned by another live window, so the
+    caller's own `live_holder` answers "held" against a real key.
+
+    IT RETURNS NO HOLDER STATE, deliberately: the caller asks `live_holder`
+    anyway (it needs the holder itself for the stale release), and returning
+    the state as well would be the same fact computed twice, which is the
+    shape every silent failure here starts as.
+
+    THE REFUSAL IS NOW THE HONEST CONDITION. One entry per identity meant
+    "somebody else got here first" was the same answer as "there is only one
+    rect for four windows", and the second is what it actually was: four
+    shells in one directory, one placed and three left at the cascade. With a
+    slot per window the ledger refuses only when they are genuinely all
+    taken.
+
+    PURE, so every cell is checkable with no compositor and no ledger, which
+    is what the ledger's own rules needed (`live_holder` is pure for the same
+    reason and this is its caller)."""
+    cands = slot_keys(kb, app, ident, src)
+    # A SLOT THIS WINDOW ALREADY HOLDS WINS. The writer assigns by view id and
+    # the placer takes the first free one, so the two can land on different
+    # keys for the same window; without this a re-place (a dock, an anchor, a
+    # verify retry) would shuffle interchangeable windows among their OWN
+    # rects. The layout is identical either way, since the rects are a
+    # bijection, but a visible shuffle that changes nothing is still worth not
+    # doing.
+    for k in cands:
+        if held.get(k) == vid:
+            return k, kb[k]
+    last = None
+    for k in cands:
+        if live_holder(held.get(k), vid, live) != "held":
+            return k, kb[k]
+        last = k
+    return (last, kb[last]) if last is not None else (None, None)
 
 
 
@@ -2684,7 +2834,12 @@ def unmatchable_entries(kb, plugins_=None):
     reg = plugins() if plugins_ is None else plugins_
     out = []
     for k, e in kb.items():
-        app, _, ident = k.partition("\0")
+        # THROUGH `slot_base`: an indexed sibling is the SAME identity as its
+        # first window's entry, so asking a plugin about `kitty:/x NUL 2`
+        # would have it answer about a key nobody designed, and the foreign
+        # branch's `source_ident` would read the index as part of the digest.
+        # Both would condemn N-1 of every group as unmatchable.
+        app, _, ident = slot_base(k).partition("\0")
         src = e.get("source") or ""
         # NO APP-ID AND NO DISCRIMINATING IDENTITY IS A WILDCARD, and this
         # is the one class that is worse than litter: it matches TOO MUCH
@@ -3193,7 +3348,12 @@ def upsert(kb, windows, when, outputs=None, refused=None):
     the other declines is two sites with a different idea of what may be
     keyed, and `upsert-and-learn-agree` pins the agreement as a table."""
     counts = own_app_counts(windows)
-    for w in windows:
+    # ONE SLOT PER WINDOW, so N sharing an identity get N entries rather than
+    # overwriting each other. BY VIEW ID, which is the only per-window handle
+    # stable for a window's life: any other order (the compositor's view list
+    # is not promised to be stable) reshuffles the entries on every capture.
+    used = set()
+    for w in slot_order(windows):
         # THE GATES FIRST, WHATEVER KEY SHAPE THE WINDOW WOULD HAVE TAKEN.
         # Asked ahead of the branches because that ordering is itself the
         # fix: when this gate sat third in learn(), an app_id-only window
@@ -3221,11 +3381,15 @@ def upsert(kb, windows, when, outputs=None, refused=None):
         decided = stamp_key(w, app, key, counts)
         if decided is not None:
             _i, _kt, _only = decided
-            kb[kkey(app, _i)] = kb_entry(w, _kt, _only, when)
+            _k = next_slot_key(app, _i, used)
+            used.add(_k)
+            kb[_k] = kb_entry(w, _kt, _only, when)
         elif w["title"]:
             # THE TITLE FALLBACK IS THIS WRITER'S OWN: one row, one title,
             # where learn() has a view id owning every title it has worn.
-            kb[kkey(app, w["title"])] = kb_entry(w, w["title"], False, when)
+            _k = next_slot_key(app, w["title"], used)
+            used.add(_k)
+            kb[_k] = kb_entry(w, w["title"], False, when)
     prune_kb(kb, when)
 
 
@@ -3269,7 +3433,11 @@ def _learn_stamp(kb, groups, windows, counts, when, hold=(), refused=None):
     # its ONE active-tab URL, no title accumulation, restored whatever tab was
     # active) -> that key; other shared apps (mux terminals) -> every title in
     # the view's group, all at the view's current placement.
-    for w in windows:
+    # ONE SLOT PER WINDOW, sorted by view id: see slot_order and upsert, which
+    # must agree with this or the two writers key a shared identity
+    # differently, which is the divergence `stamp_key` exists to prevent.
+    used = set()
+    for w in slot_order(windows):
         app, vid = w["app_id"], w.get("id")
         if vid in hold:
             continue
@@ -3314,8 +3482,15 @@ def _learn_stamp(kb, groups, windows, counts, when, hold=(), refused=None):
         decided = stamp_key(w, app, key, counts)
         if decided is not None:
             _i, _kt, _only = decided
-            kb[kkey(app, _i)] = kb_entry(w, _kt, _only, when)
+            _k = next_slot_key(app, _i, used)
+            used.add(_k)
+            kb[_k] = kb_entry(w, _kt, _only, when)
         elif vid is not None and vid in groups:
+            # THE TITLE GROUP IS NOT INDEXED, and that is not an oversight: a
+            # group is every title ONE view has worn, so its keys are already
+            # per-window. Two views sharing a title are dropped from both
+            # groups by the degroup rule before this runs, because a title on
+            # two windows at once is not a discriminator.
             for t in groups[vid]["titles"]:
                 kb[kkey(app, t)] = kb_entry(w, t, False, when)
 
@@ -3566,7 +3741,12 @@ def forget_matches(kb, selectors):
     hand-edit."""
     out = []
     for k in kb:
-        app, _, ident = k.partition("\x00")
+        # THROUGH `slot_base`, so a selector names the WHOLE FAMILY: four
+        # shells in one directory are four entries under one identity, and
+        # `forget 'kitty:/src/x'` meaning only the first of them would be a
+        # verb that silently did a quarter of what it said. The index is an
+        # assignment and never something a reader has seen.
+        app, _, ident = slot_base(k).partition("\x00")
         subject = ident or app
         if any(fnmatch.fnmatchcase(subject, s) for s in selectors):
             out.append(k)
