@@ -71,7 +71,7 @@ from .engine import (
     kitty_relaunch_missing, kkey,
     launch_missing, learn, live_keys, load_knowledge, lock_plan,
     lock_summoned_session, match, mux_candidates, mux_cmd_of_saved,
-    mux_host_of, mux_relaunch_missing, mux_session_of, mux_session_set,
+    mux_host_of, mux_relaunch_missing, mux_session_of, mux_sessions,
     pick_socket, place_of, placement_landed, profile_id, pview,
     rekey_chrome, resolution, save_knowledge, saved_sizes, schema_path,
     is_unique, seated_session, target_geometry, unidentified,
@@ -925,10 +925,52 @@ def _t_resolution(ck):
         # EVERY raw view parked, and doctor passes raw views.
         ck("doctor-an-attached-window-is-not-parked",
            _uw(dict(_lv, **{"output-name": "DP-1"}), _o1)[0] == "unmatched")
-        ck("doctor-labels-are-four-distinct", len(
-            {_uw(_lvp, _o1)[0]}
+        # AND THE FIFTH: a title ANOTHER LIVE WINDOW WEARS is not "no slot
+        # YET". Both store writers refuse such a window every pass, with a
+        # reason, for as long as both are open, where `unmatched` promises
+        # the next capture fixes it. SIXTH time this report has put two
+        # opposite facts under one word, and the same shape as `parked`.
+        _P.st = Resolution.READY
+        _lva = _trv("zzz-unowned", "Untitled Document", pid=os.getpid(),
+                    vid=71)
+        _lvb = _trv("zzz-unowned", "Untitled Document", pid=os.getpid(),
+                    vid=72)
+        _amb = engine.ambiguous_titles([_lva, _lvb])
+        ck("doctor-an-ambiguous-title-is-not-unmatched",
+           _uw(_lva, None, _amb)[0] == "ambiguous")
+        ck("doctor-ambiguous-says-why",
+           "wears this title" in _uw(_lva, None, _amb)[1])
+        # ...AND A DIFFERENT APP WEARING THE SAME TITLE IS NOT AMBIGUOUS,
+        # which is the control AND what proves `ambiguous_titles` reads both
+        # spellings of the app field: through `app_id` alone every RAW view
+        # answers `("", title)` and two windows of DIFFERENT apps sharing one
+        # title would be called ambiguous.
+        _lvc = _trv("zzz-other", "Untitled Document", pid=os.getpid(),
+                    vid=73)
+        ck("doctor-a-different-app-with-that-title-is-not-ambiguous",
+           _uw(_lvc, None,
+               engine.ambiguous_titles([_lva, _lvb, _lvc]))[0] == "unmatched")
+        # AND A UNIQUE TITLE IS STILL `unmatched`, or the rows above are a
+        # label that fires for everything.
+        ck("doctor-a-unique-title-is-still-unmatched",
+           _uw(_trv("zzz-unowned", "only me", pid=os.getpid(), vid=74),
+               None, _amb)[0] == "unmatched")
+        # AND ONE WORDING, so the report and the two writers cannot describe
+        # the same refusal three ways: the engine holds the pair.
+        #
+        # BEFORE THE DISTINCTNESS ROW, not after: that row's comprehension
+        # assigns `_P.st` and an ATTRIBUTE is not comprehension-scoped, so it
+        # LEAKS at NEVER and this check then asked about a window the plugin
+        # had started refusing. It failed over correct code until the order
+        # was fixed, which is the same leak the pre-existing four-label row
+        # has always had and gets away with by being last.
+        ck("the-ambiguous-wording-is-one-definition",
+           engine.AMBIGUOUS_REFUSAL[0] == "ambiguous"
+           and engine.AMBIGUOUS_REFUSAL[1] in _uw(_lva, None, _amb)[1])
+        ck("doctor-labels-are-five-distinct", len(
+            {_uw(_lvp, _o1)[0], _uw(_lva, None, _amb)[0]}
             | {_uw(_lv)[0] for _P.st in (Resolution.READY, Resolution.PENDING,
-                                         Resolution.NEVER)}) == 4)
+                                         Resolution.NEVER)}) == 5)
         _P.st = Resolution.PENDING
         ck("doctor-prints-the-plugin-reason", "not yet" in _uw(_lv)[1])
     finally:
@@ -9641,14 +9683,14 @@ def _t_displays(ck):
     # `placeable`, which sends a reader hunting a fault in the placer.
     from . import doctor as _dgrid
 
-    def _doc_text(ws, out="DP-1", view=None):
+    def _doc_text(ws, out="DP-1", view=None, views=None):
         _lines = []
         _pm = engine.panel_map
         try:
             engine.panel_map = lambda *_a, **_k: {}
             _dgrid._doctor_placement(
                 _lines.append, {kkey("zzz-unowned", ""): _rent(ws, out)},
-                [view or _rview], {"DP-1": _rgo})
+                views or [view or _rview], {"DP-1": _rgo})
         except Exception as _e:                            # noqa: BLE001
             # THE REPORT ITSELF CAN RAISE, which is how a live `doctor` lost
             # its whole output to an argument-shape mistake. Returning the
@@ -9703,6 +9745,25 @@ def _t_displays(ck):
     _dua = _doc_text([1, 1], view=dict(_rview, **{"app-id": "zzz-other"}))
     ck("doctor-calls-an-attached-stranger-unmatched",
        "unmatched" in _dua and "parked" not in _dua)
+    # AND THE PLACEMENT SECTION COMPUTES THE AMBIGUITY SET ITSELF, which is
+    # the wiring half: `_unmatched_why` has five cells for the label and NONE
+    # of them asks whether its caller works the set out. A plant replacing
+    # `amb = engine.ambiguous_titles(live)` with `()` passed them all.
+    # TWELFTH instance of that hole in this file.
+    _dtwo = _doc_text([1, 1], views=[
+        dict(_rview, **{"app-id": "zzz-other", "title": "shared doc",
+                        "id": 81}),
+        dict(_rview, **{"app-id": "zzz-other", "title": "shared doc",
+                        "id": 82})])
+    ck("doctor-s-placement-section-finds-the-ambiguity-itself",
+       _dtwo.count("ambiguous") == 2)
+    # ...and the control, so the row above is not a label that fires for
+    # every unmatched window: two DIFFERENT titles are plain `unmatched`.
+    _dtwd = _doc_text([1, 1], views=[
+        dict(_rview, **{"app-id": "zzz-other", "title": "one", "id": 83}),
+        dict(_rview, **{"app-id": "zzz-other", "title": "two", "id": 84})])
+    ck("doctor-s-placement-control-two-titles-are-unmatched",
+       "ambiguous" not in _dtwd and _dtwd.count("unmatched") == 2)
     # AND THE TWO REFUSALS ARE WORDED APART, pairwise, because an absent
     # OUTPUT and an out-of-grid CELL want different things done about them and
     # one wording for both sends a reader to the wrong one. Collapsing two
@@ -10744,8 +10805,91 @@ def _t_contracts(ck):
     # change over
     # in mux (the agent-state glyph) silently killed relaunch with no symptom.
     # Skipped when mux is absent (the soft dep); an empty set is legitimate.
+    _mnames, _mw = mux_sessions()
     ck("mux-list-contract",
-       all(re.fullmatch(r"[^\s:]+", s) for s in mux_session_set()))
+       all(re.fullmatch(r"[^\s:]+", s) for s in _mnames))
+    # AND AN EMPTY SET NOW SAYS WHICH EMPTY IT IS, which the bare set could
+    # not: a mux that FAILS answered the same thing as a box with no sessions,
+    # and `doctor` printed `[OK] -> 0 bare name(s)` over a dead contract.
+    # ASSERTED ON THE REAL BINARY, so it reports which case this box is in
+    # rather than claiming either.
+    # NAMES AND A REASON ARE EXCLUSIVE, which is the invariant and is
+    # host-independent: a reason means it could not ask, so there can be
+    # nothing to report. The first version of this row was
+    # `(_mw == "") == (...) or bool(_mw)`, which is TRUE whenever there is a
+    # reason and so asserted nothing in the half that matters.
+    ck("mux-list-names-and-a-reason-are-exclusive",
+       not (_mnames and _mw))
+    # AND THE FAILING CASE IS DRIVEN, with a stub mux that exits non-zero: the
+    # row above is about THIS box, and on a box where mux works it can only
+    # ever see the succeeding half.
+    _mdir = tempfile.mkdtemp(prefix="usher-muxfail-")
+    _mold = engine.MUX_BIN
+    try:
+        _mp = os.path.join(_mdir, "mux")
+        with open(_mp, "w") as _f:
+            _f.write('#!/bin/sh\necho "mux: boom" >&2\nexit 3\n')
+        os.chmod(_mp, 0o755)
+        engine.MUX_BIN = _mp
+        _bn, _bw = engine.mux_sessions()
+        ck("mux-list-a-failing-mux-is-not-an-empty-set",
+           _bn == set() and "exited 3" in _bw)
+        # ...and the stderr is carried, because "exited 3" alone sends a
+        # reader to guess at a cause the command already printed.
+        ck("mux-list-carries-the-failure-text", "boom" in _bw)
+        # AND A MISSING ONE IS A THIRD REASON, not the same as a failing one.
+        engine.MUX_BIN = os.path.join(_mdir, "not-there")
+        _nn, _nw = engine.mux_sessions()
+        ck("mux-list-a-missing-mux-says-so-differently",
+           _nn == set() and _nw != "" and "exited" not in _nw)
+        ck("mux-list-three-states-are-pairwise-distinct",
+           len({_mw, _bw, _nw}) == 3)
+        # AND THE CONTRACT SECTION BRANCHES ON THE REASON, which is the
+        # wiring half: the rows above are about the helper and NONE of them
+        # asks whether `doctor` reads the reason at all. A plant restoring
+        # the old two-way branch passed them all, and the whole defect was
+        # that `[OK] -> 0 bare name(s)` was printed over a dead contract.
+        # THIRTEENTH instance of that hole here.
+        #
+        # PATCHED ON doctor's OWN NAME: it does `from .engine import ...
+        # mux_sessions`, so it holds its own reference and patching engine's
+        # leaves the report reading the real one. That stale-copy hazard has
+        # written into real state in this suite before.
+        from . import doctor as _dmux
+        _rm, _rw = _dmux.mux_sessions, _dmux.shutil.which
+        _rd, _ra = engine.daemon_code_age, engine.session_agent_sock
+        _rl = _dmux.lock_capability
+        _mout = []
+        try:
+            _dmux.shutil.which = lambda _n: "/stub/mux"
+            engine.daemon_code_age = lambda *_a, **_k: ("none", "")
+            engine.session_agent_sock = lambda *_a, **_k: ("", "nowhere")
+            _dmux.lock_capability = lambda *_a, **_k: (False, "", "")
+            _dmux.mux_sessions = lambda: (set(), "exited 3: mux: boom")
+            _rcf = _dmux._doctor_contracts(_mout.append)
+            _dmux.mux_sessions = lambda: (set(), "")
+            _ok = []
+            _dmux._doctor_contracts(_ok.append)
+        finally:
+            _dmux.mux_sessions, _dmux.shutil.which = _rm, _rw
+            engine.daemon_code_age, engine.session_agent_sock = _rd, _ra
+            _dmux.lock_capability = _rl
+        _mtxt, _otxt = "\n".join(_mout), "\n".join(_ok)
+        ck("doctor-calls-a-failing-mux-a-FAIL",
+           "could not be read" in _mtxt and "mux: boom" in _mtxt)
+        ck("doctor-does-not-call-a-failing-mux-OK",
+           "0 bare name(s)" not in _mtxt)
+        # ...AND IT IS A CONTRACT BREACH, so a script notices: that is what
+        # doctor's exit 1 means and the shape-breach arm already sets it.
+        ck("doctor-exits-nonzero-on-a-failing-mux", _rcf == 1)
+        # AND THE CONTROL: a mux that answers with NO sessions is still OK,
+        # which is a legitimate state (a fresh box) and the reason the two
+        # had to be told apart in the first place.
+        ck("doctor-control-no-sessions-is-still-OK",
+           "0 bare name(s)" in _otxt and "could not be read" not in _otxt)
+    finally:
+        engine.MUX_BIN = _mold
+        shutil.rmtree(_mdir, ignore_errors=True)
 
     # identity() is a STRICT no-op for a non-plugin app
     ck("noop-slack", identity(_tv("slack", "Slack")) == "Slack")

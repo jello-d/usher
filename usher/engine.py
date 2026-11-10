@@ -2601,9 +2601,25 @@ def slot_keys(kb, app, ident, source=""):
     return out
 
 
+# THE ONE WORDING for a window refused because another wears its title, so
+# the two store writers and the report cannot describe it three ways. Not a
+# `refusal_of` kind, because that asks about the WINDOW and this is a property
+# of the window SET; the pair is shaped the same so every caller is uniform.
+AMBIGUOUS_REFUSAL = (
+    "ambiguous",
+    "another live window wears this title too, so it cannot tell them apart")
+
+
 def ambiguous_titles(windows):
     """The `(app_id, title)` pairs that TWO OR MORE of these windows wear.
     PURE.
+
+    THROUGH `app_of`, so it takes a SNAPSHOT row (`app_id`) or a RAW view
+    (`app-id`) alike. The writers hand it rows and `doctor` hands it views,
+    and reading one spelling would answer `("", title)` for every view, which
+    calls two windows of DIFFERENT apps with one title ambiguous. Same trap,
+    and the same fix, as `unreadable_placement`'s output field: in the
+    predicate, where no call site can get it wrong.
 
     A TITLE TWO LIVE VIEWS WEAR IS NOT A WINDOW DISCRIMINATOR, which is the
     degroup rule, and both store writers have to refuse one. ONE DEFINITION,
@@ -2617,9 +2633,23 @@ def ambiguous_titles(windows):
     whichever of them the matcher reaches first takes it. That is a window
     placed on another window's remembered rect, which is the class this
     package has bled over, and `window_slot`'s stickiness then keeps it."""
-    tc = Counter((w.get("app_id") or "", w.get("title") or "")
+    tc = Counter((app_of(w), w.get("title") or "")
                  for w in windows if w.get("title"))
     return {k for k, c in tc.items() if c >= 2}
+
+
+def is_ambiguous(v, amb):
+    """Is this window's `(app, title)` one that `ambiguous_titles` named?
+    PURE.
+
+    A FUNCTION SO `doctor` NEED NOT READ A RAW TITLE. The lookup itself is
+    harmless there (nothing is printed), but `doctor-does-not-parse-a-raw-
+    live-title` is a SOURCE SCAN and fired on the mention, which is the check
+    being conservative in the right direction: every title leak this package
+    has had was doctor reading `lv.get("title")` for one reason and a later
+    edit printing it. The engine reads raw titles by the hundred; it is the
+    REPORT that must not."""
+    return (app_of(v), v.get("title") or "") in amb
 
 
 def slot_order(windows):
@@ -3465,9 +3495,7 @@ def upsert(kb, windows, when, outputs=None, refused=None):
             # them and the other is keyable again) and two `New Tab` windows
             # would put a line in watch.log for nothing. `doctor`'s COLLISION
             # line is the user-facing half.
-            _refuse(refused, w, ("ambiguous",
-                                 "another live window wears this title too,"
-                                 " so it cannot tell them apart"))
+            _refuse(refused, w, AMBIGUOUS_REFUSAL)
     prune_kb(kb, when)
 
 
@@ -3581,10 +3609,7 @@ def _learn_stamp(kb, groups, windows, counts, when, hold=(), refused=None,
             # "nothing was written", because a window whose group still holds
             # other titles IS remembered and is not refused at all.
             if not _wrote and (app, w.get("title") or "") in amb:
-                _refuse(refused, w,
-                        ("ambiguous",
-                         "another live window wears this title too, so it"
-                         " cannot tell them apart"))
+                _refuse(refused, w, AMBIGUOUS_REFUSAL)
 
 
 def _learn_purge_terminals(kb, windows, seen):
@@ -4191,9 +4216,33 @@ def saved_key(w):
     return identity(w) or ""
 
 
-def mux_session_set():
-    """The session names mux would rebuild on this box: `mux resume --list`,
-    one bare NAME per line.
+def mux_sessions():
+    """`(names, why)`: the session names mux would rebuild on this box, from
+    `mux resume --list`, one bare NAME per line. `why` is "" when the command
+    answered and a reason when it could not.
+
+    IT RETURNS THE REASON BECAUSE AN EMPTY SET HAS TWO CAUSES and only one of
+    them is fine. This was a bare `set()` on any failure, and it did not read
+    the exit code at all, so a mux that FAILS (a broken install, a bad socket,
+    a version that moved the verb) answered the same empty set as a box with
+    no sessions built. `doctor` then printed
+
+        [OK]   `mux resume --list` -> 0 bare name(s)
+
+    over a dead contract, in the section whose whole job is catching that.
+    Measured with a stub mux exiting 3: indistinguishable.
+
+    A SOFT DEPENDENCY'S `except` IS A PLACE BUGS GO TO BE QUIET, which this
+    file records from the time `~/.local/bin/mux` was hardcoded and the whole
+    relaunch path went dead inside this very handler. The no-op is still the
+    right BEHAVIOUR; what was wrong is that nothing could tell it had
+    happened.
+
+    THE RELAUNCH NO LONGER READS THIS, checked rather than assumed: the only
+    product caller is `doctor`, since terminals are relaunched from the
+    STORE's own keys through `mux_candidates`. So this is a report fault
+    rather than a dead relaunch, which is why it is a rename and not a
+    scramble.
 
     THE DURABLE SET, NOT THE LIVE SERVER, which is the point: the case that
     matters is a COLD BOOT, where no session is live but `mux go` rebuilds
@@ -4206,12 +4255,17 @@ def mux_session_set():
 
     Empty when mux is absent or errors: the soft-dep no-op."""
     try:
-        out = subprocess.run(
-            [MUX_BIN, "resume", "--list"],
-            capture_output=True, text=True, timeout=5).stdout
-    except Exception:
-        return set()
-    return {ln.strip() for ln in out.splitlines() if ln.strip()}
+        r = subprocess.run([MUX_BIN, "resume", "--list"],
+                           capture_output=True, text=True, timeout=5)
+    except Exception as e:                                 # noqa: BLE001
+        return set(), f"{MUX_BIN} could not be run: {e}"
+    if r.returncode != 0:
+        # THE STATUS, which this never read. A non-zero exit with nothing on
+        # stdout is exactly a broken mux, and it is the one reading that
+        # tells it from a box with no sessions.
+        return set(), (f"`{MUX_BIN} resume --list` exited {r.returncode}"
+                       f"{': ' + r.stderr.strip()[:60] if r.stderr else ''}")
+    return {ln.strip() for ln in r.stdout.splitlines() if ln.strip()}, ""
 
 
 def live_keys(live):

@@ -36,7 +36,7 @@ from . import engine
 from .engine import (KB_SCHEMA, LOCAL_HOST, PLUGIN_HOOKS, STATE, TERM_KEY_RE,
                      WayfireSocket, app_of, hwdp_id, is_mux_term, live_keys,
                      load_knowledge, load_snapshot, match, mux_candidates,
-                     mux_host_of, mux_session_of, mux_session_set, plugins,
+                     mux_host_of, mux_session_of, mux_sessions, plugins,
                      lock_capability, profile_id, pview,
                      desktop_entries, desktop_launch_for, identity,
                      kkey,
@@ -309,9 +309,18 @@ def _doctor_contracts(out, snap=None):
         out(f"  [WARN] SSH_AUTH_SOCK points at a missing socket ({sock})")
     else:
         out(f"  [OK]   ssh agent socket present  (read from {whose})")
-    names = mux_session_set()
+    names, _mwhy = mux_sessions()
     bad = [s for s in names if not re.fullmatch(r"[^\s:]+", s)]
-    if bad:
+    # THREE STATES, NOT TWO, and the third was wearing the first's words: a
+    # mux that FAILS answers the same empty set as a box with no sessions, so
+    # `[OK] -> 0 bare name(s)` was printed over a dead contract. Which it is
+    # decides what a reader does about it, so they are worded apart.
+    if _mwhy:
+        out(f"  [FAIL] `mux resume --list` could not be read: {_mwhy}")
+        out("         the durable session SET is what a cold boot rebuilds"
+            " from, so this is not a quiet degradation")
+        rc = 1
+    elif bad:
         out(f"  [FAIL] `mux resume --list` is not bare names: {bad[:3]}")
         out("         relaunch will match NOTHING (this exact break has"
             " happened before)")
@@ -623,6 +632,9 @@ def _doctor_placement(out, kb, live, outs):
     """Per live window: does it match a remembered slot, and is that slot's
     output actually attached."""
     out("== live windows -> placement ==")
+    # COMPUTED ONCE over the whole live set, because ambiguity is a property
+    # of the SET and the per-window labeller below cannot see it.
+    amb = engine.ambiguous_titles(live)
     pairs, unlive, _ = match(live, list(kb.values()))
     for lv, e in pairs:
         where = f"{e['output']} ws{tuple(e['workspace'])}"
@@ -670,7 +682,7 @@ def _doctor_placement(out, kb, live, outs):
             out(f"  placeable  {app_of(lv)[:14]:14} {e['title'][:34]:34}"
                 f" -> {where}{shows}")
     for lv in unlive:
-        tag, why = _unmatched_why(lv, outs)
+        tag, why = _unmatched_why(lv, outs, amb)
         # THE ONE REPORT LINE THAT RENDERS A LIVE VIEW'S OWN TITLE, so it is
         # the one that needs redacting: every other line here prints a kb
         # entry's key-title, which for another account is already its source
@@ -679,7 +691,7 @@ def _doctor_placement(out, kb, live, outs):
             f" {engine.log_title(lv)[:34]:34}{why}")
 
 
-def _unmatched_why(lv, outs=None):
+def _unmatched_why(lv, outs=None, amb=()):
     """(label, reason) for a live window with no slot, in the words of the
     plugin that knows.
 
@@ -699,6 +711,19 @@ def _unmatched_why(lv, outs=None):
     # falsify every one of them.
     r = engine.refusal_of(lv, outs)
     if r is None:
+        # A TITLE ANOTHER LIVE WINDOW WEARS IS NOT "no slot YET". Both store
+        # writers refuse such a window every pass, with a reason, for as long
+        # as both are open, where `unmatched` means nothing is remembered yet
+        # and the next capture fixes it. Two opposite facts under one word,
+        # which is the SIXTH time this report has done that and the same
+        # shape as `parked`.
+        #
+        # NOT A `refusal_of` KIND, because that asks about the WINDOW and
+        # this is a property of the window SET, so the set has to be passed
+        # in; the WORDING is shared, so the report and the two writers cannot
+        # describe it three ways.
+        if engine.is_ambiguous(lv, amb):
+            return "ambiguous", f"  ({engine.AMBIGUOUS_REFUSAL[1]})"
         return "unmatched", ""      # identified fine; no slot yet
     kind, why = r
     # FOUR STATES, FOUR LABELS, and the fourth was printing as `unmatched`: a
