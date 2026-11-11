@@ -6549,6 +6549,49 @@ def _t_roster(ck):
                 engine.subprocess.Popen = _popen
             ck("app-spawn-is-direct-when-nothing-is-armed",
                _calls == [["/bin/true"]])
+            # T13: A RESUMED TERMINAL STARTS IN THE ACCOUNT'S OWN SESSION,
+            # as an app does. kitty was a bare Popen under the sudo, so it had
+            # no session bus and nothing started from it (Zoom's tray, the
+            # portal, the keyring) could find one. Both terminal spawners.
+            _ss, _sl, _an = (engine._session_spawn, engine._SESSION_LAUNCH,
+                             engine._announce)
+            _via = []
+            try:
+                engine._session_spawn = lambda argv: (
+                    _via.append(list(argv)) or (True, "fixture"))
+                engine._SESSION_LAUNCH = True
+                engine._announce = lambda *_a, **_k: None
+                engine._spawn_kitty("/tmp", None, "top")
+                engine.spawn_term("true")
+            except Exception as _e:                        # noqa: BLE001
+                _via.append(["RAISED", str(_e)])
+            finally:
+                (engine._session_spawn, engine._SESSION_LAUNCH,
+                 engine._announce) = _ss, _sl, _an
+            ck("t13-a-resumed-plain-terminal-starts-in-the-session",
+               any(a[:1] == ["kitty"] and "--directory" in a for a in _via))
+            ck("t13-a-resumed-command-terminal-starts-in-the-session",
+               any(a[:1] == ["kitty"] and "true; exec ksh -i" in a
+                   for a in _via))
+            # AND THE OWNER'S TERMINAL IS STILL DIRECT, without TMUX, which
+            # is what keeps mux from switch-clienting another window.
+            _calls2 = []
+            _popen = engine.subprocess.Popen
+            _tmx = os.environ.get("TMUX")
+            try:
+                os.environ["TMUX"] = "fixture"
+                engine.subprocess.Popen = (
+                    lambda *a, **k: _calls2.append((a[0], k.get("env"))))
+                engine._spawn_kitty("/tmp")
+            finally:
+                engine.subprocess.Popen = _popen
+                if _tmx is None:
+                    os.environ.pop("TMUX", None)
+                else:
+                    os.environ["TMUX"] = _tmx
+            ck("t13-the-owners-terminal-is-direct-and-drops-tmux",
+               len(_calls2) == 1 and _calls2[0][0][0] == "kitty"
+               and "TMUX" not in (_calls2[0][1] or {"TMUX": 1}))
             # AND A FAST DEATH IS REPORTED WITH ITS STDERR, which is the
             # whole point: four enclave apps died in under 0.3s with nothing
             # in the journal, and DEVNULL'd stderr left no way to see why.

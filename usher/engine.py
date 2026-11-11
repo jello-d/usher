@@ -4462,10 +4462,8 @@ def spawn_term(cmd, size=None):
                 f"mode?)")
         return False
     env = {k: v for k, v in os.environ.items() if k != "TMUX"}
-    subprocess.Popen(["kitty"] + _size_opts(size)
-                     + ["ksh", "-c", f"{cmd}; exec ksh -i"],
-                     env=env, start_new_session=True,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    app_spawn(["kitty"] + _size_opts(size)
+              + ["ksh", "-c", f"{cmd}; exec ksh -i"], env=env)
     return True
 
 
@@ -4640,10 +4638,10 @@ def _spawn_kitty(cwd, size=None, run=""):
     """
     env = {k: v for k, v in os.environ.items() if k != "TMUX"}
     tail = ["ksh", "-c", f"{run}; exec ksh -i"] if run else []
-    subprocess.Popen(["kitty"] + _size_opts(size) + ["--directory", cwd]
-                     + tail,
-                     env=env, start_new_session=True,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # THROUGH app_spawn, so an enclave resume starts it in that account's
+    # own session (T13) exactly as it starts an app.
+    app_spawn(["kitty"] + _size_opts(size) + ["--directory", cwd] + tail,
+              env=env)
 
 
 def kitty_live_counts(live):
@@ -6291,13 +6289,19 @@ def _session_spawn(argv):
     return True, "started in this account's own session"
 
 
-def app_spawn(argv, watch=None):
+def app_spawn(argv, watch=None, env=None):
     """THE one place an app is started, so a launch policy has one home.
 
     Direct and unchanged for the owner's restore, where this process already
     has a full session environment and the current behaviour works. Routed
     through the account's own session manager for a sudo'd enclave resume,
     where it does not and does not.
+
+    TERMINALS GO THROUGH HERE TOO (T13): a kitty started as a bare child of
+    the sudo had no session bus and no runtime dir, so everything started
+    FROM it (Zoom's tray, the portal, the keyring) inherited that. `env` is
+    for the direct path only: a session-spawned unit takes its environment
+    from the account's manager, which is the point.
     """
     if _SESSION_LAUNCH:
         ok, why = _session_spawn(argv)
@@ -6305,7 +6309,7 @@ def app_spawn(argv, watch=None):
         if ok:
             return
     if watch is None:
-        subprocess.Popen(argv, start_new_session=True,
+        subprocess.Popen(argv, start_new_session=True, env=env,
                          stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL)
         return
