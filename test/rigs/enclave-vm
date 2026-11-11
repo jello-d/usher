@@ -168,7 +168,7 @@ for k in SEEDED_TREES USHER_AT WF_SOURCE WF_INI S1_WAYFIRE S1_DAEMON \
          SOCK_UP \
          SOCK_UNIT ENC_HAS_FOOT ENC_HAS_TERM ENC_PROCS ENC_PROCS_T \
          ENC_IDENT S1_LIVE \
-         S1_STORE; do
+         S1_STORE S1_WAITED_FOR_IDENTITY; do
   printf '  %-16s %s\n' "$k" "$(_val "$k")"
 done
 echo "===== THE FOREIGN WINDOW, ON THE OWNER'S SIDE ====="
@@ -309,14 +309,15 @@ esac
 case "$(_val ASKED_CAPTURE)" in
   ""|0) _add "the logoff never asked the source to capture" ;;
 esac
-# THE COLLAPSED-KEY ARTIFACT, REPORTED AND NOT ASSERTED, because it is a
-# measured state nobody has decided about rather than a regression. A foreign
-# window keys SOURCE-ALONE until the refresh asks its account, so one whose
-# grace expires first is LEARNED under the collapsed key and keeps that slot
-# after its per-window key arrives. The signature is both spellings present
-# for one app, and the cost is a brief wrong placement at each login (the
-# collapsed slot holds wherever the window opened) which `_recheck_all` then
-# corrects. Silent when it is absent, so this goes quiet if it is ever fixed.
+# THE COLLAPSED-KEY ARTIFACT IS ASSERTED NOW. It was REPORTED for a while,
+# because a foreign window keyed SOURCE-ALONE until its account named it, so
+# one whose grace expired first was learned under the collapsed key and kept
+# that slot beside its per-window one, and the next login placed it from the
+# collapsed slot (wherever the window had opened) until the refresh landed.
+# A foreign window now WAITS (Pending) until its account has reported on it,
+# so that learn cannot happen: the signature is both spellings present for
+# one app, and it must be absent. An app the account reported `-` for keeps
+# the source-alone key ALONE, which is not this.
 _arte=""
 for _k in $(_val S2_KEYS); do
   case $_k in
@@ -329,10 +330,9 @@ for _k in $(_val S2_KEYS); do
   done
 done
 if [ -n "$_arte" ]; then
-  echo "NOTE: a collapsed source key survives beside its per-window one"
-  echo "  ($_arte). The window was learned before the refresh named it, so"
-  echo "  the next login places it from that slot until the refresh lands."
-  echo "  MEASURED, not a regression: no decision has been taken on it."
+  _add "a collapsed source key survives beside its per-window one
+    ($_arte): a window was placed or learned from the source-alone key
+    before its account named it, which is what a Pending window must not do"
 fi
 case "$(_val S2_ASKED)" in
   ""|0) _add "the login never asked the source to resume" ;;

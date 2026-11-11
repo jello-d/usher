@@ -1872,8 +1872,21 @@ def resolution(v):
         # own `chrome:win:<id>`. The source ALONE remains the fallback, which
         # is every entry stored before this and every window whose account
         # cannot say which one it is, so nothing relearns.
-        _per = source_window_identity(src, v, _tlid)
-        return Resolution.ready(f"{src}:{_per}" if _per else src)
+        _per = source_window_state(src, v, _tlid)
+        if _per:
+            return Resolution.ready(f"{src}:{_per}")
+        # NOT REPORTED YET IS NOT THE SAME AS NOTHING TO ADD. The window may
+        # be about to get a per-window identity, and the source-alone key is
+        # a collapsed slot that every window of the app shares and that holds
+        # whatever a cascade last wrote. Placing from it, and then learning
+        # the result into the window's own key once the identity arrives, is
+        # what put an enclave Chrome and terminal on the wrong workspace at
+        # a login. So it WAITS, bounded by SOURCE_PENDING_S.
+        if _per is None and source_pending(src, v, _tlid):
+            return Resolution.pending(
+                f"waiting for the {src} source to say which of its windows "
+                "this is")
+        return Resolution.ready(src)
     if other is not None:
         # FOREIGN AND UNNAMED: no provider is wired, or it could not answer.
         # NOT keyable, because the only thing usher has is the uid and a uid
@@ -4806,6 +4819,19 @@ SOURCE_RELAY_LINES = 80
 # much of the digest to carry. 16 hex is 64 bits, which is far past collision
 # risk over the handful of windows one account has open.
 SOURCE_WINDOW_WORD = "window"
+# THE THIRD WORD OF A `window` LINE WHEN THE ACCOUNT HAS NOTHING TO ADD: it
+# owns the window, looked, and the source-alone key is already the right one
+# (a single-window app, a PWA, a dialog). "Reported, nothing more to say" and
+# "not reported yet" are different facts, and the owner must be able to tell
+# them apart, because it refuses to place from the source-alone key while a
+# window might still get a per-window identity.
+SOURCE_NONE = "-"
+# HOW LONG A FOREIGN WINDOW WAITS FOR ITS ACCOUNT TO SAY WHICH WINDOW IT IS
+# before the owner falls back to the source-alone key. The pre-fix behaviour,
+# kept as the floor so a source that never reports (hook absent, refusing)
+# costs placement quality and never a window's memory outright. Matches
+# PLACE_GRACE: a window nothing has identified by then is not going to be.
+SOURCE_PENDING_S = 120
 SOURCE_REKEY_WORD = "rekey"
 # The line prefix the OWNER uses to tell a source which process one of its
 # windows is. The one fact an account genuinely cannot get for itself:
@@ -4896,7 +4922,12 @@ def toplevel_identifier_of(v):
     if not isinstance(v, dict):
         return None
     sc = v.get("security-context") or {}
-    tl = sc.get("toplevel-identifier")
+    # A SNAPSHOT ROW CARRIES THE SAME FACT AS `identifier`, and the store's
+    # writers resolve ROWS rather than live views. Without this a row read as
+    # a window nobody could report on, so a window still PENDING at capture
+    # was learned under the source-alone key by the very pass that was meant
+    # to refuse it (found by the capture-loop check, not by reading).
+    tl = sc.get("toplevel-identifier") or v.get("identifier")
     return tl if is_toplevel_identifier(tl) else None
 
 
@@ -5021,10 +5052,16 @@ def source_window_lines(rows, pids=None, resolve=None, uid=None):
     GATED ON OWNERSHIP RATHER THAN ON THE APP, which falls out of using
     `_single_id`: a plugin is only ever asked about windows it owns, so a
     terminal can no longer be handed to the browser's resolver, and an app NO
-    plugin claims reports nothing at all. That last part is deliberate and is
-    not a gap: one window of an app is already completely keyed by its app-id
-    plus this account's name on the owner's side, and a title-derived
+    plugin claims has no per-window identity to give. That is deliberate and
+    is not a gap: one window of an app is already completely keyed by its
+    app-id plus this account's name on the owner's side, and a title-derived
     per-window part would be a key that moves whenever the title does.
+
+    BUT IT ANSWERS `-` RATHER THAN STAYING SILENT. The owner refuses to
+    place a foreign window from the source-alone key while the window might
+    still get a per-window identity (that collapsed slot holds whatever a
+    cascade last wrote, and the window was then learned into its own key),
+    so it has to be able to tell "nothing to add" from "not asked yet".
     """
     res = _single_id if resolve is None else resolve
     out = []
@@ -5033,9 +5070,13 @@ def source_window_lines(rows, pids=None, resolve=None, uid=None):
             ident = res(v)
         except Exception:                                  # noqa: BLE001
             ident = None
-        if ident:
-            out.append(f"{SOURCE_WINDOW_WORD} {tlid} "
-                       f"{identity_digest(ident)}")
+        # EVERY WINDOW GETS A LINE, which is the whole change. A window the
+        # account has nothing to add for answers SOURCE_NONE rather than
+        # silence, so the owner can tell "nothing more to say" from "not
+        # asked yet" and need not place from the source-alone key in the
+        # meantime.
+        out.append(f"{SOURCE_WINDOW_WORD} {tlid} "
+                   f"{identity_digest(ident) if ident else SOURCE_NONE}")
     return out
 
 
@@ -5219,7 +5260,12 @@ def source_refresh_plan(live, last, now, seen=None,
         if not src:
             continue
         have.setdefault(src, set()).add(w.get("app_id") or "")
-        if is_chrome(w.get("app_id") or "") and (w.get("key") or "") == src:
+        # A WINDOW STILL WAITING (no key: it resolved Pending) wants the ask,
+        # and so does a chrome window the account could not resolve at its
+        # last answer, which can resolve at the next.
+        if ((not (w.get("key") or "") and (w.get("app_id") or ""))
+                or (is_chrome(w.get("app_id") or "")
+                    and (w.get("key") or "") == src)):
             want.add(src)
     out = []
     for src in sorted(want):
@@ -5256,7 +5302,8 @@ def take_source_rekey(src):
 
 
 def parse_source_windows(text):
-    """{identifier: digest} out of a source's own report. PURE.
+    """{identifier: digest} out of a source's own report. PURE. A digest of
+    "" means the account reported the window and has nothing to add.
 
     LENIENT BY DESIGN, because this shares a channel with prose a human
     reads: anything that is not exactly the three-word shape is somebody
@@ -5274,8 +5321,10 @@ def parse_source_windows(text):
         parts = ln.split()
         if (len(parts) == 3 and parts[0] == SOURCE_WINDOW_WORD
                 and is_toplevel_identifier(parts[1])
-                and is_digest(parts[2])):
-            out[parts[1]] = parts[2]
+                and (is_digest(parts[2]) or parts[2] == SOURCE_NONE)):
+            # "" IS "REPORTED, NOTHING TO ADD", kept in the map so that
+            # membership is the question "was this window reported".
+            out[parts[1]] = "" if parts[2] == SOURCE_NONE else parts[2]
     return out
 
 
@@ -5366,7 +5415,8 @@ def load_published_sources(path=None):
         if not isinstance(src, str) or not src or not isinstance(m, dict):
             continue
         keep = {k: v for k, v in m.items()
-                if is_toplevel_identifier(k) and is_digest(v)}
+                if is_toplevel_identifier(k)
+                and (v == "" or is_digest(v))}
         if keep:
             out[src] = keep
     return out
@@ -5454,24 +5504,29 @@ def adopt_snapshot_slots():
         if isinstance(w, dict) and not (w.get("source") or ""))
 
 
-def forget_source_window(vid):
-    """Drop a view's remembered identity. Called on view-unmapped, because a
-    cache that only grows is a leak in a process that runs for weeks."""
-    for k in [k for k in _SOURCE_SLOT if k[1] == vid]:
-        del _SOURCE_SLOT[k]
+_SOURCE_FIRST = {}      # (source, view id) -> when first seen unreported
 
 
-def source_window_identity(src, v, tlid=None):
-    """Which of `src`'s windows this view is, or None.
+def _source_clock():
+    return time.time()
+
+
+def source_window_state(src, v, tlid=None):
+    """What `src` has said about this window: None (NOT REPORTED YET), ""
+    (reported, nothing to add) or a digest. THREE STATES, which is the point:
+    a two-state answer cannot tell a window that will never get a per-window
+    identity from one that has not been asked about yet, and the owner must
+    not place the second from the source-alone key.
 
     JOINED ON `tlid`, the compositor's own instance toplevel-identifier,
     which both ends read for themselves. The title is not consulted and must
     not be: it is not a window identity, two windows can wear one, and the
     join would hold only for the interval between the two reads.
 
-    STICKY ON SUCCESS, never on failure: a window the source has not
-    reported yet is retried, and one it has is answered the same way for the
-    life of the view, so a report that goes briefly absent costs nothing.
+    STICKY ON A DIGEST ONLY: one the source has given is answered the same
+    way for the life of the view, so a report that goes briefly absent costs
+    nothing. "Nothing to add" is re-read every time, since a window the
+    account could not resolve at one capture can be resolved at the next.
     """
     vid = v.get("id")
     if vid is not None and (src, vid) in _SOURCE_SLOT:
@@ -5480,12 +5535,47 @@ def source_window_identity(src, v, tlid=None):
     # hangs here rather than on a list of verbs. See adopt_published_sources.
     adopt_published_sources()
     fps = _SOURCE_WINDOWS.get(src) or {}
-    if not fps:
+    if not fps or not tlid or tlid not in fps:
         return None
-    ident = fps.get(tlid) if tlid else None
+    ident = fps[tlid]
     if ident and vid is not None:
         _SOURCE_SLOT[(src, vid)] = ident
     return ident
+
+
+def source_window_identity(src, v, tlid=None):
+    """The per-window digest `src` gave this window, or None. The
+    two-state reading of source_window_state, for callers that only want a
+    digest."""
+    return source_window_state(src, v, tlid) or None
+
+
+def source_pending(src, v, tlid):
+    """Is this foreign window still WAITING for its account to say which
+    window it is? Asked by `resolution`, and bounded by SOURCE_PENDING_S so a
+    source that never reports costs placement quality and never a window's
+    memory.
+
+    Only a window with a toplevel-identifier can be reported on, so one
+    without is never pending: nothing could ever answer for it."""
+    if not tlid:
+        return False
+    if source_window_state(src, v, tlid) is not None:
+        return False
+    vid = v.get("id")
+    if vid is None:
+        return False
+    first = _SOURCE_FIRST.setdefault((src, vid), _source_clock())
+    return _source_clock() - first < SOURCE_PENDING_S
+
+
+def forget_source_window(vid):
+    """Drop a view's remembered identity. Called on view-unmapped, because a
+    cache that only grows is a leak in a process that runs for weeks."""
+    for k in [k for k in _SOURCE_SLOT if k[1] == vid]:
+        del _SOURCE_SLOT[k]
+    for k in [k for k in _SOURCE_FIRST if k[1] == vid]:
+        del _SOURCE_FIRST[k]
 
 
 def source_window_report(views, windows):

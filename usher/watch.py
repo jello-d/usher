@@ -1953,6 +1953,21 @@ class Watcher:
             save_knowledge(self.kb, self.kb_profile)
         self._note_refusals(refused)
         persist(snap, roll=roll)
+        # A WINDOW STILL WAITING FOR ITS ACCOUNT KEEPS THE LOOP COMING BACK.
+        # The ask in `_poll_sources` runs only inside a capture, and a capture
+        # is due only when something dirties the store, so a window that is
+        # pending and then goes quiet would never be asked about and would sit
+        # unplaced until the fallback bound: found in the enclave VM rig, where
+        # a pending window was still unplaced 45 seconds after login. BOUNDED,
+        # because a pending window falls back to the source-alone key after
+        # SOURCE_PENDING_S and so stops being pending, and the pause is the
+        # debounce, so this is one snapshot every couple of seconds for at
+        # most that long.
+        if any(w.get("source") and w.get("app_id") and not w.get("key")
+               for w in snap["windows"]):
+            with self.lock:
+                self.st["dirty"] = True
+                self.st["last"] = time.time()
 
     def _note_refusals(self, refused):
         """Say why a live window is not being remembered. ONCE.

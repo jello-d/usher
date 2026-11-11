@@ -347,6 +347,16 @@ reinstall of that account. Several windows of one of its apps share one key,
 because the state that would tell them apart is in a home usher may not read,
 so the first gets the remembered place and the rest stay where they open.
 
+A window of another account **waits**, unplaced and unlearned, until that
+account has said which of its windows it is. The account answers for every
+window it owns: a digest where it can tell windows of an app apart, or `-`
+where it has nothing to add (a single-window app keeps the plain source key).
+Waiting matters because the plain source key is a slot every window of the app
+shares, so placing from it and then learning the result into the window's own
+key is how a window ended up on the wrong workspace. A source that never
+answers costs placement quality and never a window's memory: after two minutes
+the window falls back to the plain key.
+
 **Starting them is the other account's job**, since usher has no privilege to
 spawn as another user and should not acquire any. So there is a second seam,
 and what crosses it is a *trigger*:

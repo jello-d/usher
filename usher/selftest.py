@@ -266,7 +266,7 @@ def _t_registry(ck):
     # can place it. The cwd IS the key, so drive these by stubbing the one
     # thing that reads it.
     _kp, _home = ps["kitty"], os.path.expanduser("~")
-    _kv = {"app": "kitty", "title": "terminal", "pid": 4242, "id": None}
+    _kv = {"app": "kitty", "title": "terminal", "pid": 4194305, "id": None}
     _real_cwd = engine._term_cwd
     try:
         engine._term_cwd = lambda _pid: _home
@@ -1972,9 +1972,37 @@ def _t_resolution(ck):
             _TT = "Quarterly Plan - Google Chrome"
             _TL1 = "aaaa1111bbbb22"       # a wlroots-shaped identifier
             _jv = _trv("google-chrome", _TT, pid=1, vid=201, tlid=_TL1)
-            # NO MAP YET: today's behaviour exactly, the source alone.
-            ck("foreign-with-no-report-keys-on-its-source",
+            # NO MAP YET: PENDING, not the source alone. The window may be
+            # about to learn which window it is, and the source-alone key
+            # is a collapsed slot that holds whatever a cascade last wrote.
+            _pend = engine.resolution(_jv)
+            ck("foreign-with-no-report-is-pending",
+               _pend.state == engine.Resolution.PENDING
+               and "titan" in (_pend.why or ""))
+            # BOUNDED: a source that never reports must not cost a window
+            # its memory, so after SOURCE_PENDING_S it falls back to the
+            # source alone, which is the behaviour before any of this.
+            _clk, _t0 = engine._source_clock, engine._source_clock()
+            try:
+                engine._source_clock = lambda: _t0 + engine.SOURCE_PENDING_S + 1
+                ck("foreign-pending-falls-back-after-the-bound",
+                   engine.resolution(_jv).key == "titan")
+            finally:
+                engine._source_clock = _clk
+                engine._SOURCE_FIRST.clear()
+            # A WINDOW NOTHING COULD EVER REPORT ON (no identifier) is not
+            # pending at all: waiting would be for an answer that cannot come.
+            ck("foreign-with-no-identifier-is-never-pending",
+               engine.resolution(
+                   _trv("google-chrome", _TT, pid=1, vid=203)).key == "titan")
+            # "REPORTED, NOTHING TO ADD" IS READY ON THE SOURCE ALONE, and it
+            # is what keeps a single-window app (slack, a PWA) working.
+            engine.set_source_windows("titan", {_TL1: ""})
+            ck("foreign-reported-with-nothing-to-add-keys-on-its-source",
                engine.resolution(_jv).key == "titan")
+            engine._SOURCE_WINDOWS.clear()
+            engine._SOURCE_SLOT.clear()
+            engine._SOURCE_FIRST.clear()
             engine.set_source_windows(
                 "titan", {_TL1: engine.identity_digest("chrome:win:11")})
             ck("foreign-with-a-report-keys-per-window",
@@ -2233,6 +2261,21 @@ def _t_resolution(ck):
             # interval forever.
             ck("refresh-is-not-triggered-by-a-non-chrome-window",
                _P([{"app_id": "slack", "source": "titan", "key": "titan"}],
+                  {}, 1000.0, {})[0] == [])
+            # A WINDOW STILL WAITING FOR ITS IDENTITY DOES, whatever the app:
+            # it resolved Pending, so its snapshot row has no key, and only
+            # the account can end the wait. Without this a pending kitty or
+            # slack would sit unplaced until the fallback bound.
+            _pend_row = [{"app_id": "kitty", "source": "titan", "key": ""}]
+            _rp, _sp = _P(_pend_row, {}, 1000.0, {})
+            ck("refresh-wants-a-window-that-is-still-pending",
+               _rp == [] and "titan" in _sp
+               and _P(_pend_row, {}, 1000.0 + engine.SOURCE_SETTLE,
+                      _sp)[0] == ["titan"])
+            # BUT NOT A WINDOW THAT CAN NEVER BE IDENTIFIED (no app-id also
+            # has no key): asking about it would loop every interval.
+            ck("refresh-is-not-triggered-by-a-window-with-no-app-id",
+               _P([{"app_id": "", "source": "titan", "key": ""}],
                   {}, 1000.0, {})[0] == [])
             # AND THE OWNER'S OWN WINDOWS NEVER DO, or every desk would ask.
             ck("refresh-is-not-triggered-by-our-own-window",
@@ -2667,8 +2710,7 @@ def _t_resolution(ck):
                 # THE PRECONDITION, so this cannot pass vacuously: with the
                 # cache empty the window stamps the source-alone key.
                 ck("ordering-fixture-starts-with-no-identity",
-                   engine.snapshot(_OrdSock())["windows"][0].get("key")
-                   == "titan")
+                   not engine.snapshot(_OrdSock())["windows"][0].get("key"))
                 _wo._capture_once(_OrdSock())
             finally:
                 _word.save_knowledge, _word.persist = _r_sk, _r_pe
@@ -2700,6 +2742,37 @@ def _t_resolution(ck):
             # real state: both are patched on watch's own names.
             ck("the-ordering-pass-wrote-no-real-state",
                len(_ord_persisted) == 1)
+            # ONCE IDENTIFIED THE LOOP IS NOT RE-DIRTIED, or it would take a
+            # snapshot every couple of seconds for ever.
+            ck("capture-does-not-come-back-once-the-window-is-identified",
+               _wo.st["dirty"] is False)
+            # A WINDOW STILL PENDING KEEPS IT COMING BACK. The ask runs only
+            # inside a capture and a capture is due only when something
+            # dirties the store, so a pending window that then goes quiet
+            # was never asked about: found in the enclave VM rig as a window
+            # still unplaced 45s after login. The account here answers
+            # nothing, so the window stays pending.
+            _wo2 = _word.Watcher(launch=False)
+            _wo2.place_sock = _OrdSock()
+            _wo2.kb, _wo2.groups, _wo2.saved = {}, {}, {"windows": []}
+            _wo2.src_asked = {}
+            _wo2.st["dirty"], _wo2.st["last"] = True, 0
+            engine._SOURCE_WINDOWS.clear()
+            engine._SOURCE_SLOT.clear()
+            engine._SOURCE_FIRST.clear()
+            _r_sk2, _r_pe2 = _word.save_knowledge, _word.persist
+            _r_tr2 = engine.source_trigger
+            try:
+                _word.save_knowledge = lambda kb, prof: None
+                _word.persist = lambda *_a, **_k: None
+                engine.source_trigger = lambda sources, action, **_k: 0
+                _wo2._capture_once(_OrdSock())
+                ck("capture-comes-back-while-a-window-is-pending",
+                   _wo2.st["dirty"] is True and not _wo2.kb)
+            finally:
+                _word.save_knowledge, _word.persist = _r_sk2, _r_pe2
+                engine.source_trigger = _r_tr2
+                engine._SOURCE_FIRST.clear()
         finally:
             engine.SOURCE_HOOK = _rsh4
             engine._SOURCE_CACHE.clear()
@@ -4760,7 +4833,7 @@ def _t_lifecycle(ck):
             engine._term_mux_pending = _rp
         return trace, kb
 
-    def W(vid, title, app="kitty", pid=4242):
+    def W(vid, title, app="kitty", pid=4194305):
         return {"id": vid, "app_id": app, "title": title, "pid": pid,
                 "output": "DP-1", "workspace": [1.0, 1.0],
                 "pos": [0.0, 0.0], "size": [800.0, 600.0]}
@@ -7533,13 +7606,19 @@ def _t_relaunch(ck):
                 return _ids_w.get(v.get("title") or "")
 
             _lines_w = engine.source_window_lines(_rows_w, resolve=_res_w)
-            ck("source-window-reports-one-line-per-resolved-window",
-               len(_lines_w) == 2)
+            # EVERY WINDOW WITH AN IDENTIFIER GETS A LINE, resolved or not:
+            # an unresolved one answers `-` ("nothing to add") so the owner
+            # can tell it from a window it has not been told about yet.
+            ck("source-window-reports-a-line-for-every-identified-window",
+               len(_lines_w) == 5)
+            ck("source-window-reports-a-digest-only-for-the-resolved-two",
+               len([ln for ln in _lines_w
+                    if ln.split()[2] != engine.SOURCE_NONE]) == 2)
             # A ROW WITH NO IDENTIFIER IS SKIPPED, not guessed at: the last
             # fixture row is resolvable and nameless, so without this the
             # count above would be three.
             ck("source-window-skips-a-row-with-no-join-key",
-               len(_lines_w) == 2)
+               len(_lines_w) == 5)
             ck("source-window-line-is-three-words",
                all(len(ln.split()) == 3
                    and ln.split()[0] == engine.SOURCE_WINDOW_WORD
@@ -7558,8 +7637,9 @@ def _t_relaunch(ck):
             ck("source-window-skips-an-app-the-resolver-does-not-own",
                len([ln for ln in _lines_w
                     if engine.identity_digest("chrome:win:11") in ln]) == 1)
-            ck("source-window-skips-what-it-cannot-resolve",
-               not any("Unrecorded" in ln for ln in _lines_w))
+            ck("source-window-says-nothing-to-add-for-what-it-cannot-resolve",
+               "window 3333cccc4444dd -" in _lines_w
+               and "window eeee5555ffff66 -" in _lines_w)
             # THE PARSE IS LENIENT, because this shares a channel with prose.
             # GUARDED, so a parser that RAISES on a short line is reported by
             # name here rather than aborting whichever area happens to reach
@@ -7577,9 +7657,11 @@ def _t_relaunch(ck):
                _mal_w is None)
             ck("source-window-parse-keeps-only-the-shape",
                _parsed_w == {_TL1: engine.identity_digest("chrome:win:11"),
-                             _TL2: engine.identity_digest("chrome:win:22")})
+                             _TL2: engine.identity_digest("chrome:win:22"),
+                             "eeee5555ffff66": "", "1111aaaa2222bb": "",
+                             "3333cccc4444dd": ""})
             ck("source-window-parse-ignores-prose-on-the-same-channel",
-               len(_parsed_w) == 2)
+               len(_parsed_w) == 5)
             # ---- THE MAP IS PUBLISHED, so a one-shot verb can see ------
             # THE MEASURED GAP: the map is per PROCESS and filled only by a
             # trigger, so `restore`, `restore --dry-run`, `predict` and
@@ -7765,11 +7847,11 @@ def _t_relaunch(ck):
             _rep_w = engine.source_window_report([_v1, _v2],
                                                  {"titan": _parsed_w})
             ck("source-window-report-counts-the-join",
-               _rep_w == ["titan: 1 of 2 reported identifier(s) match a "
+               _rep_w == ["titan: 1 of 5 reported identifier(s) match a "
                           "live window (2 here)"])
             ck("source-window-report-says-zero-of-n-rather-than-nothing",
                engine.source_window_report([_v2], {"titan": _parsed_w})
-               == ["titan: 0 of 2 reported identifier(s) match a live "
+               == ["titan: 0 of 5 reported identifier(s) match a live "
                    "window (1 here)"])
             # A SOURCE THAT REPORTED NOTHING MUST STILL BE NAMED, which is
             # this line's whole promise and which the check here used to
@@ -7942,10 +8024,13 @@ def _t_relaunch(ck):
             # generic: an app NO plugin owns reports nothing, because one
             # window of it is already fully keyed by app-id plus the account
             # name and a title-derived part would move with the title.
-            ck("source-window-lines-report-nothing-for-an-unowned-app",
+            # AND SAYS SO RATHER THAN STAYING SILENT, which is the change:
+            # silence made "nothing to add" look like "not asked yet".
+            ck("source-window-lines-say-nothing-to-add-for-an-unowned-app",
                engine.source_window_lines(
                    [{"app_id": "spotify", "title": "Some Song",
-                     "identifier": _TL1}]) == [])
+                     "identifier": _TL1}])
+               == [f"window {_TL1} -"])
             # AND THE TRIGGER SENDS THEM ON STDIN, not in the argv: the
             # arity is exactly three words, which is what lets the
             # integrator's sudoers rule name a FIXED command with no

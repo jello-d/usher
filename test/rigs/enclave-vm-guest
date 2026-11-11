@@ -323,6 +323,21 @@ while [ "$_i" -lt 40 ]; do
   _i=$((_i + 2)); sleep 2
 done
 M S1_STORE "$(_entries)"
+# AND WAIT FOR THE ACCOUNT TO HAVE NAMED ITS WINDOWS. A foreign window now
+# WAITS (Pending) until its account has reported on it, and the ask comes
+# only once that account's window set has been stable for SOURCE_SETTLE, so
+# at a fixed time here the enclave windows are correctly neither keyed nor
+# learned yet. Reading the store before then measured a state that is
+# supposed to exist, and read as the foreign window never being remembered.
+if [ "$ENCLAVE_OK" = yes ]; then
+  _i=0
+  while [ "$_i" -lt 90 ]; do
+    [ "$(_count "window identity, $ENC")" -gt 0 ] && break
+    _i=$((_i + 3)); sleep 3
+  done
+  M S1_WAITED_FOR_IDENTITY "$_i"
+  sleep 4
+fi
 
 R "===== phase 5: the OWNER side of a foreign window ====="
 # THE THREE CLAIMS THESE NOTES MAKE ABOUT ANOTHER ACCOUNT'S WINDOWS, every one
