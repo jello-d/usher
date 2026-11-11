@@ -4032,6 +4032,22 @@ def _t_slots(ck):
             w._try_place(_new)
             ck("slot-control-no-occupant-the-newcomer-is-placed",
                22 in seated)
+            # ONE OCCUPANT CLAIMS ONE SLOT. Two slots with the same rect (a
+            # store that once learned a stack) must not both be taken by the
+            # one window sitting on it, or the next window is refused with
+            # free slots in the store.
+            _occ["geometry"]["x"] = 5
+            w.kb[engine.slot_key(_SA, _SI, 1)] = dict(
+                w.kb[engine.slot_key(_SA, _SI, 0)])
+            with w.lock:
+                w.slot_held.clear()
+            seated[:] = []
+            w.placed.discard(22)
+            w.placed.discard(21)
+            w._try_place(_new)
+            ck("slot-one-occupant-does-not-claim-two-same-rect-slots",
+               22 in seated)
+            del w.kb[engine.slot_key(_SA, _SI, 1)]
         finally:
             w.place_sock.list_views, w.place_sock.list_outputs = _ls, _lo
             del w.kb[engine.slot_key(_SA, _SI, 0)]

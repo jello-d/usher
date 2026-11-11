@@ -2885,16 +2885,26 @@ def slot_squatters(kb, held, app, ident, src, vid, views, outs, panels=None):
     and position, never the size). PURE, so the cells are checkable with no
     compositor."""
     out = {}
+    # ONE WINDOW CLAIMS AT MOST ONE SLOT, and not at all if it already holds
+    # one. A store that once learned a stack holds slots with the same (or
+    # nearly the same) rect, and a window sitting on that rect "landed" on
+    # every one of them: it claimed all, the slots stayed taken, and the
+    # windows that really needed them were refused (measured on dragonfly's
+    # first reboot after the stack: two of four shells left at the cascade
+    # with two free slots in the store).
+    spent = {v for v in held.values() if v is not None}
     for k in slot_keys(kb, app, ident, src):
         if held.get(k) is not None:
             continue
         e = kb[k]
         o = entry_output(e, outs, panels)
         for w in views:
-            if w.get("id") == vid or (w.get("app-id") or "") != app:
+            wid = w.get("id")
+            if wid == vid or wid in spent or (w.get("app-id") or "") != app:
                 continue
             if placement_landed(w, e, o):
-                out[k] = w.get("id")
+                out[k] = wid
+                spent.add(wid)
                 break
     return out
 
