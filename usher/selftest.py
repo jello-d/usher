@@ -2272,6 +2272,37 @@ def _t_resolution(ck):
                _rp == [] and "titan" in _sp
                and _P(_pend_row, {}, 1000.0 + engine.SOURCE_SETTLE,
                       _sp)[0] == ["titan"])
+            # THE RATE LIMIT MUST NOT HOLD OFF A NEW QUESTION. The last ask
+            # predates a window that mapped late (a browser), so the account
+            # was never asked about it, and the 60s interval left it pending
+            # a further minute (85s at a real login, measured). A pending
+            # window the last ask did not include asks again after settle.
+            _pw1 = [{"app_id": "kitty", "source": "titan", "key": "",
+                     "identifier": "aaaa1111bbbb22"}]
+            _pw2 = _pw1 + [{"app_id": "google-chrome", "source": "titan",
+                            "key": "", "identifier": "cccc3333dddd44"}]
+            _s0 = {"titan": (frozenset({"kitty"}), 1000.0,
+                             frozenset({"aaaa1111bbbb22"}))}
+            _rn, _sn = _P(_pw2, {"titan": 1010.0}, 1020.0, _s0)
+            ck("refresh-a-new-pending-window-restarts-the-settle",
+               _rn == [] and _sn["titan"][0]
+               == frozenset({"kitty", "google-chrome"}))
+            _s1 = {"titan": (frozenset({"kitty", "google-chrome"}), 1020.0,
+                             frozenset({"aaaa1111bbbb22"}))}
+            ck("refresh-asks-for-a-new-pending-window-inside-the-interval",
+               _P(_pw2, {"titan": 1010.0},
+                  1020.0 + engine.SOURCE_SETTLE, _s1)[0] == ["titan"])
+            # AND ONLY A NEW ONE: the same pending window, already asked
+            # about, is the never-identifiable case the interval exists for.
+            _s2 = {"titan": (frozenset({"kitty", "google-chrome"}), 1020.0,
+                             frozenset({"aaaa1111bbbb22", "cccc3333dddd44"}))}
+            ck("refresh-does-not-repeat-for-a-window-it-already-asked-about",
+               _P(_pw2, {"titan": 1010.0},
+                  1020.0 + engine.SOURCE_SETTLE, _s2)[0] == [])
+            ck("refresh-records-who-it-asked-about",
+               _P(_pw2, {}, 1020.0 + engine.SOURCE_SETTLE,
+                  _s1)[1]["titan"][2]
+               == frozenset({"aaaa1111bbbb22", "cccc3333dddd44"}))
             # BUT NOT A WINDOW THAT CAN NEVER BE IDENTIFIED (no app-id also
             # has no key): asking about it would loop every interval.
             ck("refresh-is-not-triggered-by-a-window-with-no-app-id",

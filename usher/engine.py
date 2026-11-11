@@ -4854,9 +4854,13 @@ DIGEST_LEN = 16
 SOURCE_REFRESH_EVERY = 60
 # How long that account's window set must be UNCHANGED before asking. The
 # ask is a capture, which replaces its roster, so asking mid-login would
-# record a partial desk. 10s against a measured restore that reaches its
-# last placement in 2s median and 9s at p90 across both boxes' whole logs.
-SOURCE_SETTLE = 10
+# record a partial desk. Measured restores reach their last placement in 2s
+# median and 9s at p90 across both boxes' whole logs. It was 10s and is 5s
+# now, because a foreign window WAITS for this ask: every second here is a
+# second a window sits unplaced. The cost is a higher chance that a slow
+# login asks while a straggler is still mapping and records a partial roster,
+# which the next logoff capture repairs.
+SOURCE_SETTLE = 5
 
 
 def identity_digest(ident):
@@ -5254,12 +5258,15 @@ def source_refresh_plan(live, last, now, seen=None,
     partial roster with.
     """
     seen = dict(seen or {})
-    want, have = set(), {}
+    want, have, waiting = set(), {}, {}
     for w in live:
         src = w.get("source")
         if not src:
             continue
         have.setdefault(src, set()).add(w.get("app_id") or "")
+        if (w.get("identifier") and (w.get("app_id") or "")
+                and not (w.get("key") or "")):
+            waiting.setdefault(src, set()).add(w["identifier"])
         # A WINDOW STILL WAITING (no key: it resolved Pending) wants the ask,
         # and so does a chrome window the account could not resolve at its
         # last answer, which can resolve at the next.
@@ -5270,15 +5277,28 @@ def source_refresh_plan(live, last, now, seen=None,
     out = []
     for src in sorted(want):
         apps = frozenset(have.get(src, set()))
-        was, since = seen.get(src, (None, now))
+        cur = seen.get(src)
+        if cur is None:
+            was, since, asked = None, now, frozenset()
+        else:
+            was, since = cur[0], cur[1]
+            asked = cur[2] if len(cur) > 2 else frozenset()
+        ids = frozenset(waiting.get(src, ()))
         if apps != was:
-            seen[src] = (apps, now)      # changed: start the clock again
+            seen[src] = (apps, now, asked)   # changed: start the clock again
             continue
         if now - since < settle:
             continue
-        if now - last.get(src, 0) < every:
+        # THE RATE LIMIT IS FOR A WINDOW THAT CAN NEVER BE IDENTIFIED, and it
+        # must not hold off one that has only just appeared. The ask was
+        # last made before this window mapped (a browser maps late), so the
+        # account has not been asked about it at all, and waiting out the
+        # interval left it pending for a further minute. A pending window the
+        # last ask did not include is a NEW question, not a repeat.
+        if now - last.get(src, 0) < every and not (ids - asked):
             continue
         out.append(src)
+        seen[src] = (apps, since, ids)
     # A SOURCE WITH NOTHING WANTED KEEPS NO CLOCK, so its windows arriving
     # later start one fresh rather than inheriting a stale "stable since".
     for src in list(seen):
