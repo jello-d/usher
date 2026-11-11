@@ -9126,6 +9126,74 @@ def _t_placement(ck):
     ck("match-consumes-an-entry-once",
        len(_pairs3) == 1 and len(_unlive3) == 1)
 
+    # A PER-WINDOW ENTRY BEATS THE SOURCE-ALONE FALLBACK, in any entry order.
+    # PRODUCT, measured live on dragonfly: `kitty\0titan` sorts before
+    # `kitty\0titan:<digest>` and claims any window of its account, so a walk
+    # in entry order gave the fallback to a window that had its own entry and
+    # left that entry UNMATCHED-LAYOUT, with `restore` reporting a MOVE onto
+    # the fallback's rect. Stubbed at the engine because the matcher is what
+    # is under test and a foreign window's identity needs a live map.
+    def _src_match(wins, entries):
+        _o_id, _o_wo = engine.identity, engine.window_origin
+        _ids = {w["pid"]: w["_ident"] for w in wins}
+        engine.identity = lambda v: _ids.get(v.get("pid"), "")
+        engine.window_origin = lambda pid, *a, **k: ("titan", 997)
+        try:
+            return match(wins, entries)
+        except Exception as _x:
+            return ("RAISED", repr(_x), None)
+        finally:
+            engine.identity, engine.window_origin = _o_id, _o_wo
+
+    def _tw(pid, ident):
+        _v = _trv("kitty", "terminal")
+        _v["pid"], _v["_ident"] = pid, ident
+        return _v
+
+    def _se(title):
+        return {"app_id": "kitty", "title": title, "source": "titan",
+                "appid_only": False}
+
+    _fb, _pw_a, _pw_b = _se("titan"), _se("titan:aaa"), _se("titan:bbb")
+    for _tag, _ents in (("fallback-listed-first", [_fb, _pw_a]),
+                        ("fallback-listed-last", [_pw_a, _fb])):
+        _pr, _ul, _un = _src_match([_tw(1, "titan:aaa")], list(_ents))
+        ck(f"match-per-window-entry-beats-the-fallback-{_tag}",
+           _pr != "RAISED" and len(_pr) == 1
+           and _pr[0][1]["title"] == "titan:aaa" and len(_ul) == 0)
+        ck(f"match-the-fallback-is-the-leftover-{_tag}",
+           _pr != "RAISED" and [e["title"] for e in _un] == ["titan"])
+    # a window whose OWN entry is absent still takes the fallback, or a
+    # first-visit window would be reported unmatched for no reason
+    _pr, _ul, _un = _src_match([_tw(1, "titan:aaa"), _tw(2, "titan:zzz")],
+                               [_fb, _pw_a])
+    ck("match-a-window-with-no-entry-of-its-own-takes-the-fallback",
+       _pr != "RAISED" and len(_pr) == 2 and len(_ul) == 0
+       and {p[0]["pid"]: p[1]["title"] for p in _pr}
+       == {1: "titan:aaa", 2: "titan"})
+    # a window with NO per-window identity has nothing more specific to lose
+    # to: it takes the source-alone entry, as it always did
+    _pr, _ul, _un = _src_match([_tw(3, "titan")], [_pw_a, _fb])
+    ck("match-a-window-with-no-per-window-identity-takes-the-source-entry",
+       _pr != "RAISED" and len(_pr) == 1 and _pr[0][1]["title"] == "titan")
+    # CONSUME-ONCE still holds across the two passes, and pairs keep the
+    # order of the LIVE list
+    _pr, _ul, _un = _src_match([_tw(1, "titan:aaa"), _tw(2, "titan:aaa")],
+                               [_fb, _pw_a])
+    ck("match-two-passes-still-consume-once",
+       _pr != "RAISED" and len(_pr) == 2
+       and sorted(p[1]["title"] for p in _pr) == ["titan", "titan:aaa"])
+    _pr, _ul, _un = _src_match([_tw(1, "titan:bbb"), _tw(2, "titan:aaa")],
+                               [_fb, _pw_a, _pw_b])
+    ck("match-pairs-keep-live-order",
+       _pr != "RAISED" and [p[0]["pid"] for p in _pr] == [1, 2]
+       and [p[1]["title"] for p in _pr] == ["titan:bbb", "titan:aaa"])
+    ck("is-fallback-entry-only-for-a-window-with-its-own-identity",
+       engine.is_fallback_entry(_fb, "titan:aaa", "titan")
+       and not engine.is_fallback_entry(_fb, "titan", "titan")
+       and not engine.is_fallback_entry(_pw_a, "titan:aaa", "titan")
+       and not engine.is_fallback_entry(_fb, "titan:aaa", ""))
+
     # ---- A CELL THIS DESK DOES NOT HAVE IS NOT A PLACEMENT --------------
     # PRODUCT, measured live in a nested compositor: wayfire ACCEPTS a
     # geometry past the edge of the virtual desktop exactly as asked, so the

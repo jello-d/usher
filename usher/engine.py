@@ -647,6 +647,18 @@ def entry_matches(e, app, ident, source=""):
     return bool(e.get("appid_only")) or e.get("title") == ident
 
 
+def is_fallback_entry(e, ident, source=""):
+    """Is `e` only the SOURCE-ALONE fallback for a window that has a
+    per-window identity of its own? PURE.
+
+    That entry claims any window of its account (`entry_matches`), which is
+    right for a window with no per-window handle and wrong to prefer over the
+    window's own entry. A window with no per-window identity has no more
+    specific entry to lose to, so for it nothing is a fallback."""
+    return bool(source and source_ident(source, ident)
+                and (e.get("title") or "") == source)
+
+
 def other_profile_entries(app, ident, profile=None, source=""):
     """This identity's learned entries from every OTHER display profile,
     newest first. Reads the stores directly, since the point is the desks that
@@ -6454,19 +6466,34 @@ def match(live, entries):
     app_id-keyed entry matches on app_id alone (unique-app_id apps whose title
     drifts); the rest need an exact identity too (raw title, or, for Chrome,
     the active-tab URL via identity()). Returns (pairs, unmatched_live,
-    unmatched_entries)."""
+    unmatched_entries).
+
+    A PER-WINDOW ENTRY BEATS THE SOURCE-ALONE FALLBACK, whatever order the
+    entries are in. The fallback claims any window of its account, so a walk
+    in entry order handed it to a window that has its own entry (`kitty\\0titan`
+    sorts before `kitty\\0titan:<digest>`) and left that entry unmatched, which
+    `restore` then reported as a MOVE onto the fallback's rect. match_keys has
+    always ordered them the other way; this is the same rule for the scan
+    form. TWO PASSES, so a fallback is taken only by a window no exact entry
+    claimed, and never ahead of one that would have."""
     rem = list(entries)
-    pairs, unlive = [], []
-    for lv in live:
-        app = app_of(lv)
-        key = identity(lv)
+    got = {}
+    seen = []
+    for i, lv in enumerate(live):
         src = window_origin(lv.get("pid"))[0] if isinstance(lv, dict) else ""
-        idx = next((i for i, e in enumerate(rem)
-                    if entry_matches(e, app, key, src or "")), None)
-        if idx is None:
-            unlive.append(lv)
-        else:
-            pairs.append((lv, rem.pop(idx)))
+        seen.append((app_of(lv), identity(lv), src or ""))
+    for loose in (False, True):
+        for i, (app, key, src) in enumerate(seen):
+            if i in got:
+                continue
+            idx = next((j for j, e in enumerate(rem)
+                        if entry_matches(e, app, key, src)
+                        and (loose or not is_fallback_entry(e, key, src))),
+                       None)
+            if idx is not None:
+                got[i] = rem.pop(idx)
+    pairs = [(lv, got[i]) for i, lv in enumerate(live) if i in got]
+    unlive = [lv for i, lv in enumerate(live) if i not in got]
     return pairs, unlive, rem
 
 
