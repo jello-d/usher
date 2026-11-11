@@ -522,6 +522,66 @@ for _k in config state runtime hook venv-indicator payload venv bin man; do
     || fail "paths (user) does not report '$_k': $_pu"
 done
 
+# --- THE HWDP HOOK, FOR A CALLER WHO NEVER HAD A PER-USER INSTALL ------------
+# dragonfly's first usher install was a system one, so there was no link for
+# the mode switch to repoint and NOTHING EVER CREATED THE HOOK: a dock change
+# was noticed only by the polling backstop, 21s late. Every fixture above has
+# a pre-existing link, which is why none of them could see it.
+F=$T/fhome
+mkdir -p "$T/stub2" "$F/.config/hwdp/hooks/changed.d"
+printf '#!/bin/sh\necho "fresh:x:%s:%s::%s:/bin/sh"\n' \
+  "$(id -u)" "$(id -g)" "$F" >"$T/stub2/getent"
+chmod +x "$T/stub2/getent"
+FH=$F/.config/hwdp/hooks/changed.d/40-usher
+_fresh() { env HOME="$H" PATH="$T/stub2:$T/stub:$PATH" SUDO_USER=fresh \
+  DESTDIR="$D" USHER_SKIP_BUILD=1 NO_COLOR=1 \
+  sh "$HERE/setup.sh" "$@" 2>&1; }
+[ ! -e "$FH" ] && [ ! -L "$FH" ] || fail "fixture: the hook already exists"
+_o7=$(_fresh install --system) || fail "install for a fresh caller: $_o7"
+[ "$(readlink "$FH")" = /opt/usher/share/hooks/hwdp-changed ] \
+  || fail "no hook was linked for a caller who had none: \
+$(readlink "$FH" 2>&1) :: $_o7"
+case $_o7 in
+  *"ln -sfn"*) fail "it still printed the by-hand advice after linking: $_o7" ;;
+esac
+# IDEMPOTENT, so a provision sweep re-running it is quiet and changes nothing.
+_o8=$(_fresh install --system) || fail "second install for a fresh caller"
+case $_o8 in
+  *"already"*) : ;;
+  *) fail "a second run was not idempotent: $_o8" ;;
+esac
+# CHECK SEES IT, both ways: present is OK and gone is a FAILURE, because a
+# missing link reads as a healthy install (the backstop covers for it).
+_rc=0; _o9=$(_fresh check --system) || _rc=$?
+case $_o9 in *"hwdp display-change hook is linked"*) : ;;
+  *) fail "check --system did not report the hook: $_o9" ;; esac
+rm -f "$FH"
+_rc=0; _o9=$(_fresh check --system) || _rc=$?
+[ "$_rc" != 0 ] || fail "check --system passed with no hook: $_o9"
+case $_o9 in *"no working hwdp hook"*) : ;;
+  *) fail "check --system did not name the missing hook: $_o9" ;; esac
+# NEVER OVERWRITES WHAT IS NOT ITS OWN: a link the user pointed elsewhere, and
+# a real file, are each said and left.
+ln -s /somewhere/else "$FH"
+_o10=$(_fresh install --system) || fail "install over a foreign link"
+[ "$(readlink "$FH")" = /somewhere/else ] \
+  || fail "it overwrote a link the user pointed elsewhere"
+case $_o10 in *"points elsewhere"*) : ;;
+  *) fail "it did not say it left a foreign link alone: $_o10" ;; esac
+rm -f "$FH"; printf 'mine\n' >"$FH"
+_o11=$(_fresh install --system) || fail "install over a real file"
+[ "$(cat "$FH")" = mine ] && [ ! -L "$FH" ] \
+  || fail "it replaced a real file the user wrote"
+rm -f "$FH"
+# OPT-IN BY PRESENCE: no hwdp hook directory, nothing is created and the
+# by-hand advice is still given.
+rmdir "$F/.config/hwdp/hooks/changed.d" "$F/.config/hwdp/hooks" \
+  "$F/.config/hwdp"
+_o12=$(_fresh install --system) || fail "install with no hook directory"
+[ ! -e "$F/.config/hwdp" ] || fail "it created an hwdp tree nobody asked for"
+case $_o12 in *"ln -sfn"*) : ;;
+  *) fail "no by-hand advice where it could not link: $_o12" ;; esac
+
 # --- UNINSTALL ---------------------------------------------------------------
 sysrun uninstall --system >/dev/null 2>&1 || fail "system uninstall errored"
 [ ! -e "$D/opt/usher" ] || fail "uninstall left $D/opt/usher"

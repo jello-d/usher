@@ -410,6 +410,53 @@ _user_copies() {
   return 0
 }
 
+# _login_hook: link the display-change hook for the SUDO CALLER, which is the
+# half a system install used to leave to the human. It printed the `ln` and
+# moved on, on the reasoning that the hook is a link per user and a root
+# install must not wander into a home. The mode switch already does exactly
+# that for the one user who has a sudo caller, and the reasoning missed what
+# it costs: on a box that never had a per-user install there is no link to
+# repoint, so NOTHING EVER CREATED THE HOOK. Found on dragonfly, whose first
+# usher install was a system one: a dock change was noticed only by the
+# polling backstop, 21 seconds late, with "noticed, no hook" in the log.
+# tackup is not at fault: its hwdp module says in as many words that
+# `40-usher` is usher's own link to make.
+#
+# OPT-IN BY PRESENCE, like do_hooks: no hwdp hook directory means hwdp is not
+# in use for that user and nothing is created. And NEVER OVERWRITES what is
+# not ours: a link a user pointed elsewhere, or a real file, is said and left.
+# Returns 0 when the hook is in place, 1 when it could not act, so the caller
+# prints the by-hand advice only where it is still needed.
+_login_hook() {
+  _hlh=$(_login_home)
+  case $_hlh in
+  /?*) ;;
+  *) return 1 ;;
+  esac
+  _hld=$_hlh/.config/hwdp/hooks/changed.d
+  [ -d "$_hld" ] || return 1
+  _hll=$_hld/40-usher
+  _hlt=$_payt/share/hooks/hwdp-changed
+  if [ -L "$_hll" ]; then
+    case $(readlink "$_hll") in
+    "$_hlt") echo "$PKG: hwdp hook already -> $_hlt"; return 0 ;;
+    "$_hlh/.local/share/$PKG"/share/hooks/hwdp-changed) ;;
+    *) echo "$PKG: NOTE $_hll points elsewhere, so it is left alone" >&2
+       return 1 ;;
+    esac
+  elif [ -e "$_hll" ]; then
+    echo "$PKG: NOTE $_hll is a file, not a link, so it is left alone" >&2
+    return 1
+  fi
+  ln -sfn "$_hlt" "$_hll"
+  # THE LINK BELONGS TO THE USER whose directory it is in, not to root, so
+  # they can retire it themselves. Best effort: a non-root stage has no one
+  # to give it to.
+  [ "$(id -u)" != 0 ] || chown -h "$SUDO_USER" "$_hll" 2>/dev/null || :
+  echo "$PKG: hwdp hook $_hll -> $_hlt (for $SUDO_USER)"
+  return 0
+}
+
 # _mode_switch: user to system, in the same install, because two `usher` on
 # PATH is banned and /usr/local/bin shadows ~/.local/bin. Each removal is
 # pinned to its exact shape FIRST, per the standing rm rule: this runs as root
@@ -544,13 +591,18 @@ do_install() {
   # legitimately does inside a user's home, and only for the sudo caller.
   if [ "$_MODE" = system ]; then
     _mode_switch
-    echo "$PKG: per-user steps are each user's: 'usher' is on PATH for" \
-      "everyone, and the hwdp display-change hook is a link per user" >&2
-    # The tilde is LITERAL on purpose: this line is advice every user copies,
-    # not a path to resolve, and expanding it here would print root's home.
-    # shellcheck disable=SC2088
-    echo "$PKG:   ln -sfn $_payt/share/hooks/hwdp-changed" \
-      "~/.config/hwdp/hooks/changed.d/40-usher" >&2
+    # THE SUDO CALLER'S HOOK IS LINKED HERE. Anyone else, or a caller with no
+    # hwdp hook directory, is told how to do it by hand.
+    if ! _login_hook; then
+      echo "$PKG: per-user steps are each user's: 'usher' is on PATH for" \
+        "everyone, and the hwdp display-change hook is a link per user" >&2
+      # The tilde is LITERAL on purpose: this line is advice every user
+      # copies, not a path to resolve, and expanding it here would print
+      # root's home.
+      # shellcheck disable=SC2088
+      echo "$PKG:   ln -sfn $_payt/share/hooks/hwdp-changed" \
+        "~/.config/hwdp/hooks/changed.d/40-usher" >&2
+    fi
     _login_reload
     return 0
   fi
@@ -823,7 +875,21 @@ _check_system() {
     if [ -n "$_left" ]; then
       bad "user-mode copy beside the system install (two copies on PATH," \
         "and this one shadows it): $(echo "$_left" | head -n 1)"
-    else ok "no user-mode copy for $SUDO_USER"; fi ;;
+    else ok "no user-mode copy for $SUDO_USER"; fi
+    # AND THE CALLER'S HOOK, which nothing used to ask: a box with hwdp but no
+    # `40-usher` works, slowly, through the polling backstop, so a missing
+    # link reads as a healthy install. OK when it names the payload, or
+    # resolves to something the user chose; a dangling one is the case hwdp's
+    # runner skips in silence.
+    _chd=$_lh/.config/hwdp/hooks/changed.d
+    if [ -d "$_chd" ]; then
+      if [ "$(readlink "$_chd/40-usher" 2>/dev/null)" \
+           = "$_payt/share/hooks/hwdp-changed" ] || [ -e "$_chd/40-usher" ]
+      then ok "the hwdp display-change hook is linked for $SUDO_USER"
+      else bad "no working hwdp hook at $_chd/40-usher, so a display" \
+             "change is noticed only by the polling backstop; run:" \
+             "install --system (as root, with SUDO_USER set)"; fi
+    fi ;;
   esac
   if [ -x "$VENV/bin/python" ] \
      && "$VENV/bin/python" -c 'import wayfire' 2>/dev/null; then
