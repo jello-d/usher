@@ -7493,14 +7493,29 @@ def _prediction_rows():
     outs = {o["name"]: o for o in sock.list_outputs()}
     panels = panel_map()
     rows = []
-    for w in snapshot(sock)["windows"]:
+    wins = snapshot(sock)["windows"]
+    # ONE SLOT PER WINDOW, CONSUMED ONCE, in the writer's own order (view id).
+    # Taking the first matching key for every window gave all N shells of one
+    # directory slot 0's rect, so a prediction said "ok" over a layout with
+    # them stacked, which is the one thing it exists to catch.
+    taken = {}
+    used = set()
+    for w in slot_order(wins):
+        app = w.get("app_id") or ""
+        ks = slot_keys(kb, app, w.get("key") or "", w.get("source") or "")
+        # EXHAUSTED MEANS NO SLOT, not the last one again: the placer leaves
+        # such a window where it opened, so predicting a rect for it would
+        # claim a placement that is never going to happen.
+        k = next((c for c in ks if c not in used), None)
+        if k is not None:
+            used.add(k)
+        taken[id(w)] = k
+    for w in wins:
         app = w.get("app_id") or ""
         # An app_id-ONLY key ends in NUL (see kkey / appid_only), which is how
         # a uniquely-identified app like Signal is stored, so both shapes have
         # to be tried or those windows read as having no slot.
-        e = next((kb[k] for k in
-                  match_keys(app, w.get("key") or "", w.get("source") or "")
-                  if k in kb), None)
+        e = kb.get(taken.get(id(w)))
         # THE RESOLVED output, not the stored name. Those differ exactly when
         # a panel has moved connector, and a prediction quoting the stale name
         # would report every such window as WRONG on the next verify.

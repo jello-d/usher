@@ -9598,6 +9598,46 @@ def _t_sticky(ck):
     ck("sticky-doctors-states-are-pairwise-distinct",
        _d_ok != _d_live and _d_live != "" and _d_ok != "")
 
+    # ---- predict GIVES EACH WINDOW OF A FAMILY ITS OWN SLOT ----------
+    # It took the FIRST matching key for every window, so N shells of one
+    # directory all predicted slot 0's rect and `verify` read `ok` over a
+    # layout with them stacked.
+    def _pred(nwin):
+        _kb = {engine.slot_key("zzz-fam", "", n): {
+                   "output": "DP-1", "workspace": [n, 0], "pos": [n, n],
+                   "size": [100, 100]} for n in range(3)}
+        _wins = [{"id": 30 - i, "app_id": "zzz-fam", "key": "", "title": "t",
+                  "cmd": None} for i in range(nwin)]
+        _s = (engine.ipc, engine.load_knowledge, engine.panel_map,
+              engine.snapshot)
+
+        class _PS:
+            def list_outputs(self):
+                return [_go]
+
+        try:
+            engine.ipc = lambda: _PS()
+            engine.load_knowledge = lambda *_a, **_k: _kb
+            engine.panel_map = lambda *_a, **_k: {}
+            engine.snapshot = lambda *_a, **_k: {"windows": _wins}
+            return engine._prediction_rows()
+        except Exception as _e:                            # noqa: BLE001
+            return "RAISED %s: %s" % (type(_e).__name__, _e)
+        finally:
+            (engine.ipc, engine.load_knowledge, engine.panel_map,
+             engine.snapshot) = _s
+
+    _p3, _p4 = _pred(3), _pred(4)
+    _pp3 = [r["expect_pos"] for r in _p3] if isinstance(_p3, list) else _p3
+    ck("predict-gives-each-window-its-own-slot",
+       isinstance(_p3, list) and len({tuple(x) for x in _pp3}) == 3)
+    ck("predict-assigns-by-view-id-like-the-writer",
+       isinstance(_p3, list) and _p3[2]["expect_pos"] == [0, 0]
+       and _p3[0]["expect_pos"] == [2, 2])
+    ck("predict-says-no-slot-for-a-window-past-the-last-one",
+       isinstance(_p4, list) and sum(
+           1 for r in _p4 if r["expect_workspace"] is None) == 1)
+
 
 def _t_geometry(ck):
     """respawn geometry and the chrome profile fallback."""
