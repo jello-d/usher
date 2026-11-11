@@ -592,6 +592,17 @@ never-place rules and settled-state anchors.
 .I ~/.config/usher/plugins/*.py
 user window plugins.
 .TP
+.I ~/.config/usher/replay
+commands a terminal may be restarted running, one per line as you would
+type them (\fBtop\fR, \fBhtop -d 5\fR, a script's name).
+A terminal whose foreground job is a listed command is remembered apart
+from an idle shell in the same directory, and at a login it comes back
+running that command, inside a shell that stays when it ends. Opt-in per
+command because re-running something you typed is not the same act as
+starting an app from its desktop entry; anything not listed comes back as
+a plain shell in its directory. Edits apply at the next look; a missing
+file replays nothing.
+.TP
 .I ~/.config/usher/window-source
 OPTIONAL hook, asked which account a window belongs to. Run as
 .I window-source

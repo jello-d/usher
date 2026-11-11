@@ -1,0 +1,14 @@
+# usher/replay: commands a terminal may be restarted running.
+#
+# One per line, as you would type it. A terminal whose foreground job is a
+# listed command is remembered apart from an idle shell in the same
+# directory, and at the next login it comes back running that command,
+# inside a shell that stays when the command ends.
+#
+# OPT-IN, PER COMMAND. Re-running something you typed is a different act from
+# starting an app out of its desktop entry: `top` is harmless, `make deploy`
+# is not. Anything not listed here comes back as a plain shell in its
+# directory. A script run by a shell is matched by its own name.
+top
+htop
+btop

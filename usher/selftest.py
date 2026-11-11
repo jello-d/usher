@@ -5041,7 +5041,8 @@ def _t_terminals(ck):
     ck("kitty-candidates-counts-per-cwd",
        kitty_candidates([S("kitty:/tmp"), S("kitty:/tmp"),
                          S("kitty:/nonexistent-" + "z" * 12),
-                         S("mux@manifestor:wf")], []) == ["/tmp", "/tmp"])
+                         S("mux@manifestor:wf")], [])
+       == [("/tmp", ""), ("/tmp", "")])
     ck("kitty-candidates-live",
        kitty_candidates([S("kitty:/tmp")],
                         [LV("kitty:/tmp", app="zzz-unowned")]) == [])
@@ -5049,7 +5050,8 @@ def _t_terminals(ck):
     # cell neither the old behaviour nor a naive count gets right.
     ck("kitty-candidates-starts-only-the-shortfall",
        kitty_candidates([S("kitty:/tmp"), S("kitty:/tmp")],
-                        [LV("kitty:/tmp", app="zzz-unowned")]) == ["/tmp"])
+                        [LV("kitty:/tmp", app="zzz-unowned")])
+       == [("/tmp", "")])
     ck("kitty-candidates-starts-nothing-when-every-window-is-up",
        kitty_candidates([S("kitty:/tmp"), S("kitty:/tmp")],
                         [LV("kitty:/tmp", app="zzz-unowned"),
@@ -5062,11 +5064,11 @@ def _t_terminals(ck):
     ck("kitty-candidates-will-not-multiply-against-an-unreadable-live-side",
        kitty_candidates([S("kitty:/tmp"), S("kitty:/tmp")],
                         [{"app-id": "kitty", "title": "", "pid": -1}])
-       == ["/tmp"])
+       == [("/tmp", "")])
     # AND THE READABILITY TEST ITSELF, both answers.
     ck("kitty-live-counts-reads-a-cwd-window",
        kitty_live_counts([LV("kitty:/tmp", app="zzz-unowned")])
-       == (Counter({"/tmp": 1}), True))
+       == (Counter({("/tmp", ""): 1}), True))
     # A MUX TERMINAL IS A kitty, which is what makes that branch
     # load-bearing: dropping it sends `term:resume` to the unreadable arm and
     # caps every cwd at one. The fixture has to say app="kitty" or it tests
@@ -5078,10 +5080,114 @@ def _t_terminals(ck):
     # which is the arrangement every box here actually has.
     ck("kitty-candidates-counts-past-a-live-mux-terminal",
        kitty_candidates([S("kitty:/tmp"), S("kitty:/tmp")],
-                        [LV("term:resume", app="kitty")]) == ["/tmp", "/tmp"])
+                        [LV("term:resume", app="kitty")])
+       == [("/tmp", ""), ("/tmp", "")])
     ck("kitty-live-counts-says-so-when-a-kitty-cannot-be-read",
        kitty_live_counts([{"app-id": "kitty", "title": "", "pid": -1}])[1]
        is False)
+
+    # ---- THE REPLAY ALLOWLIST (generic) and the kitty key that reads it ----
+    # Two shells in one directory, one running `top`, were one key and came
+    # back as two idle shells. The foreground command tells them apart, and
+    # only an ALLOWLISTED one may enter a key or be re-run.
+    _tc = engine.typed_command
+    ck("typed-command-is-the-basename", _tc(["/usr/bin/top"]) == "top")
+    ck("typed-command-a-shell-running-a-script-is-the-script",
+       _tc(["/bin/ksh", "/home/x/bin/tt", "-v"]) == "tt -v")
+    ck("typed-command-a-shell-with-an-option-is-the-shell",
+       _tc(["ksh", "-i"]) == "ksh -i")
+    ck("typed-command-empty", _tc([]) == "" and _tc(None) == "")
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as _td:
+        _rp = os.path.join(_td, "replay")
+        with open(_rp, "w") as _f:
+            _f.write("# comment\ntop\n  htop   -d 5  # trailing\n\n"
+                     "bad\tline\n")
+        _rr = engine.load_replay_rules(_rp)
+        ck("replay-rules-read-lines-collapse-space-and-skip-comments",
+           _rr == frozenset({"top", "htop -d 5"}))
+        ck("replay-rules-refuse-a-line-holding-a-tab",
+           not any("bad" in x for x in _rr))
+        with open(_rp, "w") as _f:
+            _f.write("tt\n")
+        os.utime(_rp, ns=(1, 2_000_000_000_000_000_000))
+        ck("replay-rules-follow-an-edit",
+           engine.load_replay_rules(_rp) == frozenset({"tt"}))
+        ck("replay-rules-missing-file-is-nothing",
+           engine.load_replay_rules(os.path.join(_td, "no")) == frozenset())
+    ck("replay-line-is-the-allowlisted-line",
+       engine.replay_line(["/usr/bin/top"], frozenset({"top"})) == "top")
+    ck("replay-line-refuses-an-unlisted-command",
+       engine.replay_line(["vim", "f"], frozenset({"top"})) == "")
+    ck("foreground-argv-of-nothing-is-empty",
+       engine.foreground_argv(None) == [] and engine.foreground_argv(-1)
+       == [])
+
+    _kk, _kp = engine.kitty_key, engine.kitty_key_parts
+    ck("kitty-key-plain-is-unchanged", _kk("/tmp") == "kitty:/tmp")
+    ck("kitty-key-round-trips-a-command-and-a-spaced-cwd",
+       _kp(_kk("/a b", "htop -d 5")) == ("/a b", "htop -d 5")
+       and _kp("kitty:/tmp") == ("/tmp", ""))
+    ck("kitty-key-parts-refuses-another-key",
+       _kp("term:resume") is None and _kp("") is None)
+    # A WINDOW RUNNING `top` IS NOT SATISFIED BY AN IDLE SHELL BESIDE IT.
+    ck("kitty-candidates-counts-a-command-apart-from-an-idle-shell",
+       kitty_candidates([S(_kk("/tmp", "top")), S("kitty:/tmp")],
+                        [LV("kitty:/tmp", app="zzz-unowned")])
+       == [("/tmp", "top")])
+    # ...AND A LIVE `top` DOES SATISFY ITS SAVED ROW, or every login starts
+    # a second one beside it.
+    ck("kitty-candidates-a-live-command-satisfies-its-saved-row",
+       kitty_candidates([S(_kk("/tmp", "top"))],
+                        [LV(_kk("/tmp", "top"), app="zzz-unowned")]) == [])
+
+    # THE KEY: driven through the real resolve with /proc stubbed.
+    _kst = (engine._term_cwd, engine._term_shell, engine.foreground_argv,
+            engine.load_replay_rules, engine._term_mux_pending)
+
+    def _kres(fg, rules):
+        engine._term_cwd = lambda *_a: "/w"
+        engine._term_shell = lambda *_a: 99
+        engine.foreground_argv = lambda *_a: fg
+        engine.load_replay_rules = lambda *_a, **_k: rules
+        engine._term_mux_pending = lambda *_a: False
+        try:
+            r = engine.KittyPlugin().resolve(
+                {"app": "kitty", "title": "", "pid": 4242})
+            return r.key if r.is_ready else None
+        except Exception as _e:                            # noqa: BLE001
+            return "RAISED %s" % _e
+        finally:
+            (engine._term_cwd, engine._term_shell, engine.foreground_argv,
+             engine.load_replay_rules, engine._term_mux_pending) = _kst
+
+    ck("kitty-resolve-keys-an-allowlisted-foreground-command",
+       _kres(["top"], frozenset({"top"})) == _kk("/w", "top"))
+    ck("kitty-resolve-ignores-an-unlisted-foreground-command",
+       _kres(["vim", "f"], frozenset({"top"})) == "kitty:/w")
+    ck("kitty-resolve-an-idle-shell-is-the-cwd",
+       _kres([], frozenset({"top"})) == "kitty:/w")
+
+    # THE RELAUNCH re-runs only what the allowlist lists NOW.
+    _spw, _ann, _lr = engine._spawn_kitty, engine._announce, \
+        engine.load_replay_rules
+    _runs = []
+    try:
+        engine._spawn_kitty = lambda cwd, size=None, run="": _runs.append(
+            (cwd, run))
+        engine._announce = lambda *_a, **_k: None
+        engine.load_replay_rules = lambda *_a, **_k: frozenset({"top"})
+        engine.kitty_relaunch_missing(
+            [S(_kk("/tmp", "top")), S(_kk("/tmp", "gone"))], [])
+    except Exception as _e:                                # noqa: BLE001
+        _runs.append(("RAISED", str(_e)))
+    finally:
+        engine._spawn_kitty, engine._announce, engine.load_replay_rules = \
+            _spw, _ann, _lr
+    ck("kitty-relaunch-reruns-a-listed-command",
+       ("/tmp", "top") in _runs)
+    ck("kitty-relaunch-a-delisted-command-comes-back-a-plain-shell",
+       ("/tmp", "") in _runs and ("/tmp", "gone") not in _runs)
 
     # the relaunch command. A latch is REPLAYED (it is the one mux verb that
     # survives in the process tree); anything else was a local mux, and the
@@ -8511,14 +8617,14 @@ def _t_chrome(ck):
         ck("terminal-count-survives-another-accounts-terminal",
            engine.kitty_candidates(_saved_2,
                                    [_trv("kitty", "", pid=1)])
-           == engine.kitty_candidates(_saved_2, []) == ["/var/tmp"] * 2)
+           == engine.kitty_candidates(_saved_2, []) == [("/var/tmp", "")] * 2)
         # THE CONTROL, and it is the reason the flag exists at all: one of
         # OUR OWN kitty windows that resolves to neither set really is
         # unaccountable, and must still force the conservative fallback.
         ck("terminal-count-still-falls-back-on-an-unreadable-own-kitty",
            engine.kitty_candidates(
                _saved_2, [_trv("kitty", "", pid=os.getpid())])
-           == ["/var/tmp"])
+           == [("/var/tmp", "")])
     ck("chrome-already-live",
        _ch.relaunch_missing([{"app_id": "google-chrome"}],
                             [_tv("google-chrome", "x")]) == set())

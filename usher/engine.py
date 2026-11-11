@@ -146,6 +146,92 @@ def config_path(name):
     return os.path.join(CONFIG_DIR, name)
 
 
+# --- the REPLAY allowlist: commands a terminal may be restarted running -----
+# A terminal's identity is where its shell is (`kitty:<cwd>`), which cannot
+# tell `top` in $HOME from an idle shell in $HOME, and at a login usher would
+# bring both back as idle shells. The FOREGROUND COMMAND tells them apart, and
+# re-running it brings the window back as what it was.
+#
+# OPT-IN, PER COMMAND, because re-running something you typed is a different
+# kind of act from starting an app out of its desktop entry: `top` is
+# harmless and `make deploy` is not. Only a command the user listed here ever
+# enters a key or is replayed, so a transient one (`vim foo`, `less`) cannot
+# mint a slot either, which is what keeps the key from churning on every
+# command a shell runs.
+REPLAY_FILE = config_path("replay")
+REPLAY_SHELLS = ("sh", "ksh", "mksh", "bash", "dash", "zsh")
+_REPLAY = {"sig": None, "rules": frozenset()}
+
+
+def load_replay_rules(path=None):
+    """The allowlisted command lines, one per line as you would type them.
+    `#` comments and blank lines ignored, runs of whitespace collapsed, and a
+    line holding a TAB or a NUL refused, since those are key separators.
+    Cached on the file's mtime, so an edit applies at the next look and a
+    missing file means nothing is replayed."""
+    path = path or REPLAY_FILE
+    try:
+        sig = os.stat(path).st_mtime_ns
+    except OSError:
+        _REPLAY.update(sig=None, rules=frozenset())
+        return _REPLAY["rules"]
+    if sig == _REPLAY["sig"]:
+        return _REPLAY["rules"]
+    rules = set()
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for raw in f:
+                line = raw.split("#", 1)[0].strip()
+                if not line or "\t" in raw.rstrip("\n") or "\0" in raw:
+                    continue
+                rules.add(" ".join(line.split()))
+    except OSError:
+        rules = set()
+    _REPLAY.update(sig=sig, rules=frozenset(rules))
+    return _REPLAY["rules"]
+
+
+def typed_command(argv):
+    """`argv` as the user would have typed it: the program's basename and its
+    arguments. A SHELL RUNNING A SCRIPT is the script (`/bin/ksh ~/bin/tt` is
+    `tt`), since that is the command typed and the interpreter is incidental.
+    "" for nothing. PURE."""
+    argv = [a for a in (argv or []) if a]
+    if not argv:
+        return ""
+    if (os.path.basename(argv[0]) in REPLAY_SHELLS and len(argv) > 1
+            and not argv[1].startswith("-")):
+        argv = argv[1:]
+    return " ".join([os.path.basename(argv[0])] + argv[1:])
+
+
+def replay_line(argv, rules=None):
+    """The allowlisted command this argv is, or "" when it is not one. The
+    answer is the ALLOWLIST'S LINE, never the argv, so what a key carries and
+    what a relaunch runs is exactly what the user wrote down."""
+    rules = load_replay_rules() if rules is None else rules
+    line = typed_command(argv)
+    return line if line in rules else ""
+
+
+def foreground_argv(shell_pid):
+    """The argv of the job in the FOREGROUND of a shell's terminal, or [] when
+    the shell itself is (idle at its prompt) or it cannot be read. From
+    /proc/<pid>/stat's tpgid, the terminal's foreground process group."""
+    if not shell_pid or shell_pid < 0:
+        return []
+    try:
+        with open(f"/proc/{shell_pid}/stat", encoding="utf-8",
+                  errors="replace") as f:
+            rest = f.read().rsplit(")", 1)[1].split()
+        tpgid = int(rest[5])
+    except (OSError, IndexError, ValueError):
+        return []
+    if tpgid <= 0 or tpgid == shell_pid:
+        return []
+    return _proc_argv(tpgid)
+
+
 EXCLUDE_FILE = os.environ.get(
     "USHER_EXCLUDE_FILE", config_path("exclude"))
 
@@ -2144,20 +2230,48 @@ def _proc_argv0(pid):
         return ""
 
 
-def _term_cwd(pid):
-    """The working dir of a kitty window's SHELL: its first non-helper child's
-    cwd. kitty itself stays at $HOME (--directory), but the shell's cwd tracks
-    the user's cd, so it is where the window 'is'. '' if unreadable/none."""
+def _term_shell(pid):
+    """A kitty window's SHELL: its first non-helper child, or None."""
     if not pid or pid < 0:
-        return ""
+        return None
     for k in _proc_children(pid):
         if _proc_argv0(k) in ("kitten", "kitty"):
             continue                            # skip kitty's atexit helper
-        try:
-            return os.readlink(f"/proc/{k}/cwd")
-        except OSError:
-            return ""
-    return ""
+        return k
+    return None
+
+
+def _term_cwd(pid):
+    """The working dir of a kitty window's SHELL. kitty itself stays at $HOME
+    (--directory), but the shell's cwd tracks the user's cd, so it is where
+    the window 'is'. '' if unreadable/none."""
+    k = _term_shell(pid)
+    if k is None:
+        return ""
+    try:
+        return os.readlink(f"/proc/{k}/cwd")
+    except OSError:
+        return ""
+
+
+# A KITTY KEY IS `kitty:<cwd>`, plus a TAB and the allowlisted command when
+# the shell is running one (see REPLAY_FILE). TAB because a path may hold
+# almost anything and an allowlist line may hold no tab, so splitting on the
+# LAST tab is unambiguous.
+KITTY_RUN_SEP = "\t"
+
+
+def kitty_key(cwd, line=""):
+    return f"kitty:{cwd}{KITTY_RUN_SEP}{line}" if line else f"kitty:{cwd}"
+
+
+def kitty_key_parts(ident):
+    """(cwd, command) from a kitty key, or None when it is not one. PURE."""
+    if not (ident or "").startswith("kitty:"):
+        return None
+    body = ident[len("kitty:"):]
+    cwd, sep, line = body.rpartition(KITTY_RUN_SEP)
+    return (cwd, line) if sep else (body, "")
 
 
 def _proc_argv(pid):
@@ -2498,9 +2612,11 @@ class KittyPlugin(WindowPlugin):
     """Non-mux kitty terminals: a shell or a program (e.g. Claude Code) in a
     working dir. Claims any kitty window mux did not (registry order). Identity
     is the shell's CWD from /proc (`kitty:<cwd>`), so the window keeps its place
-    across restarts regardless of the volatile title. Respawns a missing one as
-    a plain shell in that cwd (`kitty --directory`, deliberately NOT re-running
-    the captured command).
+    across restarts regardless of the volatile title, plus the foreground
+    command when it is one the user allowlisted (see REPLAY_FILE). Respawns a
+    missing one in that cwd, running that command only if it is STILL listed,
+    and otherwise as a plain shell; an unlisted captured command is never
+    re-run.
 
     A SHELL AT $HOME USED TO BE A SCRATCH TERMINAL, excluded end to end: never
     captured, never placed, never brought back. That was the same kind of
@@ -2560,7 +2676,13 @@ class KittyPlugin(WindowPlugin):
                 "identity is a terminal slot, not this cwd")
         cwd = _term_cwd(v["pid"])
         if cwd:
-            return Resolution.ready(f"kitty:{cwd}")
+            # THE FOREGROUND COMMAND IS PART OF WHICH WINDOW THIS IS, but only
+            # an ALLOWLISTED one: `top` in $HOME is not the idle shell beside
+            # it, while `vim foo` is a moment in a shell's life and must not
+            # re-key it.
+            line = replay_line(
+                foreground_argv(_term_shell(v["pid"])))
+            return Resolution.ready(kitty_key(cwd, line))
         return Resolution.pending(
             "the shell's cwd is not readable yet (a kitty needs ~0.25s)")
 
@@ -4510,12 +4632,16 @@ def mux_relaunch_missing(saved, live):
     return {"kitty"} if n else set()
 
 
-def _spawn_kitty(cwd, size=None):
-    """Open a plain kitty shell in cwd (a fresh per-window id). Deliberately NOT
-    re-running the window's captured program: restoring the place + directory,
-    not the command."""
+def _spawn_kitty(cwd, size=None, run=""):
+    """Open a kitty shell in cwd, running `run` first when it is given. `run`
+    is an ALLOWLIST LINE (see REPLAY_FILE), never a captured argv, and it runs
+    the way spawn_term runs a mux command: inside a shell that stays when it
+    ends, so quitting `top` leaves a terminal rather than closing the window.
+    """
     env = {k: v for k, v in os.environ.items() if k != "TMUX"}
-    subprocess.Popen(["kitty"] + _size_opts(size) + ["--directory", cwd],
+    tail = ["ksh", "-c", f"{run}; exec ksh -i"] if run else []
+    subprocess.Popen(["kitty"] + _size_opts(size) + ["--directory", cwd]
+                     + tail,
                      env=env, start_new_session=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -4541,8 +4667,8 @@ def kitty_live_counts(live):
     for v in our_views(live):
         vv = pview(v)
         k = identity(v) or ""
-        if k.startswith("kitty:"):
-            have[k[len("kitty:"):]] += 1
+        if kitty_key_parts(k) is not None:
+            have[kitty_key_parts(k)] += 1
         elif TERM_KEY_RE.match(k):
             pass                       # a mux terminal: accounted for, not ours
         elif vv["app"] == "kitty":
@@ -4551,7 +4677,10 @@ def kitty_live_counts(live):
 
 
 def kitty_candidates(saved, live):
-    """The cwds to reopen a plain kitty shell in, ONE PER MISSING WINDOW.
+    """(cwd, command) pairs to reopen a kitty in, ONE PER MISSING WINDOW. The
+    command is "" for a plain shell, or the allowlisted command it was running
+    (see REPLAY_FILE), counted separately so `top` in $HOME is not satisfied
+    by an idle shell in $HOME.
     Pure, for the same reason mux_candidates is.
 
     COUNTED PER CWD, which is the same question `mux_candidates` asks per
@@ -4577,18 +4706,17 @@ def kitty_candidates(saved, live):
     for w in saved:
         if w.get("app_id") != "kitty":
             continue
-        k = saved_key(w)
-        if not k.startswith("kitty:"):
+        parts = kitty_key_parts(saved_key(w))
+        if parts is None:
             continue
-        cwd = k[len("kitty:"):]
-        if not cwd or not os.path.isdir(cwd):
+        if not parts[0] or not os.path.isdir(parts[0]):
             continue
-        want[cwd] += 1
+        want[parts] += 1
     have, readable = kitty_live_counts(live)
     out = []
-    for cwd in want:
-        n = max(0, want[cwd] - have[cwd])
-        out.extend([cwd] * (min(n, 1) if not readable else n))
+    for parts in want:
+        n = max(0, want[parts] - have[parts])
+        out.extend([parts] * (min(n, 1) if not readable else n))
     return out
 
 
@@ -4602,10 +4730,15 @@ def kitty_relaunch_missing(saved, live):
     enclave's four shells in one home made of that."""
     n = 0
     sizes = saved_sizes(saved)
-    for cwd in kitty_candidates(saved, live):
-        _spawn_kitty(cwd, sizes.get(f"kitty:{cwd}"))
+    rules = load_replay_rules()
+    for cwd, line in kitty_candidates(saved, live):
+        # ASKED AGAIN NOW, not trusted from the key: the allowlist may have
+        # lost a command since it was captured, and only what it lists TODAY
+        # is ever run. A command no longer listed comes back as a plain shell.
+        run = line if line in rules else ""
+        _spawn_kitty(cwd, sizes.get(kitty_key(cwd, line)), run)
         n += 1
-        _announce(f"launch  kitty {cwd}")
+        _announce(f"launch  kitty {cwd}" + (f" :: {run}" if run else ""))
     return {"kitty"} if n else set()
 
 

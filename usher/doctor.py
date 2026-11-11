@@ -39,7 +39,7 @@ from .engine import (KB_SCHEMA, LOCAL_HOST, PLUGIN_HOOKS, STATE, TERM_KEY_RE,
                      mux_host_of, mux_session_of, mux_sessions, plugins,
                      lock_capability, profile_id, pview,
                      desktop_entries, desktop_launch_for, identity,
-                     kkey,
+                     kkey, kitty_key_parts, KITTY_RUN_SEP, load_replay_rules,
                      saved_key,
                      schema_path)
 
@@ -438,9 +438,11 @@ def collision_fix(ident, source="", per_window=0):
     if is_chrome_slot(ident):
         return "usher mis-resolved these; usher reload clears it"
     if ident.startswith("kitty:"):
-        return ("usher keys a terminal on its shell's directory, so two in "
-                "one directory share a slot; move one, or give it its own "
-                "app-id (kitty --app-id NAME) plus a NAME.desktop entry")
+        return ("usher keys a terminal on its shell's directory and an "
+                "allowlisted foreground command (usher/replay), so idle shells "
+                "in one directory share a slot; list what they run there, "
+                "move one, or give it its own app-id (kitty --app-id NAME) "
+                "plus a NAME.desktop entry")
     return "a plugin can tell them apart; see README"
 
 
@@ -512,14 +514,19 @@ def _doctor_relaunch(out, snap, live):
             continue
         if TERM_KEY_RE.match(key):
             continue        # covered by the per-command lines above
-        if key.startswith("kitty:"):
-            cwd = key[len("kitty:"):]
+        if kitty_key_parts(key) is not None:
+            cwd, line = kitty_key_parts(key)
+            shown = key.replace(KITTY_RUN_SEP, " :: ")
             if key in lk:
-                out(f"  live       {key[:56]}")
+                out(f"  live       {shown[:56]}")
             elif not os.path.isdir(cwd):
-                out(f"  skip       {key[:44]}  (directory is gone)")
+                out(f"  skip       {shown[:44]}  (directory is gone)")
+            elif line and line not in load_replay_rules():
+                out(f"  RELAUNCH   {shown[:44]}  (a plain shell: `{line}` is"
+                    f" no longer in usher/replay)")
             else:
-                out(f"  RELAUNCH   {key[:44]}  (kitty --directory {cwd})")
+                out(f"  RELAUNCH   {shown[:44]}  (kitty --directory {cwd}"
+                    + (f", running `{line}`" if line else "") + ")")
             continue
         # THE DEFAULT RELAUNCH's VERDICT. "No plugin respawns this" stopped
         # being true when the freedesktop registry became the fallback, and a

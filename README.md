@@ -494,6 +494,12 @@ and no live greeter, so the installed copy can be checked in place:
 - `~/.config/usher/exclude`: `<app-regex> :: <title-regex>` never-place list.
 - `~/.config/usher/include`: the same shape; the settled-state anchor list.
 - `~/.config/usher/plugins/*.py`: user window plugins.
+- `~/.config/usher/replay`: commands a terminal may be restarted running,
+  one per line as typed (`top`, `htop -d 5`, a script's name). A terminal
+  running a listed command is remembered apart from an idle shell in the
+  same directory and comes back running it; anything else comes back as a
+  plain shell. Opt-in, because re-running what you typed is not the same
+  act as starting an app from its desktop entry.
 
 Example defaults ship in [`share/config/`](share/config/). The
 daemon soft-degrades when any are absent.
