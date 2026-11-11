@@ -6510,6 +6510,28 @@ def target_geometry(e, o):
             "width": w, "height": h}
 
 
+def is_sticky(v, e=None):
+    """Is this window sticky, by what it IS now or by what its slot SAYS? PURE.
+
+    A STICKY WINDOW IS ON EVERY WORKSPACE, so it has no workspace to be put
+    on, and usher never moves one. That is a rule rather than an optimisation,
+    because the arithmetic cannot be made right: wayfire reports a view's
+    geometry relative to the current viewport and a sticky view follows the
+    viewport, so a placement "onto another workspace" is an offset of whole
+    screens that the window then CARRIES with it. Measured live 2026-11-11 on
+    dragonfly: a keyring prompt placed from a slot saved with the viewport on
+    one workspace while the viewport was on another sat 2450px left of the
+    screen edge, off-screen, on every workspace, until it was moved by hand.
+
+    BOTH SIDES ARE ASKED, because either alone leaves a hole. The live view
+    is the truth when it says so; the ENTRY is what catches a window whose
+    stickiness arrives after it maps (a rule applies it late, so the map
+    payload does not carry it yet) and the reverse case of a stored sticky
+    slot matching a window that is not, which `place()` would otherwise MAKE
+    sticky and offset in one request."""
+    return bool((v or {}).get("sticky")) or bool((e or {}).get("sticky"))
+
+
 def place(sock, view_id, e, o):
     geom = target_geometry(e, o)
     sock.send_json({
@@ -7628,6 +7650,12 @@ def do_restore(dry, only=None, source=None):
         # anyway strands the window past the edge of the virtual desktop,
         # where no workspace navigation reaches it, and the read-back confirms
         # the stranding rather than catching it.
+        # A STICKY WINDOW IS NEVER MOVED, so it is reported rather than put
+        # anywhere: see is_sticky for why no offset can be right for one.
+        if is_sticky(lv, e):
+            unplaceable.append((lv, e, "sticky, so it is on every workspace "
+                                "and is never moved"))
+            continue
         if not cell_fits(e, {o["name"]: o}):
             _ws = o.get("workspace") or {}
             unplaceable.append((lv, e, f"saved on ws{tuple(e['workspace'])}, "

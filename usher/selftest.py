@@ -9290,6 +9290,199 @@ def _t_placement(ck):
         _gw._on_event({"event": "view-unmapped", "view": {"id": 9}})
     ck("the-refusal-is-forgotten-on-unmap", 9 not in _gw.cell_said)
 
+def _t_sticky(ck):
+    """A STICKY WINDOW IS NEVER MOVED, driven through every path that moves one.
+
+    PRODUCT, measured live on dragonfly 2026-11-11: a keyring prompt, sticky,
+    was placed from a slot saved with the viewport on one workspace while the
+    viewport was on another. wayfire reports geometry relative to the viewport
+    and a sticky view follows the viewport, so the whole-screen offset the
+    placement added was CARRIED, and the window sat 2450px off the left edge
+    of the screen on every workspace. The enclave's Chrome and Slack were
+    waiting on that prompt, so nothing could be unlocked until it was found.
+
+    THE CONTROLS ARE THE POINT: a gate that refused every window would pass
+    every refusal cell below, so each path has a cell where a non-sticky
+    window is still placed."""
+    from .watch import Watcher, PLACE_GRACE
+    from . import watch as _ws
+    from . import doctor as _dsk
+    import time as _t
+
+    # THE DEFINITION, BOTH SIDES, and the absent forms a live payload takes.
+    ck("sticky-a-live-sticky-view-counts", engine.is_sticky({"sticky": True}))
+    ck("sticky-a-stored-sticky-slot-counts",
+       engine.is_sticky({}, {"sticky": True}))
+    ck("sticky-neither-side-is-not-sticky",
+       not engine.is_sticky({"sticky": False}, {"sticky": False}))
+    ck("sticky-missing-fields-are-not-sticky",
+       not engine.is_sticky(None) and not engine.is_sticky({}, None)
+       and not engine.is_sticky(None, {}))
+
+    # ---- THE DAEMON, through the real placer --------------------------------
+    w = Watcher(launch=False)
+    now = _t.time()
+    w.st["armed_at"] = now
+    w.st["last_map"] = now
+    seated = []
+
+    class _Sock:
+        live = {1, 2, 3, 4}
+
+        def list_outputs(self):
+            return [{"name": "DP-1", "geometry": {"x": 0, "y": 0,
+                                                  "width": 100, "height": 100}}]
+
+        def list_views(self, filter_mapped_toplevel=False):
+            return [{"id": i} for i in sorted(self.live)]
+
+    w.place_sock = _Sock()
+    w._seat_view = lambda v, e, o: (seated.append(v["id"]) or True)
+    _key = kkey("signal", "")
+
+    def _entry(sticky):
+        return {"app_id": "signal", "title": "", "appid_only": True,
+                "label": "x", "output": "DP-1", "workspace": [1.0, 1.0],
+                "pos": [1.0, 1.0], "size": [10.0, 10.0], "last_seen": now,
+                "sticky": sticky, "inverted": False, "fullscreen": False}
+
+    def V(vid, sticky=False):
+        return {"id": vid, "app-id": "signal", "title": "Signal", "pid": -1,
+                "parent": -1, "sticky": sticky,
+                "geometry": {"x": 0, "y": 0, "width": 1, "height": 1}}
+
+    w.kb = {_key: _entry(False)}
+    _said = []
+    _l_e, _l_w = engine.logline, _ws.logline
+    try:
+        engine.logline = _ws.logline = _said.append
+        for _v in (1, 2, 3, 4):
+            w.deadline[_v] = now + PLACE_GRACE
+            w.identified.add(_v)
+        # a live view that SAYS it is sticky, against an ordinary slot
+        w._try_place(V(1, sticky=True))
+        ck("sticky-the-daemon-never-moves-a-live-sticky-window",
+           1 not in seated)
+        ck("sticky-and-says-so-naming-the-app",
+           any("sticky, never moved" in m and "signal" in m for m in _said))
+        w._try_place(V(1, sticky=True))
+        ck("sticky-and-only-once-per-window",
+           len([m for m in _said if "sticky, never moved" in m]) == 1)
+        # it claimed NO slot, so the next window of the same key is placed.
+        # This is also the CONTROL: a gate refusing everything fails here.
+        ck("sticky-a-skipped-window-holds-no-slot", not w.slot_held)
+        w._try_place(V(2))
+        ck("sticky-and-a-window-that-is-not-sticky-is-still-placed",
+           seated == [2])
+        # a STORED sticky slot, against a view that does not say so: this is
+        # the late-rule case and the one place() would turn into sticky + off
+        # screen in a single request
+        w.kb[_key] = _entry(True)
+        with w.lock:
+            w.slot_held.clear()
+        w._try_place(V(3))
+        ck("sticky-the-daemon-never-places-onto-a-sticky-slot", 3 not in seated)
+        w.kb[_key] = _entry(False)
+        with w.lock:
+            w.slot_held.clear()
+        w._try_place(V(4))
+        ck("sticky-and-the-same-window-is-placed-once-the-slot-is-not",
+           4 in seated)
+        # a forgotten view is said again, or a new window reusing the vid is
+        # refused in silence; driven through the real event, not the set
+        ck("sticky-the-refusal-is-recorded", 1 in w.sticky_said)
+        with contextlib.redirect_stdout(io.StringIO()):
+            w._on_event({"event": "view-unmapped", "view": {"id": 1}})
+        ck("sticky-the-refusal-is-forgotten-on-unmap",
+           1 not in w.sticky_said)
+    finally:
+        engine.logline, _ws.logline = _l_e, _l_w
+
+    # ---- THE ONE-SHOT RESTORE, which has its own mover ----------------------
+    _go = {"id": 1, "name": "DP-1",
+           "geometry": {"x": 0, "y": 0, "width": 1000, "height": 800},
+           "workspace": {"x": 0, "y": 0, "grid_width": 2, "grid_height": 2}}
+
+    def _kent(sticky):
+        return {"app_id": "zzz-unowned", "title": "t", "appid_only": True,
+                "label": "x", "output": "DP-1", "panel": "", "surface": "",
+                "workspace": [1, 1], "pos": [10, 20], "size": [100, 100],
+                "last_seen": _t.time(), "sticky": sticky, "inverted": False,
+                "fullscreen": False}
+
+    def _kview(sticky):
+        return {"id": 11, "app-id": "zzz-unowned", "title": "t",
+                "output-name": "DP-1", "pid": os.getpid(), "role": "toplevel",
+                "sticky": sticky,
+                "geometry": {"x": 10, "y": 20, "width": 100, "height": 100}}
+
+    def _restore(entry_sticky, view_sticky):
+        _view = _kview(view_sticky)
+
+        class _RS:
+            def list_views(self, filter_mapped_toplevel=False):
+                return [_view]
+
+            def list_outputs(self):
+                return [_go]
+
+        _s = (engine.ipc, engine.load_knowledge, engine.panel_map,
+              engine.profile_id)
+        _b = io.StringIO()
+        try:
+            engine.ipc = lambda: _RS()
+            engine.load_knowledge = lambda *_a, **_k: {
+                kkey("zzz-unowned", ""): _kent(entry_sticky)}
+            engine.panel_map = lambda *_a, **_k: {}
+            engine.profile_id = lambda *_a, **_k: "rigprof"
+            with contextlib.redirect_stdout(_b):
+                engine.do_restore(True)
+        except Exception as _e:                            # noqa: BLE001
+            return "RAISED %s: %s" % (type(_e).__name__, _e)
+        finally:
+            (engine.ipc, engine.load_knowledge, engine.panel_map,
+             engine.profile_id) = _s
+        return _b.getvalue()
+
+    _r_ok = _restore(False, False)
+    _r_live = _restore(False, True)
+    _r_slot = _restore(True, False)
+    ck("sticky-restore-control-an-ordinary-window-matches",
+       "matched 1/1" in _r_ok and "unplaceable 0" in _r_ok)
+    ck("sticky-restore-reports-a-sticky-view-unplaceable",
+       "unplaceable 1" in _r_live and "sticky" in _r_live)
+    ck("sticky-restore-reports-a-sticky-slot-unplaceable",
+       "unplaceable 1" in _r_slot and "sticky" in _r_slot)
+    ck("sticky-restore-never-offers-it-as-a-move",
+       "MOVE" not in _r_live and "MOVE" not in _r_slot)
+
+    # ---- AND doctor SAYS SO rather than `placeable` -------------------------
+    def _doc(entry_sticky, view_sticky):
+        _lines = []
+        _pm = engine.panel_map
+        try:
+            engine.panel_map = lambda *_a, **_k: {}
+            _dsk._doctor_placement(
+                _lines.append, {kkey("zzz-unowned", ""): _kent(entry_sticky)},
+                [_kview(view_sticky)], {"DP-1": _go})
+        except Exception as _e:                            # noqa: BLE001
+            return "RAISED %s: %s" % (type(_e).__name__, _e)
+        finally:
+            engine.panel_map = _pm
+        return "\n".join(_lines)
+
+    _d_ok, _d_live, _d_slot = _doc(False, False), _doc(False, True), \
+        _doc(True, False)
+    ck("sticky-doctor-control-an-ordinary-window-is-placeable",
+       "placeable" in _d_ok and "STICKY" not in _d_ok)
+    ck("sticky-doctor-calls-a-sticky-view-sticky",
+       "STICKY" in _d_live and "placeable " not in _d_live)
+    ck("sticky-doctor-calls-a-sticky-slot-sticky",
+       "STICKY" in _d_slot and "placeable " not in _d_slot)
+    ck("sticky-doctors-states-are-pairwise-distinct",
+       _d_ok != _d_live and _d_live != "" and _d_ok != "")
+
+
 def _t_geometry(ck):
     """respawn geometry and the chrome profile fallback."""
     # respawn geometry: ask kitty for the size the window had, so it does not
@@ -11921,7 +12114,7 @@ def selftest():
         for area in (_t_registry, _t_resolution, _t_lock,
                      _t_toplevels, _t_roster,
                      _t_lifecycle, _t_desktop, _t_loupe, _t_slots,
-                     _t_verify,
+                     _t_sticky, _t_verify,
                      _t_terminals, _t_cli_split,
                      _t_launch_source,
                      _t_relaunch, _t_chrome, _t_learn,

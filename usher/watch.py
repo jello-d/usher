@@ -508,6 +508,10 @@ class Watcher:
         # window holds and this is a property of the desk; one set would make
         # either message suppress the other.
         self.cell_said = set()
+        # VIEWS WE HAVE ALREADY SAID ARE STICKY and so never moved. A third
+        # set for the same reason as the one above: it is a property of the
+        # window, and a browser renames constantly.
+        self.sticky_said = set()
         # (vid, kind) PAIRS WHOSE REFUSAL TO REMEMBER WE HAVE ALREADY SAID.
         # The capture loop runs every second and a refused window stays
         # refused, so this is per window rather than per pass. Discarded with
@@ -867,6 +871,21 @@ class Watcher:
         with self.lock:
             skey, e = engine.free_slot(self.kb, self.slot_held, app,
                                        identity(v), _src or "", vid, _live)
+        # A STICKY WINDOW IS NEVER MOVED, whatever else says it may be. It is
+        # on every workspace, so the workspace offset a slot carries would
+        # strand it off-screen and it would CARRY that offset to every
+        # workspace (see engine.is_sticky). Asked after the slot is chosen so
+        # the entry's own flag counts, and BEFORE the ledger, the seed and the
+        # settled gate, so a skipped window claims no slot and no later
+        # window is refused for want of one it never used.
+        if engine.is_sticky(v, e):
+            with self.lock:
+                _first = vid not in self.sticky_said
+                if _first:
+                    self.sticky_said.add(vid)
+            if _first:
+                logline(f"sticky, never moved: {app[:18]} | {title[:34]}")
+            return
         # CAPTURED BEFORE _recognise, which is what records the identification:
         # read it afterwards and this is always False.
         first_look = e is not None and vid not in self.identified
@@ -2096,6 +2115,7 @@ class Watcher:
                 self.slot_said = {p for p in self.slot_said
                                   if p[0] != v["id"]}
                 self.cell_said.discard(v["id"])
+                self.sticky_said.discard(v["id"])
                 # and having said it would never be remembered, for the same
                 # two reasons: a vid is reused, and a set that only grows is a
                 # leak in a process that runs for weeks.
