@@ -867,8 +867,22 @@ class Watcher:
         # the indexed siblings, skipping any a LIVE window already holds.
         # Resolved once here and reused for the ledger below, or the entry
         # placed and the slot recorded could be two different slots.
-        _live = self._live_ids()
+        _views = self._live_views()
+        _live = {w.get("id") for w in _views}
         with self.lock:
+            # A WINDOW ALREADY AT A SLOT'S RECT HOLDS IT (see slot_squatters),
+            # recorded before the pick so this window is offered the NEXT one
+            # and not a stack on top of the occupant.
+            try:
+                _outs0 = {o["name"]: o for o in
+                          self.place_sock.list_outputs()}
+                for _k, _id in engine.slot_squatters(
+                        self.kb, self.slot_held, app, identity(v),
+                        _src or "", vid, _views, _outs0,
+                        engine.panel_map()).items():
+                    self.slot_held[_k] = _id
+            except Exception as _e:                      # noqa: BLE001
+                logline(f"slot occupancy: {_e}")
             skey, e = engine.free_slot(self.kb, self.slot_held, app,
                                        identity(v), _src or "", vid, _live)
         # A STICKY WINDOW IS NEVER MOVED, whatever else says it may be. It is
@@ -1241,6 +1255,16 @@ class Watcher:
         except Exception as e:
             logline(f"refetch view {vid}: {e}")
         return None
+
+    def _live_views(self):
+        """Every mapped toplevel right now, or [] if the list could not be
+        read (the no-evidence answer, see _live_ids)."""
+        try:
+            return list(self.place_sock.list_views(
+                filter_mapped_toplevel=True))
+        except Exception as e:
+            logline(f"live view list: {e}")
+            return []
 
     def _live_ids(self):
         """The ids of every mapped toplevel right now, or an EMPTY set if the

@@ -3986,6 +3986,56 @@ def _t_slots(ck):
         del w.kb[engine.slot_key(_SA, _SI, 0)]
         w.place_sock.live = {1, 2, 3}
 
+        # THE HOLDER OF A SLOT IS THE WINDOW AT ITS RECT. dragonfly's first
+        # undock: ONE slot, a window already sitting on it, and a second
+        # window reached first. The sweep made the newcomer the holder and
+        # placed it on top of the occupant, stacking the two. Drive it
+        # through the real `_try_place` with the occupant already landed.
+        _o_ws = {"name": "DP-1", "workspace": {"x": 1, "y": 1},
+                 "geometry": {"x": 0, "y": 0, "width": 100, "height": 100}}
+        _occ = {"id": 21, "app-id": _SA, "title": _SI, "pid": -1,
+                "parent": -1, "output-name": "DP-1",
+                "geometry": {"x": 5, "y": 5, "width": 10, "height": 10}}
+        _new = {"id": 22, "app-id": _SA, "title": _SI, "pid": -1,
+                "parent": -1, "output-name": "DP-1",
+                "geometry": {"x": 60, "y": 60, "width": 10, "height": 10}}
+        w.kb[engine.slot_key(_SA, _SI, 0)] = {
+            "app_id": _SA, "title": _SI, "appid_only": False, "label": "x",
+            "output": "DP-1", "workspace": [1.0, 1.0], "pos": [5.0, 5.0],
+            "size": [10.0, 10.0], "last_seen": now, "sticky": False,
+            "inverted": False, "fullscreen": False}
+        _ls, _lo = w.place_sock.list_views, w.place_sock.list_outputs
+        w.place_sock.list_views = lambda filter_mapped_toplevel=False: [
+            _occ, _new]
+        w.place_sock.list_outputs = lambda: [_o_ws]
+        with w.lock:
+            w.slot_held.clear()
+        seated[:] = []
+        try:
+            for _v in (_new, _occ):
+                w.deadline[_v["id"]] = now + PLACE_GRACE
+                w.identified.add(_v["id"])
+                w.placed.discard(_v["id"])
+                w._try_place(_v)
+            ck("slot-newcomer-is-not-stacked-on-the-occupant",
+               22 not in seated)
+            ck("slot-the-window-already-there-holds-it",
+               w.slot_held.get(engine.slot_key(_SA, _SI, 0)) == 21)
+            # CONTROL: with the occupant NOT on the rect the newcomer is
+            # placed, so the check above measures the occupancy and not a
+            # placer that refuses everything.
+            _occ["geometry"]["x"] = 40
+            with w.lock:
+                w.slot_held.clear()
+            seated[:] = []
+            w.placed.discard(22)
+            w._try_place(_new)
+            ck("slot-control-no-occupant-the-newcomer-is-placed",
+               22 in seated)
+        finally:
+            w.place_sock.list_views, w.place_sock.list_outputs = _ls, _lo
+            del w.kb[engine.slot_key(_SA, _SI, 0)]
+
         # STEP 2: A WINDOW FROM ANOTHER ACCOUNT IS PLACED FROM ITS OWN
         # SLOT, AND NEVER FROM THE OWNER'S. Both slots exist here on purpose:
         # `signal\0` is the owner's app_id-only key and matches every window

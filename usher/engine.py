@@ -2869,6 +2869,36 @@ def free_slot(kb, held, app, ident, src, vid, live):
 
 
 
+def slot_squatters(kb, held, app, ident, src, vid, views, outs, panels=None):
+    """{slot key: view id} for slots another live window ALREADY SITS ON.
+
+    **THE HOLDER OF A SLOT IS THE WINDOW AT ITS RECT, not whichever window the
+    placer reached first.** Measured on dragonfly's first undock: the laptop
+    desk had ONE slot for `kitty:/home/jello` and a kitty that had been on the
+    laptop panel all along was already sitting on it. The sweep reached a
+    different kitty (from an external) first, made it the holder, and placed
+    it exactly on top of the occupant. Two windows stacked, and the capture
+    loop then learned the stack into the docked desk's store.
+
+    Only an UNHELD slot is claimed, and only for a window of the same app
+    that has genuinely landed there (`placement_landed`: output, workspace
+    and position, never the size). PURE, so the cells are checkable with no
+    compositor."""
+    out = {}
+    for k in slot_keys(kb, app, ident, src):
+        if held.get(k) is not None:
+            continue
+        e = kb[k]
+        o = entry_output(e, outs, panels)
+        for w in views:
+            if w.get("id") == vid or (w.get("app-id") or "") != app:
+                continue
+            if placement_landed(w, e, o):
+                out[k] = w.get("id")
+                break
+    return out
+
+
 def human_age(seconds):
     """A duration for a human, in the unit it is actually in. PURE.
 
