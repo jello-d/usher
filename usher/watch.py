@@ -1018,9 +1018,15 @@ class Watcher:
             return None
         others = engine.other_profile_entries(app, identity(v),
                                               self.kb_profile)
-        seed = engine.surface_seed(others, surfaces)
+        seed = engine.surface_seed(others, surfaces,
+                                   engine.surface_default())
         if not seed:
             return None
+        # THE DEFAULT HAS NO CELL, so the window kept its own, which this
+        # desk's grid may not have: brought inside it rather than refused,
+        # since the default exists so that every window has a destination.
+        if seed.get("seeded_default"):
+            seed = engine.clamp_cell(seed, outs)
         # THE CELL IS hwdp's PASSTHROUGH, so it is ours to check: seeding into
         # a cell the live grid does not have puts the window where no
         # workspace navigation reaches it.
@@ -1029,8 +1035,10 @@ class Watcher:
                     f"{tuple(seed['workspace'])}, which this grid does not "
                     f"have: not seeding {app[:18]}")
             return None
-        logline(f"seeded from surface `{seed['seeded_from']}`: {app[:18]} -> "
-                f"{seed['output']} ws{tuple(seed['workspace'])}")
+        logline(f"seeded from surface `{seed['seeded_from']}`"
+                + (" (the default)" if seed.get("seeded_default") else "")
+                + f": {app[:18]} -> {seed['output']} "
+                f"ws{tuple(seed['workspace'])}")
         return seed
 
     def _recognise(self, vid, app, title):

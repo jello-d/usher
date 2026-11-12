@@ -498,7 +498,7 @@ def panel_map(fresh=False):
 
 # The desk's surface map, cached like the panel map and for the same reason.
 SURFACE_TTL = 5.0
-_SURFACES = {"map": None, "why": "", "at": 0.0}
+_SURFACES = {"map": None, "why": "", "at": 0.0, "default": None}
 
 
 def surface_map(fresh=False):
@@ -534,19 +534,25 @@ def surface_map(fresh=False):
     if not fresh and _SURFACES["map"] is not None \
             and now - _SURFACES["at"] < SURFACE_TTL:
         return _SURFACES["map"], _SURFACES["why"]
-    out, why = {}, ""
+    out, why, dflt = {}, "", None
     exe = shutil.which("hwdp")
     if not exe:
         why = "no hwdp on PATH, so this desk has no surface map"
     else:
         try:
-            r = subprocess.run([exe, "surfaces"], capture_output=True,
-                               text=True, timeout=5)
+            # THE MAP MODE FIRST (`--map`: the region as a fraction of its
+            # panel, and the desk's DEFAULT), the plain record if this hwdp
+            # predates it, which it says by refusing the argument.
+            r = subprocess.run([exe, "surfaces", "--map"],
+                               capture_output=True, text=True, timeout=5)
+            if r.returncode and "unexpected argument" in (r.stderr or ""):
+                r = subprocess.run([exe, "surfaces"], capture_output=True,
+                                   text=True, timeout=5)
             if r.returncode:
                 why = (f"`hwdp surfaces` exited {r.returncode}: "
                        + (r.stderr.strip().splitlines() or ["no detail"])[0])
             else:
-                out, why = _parse_surfaces(r.stdout)
+                out, why, dflt = _parse_surface_map(r.stdout)
         except Exception as e:
             why = f"could not run `hwdp surfaces`: {e}"
     # THE INVARIANT A CONSUMER RELIES ON: a `why` always comes with an EMPTY
@@ -554,33 +560,65 @@ def surface_map(fresh=False):
     # check both. Asserted by a check, since duplicating the guard in every
     # caller is how two of them come to disagree.
     if why:
-        out = {}
-    _SURFACES.update({"map": out, "why": why, "at": now})
+        out, dflt = {}, None
+    _SURFACES.update({"map": out, "why": why, "at": now, "default": dflt})
     return out, why
 
 
+def surface_default(fresh=False):
+    """This desk's DEFAULT region as a slot (with its `name`), or None: where
+    a window goes whose cell no surface claims. Read through surface_map, so
+    one cache answers both and they cannot describe two different desks."""
+    surface_map(fresh)
+    return _SURFACES["default"]
+
+
 def _parse_surfaces(text):
-    """({surface: slot}, why) for one `hwdp surfaces` stdout.
+    """({surface: slot}, why) for one `hwdp surfaces` stdout. The map's
+    DEFAULT, if any, is dropped here: see _parse_surface_map."""
+    out, why, _d = _parse_surface_map(text)
+    return out, why
+
+
+def _parse_surface_map(text):
+    """({surface: slot}, why, default slot or None) for `hwdp surfaces` or
+    `hwdp surfaces --map` stdout. The map record carries five more fields,
+    PANEL FX FY FW FH, kept on the slot as `region_panel` and `frac`; the
+    DEFAULT is the one record whose cell is `* *`.
 
     REFUSED WHOLE ON A BAD LINE, matching what hwdp does with a bad FILE. A
     map we have half parsed is the same hazard as one hwdp half validated, and
     the two sides disagreeing about which half to trust is worse than either."""
-    out = {}
+    out, default = {}, None
     for n, ln in enumerate(text.splitlines(), 1):
         if not ln.strip():
             continue
         f = ln.split()
-        if len(f) != 8:
+        if len(f) not in (8, 13):
             return {}, (f"`hwdp surfaces` line {n} has {len(f)} fields, "
-                        "expected 8; ignoring the whole map")
+                        "expected 8 or 13; ignoring the whole map"), None
+        is_default = f[2:4] == ["*", "*"]
         try:
-            nums = [int(float(x)) for x in f[2:]]
+            cell = [0, 0] if is_default else [int(float(x)) for x in f[2:4]]
+            rect = [int(float(x)) for x in f[4:8]]
+            frac = [float(x) for x in f[9:13]] if len(f) == 13 else None
         except ValueError:
             return {}, (f"`hwdp surfaces` line {n} has a non-numeric field; "
-                        "ignoring the whole map")
-        out[f[0]] = {"output": f[1], "workspace": nums[0:2],
-                     "pos": nums[2:4], "size": nums[4:6]}
-    return out, ""
+                        "ignoring the whole map"), None
+        slot = {"output": f[1], "workspace": cell, "pos": rect[0:2],
+                "size": rect[2:4]}
+        if len(f) == 13:
+            # NOT `panel`: that field is a store entry's and has named
+            # writers (checked); a surface's panel is a different record's.
+            slot.update({"region_panel": f[8], "frac": frac})
+        if is_default:
+            if default is not None:
+                return {}, (f"`hwdp surfaces` line {n} is a second DEFAULT; "
+                            "ignoring the whole map"), None
+            default = dict(slot, name=f[0])
+        else:
+            out[f[0]] = slot
+    return out, "", default
 
 
 def cell_fits(slot, outputs):
@@ -627,6 +665,20 @@ def cell_fits(slot, outputs):
     return 0 <= int(x) < gw and 0 <= int(y) < gh
 
 
+def clamp_cell(slot, outputs):
+    """`slot` with its workspace cell brought inside its output's live grid.
+    PURE; the slot itself unless something changed. A grid the compositor
+    does not report concludes nothing, as in cell_fits."""
+    o = outputs.get(slot.get("output"))
+    ws = (o or {}).get("workspace") or {}
+    gw, gh = int(ws.get("grid_width") or 0), int(ws.get("grid_height") or 0)
+    if gw <= 0 or gh <= 0:
+        return slot
+    x, y = [int(n) for n in (slot.get("workspace") or [0, 0])]
+    cx, cy = min(max(0, x), gw - 1), min(max(0, y), gh - 1)
+    return slot if (cx, cy) == (x, y) else dict(slot, workspace=[cx, cy])
+
+
 def surface_of(w, surfaces):
     """The surface name whose rect CONTAINS window w's placement, or "".
 
@@ -647,23 +699,58 @@ def surface_of(w, surfaces):
     no centre can fall in two. A size tie-break was written here first and
     removed: the planted regression inverting it was UNCATCHABLE, which is how
     code that can never change an outcome announces itself."""
-    if not surfaces:
-        return ""
+    return surface_region(w, surfaces)[0]
+
+
+def surface_region(w, surfaces, default=None):
+    """(name, slot) of the surface window w sits in, or ("", None): the
+    rect-returning form of surface_of, which the learn side needs to record
+    WHERE IN its surface a window sits as well as which one.
+
+    THE DEFAULT IS WHERE A WINDOW IS when its cell has no surface of its own
+    on that output: hwdp's definition is "the region every cell no surface
+    claims falls to", and a cell some surface claims is not that, even where
+    the window's centre is outside the surface."""
     pos = w.get("pos") or [0, 0]
     size = w.get("size") or [0, 0]
     cx = pos[0] + size[0] / 2.0
     cy = pos[1] + size[1] / 2.0
     cell = [int(n) for n in (w.get("workspace") or [0, 0])]
-    for name, s in sorted(surfaces.items()):
+    claimed = False
+    for name, s in sorted((surfaces or {}).items()):
         if s["output"] != w.get("output"):
             continue
         if [int(n) for n in s["workspace"]] != cell:
             continue
+        claimed = True
         sx, sy = s["pos"]
         sw, sh = s["size"]
         if sx <= cx < sx + sw and sy <= cy < sy + sh:
-            return name
-    return ""
+            return name, s
+    if default is None or claimed or default["output"] != w.get("output"):
+        return "", None
+    dx, dy = default["pos"]
+    dw, dh = default["size"]
+    if dx <= cx < dx + dw and dy <= cy < dy + dh:
+        return default["name"], default
+    return "", None
+
+
+def surface_frac(w, region):
+    """Window w's rect as a FRACTION of `region`'s, [fx, fy, fw, fh], or
+    None. PURE. What travels between desks with the surface name, so a window
+    filling the left half of a laptop cell fills the left half of whatever the
+    same name is at the next desk, at that desk's resolution."""
+    try:
+        rx, ry = region["pos"]
+        rw, rh = region["size"]
+        if rw <= 0 or rh <= 0:
+            return None
+        return [round((w["pos"][0] - rx) / rw, 4),
+                round((w["pos"][1] - ry) / rh, 4),
+                round(w["size"][0] / rw, 4), round(w["size"][1] / rh, 4)]
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
 
 
 def source_ident(source, ident):
@@ -785,7 +872,7 @@ def other_profile_entries(app, ident, profile=None, source=""):
     return found
 
 
-def surface_seed(others, surfaces):
+def surface_seed(others, surfaces, default=None):
     """A starting slot for a window this desk has never learned, from the
     SURFACE it occupies on another desk. None when nothing can be derived.
 
@@ -815,14 +902,51 @@ def surface_seed(others, surfaces):
     for e in others:
         name = e.get("surface") or ""
         s = surfaces.get(name)
+        # A NAME THIS DESK DOES NOT PLACE, or a window learned where there was
+        # no map, goes by its CELL next: under wsync a cell is the whole desk
+        # at once, so the surface this desk puts in the same cell is the same
+        # place in the only sense that survives a desk change. Then the
+        # DEFAULT, which is what makes the map total.
+        by_cell = None
+        if s is None:
+            cell = [int(n) for n in (e.get("workspace") or [0, 0])]
+            by_cell = next((n for n, c in sorted(surfaces.items())
+                            if [int(x) for x in c["workspace"]] == cell),
+                           None)
+            s = surfaces.get(by_cell) if by_cell else None
+        to_default = s is None and default is not None
+        if to_default:
+            s = default
         if not s:
             continue
-        w = min(int(e.get("size", [0, 0])[0]) or s["size"][0], s["size"][0])
-        h = min(int(e.get("size", [0, 0])[1]) or s["size"][1], s["size"][1])
+        sx, sy = s["pos"]
+        sw, sh = s["size"]
+        # THE FRACTION IS OF THE REGION IT WAS LEARNED IN, so it applies only
+        # where that same region is the target.
+        frac = e.get("surface_frac") if (
+            (not to_default and not by_cell)
+            or (to_default and name == default.get("name"))) else None
+        if frac and len(frac) == 4:
+            # SCALED INTO THE TARGET: the same part of the region, at this
+            # desk's resolution, clamped so it never overflows it.
+            w = max(1, min(int(frac[2] * sw), sw))
+            h = max(1, min(int(frac[3] * sh), sh))
+            x = sx + min(max(0, int(frac[0] * sw)), sw - w)
+            y = sy + min(max(0, int(frac[1] * sh)), sh - h)
+        else:
+            w = min(int(e.get("size", [0, 0])[0]) or sw, sw)
+            h = min(int(e.get("size", [0, 0])[1]) or sh, sh)
+            x, y = sx, sy
         seed = dict(e)
-        seed.update({"output": s["output"], "workspace": list(s["workspace"]),
-                     "pos": list(s["pos"]), "size": [w, h],
-                     "panel": "", "seeded_from": name})
+        seed.update({"output": s["output"],
+                     # THE DEFAULT HAS NO CELL (`* *`), so the window keeps
+                     # its own; the caller clamps it into this desk's grid.
+                     "workspace": list(e.get("workspace") or [0, 0])
+                     if to_default else list(s["workspace"]),
+                     "pos": [x, y], "size": [w, h],
+                     "panel": "",
+                     "seeded_from": s.get("name") or by_cell or name,
+                     "seeded_default": to_default})
         return seed
     return None
 
@@ -3606,6 +3730,15 @@ def is_appid_keyed(app):
     return bool(app) and not is_owned(app)
 
 
+def _entry_surface(w):
+    """The `surface` and `surface_frac` a learned entry carries: which named
+    region of this desk it sits in, and where inside it, which together are
+    what can travel to another desk. Both empty when the desk has no map."""
+    name, region = surface_region(w, surface_map()[0], surface_default())
+    return {"surface": name,
+            "surface_frac": surface_frac(w, region) if region else None}
+
+
 def kb_entry(w, title, appid_only, when):
     """A knowledge record for one identity at window w's current placement.
     `title` is the KEY-title (identity(): a URL for Chrome); `label` keeps the
@@ -3629,7 +3762,7 @@ def kb_entry(w, title, appid_only, when):
         # travel to another desk, where the same name resolves to a different
         # panel and a different rect. Empty when the desk has no map, which is
         # most desks and is not a fault.
-        "surface": surface_of(w, surface_map()[0]),
+        **_entry_surface(w),
         "pos": w["pos"], "size": w["size"],
         "sticky": bool(w.get("sticky", False)),
         "inverted": bool(w.get("inverted", False)),

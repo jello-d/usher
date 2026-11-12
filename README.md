@@ -517,8 +517,18 @@ it, via `hwdp surfaces`, because resolving "the bottom half of that monitor"
 to a rect needs the logical size after rotation and scale. usher reads that
 and seeds a window into the surface it occupies at another desk.
 
-    hwdp surfaces           SURFACE CONNECTOR WS_X WS_Y X Y W H
+    hwdp surfaces --map     the surfaces, the region as a fraction of its
+                            panel, and the desk's DEFAULT
     usher doctor            the map, and which surfaces this desk has
+
+Where a window goes, in order: the surface of the same name; else the surface
+this desk puts in the window's own workspace cell (under wsync a cell is the
+whole desk, so it is the same place); else the desk's DEFAULT, which is what
+makes the map total. The window keeps its position and size as a FRACTION of
+the region it was learned in, so it fills the same part of the target region
+at that desk's resolution. Undocking uses the same path, so a window whose
+monitor has gone lands in its region on the laptop instead of staying parked
+out of sight.
 
 It is a SEED, never a projection, and only where a profile has no learned slot
 for that window. The moment the window is placed, the capture loop learns its

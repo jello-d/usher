@@ -488,8 +488,13 @@ monitor" into a rect needs the logical size after rotation and scale.
 .B usher
 reads
 .B hwdp surfaces
-and records, on each learned entry, which surface it sits in; a window with no
-slot at this desk is then SEEDED into the surface of the same name.
+and records, on each learned entry, which surface it sits in and where inside
+it as a fraction; a window with no slot at this desk is then SEEDED into the
+surface of the same name, else the surface in its own workspace cell, else the
+desk's DEFAULT region
+.RB ( "hwdp surfaces --map" ),
+scaled so it fills the same part of the target region. An undock takes the
+same path, so a window whose monitor has gone is not left parked out of sight.
 .PP
 It is a SEED and not a projection. It applies only where a profile has no
 learned slot, and the moment the window is placed the capture loop learns its

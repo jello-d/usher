@@ -7565,7 +7565,10 @@ def _t_cli_split(ck):
         # that may not be attached here and entry_output would fall back to
         # the connector NAME and place the old panel's rect on a new one
         "panel": {"kb_entry", "surface_seed"},
-        "surface": {"kb_entry"},
+        # kb_entry's helper, which stamps the name and WHERE IN that region
+        # the window sits together, so the two cannot describe two regions
+        "surface": {"_entry_surface"},
+        "surface_frac": {"_entry_surface"},
         # snapshot stamps the live fact; kb_entry CARRIES it into the store
         # rather than re-deriving, since a replayed row's pid is long dead
         "source": {"snapshot", "kb_entry"},
@@ -11205,6 +11208,195 @@ def _t_displays(ck):
         ck("kb-entry-records-the-surface", _ke["surface"] == "ref")
     finally:
         engine.surface_map, engine.panel_map = _rsm, _rpm
+
+    # ---- R7/U7: the MAP mode, the DEFAULT, and the scaled seed ----------
+    _mrow = ("code DP-2 0 0 0 0 3840 2160 p1 0 0 1 1\n"
+             "comms DP-2 1 0 0 0 3840 1080 p1 0 0 1 0.5\n"
+             "rest eDP-1 * * 0 0 2880 1800 p0 0 0 1 1\n")
+    _mm, _mw, _md = engine._parse_surface_map(_mrow)
+    ck("map-parses-the-thirteen-fields",
+       _mw == "" and sorted(_mm) == ["code", "comms"]
+       and _mm["comms"]["frac"] == [0, 0, 1, 0.5]
+       and _mm["comms"]["region_panel"] == "p1")
+    ck("map-the-default-is-the-star-cell-record",
+       _md is not None and _md["name"] == "rest"
+       and _md["output"] == "eDP-1" and "rest" not in _mm)
+    ck("map-the-plain-record-still-parses-with-no-default",
+       engine._parse_surface_map(_row)[2] is None
+       and len(engine._parse_surface_map(_row)[0]) == 3)
+    ck("map-two-defaults-refuse-the-whole-map",
+       engine._parse_surface_map(_mrow + "x eDP-1 * * 0 0 1 1 p 0 0 1 1\n")
+       [0] == {})
+    ck("map-a-nine-field-line-refuses-the-whole-map",
+       engine._parse_surface_map("a DP-2 0 0 0 0 9 9 p\n")[0] == {})
+    ck("plain-parse-drops-the-default",
+       sorted(engine._parse_surfaces(_mrow)[0]) == ["code", "comms"])
+
+    # surface_map ASKS FOR --map, and falls back to the plain record on an
+    # hwdp that refuses the argument.
+    _calls = []
+    _rrun, _rwhich = engine.subprocess.run, engine.shutil.which
+
+    def _fake(argv, **_k):
+        _calls.append(list(argv))
+        if "--map" in argv:
+            return _R(2, "", "hwdp surfaces: unexpected argument '--map'")
+        return _R(0, _row)
+    try:
+        engine.shutil.which = lambda n: "/usr/bin/hwdp"
+        _argv = []
+        engine.subprocess.run = lambda argv, **k: (
+            _argv.append(list(argv)) or _R(0, _mrow))
+        engine._SURFACES.update({"map": None, "why": "", "at": 0.0,
+                                 "default": None})
+        _sm, _sw = engine.surface_map(fresh=True)
+        ck("surface-map-reads-the-map-mode-and-its-default",
+           len(_sm) == 2 and (engine.surface_default() or {}).get("name")
+           == "rest" and "--map" in (_argv[0] if _argv else []))
+        engine.subprocess.run = _fake
+        _sm, _sw = engine.surface_map(fresh=True)
+        ck("surface-map-falls-back-on-an-hwdp-without-map",
+           _sw == "" and len(_sm) == 3 and len(_calls) == 2
+           and engine.surface_default() is None)
+        engine.subprocess.run = lambda argv, **k: _R(2, "", "broken")
+        engine.surface_map(fresh=True)
+        ck("a-broken-map-has-no-default", engine.surface_default() is None)
+    finally:
+        engine.subprocess.run, engine.shutil.which = _rrun, _rwhich
+        engine._SURFACES.update({"map": None, "why": "", "at": 0.0,
+                                 "default": None})
+
+    # WHICH REGION a window sits in, the default only for an UNCLAIMED cell
+    _sr = engine.surface_region
+    _wc = {"output": "DP-2", "workspace": [1, 0], "pos": [10, 10],
+           "size": [100, 100]}
+    ck("region-a-window-in-a-surface",
+       _sr(_wc, _mm, _md)[0] == "comms")
+    ck("region-a-claimed-cell-outside-its-surface-is-not-the-default",
+       _sr(dict(_wc, pos=[10, 1500]), _mm, _md) == ("", None))
+    _we = {"output": "eDP-1", "workspace": [2, 2], "pos": [100, 100],
+           "size": [200, 200]}
+    ck("region-an-unclaimed-cell-on-the-default-output-is-the-default",
+       _sr(_we, _mm, _md)[0] == "rest")
+    # A CELL SOME SURFACE CLAIMS ON THE DEFAULT'S OWN OUTPUT is not the
+    # default's, even where the window is outside that surface.
+    _mm2 = dict(_mm, half={"output": "eDP-1", "workspace": [2, 2],
+                           "pos": [0, 0], "size": [2880, 50]})
+    ck("region-a-claimed-cell-on-the-default-output-is-not-the-default",
+       _sr(_we, _mm2, _md) == ("", None))
+    ck("region-the-default-on-another-output-is-not",
+       _sr(dict(_we, output="DP-9"), _mm, _md) == ("", None))
+    ck("region-surface-of-is-unchanged", engine.surface_of(_wc, _mm)
+       == "comms")
+    ck("frac-is-the-rect-as-a-fraction-of-the-region",
+       engine.surface_frac({"pos": [960, 270], "size": [1920, 540]},
+                           _mm["comms"]) == [0.25, 0.25, 0.5, 0.5])
+    ck("frac-of-an-empty-region-is-none",
+       engine.surface_frac(_wc, {"pos": [0, 0], "size": [0, 9]}) is None)
+
+    # THE SEED SCALES: the same part of the region at this desk's resolution
+    _fa = dict(_away, surface="comms", surface_frac=[0.25, 0.5, 0.5, 0.5])
+    _fs = engine.surface_seed([_fa], _mm, _md)
+    ck("seed-scales-the-window-into-the-region",
+       _fs["pos"] == [960, 540] and _fs["size"] == [1920, 540])
+    ck("seed-a-fraction-overflowing-the-region-is-clamped",
+       engine.surface_seed([dict(_fa, surface_frac=[0.9, 0.9, 0.5, 0.5])],
+                           _mm, _md)["pos"] == [1920, 540])
+    # AN UNPLACED NAME FALLS TO THE DEFAULT, keeping its own cell
+    _ds = engine.surface_seed([dict(_away, surface="nowhere")], _mm, _md)
+    ck("seed-an-unplaced-name-falls-to-the-default",
+       bool(_ds) and _ds["output"] == "eDP-1" and _ds["seeded_default"]
+       and _ds["workspace"] == [2, 0] and _ds["seeded_from"] == "rest")
+    ck("seed-a-window-learned-with-no-map-falls-to-the-default",
+       (engine.surface_seed([dict(_away, surface="")], _mm, _md)
+        or {}).get("seeded_default") is True)
+    ck("seed-control-no-default-is-still-no-seed",
+       engine.surface_seed([dict(_away, surface="nowhere",
+                                 workspace=[9, 9])], _mm) is None)
+    # A NAME THIS DESK DOES NOT PLACE GOES BY ITS CELL FIRST: under wsync a
+    # cell is the whole desk, so the surface in the same cell is the same
+    # place. This is what lets an undock land windows from a desk with no
+    # map on a laptop desk that has one.
+    _cs = engine.surface_seed([dict(_away, surface="", workspace=[1, 0],
+                                    surface_frac=[0.5, 0.5, 0.1, 0.1])],
+                              _mm, _md)
+    ck("seed-an-unnamed-window-goes-to-the-surface-in-its-cell",
+       bool(_cs) and _cs["seeded_from"] == "comms"
+       and _cs["seeded_default"] is False)
+    ck("seed-and-a-fraction-from-another-region-is-not-applied",
+       bool(_cs) and _cs["pos"] == [0, 0])
+    ck("seed-another-region's-fraction-is-not-applied-to-the-default",
+       (engine.surface_seed([dict(_away, surface="gone",
+                                  surface_frac=[0.5, 0.5, 0.1, 0.1])],
+                            _mm, _md) or {}).get("pos") == [0, 0])
+    ck("seed-the-default's-own-fraction-is",
+       (engine.surface_seed([dict(_away, surface="rest",
+                                  surface_frac=[0.5, 0.5, 0.1, 0.1])],
+                            _mm, _md) or {}).get("pos") == [1440, 900])
+    ck("clamp-cell-brings-a-cell-inside-the-grid",
+       engine.clamp_cell({"output": "DP-2", "workspace": [5, 9]}, _g)
+       ["workspace"] == [2, 2])
+    ck("clamp-cell-leaves-a-fitting-cell-alone",
+       engine.clamp_cell(_mm["comms"], _g) is _mm["comms"])
+
+    # AND THE ENTRY RECORDS WHERE IN THE REGION IT SITS
+    _rsm, _rpm, _rsd = (engine.surface_map, engine.panel_map,
+                        engine.surface_default)
+    try:
+        engine.surface_map = lambda fresh=False: (_mm, "")
+        engine.surface_default = lambda fresh=False: _md
+        engine.panel_map = lambda fresh=False: {}
+        _ke = engine.kb_entry(
+            {"app_id": "x", "title": "X", "output": "DP-2",
+             "workspace": [1, 0], "pos": [960, 270], "size": [1920, 540]},
+            "X", True, 1_800_000_000)
+        ck("kb-entry-records-the-fraction",
+           _ke["surface"] == "comms"
+           and _ke["surface_frac"] == [0.25, 0.25, 0.5, 0.5])
+        _ke2 = engine.kb_entry(dict(_we, app_id="x", title="X"), "X", True,
+                               1_800_000_000)
+        ck("kb-entry-records-the-default-by-name",
+           _ke2["surface"] == "rest" and _ke2["surface_frac"] is not None)
+    finally:
+        engine.surface_map, engine.panel_map, engine.surface_default = \
+            _rsm, _rpm, _rsd
+
+    # AND THE DAEMON SPENDS IT: Watcher._seed had no check at all. A window
+    # whose remembered name this desk does not place goes to the DEFAULT,
+    # with a cell this grid lacks brought inside it, and the log says so.
+    _sw = Watcher(launch=False)
+    _swm = sys.modules[Watcher.__module__]
+
+    class _SO:
+        def list_outputs(self):
+            return [{"name": "eDP-1", "id": 1,
+                     "geometry": {"x": 0, "y": 0, "width": 2880,
+                                  "height": 1800},
+                     "workspace": {"x": 0, "y": 0, "grid_width": 3,
+                                   "grid_height": 3}}]
+    _sw.place_sock = _SO()
+    _said = []
+    _rs = (engine.surface_map, engine.surface_default,
+           engine.other_profile_entries, _swm.logline)
+    try:
+        engine.surface_map = lambda fresh=False: (_mm, "")
+        engine.surface_default = lambda fresh=False: _md
+        engine.other_profile_entries = lambda *a, **k: [
+            dict(_away, surface="nowhere", workspace=[4, 7])]
+        _swm.logline = _said.append
+        _got = _sw._seed("slack", {"app": "slack", "title": "", "pid": -1})
+    except Exception as _e:                                # noqa: BLE001
+        _got = {"RAISED": str(_e)}
+    finally:
+        (engine.surface_map, engine.surface_default,
+         engine.other_profile_entries, _swm.logline) = _rs
+    ck("watch-seed-falls-to-the-default",
+       bool(_got) and _got.get("output") == "eDP-1"
+       and _got.get("seeded_default") is True)
+    ck("watch-seed-clamps-the-default's-cell-into-the-grid",
+       bool(_got) and _got.get("workspace") == [2, 2])
+    ck("watch-seed-says-it-was-the-default",
+       any("(the default)" in m for m in _said))
 
     # ---- what a display event calls for ----------------------------------
     ck("redisplay-same-monitors-does-nothing",

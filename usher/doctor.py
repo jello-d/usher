@@ -71,6 +71,13 @@ def _doctor_surfaces(out):
     except Exception:
         outs = {}
     out(f"  surfaces     {len(surfaces)} on this desk")
+    _d = engine.surface_default()
+    if _d:
+        out(f"  default      `{_d['name']}` on {_d['output']}: every cell no "
+            f"surface names goes there")
+    else:
+        out("  default      NONE: a window whose cell no surface names has "
+            "no destination at this desk (see `hwdp surfaces --check`)")
     for name, s in sorted(surfaces.items()):
         bad = "" if engine.cell_fits(s, outs) else \
             "  CELL NOT IN THE LIVE GRID, so it is not seeded"
