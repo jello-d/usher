@@ -2320,10 +2320,21 @@ def _t_resolution(ck):
             # daemon sudo every minute for as long as they were open.
             _cr = [{"source": "titan", "app_id": "google-chrome",
                     "key": "titan", "identifier": "eeee5555ffff66"}]
-            ck("refresh-a-chrome-window-answered-dash-is-not-asked-again",
+            # ...BUT NOT AT ONCE: right after a browser restart `-` is
+            # usually transient (measured: the Team Notes window answered
+            # `-` 43s after login and was never asked again), so it is asked
+            # again up to SOURCE_DASH_TRIES times.
+            ck("refresh-a-chrome-window-answered-dash-is-asked-again",
+               "titan" in engine.source_refresh_plan(
+                   _cr, {}, 1000.0,
+                   answered={"titan": {"eeee5555ffff66": ""}},
+                   dashed={("titan", "eeee5555ffff66"): 1})[1])
+            ck("refresh-a-chrome-window-answered-dash-is-not-asked-for-ever",
                "titan" not in engine.source_refresh_plan(
                    _cr, {}, 1000.0,
-                   answered={"titan": {"eeee5555ffff66": ""}})[1])
+                   answered={"titan": {"eeee5555ffff66": ""}},
+                   dashed={("titan", "eeee5555ffff66"):
+                           engine.SOURCE_DASH_TRIES})[1])
             ck("refresh-control-an-unanswered-chrome-window-is",
                "titan" in engine.source_refresh_plan(
                    _cr, {}, 1000.0, answered={"titan": {}})[1])
@@ -11903,7 +11914,25 @@ def _t_displays(ck):
             engine.source_refresh_plan = _rsrp
             w.src_asked, w.src_seen = {}, {}
         ck("the-refresh-passes-what-each-account-answered",
-           bool(_kw) and _kw[0].get("answered") is engine._SOURCE_WINDOWS)
+           bool(_kw) and _kw[0].get("answered") is engine._SOURCE_WINDOWS
+           and _kw[0].get("dashed") is w.src_dashed)
+        # AND COUNTS EACH `-` it hears, or the bound never arrives
+        _rst = engine.source_trigger
+        try:
+            engine.source_refresh_plan = (
+                lambda rows, asked, now, seen, **_k: (["titan"], {}))
+            engine.source_trigger = lambda *a, **k: engine._SOURCE_WINDOWS
+            engine._SOURCE_WINDOWS["titan"] = {"ab12": ""}
+            w.src_dashed.clear()
+            w._poll_sources({"windows": []})
+            w._poll_sources({"windows": []})
+        finally:
+            engine.source_refresh_plan, engine.source_trigger = _rsrp, _rst
+            engine._SOURCE_WINDOWS.pop("titan", None)
+            w.src_asked, w.src_seen = {}, {}
+        ck("the-refresh-counts-each-dash-it-hears",
+           w.src_dashed.get(("titan", "ab12")) == 2)
+        w.src_dashed.clear()
         # AND A PUBLISH THAT RAISES DOES NOT COST THE REFRESH, since every
         # outcome of that poll is optional: it is a sudo subprocess on the
         # capture thread and the windows keep the source-alone key without it.

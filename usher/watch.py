@@ -585,6 +585,8 @@ class Watcher:
         # for a login to stop bringing windows up, since a capture REPLACES
         # that account's roster with what is live
         self.src_seen = {}
+        # (source, identifier) -> how many times that account answered `-`
+        self.src_dashed = {}
         # consecutive failed chrome re-keys, so the session signature is
         # held back and retried rather than adopted over a lost pass
         self.rekey_tries = 0
@@ -1961,7 +1963,8 @@ class Watcher:
         try:
             plan, self.src_seen = engine.source_refresh_plan(
                 snap["windows"], self.src_asked, time.time(),
-                self.src_seen, answered=engine._SOURCE_WINDOWS)
+                self.src_seen, answered=engine._SOURCE_WINDOWS,
+                dashed=self.src_dashed)
         except Exception as e:                             # noqa: BLE001
             logline(f"could not plan a source refresh: {e}")
             return False
@@ -1981,6 +1984,12 @@ class Watcher:
                 continue
             if (engine._SOURCE_WINDOWS.get(src) or {}) != before:
                 changed = True
+            # COUNT EACH `-`, so a chrome window that stays unidentifiable is
+            # asked about a bounded number of times (SOURCE_DASH_TRIES).
+            for _tl, _d in (engine._SOURCE_WINDOWS.get(src) or {}).items():
+                if _d == "":
+                    self.src_dashed[(src, _tl)] = \
+                        self.src_dashed.get((src, _tl), 0) + 1
             with self.lock:
                 n = engine.rekey_source(self.kb, src,
                                         engine.take_source_rekey(src))

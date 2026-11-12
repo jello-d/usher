@@ -5236,6 +5236,14 @@ SOURCE_REFRESH_EVERY = 60
 # login asks while a straggler is still mapping and records a partial roster,
 # which the next logoff capture repairs.
 SOURCE_SETTLE = 5
+# How many times a Chrome window the account answered `-` for is asked about
+# again, at the SOURCE_REFRESH_EVERY rate. Not zero: right after a browser
+# restart `-` is usually TRANSIENT (pages still loading, titles not yet in the
+# session file), measured on dragonfly 2026-11-12 where five of ten windows
+# answered `-` 43s after login and asking never again left the Team Notes
+# window on the shared fallback slot, left where it opened. Not unbounded
+# either: asking every minute for ever is the loop that was measured first.
+SOURCE_DASH_TRIES = 5
 
 
 def identity_digest(ident):
@@ -5605,7 +5613,7 @@ def rekey_source(kb, src, binding):
 
 def source_refresh_plan(live, last, now, seen=None,
                         every=SOURCE_REFRESH_EVERY, settle=SOURCE_SETTLE,
-                        answered=None):
+                        answered=None, dashed=None):
     """Which sources to ask to identify their windows, and the updated
     stability state. PURE, returning (sources, seen).
 
@@ -5645,15 +5653,17 @@ def source_refresh_plan(live, last, now, seen=None,
             waiting.setdefault(src, set()).add(w["identifier"])
         # A WINDOW STILL WAITING (no key: it resolved Pending) wants the ask,
         # and so does a chrome window on its source-alone key that the
-        # account has NOT YET ANSWERED for. One it answered `-` for (nothing
-        # to add) is not asked about again: measured on dragonfly
-        # 2026-11-12, two such windows made the daemon sudo to that account
-        # every minute for as long as they were open, each time hearing `-`.
+        # account has not answered for, or has answered `-` for fewer than
+        # SOURCE_DASH_TRIES times: `-` right after a restart is usually
+        # transient, and asking for ever is a sudo a minute for as long as
+        # the window is open (both measured, see SOURCE_DASH_TRIES).
+        _tl = w.get("identifier")
         if ((not (w.get("key") or "") and (w.get("app_id") or ""))
                 or (is_chrome(w.get("app_id") or "")
                     and (w.get("key") or "") == src
-                    and w.get("identifier")
-                    not in ((answered or {}).get(src) or {}))):
+                    and (_tl not in ((answered or {}).get(src) or {})
+                         or (dashed or {}).get((src, _tl), 0)
+                         < SOURCE_DASH_TRIES))):
             want.add(src)
     out = []
     for src in sorted(want):
