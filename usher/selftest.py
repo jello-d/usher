@@ -1645,6 +1645,18 @@ def _t_resolution(ck):
         engine.prune_kb(_l2, time.time())
         ck("load-forgiveness-still-prunes-what-was-stale-at-that-desk",
            len(_l2) == 1)
+        # A LEARNED STACK IS DROPPED AT LOAD, before the sweep that places a
+        # returning desk can put a window on top of the repeated slot.
+        _rect = {"output": "DP-1", "workspace": [1.0, 1.0],
+                 "pos": [5.0, 5.0], "size": [9.0, 9.0], "last_seen": _n0}
+        engine.write_json(
+            os.path.join(_tdir, "knowledge-DESK.json"),
+            json.dumps({engine.slot_key("zzz-s", "i", 0): _rect,
+                        engine.slot_key("zzz-s", "i", 1): _rect}))
+        with contextlib.redirect_stdout(io.StringIO()):
+            _l3 = engine.load_knowledge("DESK")
+        ck("load-drops-a-learned-stack",
+           list(_l3) == [engine.slot_key("zzz-s", "i", 0)])
 
         # AND THE LINE REPORTS THE RESCUE, NOT THE STORE SIZE, which is the
         # defect this closes. Measured on manifestor: NINE lines in one day,
@@ -4653,7 +4665,7 @@ def _t_slots(ck):
         # cannot identify is refused by the readiness gate above.
         _kb9 = {}
         _same = [{"id": i, "app_id": "zzz-unowned", "title": "one title",
-                  "workspace": [0.0, 0.0], "pos": [1.0, 1.0],
+                  "workspace": [0.0, 0.0], "pos": [20.0 * i, 1.0],
                   "size": [8.0, 6.0], "output": "DP-1"} for i in (1, 2)]
         engine.learn(_kb9, {}, _same, _t.time())
         ck("two-views-sharing-a-title-get-a-slot-each",
@@ -8893,7 +8905,7 @@ def _t_learn(ck):
     def LW(vid, title, app="kitty"):
         return {"id": vid, "app_id": app, "title": title, "pid": -1,
                 "output": "DP-1", "workspace": [1.0, 1.0],
-                "pos": [0.0, 0.0], "size": [800.0, 600.0]}
+                "pos": [20.0 * vid, 0.0], "size": [800.0, 600.0]}
 
     _kb, _groups = {}, {}
     learn(_kb, _groups, [LW(1, "usher:main⠀⠀⠀⠀[manifestor]")], 1_800_000_000)
@@ -9090,6 +9102,39 @@ def _t_learn(ck):
     ck("upsert-and-learn-both-index-a-shared-identity",
        [len(u) for _n, u, _l in _rows
         if _n == "foreign, TWO windows, one identity"] == [2])
+
+    # A REPEATED RECT IN A FAMILY IS A LEARNED STACK, and it is harmful
+    # rather than dead: one window can hold only one of the two slots, so
+    # the other is free and the next window is placed on top of it. Six
+    # stores on dragonfly carried such pairs after one undock.
+    def _de(pos, ws=(1.0, 1.0), out="DP-1", seen=1.0):
+        return {"output": out, "workspace": list(ws), "pos": list(pos),
+                "size": [10.0, 10.0], "last_seen": seen}
+    _sk = engine.slot_key
+    _kbd = {_sk("zzz-d", "i", 0): _de((10, 10), seen=1.0),
+            _sk("zzz-d", "i", 1): _de((13, 12), seen=5.0),
+            _sk("zzz-d", "i", 2): _de((10, 10), ws=(2.0, 1.0)),
+            _sk("zzz-d", "i", 3): _de((40, 10)),
+            _sk("zzz-d", "i", 4): _de((10, 10), out="DP-2"),
+            _sk("zzz-d", "j", 0): _de((10, 10))}
+    _dd = engine.duplicate_slots(_kbd)
+    ck("dup-slots-finds-a-repeated-rect-and-keeps-the-lowest-index",
+       _dd == [(_sk("zzz-d", "i", 1), _sk("zzz-d", "i", 0))])
+    ck("dup-slots-another-cell-output-or-far-position-is-not-a-repeat",
+       not any(k in (_sk("zzz-d", "i", 2), _sk("zzz-d", "i", 3),
+                     _sk("zzz-d", "i", 4)) for k, _ in _dd))
+    ck("dup-slots-another-family-at-the-same-rect-is-not-a-repeat",
+       not any(k == _sk("zzz-d", "j", 0) for k, _ in _dd))
+    _kbp = dict(_kbd)
+    _kbp = {k: dict(v, last_seen=1_800_000_000 + v["last_seen"])
+            for k, v in _kbp.items()}
+    engine.prune_kb(_kbp, 1_800_000_010)
+    ck("prune-drops-a-repeated-slot",
+       _sk("zzz-d", "i", 1) not in _kbp and _sk("zzz-d", "i", 0) in _kbp
+       and len(_kbp) == 5)
+    ck("prune-carries-the-newer-last-seen-onto-the-kept-slot",
+       _kbp.get(_sk("zzz-d", "i", 0), {}).get("last_seen")
+       == 1_800_000_005.0)
 
     # AND `prune_kb` MUST READ A KEY THROUGH `slot_base`, which the row above
     # exercises end to end and this asks directly, because the sweep is the

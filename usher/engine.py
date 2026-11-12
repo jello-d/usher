@@ -3568,6 +3568,13 @@ def load_knowledge(profile=None):
     if _saved:
         logline(f"store {profile}: away {human_age(_gap)}, so {_saved} "
                 "entr(ies) are not aged out for it")
+    # A LEARNED STACK IS DROPPED AT LOAD as well as at prune, because a desk
+    # that comes back is SWEPT (every window placed) before anything is
+    # learned or pruned, and a repeated slot is free to be placed onto.
+    _dups = drop_duplicate_slots(kb)
+    if _dups:
+        logline(f"store {profile}: dropped {_dups} slot(s) repeating "
+                "another slot's rect (a learned stack)")
     return kb
 
 
@@ -3682,6 +3689,68 @@ def prune_kb(kb, when):
                   and not v.get("source")
                   and slot_base(k).split("\x00", 1)[0] in appid_keyed)]:
         del kb[k]
+    drop_duplicate_slots(kb)
+
+
+def drop_duplicate_slots(kb):
+    """Drop every slot `duplicate_slots` names, carrying the newer
+    `last_seen` onto the slot kept. Returns how many went."""
+    dups = duplicate_slots(kb)
+    for k, keep in dups:
+        kb[keep]["last_seen"] = max(kb[keep].get("last_seen", 0),
+                                    kb[k].get("last_seen", 0))
+        del kb[k]
+    return len(dups)
+
+
+def _slot_index(k):
+    base = slot_base(k)
+    return 0 if base == k else int(k[len(base) + 1:])
+
+
+def duplicate_slots(kb, tol=None):
+    """[(key, kept key)] for every slot of a family that REPEATS the rect of
+    a lower-indexed slot in the same family. PURE.
+
+    A REPEATED RECT IS A STACK THAT WAS LEARNED, and it is worse than dead
+    weight: one window can only ever occupy one of the two slots, so the
+    other is free, and the next window of that family is placed exactly on
+    top of it. Measured on dragonfly 2026-11-11 after an undock stacked two
+    shells: six stores carried such pairs, including the docked desk's, where
+    the stack had overwritten the slot for a whole monitor.
+
+    SAME OUTPUT, SAME CELL, POSITION WITHIN THE PLACEMENT TOLERANCE, and the
+    size deliberately ignored, the same test `placement_landed` makes. The
+    LOWEST index is kept, so a family never loses its base key to this, and
+    the caller carries the newer `last_seen` onto it."""
+    tol = PLACE_TOL if tol is None else tol
+    fam = {}
+    for k in kb:
+        fam.setdefault(slot_base(k), []).append(k)
+    out = []
+    for ks in fam.values():
+        if len(ks) < 2:
+            continue
+        kept = []
+        for k in sorted(ks, key=_slot_index):
+            e = kb[k]
+            dup = next((j for j in kept if _same_rect(e, kb[j], tol)), None)
+            if dup is None:
+                kept.append(k)
+            else:
+                out.append((k, dup))
+    return out
+
+
+def _same_rect(a, b, tol):
+    try:
+        return (a.get("output") == b.get("output")
+                and [int(n) for n in a.get("workspace") or ()]
+                == [int(n) for n in b.get("workspace") or ()]
+                and abs(a["pos"][0] - b["pos"][0]) <= tol
+                and abs(a["pos"][1] - b["pos"][1]) <= tol)
+    except (KeyError, IndexError, TypeError, ValueError):
+        return False
 
 
 def own_app_counts(windows):
