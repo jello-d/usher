@@ -1260,11 +1260,48 @@ def place_of(view, outputs):
 SNAPSHOT_VERSION = 1
 
 
+def viewports(outputs):
+    """{output: (x, y)} of each output's current workspace. PURE."""
+    out = {}
+    for o in outputs:
+        ws = o.get("workspace") or {}
+        out[o.get("name")] = (ws.get("x"), ws.get("y"))
+    return out
+
+
+STABLE_TRIES = 3
+
+
+def stable_views(sock, tries=STABLE_TRIES):
+    """(outputs, views, stable): the views read BETWEEN two reads of the
+    outputs, and whether every output's workspace was the same on both.
+
+    A VIEW'S GEOMETRY IS RELATIVE TO ITS OUTPUT'S CURRENT WORKSPACE, and the
+    two come from separate IPC calls. A workspace switch between them puts
+    every window one whole screen off, all at once, in the direction of the
+    switch. Measured on dragonfly 2026-11-12: the visibility rescue saw eleven
+    windows "mostly in cell (1,3), outside this 3x3 grid" in one pass and
+    moved them, three times each, while the user flipped workspaces in a
+    settled session. Reading the outputs on both sides of the views and
+    retrying makes a straddle detectable; a caller that ACTS on the result
+    must not act on an unstable one."""
+    outs = sock.list_outputs()
+    views = []
+    for _ in range(max(1, tries)):
+        views = sock.list_views(filter_mapped_toplevel=True)
+        after = sock.list_outputs()
+        if viewports(after) == viewports(outs):
+            return after, views, True
+        outs = after
+    return outs, views, False
+
+
 def snapshot(sock):
-    outputs = {o["name"]: o for o in sock.list_outputs()}
+    _outs, _views, _stable = stable_views(sock)
+    outputs = {o["name"]: o for o in _outs}
     inverts = load_inverts()
     windows = []
-    for v in sock.list_views(filter_mapped_toplevel=True):
+    for v in _views:
         title = v.get("title", "")
         if SKIP_TITLE.search(title) or is_transient(v):
             continue   # work / scratch / transient-chrome: never record it
@@ -1391,6 +1428,10 @@ def snapshot(sock):
         "outputs": [{"name": o["name"], "geometry": o["geometry"],
                      "workspace": o["workspace"]} for o in outputs.values()],
         "windows": windows,
+        # TRUE ONLY WHEN THE VIEWPORT MOVED UNDER EVERY ATTEMPT TO READ IT
+        # (stable_views), so its workspaces may be a whole screen off. The
+        # daemon does not learn from such a snapshot.
+        **({} if _stable else {"unstable": True}),
     }
 
 

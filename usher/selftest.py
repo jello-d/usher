@@ -9980,6 +9980,8 @@ def _t_visible(ck):
         engine.other_profile_entries = lambda *a, **k: []
         _wm.logline = _said.append
         w._ensure_visible()
+        ck("daemon-waits-for-a-second-sighting", _moved == [])
+        w._ensure_visible()
         ck("daemon-rescues-only-the-invisible-window", _moved == [2])
         ck("daemon-says-why", any("rescued" in m and "no attached output"
                                   in m for m in _said))
@@ -10000,6 +10002,7 @@ def _t_visible(ck):
         _moved[:] = []
         w.rescued.clear()
         w.transition_until = 0.0
+        w.unseen = {2}
         _lv0 = _S.list_views
 
         def _lv_starts(self, filter_mapped_toplevel=False):
@@ -10013,12 +10016,89 @@ def _t_visible(ck):
             w.transition_until = 0.0
         ck("daemon-stops-rescuing-when-a-change-starts-mid-pass",
            _moved == [])
+        # A WORKSPACE SWITCH BETWEEN THE READS MOVES NOTHING, though the
+        # window was already seen once: every view is a screen off for that
+        # read. Measured on dragonfly 2026-11-12, eleven windows at once.
+        _moved[:] = []
+        w.rescued.clear()
+        w.unseen = {2}
+        _lo0, _flip = _S.list_outputs, [0]
+
+        def _lo_flips(self):
+            _flip[0] += 1
+            return [dict(_o, workspace={"x": 0, "y": _flip[0] % 2,
+                                        "grid_width": 3,
+                                        "grid_height": 3})]
+        _S.list_outputs = _lo_flips
+        try:
+            w._ensure_visible()
+        finally:
+            _S.list_outputs = _lo0
+        ck("daemon-rescues-nothing-across-a-workspace-switch",
+           _moved == [] and w.unseen == {2})
     except Exception as _e:                                # noqa: BLE001
         ck("daemon-visibility-raised: %s" % _e, False)
     finally:
         (engine.surface_map, engine.surface_default,
          engine.other_profile_entries) = _rs
         _wm.logline = _rl
+
+    # ---- A READ ACROSS A WORKSPACE SWITCH IS KNOWN TO BE ONE ---------------
+    class _SV:
+        def __init__(self, seq):
+            self.seq, self.n = list(seq), 0
+
+        def list_outputs(self):
+            y = self.seq[min(self.n, len(self.seq) - 1)]
+            self.n += 1
+            return [{"name": "o", "workspace": {"x": 0, "y": y},
+                     "geometry": {"x": 0, "y": 0, "width": 9, "height": 9}}]
+
+        def list_views(self, filter_mapped_toplevel=False):
+            return ["v"]
+    _sv = engine.stable_views(_SV([0, 0]))
+    ck("stable-views-a-still-viewport-is-stable",
+       _sv[2] is True and _sv[1] == ["v"])
+    _sv = engine.stable_views(_SV([0, 1, 1]))
+    ck("stable-views-retries-past-one-switch",
+       _sv[2] is True and _sv[0][0]["workspace"]["y"] == 1)
+    _sv = engine.stable_views(_SV([0, 1, 0, 1, 0, 1]))
+    ck("stable-views-says-when-it-never-held", _sv[2] is False)
+    _SV.list_views = lambda self, filter_mapped_toplevel=False: []
+    ck("snapshot-marks-a-read-across-a-switch",
+       engine.snapshot(_SV([0, 1, 0, 1, 0, 1])).get("unstable") is True
+       and "unstable" not in engine.snapshot(_SV([0, 0])))
+    ck("viewports-reads-every-output",
+       engine.viewports([{"name": "a", "workspace": {"x": 1, "y": 2}},
+                         {"name": "b"}]) == {"a": (1, 2), "b": (None, None)})
+
+    # AND THE DAEMON DOES NOT LEARN FROM ONE, driven through _capture_once.
+    _wc = Watcher(launch=False)
+    _rsnap, _rlearn = _wm.snapshot, _wm.learn
+    _learned = []
+    try:
+        _wm.snapshot = lambda sock: {"windows": [], "outputs": [], "time": 1,
+                                     "unstable": True}
+        _wm.learn = lambda *a, **k: _learned.append(1)
+        _wc._poll_sources = lambda snap: False
+        _wc.st["dirty"] = True
+        _wc._capture_once(None)
+        ck("capture-does-not-learn-an-unstable-snapshot",
+           _learned == [] and _wc.st["dirty"] is True)
+        _wm.snapshot = lambda sock: {"windows": [], "outputs": [], "time": 1}
+        _wc._held = lambda ws: set()
+        _rsk3, _rper = _wm.save_knowledge, _wm.persist
+        _wm.save_knowledge = lambda kb, p: None
+        _wm.persist = lambda snap, roll=True: None
+        try:
+            _wc._capture_once(None)
+        finally:
+            _wm.save_knowledge, _wm.persist = _rsk3, _rper
+        ck("capture-control-learns-a-stable-one", _learned == [1])
+    except Exception as _e:                                # noqa: BLE001
+        ck("capture-unstable-raised: %s" % _e, False)
+    finally:
+        _wm.snapshot, _wm.learn = _rsnap, _rlearn
 
     # AND THE PLACER FITS A SLOT BEFORE IT ASKS: a slot learned off its
     # panel is requested inside the work area, driven through _seat_view.

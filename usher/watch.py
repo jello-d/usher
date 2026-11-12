@@ -522,6 +522,7 @@ class Watcher:
         # pushing off-screen cannot become a placement loop).
         self.visible_due = 0.0
         self.rescued = {}
+        self.unseen = set()   # vids invisible on the last pass (see above)
         # VIEWS WE HAVE ALREADY SAID ARE STICKY and so never moved. A third
         # set for the same reason as the one above: it is a property of the
         # window, and a browser renames constantly.
@@ -1313,10 +1314,18 @@ class Watcher:
         if self._in_transition():
             return
         sock = self.place_sock
-        outs = {o["name"]: o for o in sock.list_outputs()}
+        _outs, _views, stable = engine.stable_views(sock)
+        if not stable:
+            return        # the viewport moved while we looked; next pass
+        outs = {o["name"]: o for o in _outs}
         surfaces, _why = engine.surface_map()
         dflt = engine.surface_default()
-        for v in sock.list_views(filter_mapped_toplevel=True):
+        # SEEN TWICE BEFORE IT IS MOVED: a window genuinely out of sight stays
+        # out of sight, and one a single read got wrong does not, so a rescue
+        # needs the same verdict on two passes VISIBLE_EVERY apart. Cheap
+        # against a stray read moving every window on the desk.
+        suspect, self.unseen = self.unseen, set()
+        for v in _views:
             # A MINIMIZED window is hidden on purpose, and one the user's
             # exclude rules name is one usher never places.
             if ((v.get("parent", -1) or -1) != -1 or v.get("minimized")
@@ -1333,6 +1342,9 @@ class Watcher:
             # null output onto the old desk's map and grid.
             if self._in_transition():
                 return
+            self.unseen.add(vid)
+            if vid not in suspect:
+                continue
             n = self.rescued.get(vid, 0)
             if n >= RESCUE_TRIES:
                 if n == RESCUE_TRIES:
@@ -2224,6 +2236,12 @@ class Watcher:
         # changed something, which the rate limit bounds to once a minute.
         if self._poll_sources(snap):
             snap = snapshot(cap)
+        # A SNAPSHOT TAKEN ACROSS A WORKSPACE SWITCH IS NOT LEARNED: its
+        # workspaces may be a whole screen off (engine.stable_views), and
+        # learning that is how a flip of the desk becomes a wrong slot. The
+        # store stays dirty, so the next tick takes another.
+        if snap.get("unstable"):
+            return
         hold = self._held(snap["windows"])
         # WHEN THE HOLD LIFTS, COME BACK. Capture is event-driven, so a window
         # held through the pass that recorded it gets no second look until
