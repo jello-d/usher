@@ -7035,6 +7035,133 @@ def sticky_entry(v, e):
     return dict(e, sticky=True)
 
 
+def workarea(o):
+    """(x, y, w, h): the part of output `o` windows may use, OUTPUT-LOCAL.
+
+    THE NET SCREEN, which the compositor already computes: its `workarea` is
+    the output minus every layer-shell EXCLUSIVE ZONE, i.e. the bars
+    (measured on dragonfly's 2880x1800 panel: 48 on top, 50 at the bottom).
+    So the bars' heights, which differ with each panel's DPI, need no plugin
+    and no copy of waybar's config: whatever reserves space is subtracted by
+    the thing that granted it. The whole output when it reports none.
+
+    Output-local as wayfire reports it; a rect that cannot be local (it runs
+    past the output) is read as layout coordinates and shifted, so either
+    convention lands the same place."""
+    g = o.get("geometry") or {}
+    gw, gh = float(g.get("width") or 0), float(g.get("height") or 0)
+    wa = o.get("workarea") or {}
+    try:
+        x, y = float(wa["x"]), float(wa["y"])
+        w, h = float(wa["width"]), float(wa["height"])
+    except (KeyError, TypeError, ValueError):
+        return 0.0, 0.0, gw, gh
+    if x + w > gw + 1 or y + h > gh + 1:
+        x -= float(g.get("x") or 0)
+        y -= float(g.get("y") or 0)
+    x, y = max(0.0, x), max(0.0, y)
+    w, h = min(w, gw - x), min(h, gh - y)
+    if w <= 0 or h <= 0:
+        return 0.0, 0.0, gw, gh
+    return x, y, w, h
+
+
+def fit_entry(e, o):
+    """`e` with its rect moved, and shrunk if it must be, to lie inside the
+    WORK AREA of output `o`. PURE; `e` itself when nothing changes.
+
+    A SLOT CAN PUT A WINDOW OFF ITS PANEL, and restoring it faithfully then
+    restores the fault: measured on dragonfly 2026-11-12, Signal's slot sat
+    at x=2873 on a 2880-wide panel, so every placement left 7 pixels of it
+    on screen. Learned under a 3x3 grid, where the overhang ran onto the
+    next workspace and was still reachable; a 2x2 grid has no next one. The
+    size is cut to the work area too, so a window learned on a larger panel
+    or under thinner bars cannot hang off the bottom of this one."""
+    if not e or not o:
+        return e
+    x, y, w, h = workarea(o)
+    try:
+        sw, sh = float(e["size"][0]), float(e["size"][1])
+        px, py = float(e["pos"][0]), float(e["pos"][1])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return e
+    nw, nh = min(sw, w), min(sh, h)
+    nx = min(max(px, x), x + w - nw)
+    ny = min(max(py, y), y + h - nh)
+    if (nx, ny, nw, nh) == (px, py, sw, sh):
+        return e
+    return dict(e, pos=[nx, ny], size=[nw, nh])
+
+
+VISIBLE_MIN = 0.25   # of a window's area: below this it is not "visible"
+
+
+def visibility(v, outputs):
+    """Why live view `v` cannot be seen, or "" when it can. PURE.
+
+    THE INVARIANT usher HOLDS: every window is on an attached output, in a
+    workspace cell the grid has, with at least VISIBLE_MIN of it on its
+    panel. Three ways it failed on one desk in one day, each from a
+    different path, which is why it is a test of the RESULT rather than of
+    any path: a parked window refused a slot (on the null output), a slot
+    learned mostly off its panel (Signal), and a grid shrinking under
+    windows."""
+    name = v.get("output-name")
+    o = outputs.get(name)
+    if not o:
+        return f"on no attached output ({name})"
+    p = place_of(v, outputs)
+    ws = o.get("workspace") or {}
+    gw, gh = int(ws.get("grid_width") or 0), int(ws.get("grid_height") or 0)
+    cx, cy = int(p["workspace"][0]), int(p["workspace"][1])
+    if gw > 0 and gh > 0 and not (0 <= cx < gw and 0 <= cy < gh):
+        return f"in cell ({cx},{cy}), outside this {gw}x{gh} grid"
+    g = o.get("geometry") or {}
+    ow, oh = float(g.get("width") or 0), float(g.get("height") or 0)
+    px, py = p["pos"]
+    w, h = p["size"]
+    if w <= 0 or h <= 0 or ow <= 0 or oh <= 0:
+        return ""
+    vis = (max(0.0, min(px + w, ow) - max(px, 0.0))
+           * max(0.0, min(py + h, oh) - max(py, 0.0)))
+    if vis < VISIBLE_MIN * w * h:
+        return f"only {int(100 * vis / (w * h))}% of it is on {name}"
+    return ""
+
+
+def rescue_slot(v, outputs, others=(), surfaces=None, default=None):
+    """Where to put an invisible window: a slot on this desk. PURE.
+
+    THE MAP FIRST, through the same order a seed takes (its surface's name
+    at another desk, else the surface in its cell, else the default), since
+    that is where the user said each place is. Failing that, its own cell on
+    its own panel, or the built-in panel when its own is gone. Always fitted
+    to the work area, so the answer is visible by construction."""
+    p = place_of(v, outputs)
+    g = v.get("geometry") or {}
+    me = {"workspace": [int(n) for n in p["workspace"]],
+          "pos": list(p["pos"]),
+          "size": [g.get("width") or 800, g.get("height") or 600],
+          "sticky": bool(v.get("sticky"))}
+    seed = surface_seed([dict(o, size=me["size"], sticky=me["sticky"])
+                         for o in others] + [me], surfaces or {}, default)
+    if seed:
+        tgt = dict(seed)
+    else:
+        own = outputs.get(v.get("output-name"))
+        if own is None:
+            own = next((outputs[n] for n in sorted(outputs)
+                        if n.startswith("eDP")), None) or next(
+                (outputs[n] for n in sorted(outputs)), None)
+        if own is None:
+            return None
+        tgt = dict(me, output=own["name"])
+    o = outputs.get(tgt["output"])
+    if o is None:
+        return None
+    return fit_entry(clamp_cell(tgt, outputs), o)
+
+
 def place(sock, view_id, e, o):
     geom = target_geometry(e, o)
     sock.send_json({
@@ -8185,6 +8312,7 @@ def do_restore(dry, only=None, source=None):
                                 f"{_ws.get('grid_width')}x"
                                 f"{_ws.get('grid_height')} grid"))
             continue
+        e = fit_entry(e, o)
         geom = target_geometry(e, o)
         g = lv.get("geometry", {}) or {}
         same = (g.get("x") == geom["x"] and g.get("y") == geom["y"] and

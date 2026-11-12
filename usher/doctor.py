@@ -643,6 +643,23 @@ def _doctor_relaunch(out, snap, live):
             f" ({collision_fix(_ident, _csrc)})")
 
 
+def _doctor_visible(out, live, outs):
+    """Every window that cannot be seen, and why. The daemon rescues these
+    (Watcher._ensure_visible); this is how a case it misses shows up rather
+    than being found by hunting for a window."""
+    out("== visibility ==")
+    bad = [(lv, engine.visibility(lv, outs)) for lv in live
+           if (lv.get("parent", -1) or -1) == -1
+           and not lv.get("minimized")]
+    bad = [(lv, why) for lv, why in bad if why]
+    if not bad:
+        out(f"  [OK]   all {len(live)} window(s) can be seen")
+        return
+    for lv, why in bad:
+        out(f"  [WARN] INVISIBLE {app_of(lv)[:14]:14} "
+            f"{engine.log_title(lv)[:30]:30} {why}")
+
+
 def _doctor_placement(out, kb, live, outs):
     """Per live window: does it match a remembered slot, and is that slot's
     output actually attached."""
@@ -850,5 +867,6 @@ def do_doctor():
     if ok:
         _doctor_relaunch(out, snap, live)
         _doctor_placement(out, kb, live, outs)
+        _doctor_visible(out, live, outs)
     print("\n".join(lines))
     return rc or (engine.EXIT_OK if ok else engine.EXIT_CANNOT)

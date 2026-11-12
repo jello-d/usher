@@ -535,6 +535,15 @@ for that window. The moment the window is placed, the capture loop learns its
 real geometry and that learned slot wins from then on, so arranging a window
 by hand at one desk never overrules what you arranged at another.
 
+**No window is left where it cannot be seen.** Whatever put it there (a
+parked window that lost a shared slot, a slot learned mostly off its panel, a
+grid that shrank), the daemon checks every few seconds that each window is on
+an attached output, in a cell the grid has, and mostly on its panel, and puts
+any that is not on this desk by the same order a seed takes. Every placement
+is also fitted to the panel's WORK AREA, which the compositor computes net of
+the bars, so their heights at each panel's DPI need no configuration.
+`usher doctor` lists any window that cannot be seen.
+
 **No map means no seeding**, which is the opt-out: with no hwdp, no surfaces
 file for this desk, or an unreadable one, usher behaves exactly as it did
 before, learning only.

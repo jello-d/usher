@@ -9681,6 +9681,235 @@ def _t_placement(ck):
         _gw._on_event({"event": "view-unmapped", "view": {"id": 9}})
     ck("the-refusal-is-forgotten-on-unmap", 9 not in _gw.cell_said)
 
+def _t_visible(ck):
+    """NO WINDOW IS LEFT WHERE IT CANNOT BE SEEN.
+
+    Three ways a window was invisible on dragonfly in one day, each from a
+    different path: a parked window that lost a shared slot (on the null
+    output), a slot learned mostly off its panel (Signal at x=2873 on a
+    2880-wide panel), and a grid shrinking under windows. So the RESULT is
+    checked, and every slot is fitted to the WORK AREA, which the compositor
+    computes net of the bars."""
+    from .watch import Watcher
+    from . import doctor as _dv
+    _o = {"id": 1, "name": "eDP-1",
+          "geometry": {"x": 0, "y": 0, "width": 2880, "height": 1800},
+          "workarea": {"x": 0, "y": 48, "width": 2880, "height": 1702},
+          "workspace": {"x": 1, "y": 1, "grid_width": 2, "grid_height": 2}}
+    _outs = {"eDP-1": _o}
+
+    # THE NET SCREEN comes from the compositor, so no plugin is needed.
+    ck("workarea-is-the-compositor's-net-rect",
+       engine.workarea(_o) == (0.0, 48.0, 2880.0, 1702.0))
+    ck("workarea-with-none-reported-is-the-whole-output",
+       engine.workarea(dict(_o, workarea=None)) == (0.0, 0.0, 2880.0, 1800.0))
+    _og = dict(_o, geometry=dict(_o["geometry"], x=2880),
+               workarea={"x": 2880, "y": 48, "width": 2880, "height": 1702})
+    ck("workarea-in-layout-coordinates-is-made-local",
+       engine.workarea(_og) == (0.0, 48.0, 2880.0, 1702.0))
+
+    # FIT: moved inside, shrunk only if it must be
+    _e = {"workspace": [1, 0], "pos": [2873, 33], "size": [1392, 885]}
+    _f = engine.fit_entry(_e, _o)
+    ck("fit-pulls-an-off-panel-slot-inside-the-work-area",
+       _f["pos"] == [2880 - 1392, 48] and _f["size"] == [1392, 885])
+    ck("fit-shrinks-a-slot-larger-than-the-work-area",
+       engine.fit_entry(dict(_e, size=[4000, 3000]), _o)["size"]
+       == [2880, 1702])
+    _in = {"workspace": [1, 0], "pos": [100, 100], "size": [500, 400]}
+    ck("fit-leaves-a-slot-that-fits-alone", engine.fit_entry(_in, _o) is _in)
+
+    # VISIBILITY, all three measured shapes and a control
+    def _v(**k):
+        v = {"id": 9, "app-id": "zzz-v", "title": "t", "output-name": "eDP-1",
+             "parent": -1,
+             "geometry": {"x": 100, "y": 100, "width": 500, "height": 400}}
+        v.update(k)
+        return v
+    ck("visible-control-a-window-on-screen", engine.visibility(_v(), _outs)
+       == "")
+    ck("visible-a-parked-window-is-not",
+       "no attached output" in engine.visibility(_v(**{"output-name":
+                                                      "null"}), _outs))
+    ck("visible-a-window-mostly-off-its-panel-is-not",
+       "%" in engine.visibility(_v(geometry={"x": 2873, "y": 33,
+                                             "width": 1392,
+                                             "height": 885}), _outs))
+    ck("visible-a-window-outside-the-grid-is-not",
+       "outside" in engine.visibility(_v(geometry={"x": 2880 * 2, "y": 0,
+                                                   "width": 500,
+                                                   "height": 400}), _outs))
+    ck("visible-a-window-half-off-is-still-visible",
+       engine.visibility(_v(geometry={"x": 2630, "y": 100, "width": 500,
+                                      "height": 400}), _outs) == "")
+
+    # RESCUE: the map first, else its own cell on its panel or the built-in
+    _surf = {"code": {"output": "eDP-1", "workspace": [0, 1], "pos": [0, 0],
+                      "size": [2880, 1800]}}
+    _r1 = engine.rescue_slot(_v(**{"output-name": "null"}), _outs,
+                             [{"surface": "code", "workspace": [0, 1]}],
+                             _surf, None)
+    ck("rescue-a-parked-window-goes-to-its-surface",
+       bool(_r1) and _r1["output"] == "eDP-1" and _r1["workspace"] == [0, 1])
+    _r2 = engine.rescue_slot(_v(**{"output-name": "null"}), _outs)
+    ck("rescue-with-no-map-goes-to-the-built-in-panel",
+       bool(_r2) and _r2["output"] == "eDP-1")
+    _r3 = engine.rescue_slot(_v(geometry={"x": 2873, "y": 33, "width": 1392,
+                                          "height": 885}), _outs)
+    ck("rescue-an-off-panel-window-is-fitted-into-its-cell",
+       bool(_r3) and engine.visibility(
+           {"output-name": "eDP-1", "geometry": {
+               "x": (_r3["workspace"][0] - 1) * 2880 + _r3["pos"][0],
+               "y": (_r3["workspace"][1] - 1) * 1800 + _r3["pos"][1],
+               "width": _r3["size"][0], "height": _r3["size"][1]}},
+           _outs) == "")
+    ck("rescue-is-always-inside-the-work-area",
+       all(r and r["pos"][1] >= 48 and r["pos"][1] + r["size"][1] <= 1750
+           for r in (_r1, _r2, _r3)))
+
+    # THE DAEMON: one placement for an invisible window, none for a visible
+    # one, and it gives up (loudly) after RESCUE_TRIES.
+    w = Watcher(launch=False)
+    _moved = []
+    _views = [_v(id=1), _v(id=2, **{"output-name": "null"})]
+
+    class _S:
+        def list_outputs(self):
+            return [_o]
+
+        def list_views(self, filter_mapped_toplevel=False):
+            return _views
+
+        def send_json(self, msg):
+            _moved.append(msg["data"]["id"])
+
+    w.place_sock = _S()
+    _rs = (engine.surface_map, engine.surface_default,
+           engine.other_profile_entries)
+    _said = []
+    _wm = sys.modules[Watcher.__module__]
+    _rl = _wm.logline
+    try:
+        engine.surface_map = lambda fresh=False: ({}, "")
+        engine.surface_default = lambda fresh=False: None
+        engine.other_profile_entries = lambda *a, **k: []
+        _wm.logline = _said.append
+        w._ensure_visible()
+        ck("daemon-rescues-only-the-invisible-window", _moved == [2])
+        ck("daemon-says-why", any("rescued" in m and "no attached output"
+                                  in m for m in _said))
+        for _ in range(5):
+            w._ensure_visible()
+        ck("daemon-gives-up-after-the-bound",
+           _moved.count(2) == _wm.RESCUE_TRIES
+           and any("giving up" in m for m in _said))
+        _moved[:] = []
+        w.rescued.clear()
+        w.transition_until = time.time() + 60
+        w._ensure_visible()
+        ck("daemon-does-not-rescue-during-a-display-change", _moved == [])
+    except Exception as _e:                                # noqa: BLE001
+        ck("daemon-visibility-raised: %s" % _e, False)
+    finally:
+        (engine.surface_map, engine.surface_default,
+         engine.other_profile_entries) = _rs
+        _wm.logline = _rl
+
+    # AND THE PLACER FITS A SLOT BEFORE IT ASKS: a slot learned off its
+    # panel is requested inside the work area, driven through _seat_view.
+    w2 = Watcher(launch=False)
+    _sent = []
+
+    class _S2:
+        def send_json(self, msg):
+            _sent.append(msg["data"]["geometry"])
+
+        def list_outputs(self):
+            return [_o]
+
+    w2.place_sock = _S2()
+    try:
+        w2._seat_view(_v(id=5), dict(_e, sticky=False, inverted=False,
+                                     fullscreen=False, output="eDP-1"), _o)
+    except Exception as _e2:                               # noqa: BLE001
+        _sent.append({"RAISED": str(_e2)})
+    ck("placer-fits-a-slot-to-the-work-area",
+       bool(_sent) and _sent[0].get("x", 0) % 2880 == 2880 - 1392
+       and _sent[0].get("y", 0) % 1800 == 48)
+
+    # THE PLACER STEP RUNS THE GUARANTEE when it is due, and only then
+    w3 = Watcher(launch=False)
+    _ran = []
+    w3._ensure_visible = lambda: _ran.append(1)
+    w3.visible_due = 0.0
+    w3._placer_step()
+    w3._placer_step()
+    ck("placer-step-runs-the-visibility-guarantee-when-due", _ran == [1])
+
+    # restore FITS TOO: its own mover asks for the fitted rect
+    class _RS:
+        def list_views(self, filter_mapped_toplevel=False):
+            return [_v(id=11, pid=os.getpid(), **{"app-id": "zzz-unowned"})]
+
+        def list_outputs(self):
+            return [_o]
+
+    _rr = (engine.ipc, engine.load_knowledge, engine.panel_map,
+           engine.profile_id)
+    _rb = io.StringIO()
+    try:
+        engine.ipc = lambda: _RS()
+        engine.load_knowledge = lambda *_a, **_k: {
+            kkey("zzz-unowned", ""): {
+                "app_id": "zzz-unowned", "title": "", "appid_only": True,
+                "label": "x", "output": "eDP-1", "panel": "", "surface": "",
+                "workspace": [1, 0], "pos": [2873, 33], "size": [1392, 885],
+                "last_seen": time.time(), "sticky": False,
+                "inverted": False, "fullscreen": False}}
+        engine.panel_map = lambda *_a, **_k: {}
+        engine.profile_id = lambda *_a, **_k: "rigprof"
+        with contextlib.redirect_stdout(_rb):
+            engine.do_restore(True)
+    except Exception as _e3:                               # noqa: BLE001
+        _rb.write("RAISED %s" % _e3)
+    finally:
+        (engine.ipc, engine.load_knowledge, engine.panel_map,
+         engine.profile_id) = _rr
+    ck("restore-fits-a-slot-to-the-work-area",
+       "pos(1488.0, 48.0)" in _rb.getvalue())
+
+    # doctor RUNS the section, not merely defines it
+    _rd = (_dv._doctor_store, _dv._doctor_contracts, _dv._doctor_compositor,
+           _dv._doctor_relaunch, _dv._doctor_placement, _dv._doctor_visible)
+    _vis_ran = []
+    try:
+        _dv._doctor_store = lambda out: ({}, {"windows": []})
+        _dv._doctor_contracts = lambda out, snap: 0
+        _dv._doctor_compositor = lambda out: ([], _outs, True)
+        _dv._doctor_relaunch = lambda *a: None
+        _dv._doctor_placement = lambda *a: None
+        _dv._doctor_visible = lambda *a: _vis_ran.append(1)
+        with contextlib.redirect_stdout(io.StringIO()):
+            _dv.do_doctor()
+    except Exception:                                      # noqa: BLE001
+        pass
+    finally:
+        (_dv._doctor_store, _dv._doctor_contracts, _dv._doctor_compositor,
+         _dv._doctor_relaunch, _dv._doctor_placement,
+         _dv._doctor_visible) = _rd
+    ck("doctor-runs-the-visibility-section", _vis_ran == [1])
+
+    # AND doctor LISTS THEM
+    _lines = []
+    _dv._doctor_visible(_lines.append, _views, _outs)
+    ck("doctor-lists-an-invisible-window",
+       any("INVISIBLE" in x for x in _lines))
+    _lines = []
+    _dv._doctor_visible(_lines.append, _views[:1], _outs)
+    ck("doctor-says-when-every-window-can-be-seen",
+       any("[OK]" in x for x in _lines))
+
+
 def _t_sticky(ck):
     """A STICKY WINDOW IS NEVER MOVED, driven through every path that moves one.
 
@@ -12800,7 +13029,7 @@ def selftest():
         for area in (_t_registry, _t_resolution, _t_lock,
                      _t_toplevels, _t_roster,
                      _t_lifecycle, _t_desktop, _t_loupe, _t_slots,
-                     _t_sticky, _t_verify,
+                     _t_sticky, _t_visible, _t_verify,
                      _t_terminals, _t_cli_split,
                      _t_launch_source,
                      _t_relaunch, _t_chrome, _t_learn,

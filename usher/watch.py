@@ -98,6 +98,10 @@ TITLE_QUIET_FAST = 0.15  # everything else: the title is already stable at map
 # for the compositor to have APPLIED the request we are checking, or every
 # placement reads as failed; 0.6s against a measured sub-second apply.
 PLACE_VERIFY = (0.6, 1.5, 3.0)
+# The visibility guarantee (Watcher._ensure_visible): how often it looks,
+# and how many times one window is rescued before usher says so and stops.
+VISIBLE_EVERY = 5.0
+RESCUE_TRIES = 3
 
 # HOW MANY TIMES A FAILED CHROME RE-KEY IS RETRIED before its session
 # signature is adopted anyway. The measured failure is a session file
@@ -508,6 +512,11 @@ class Watcher:
         # window holds and this is a property of the desk; one set would make
         # either message suppress the other.
         self.cell_said = set()
+        # The visibility guarantee: when it next runs, and how often each
+        # window has been rescued (bounded, so a window something keeps
+        # pushing off-screen cannot become a placement loop).
+        self.visible_due = 0.0
+        self.rescued = {}
         # VIEWS WE HAVE ALREADY SAID ARE STICKY and so never moved. A third
         # set for the same reason as the one above: it is a property of the
         # window, and a browser renames constantly.
@@ -1089,6 +1098,11 @@ class Watcher:
                         f"{app} ws{tuple(e['workspace'])} outside "
                         f"{_ws.get('grid_width')}x{_ws.get('grid_height')}")
             return
+        # FITTED TO THE WORK AREA, so a slot learned off its panel or under
+        # thinner bars still lands where it can be seen (engine.fit_entry).
+        # Before everything below, so the "already there" test, the request
+        # and the read-back all mean the same rect.
+        e = engine.fit_entry(e, o)
         # Skip if already exactly there (init-place over an in-place session
         # would otherwise re-issue every window). The event view carries
         # geometry for init (list_views); a freshly-mapped view may not, and
@@ -1236,6 +1250,66 @@ class Watcher:
             again = self.st.pop("recheck", False)
         if again:
             self._recheck_all()
+        if now >= self.visible_due:
+            self.visible_due = now + VISIBLE_EVERY
+            self._guarded("visible", self._ensure_visible)
+
+    def _ensure_visible(self):
+        """NO WINDOW IS LEFT WHERE IT CANNOT BE SEEN, whatever put it there.
+
+        Every path that leaves a window alone (a refused slot, an off-grid
+        slot, a desk with no map) used to leave it wherever it was, and three
+        of those were invisible on one desk in one day: a parked window that
+        lost a shared slot sat on the null output, a slot learned mostly off
+        its panel restored Signal off-screen, and a grid shrank under windows.
+        So the RESULT is checked (engine.visibility) and a window failing it
+        is put on this desk (engine.rescue_slot): its surface, its cell's
+        surface, the default, else its own cell or the built-in panel.
+
+        NOT DURING A DISPLAY CHANGE, when windows are legitimately parked
+        and the layout is not yet true. BOUNDED PER WINDOW, so something that
+        keeps pushing a window away is reported rather than fought."""
+        if self._in_transition():
+            return
+        sock = self.place_sock
+        outs = {o["name"]: o for o in sock.list_outputs()}
+        surfaces, _why = engine.surface_map()
+        dflt = engine.surface_default()
+        for v in sock.list_views(filter_mapped_toplevel=True):
+            # A MINIMIZED window is hidden on purpose, and one the user's
+            # exclude rules name is one usher never places.
+            if ((v.get("parent", -1) or -1) != -1 or v.get("minimized")
+                    or is_transient(v)):
+                continue
+            why = engine.visibility(v, outs)
+            vid = v.get("id")
+            if not why:
+                continue
+            n = self.rescued.get(vid, 0)
+            if n >= RESCUE_TRIES:
+                if n == RESCUE_TRIES:
+                    logline(f"still not visible after {n} rescue(s), giving "
+                            f"up: {app_of(v)[:18]} | "
+                            f"{engine.log_title(v)[:30]} ({why})")
+                    self.rescued[vid] = n + 1
+                continue
+            app = app_of(v)
+            try:
+                others = engine.other_profile_entries(
+                    app, identity(v) or "", self.kb_profile)
+            except Exception:                              # noqa: BLE001
+                others = []
+            tgt = engine.rescue_slot(v, outs, others, surfaces, dflt)
+            if not tgt:
+                continue
+            o = outs[tgt["output"]]
+            place(sock, vid, tgt, o)
+            self.rescued[vid] = n + 1
+            logline(f"rescued, it could not be seen ({why}): {app[:18]} -> "
+                    f"{o['name']} ws{tuple(int(x) for x in tgt['workspace'])}"
+                    + (f" surface `{tgt['seeded_from']}`"
+                       if tgt.get("seeded_from") else "")
+                    + f" | {engine.log_title(v)[:30]}")
 
     def _fresh_view(self, vid):
         """The compositor's CURRENT view dict for vid, or None if it is gone.
@@ -2151,6 +2225,7 @@ class Watcher:
                 self.slot_said = {p for p in self.slot_said
                                   if p[0] != v["id"]}
                 self.cell_said.discard(v["id"])
+                self.rescued.pop(v["id"], None)
                 # and having said it would never be remembered, for the same
                 # two reasons: a vid is reused, and a set that only grows is a
                 # leak in a process that runs for weeks.
