@@ -7066,25 +7066,83 @@ def workarea(o):
     return x, y, w, h
 
 
+def _grid(o):
+    """(output width, height, grid width, height); a grid the compositor
+    does not report is read as one cell."""
+    g = o.get("geometry") or {}
+    ws = o.get("workspace") or {}
+    return (float(g.get("width") or 0), float(g.get("height") or 0),
+            int(ws.get("grid_width") or 0) or 1,
+            int(ws.get("grid_height") or 0) or 1)
+
+
+def rehome(e, o):
+    """`e` described from the cell holding its CENTRE. PURE; `e` itself
+    when that is already its cell.
+
+    A WORKSPACE IS A REGION OF ONE PLANE, so a slot's cell is a FRAME and
+    not a fact: place_of names the cell holding a window's ORIGIN, and a
+    window whose origin is 10px inside one cell can lie almost entirely in
+    the next. Measured on dragonfly 2026-11-12: Signal recorded at ws(1,0)
+    x=2870 on a 2880-wide panel is, to anyone looking, on ws(2,0). Judging
+    or clamping it against ws(1,0) moved it off the workspace it was on.
+    A sticky slot has no cell, so it is left as it is."""
+    if not e or e.get("sticky"):
+        return e
+    ow, oh, _gw, _gh = _grid(o)
+    try:
+        cx, cy = int(e["workspace"][0]), int(e["workspace"][1])
+        px, py = float(e["pos"][0]), float(e["pos"][1])
+        w, h = float(e["size"][0]), float(e["size"][1])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return e
+    if ow <= 0 or oh <= 0:
+        return e
+    ax, ay = cx * ow + px, cy * oh + py
+    nx, ny = int((ax + w / 2) // ow), int((ay + h / 2) // oh)
+    if (nx, ny) == (cx, cy):
+        return e
+    return dict(e, workspace=[nx, ny], pos=[ax - nx * ow, ay - ny * oh])
+
+
 def fit_entry(e, o):
     """`e` with its rect moved, and shrunk if it must be, to lie inside the
-    WORK AREA of output `o`. PURE; `e` itself when nothing changes.
+    WORK AREA of output `o`, in the cell that holds most of it. PURE; `e`
+    itself when nothing changes.
 
-    A SLOT CAN PUT A WINDOW OFF ITS PANEL, and restoring it faithfully then
-    restores the fault: measured on dragonfly 2026-11-12, Signal's slot sat
-    at x=2873 on a 2880-wide panel, so every placement left 7 pixels of it
-    on screen. Learned under a 3x3 grid, where the overhang ran onto the
-    next workspace and was still reachable; a 2x2 grid has no next one. The
-    size is cut to the work area too, so a window learned on a larger panel
-    or under thinner bars cannot hang off the bottom of this one."""
+    A SLOT CAN PUT A WINDOW WHERE IT CANNOT BE SEEN, and restoring it
+    faithfully then restores the fault: on dragonfly's docked 2x2 desk
+    Signal's slot ran off the right of the last column. The window is first
+    REHOMED to the cell holding its centre (see rehome: a slot whose origin
+    sits at a cell's edge belongs to the next cell), that cell is brought
+    inside the grid, and only then is the rect clamped, so a window is
+    never pulled off the workspace it is actually on. The size is cut to
+    the work area too, so a window learned on a larger panel or under
+    thinner bars cannot hang off the bottom of this one."""
     if not e or not o:
         return e
+    base = e
+    e = rehome(e, o)
+    if not e.get("sticky"):
+        ow, oh, gw, gh = _grid(o)
+        try:
+            cx, cy = int(e["workspace"][0]), int(e["workspace"][1])
+            px0, py0 = float(e["pos"][0]), float(e["pos"][1])
+        except (KeyError, IndexError, TypeError, ValueError):
+            return base
+        kx, ky = min(max(0, cx), gw - 1), min(max(0, cy), gh - 1)
+        if (kx, ky) != (cx, cy):
+            # RE-EXPRESSED FROM THE SAME PLANE POSITION, so the clamp below
+            # pulls it to the NEAREST edge of the grid: a window past the
+            # last column lands flush against that column's right edge.
+            e = dict(e, workspace=[kx, ky],
+                     pos=[px0 + (cx - kx) * ow, py0 + (cy - ky) * oh])
     x, y, w, h = workarea(o)
     try:
         sw, sh = float(e["size"][0]), float(e["size"][1])
         px, py = float(e["pos"][0]), float(e["pos"][1])
     except (KeyError, IndexError, TypeError, ValueError):
-        return e
+        return base
     nw, nh = min(sw, w), min(sh, h)
     nx = min(max(px, x), x + w - nw)
     ny = min(max(py, y), y + h - nh)
@@ -7111,21 +7169,24 @@ def visibility(v, outputs):
     if not o:
         return f"on no attached output ({name})"
     p = place_of(v, outputs)
-    ws = o.get("workspace") or {}
-    gw, gh = int(ws.get("grid_width") or 0), int(ws.get("grid_height") or 0)
-    cx, cy = int(p["workspace"][0]), int(p["workspace"][1])
-    if gw > 0 and gh > 0 and not (0 <= cx < gw and 0 <= cy < gh):
-        return f"in cell ({cx},{cy}), outside this {gw}x{gh} grid"
-    g = o.get("geometry") or {}
-    ow, oh = float(g.get("width") or 0), float(g.get("height") or 0)
-    px, py = p["pos"]
-    w, h = p["size"]
+    ow, oh, gw, gh = _grid(o)
+    w, h = float(p["size"][0]), float(p["size"][1])
     if w <= 0 or h <= 0 or ow <= 0 or oh <= 0:
         return ""
-    vis = (max(0.0, min(px + w, ow) - max(px, 0.0))
-           * max(0.0, min(py + h, oh) - max(py, 0.0)))
+    # MEASURED ON THE WHOLE PLANE, not on the cell holding the window's
+    # origin: a window straddling two cells is visible on the one holding
+    # most of it (see rehome), and the first version of this called Signal
+    # invisible for exactly that.
+    ax = float(p["workspace"][0]) * ow + float(p["pos"][0])
+    ay = float(p["workspace"][1]) * oh + float(p["pos"][1])
+    ncx, ncy = int((ax + w / 2) // ow), int((ay + h / 2) // oh)
+    if not (0 <= ncx < gw and 0 <= ncy < gh):
+        return f"mostly in cell ({ncx},{ncy}), outside this {gw}x{gh} grid"
+    vis = (max(0.0, min(ax + w, gw * ow) - max(ax, 0.0))
+           * max(0.0, min(ay + h, gh * oh) - max(ay, 0.0)))
     if vis < VISIBLE_MIN * w * h:
-        return f"only {int(100 * vis / (w * h))}% of it is on {name}"
+        return (f"only {int(100 * vis / (w * h))}% of it is on {name}'s "
+                f"workspaces")
     return ""
 
 
@@ -7143,6 +7204,8 @@ def rescue_slot(v, outputs, others=(), surfaces=None, default=None):
           "pos": list(p["pos"]),
           "size": [g.get("width") or 800, g.get("height") or 600],
           "sticky": bool(v.get("sticky"))}
+    if outputs.get(v.get("output-name")):
+        me = rehome(me, outputs[v.get("output-name")])
     seed = surface_seed([dict(o, size=me["size"], sticky=me["sticky"])
                          for o in others] + [me], surfaces or {}, default)
     if seed:

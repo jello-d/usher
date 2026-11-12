@@ -9732,15 +9732,30 @@ def _t_visible(ck):
        "no attached output" in engine.visibility(_v(**{"output-name":
                                                       "null"}), _outs))
     ck("visible-a-window-mostly-off-its-panel-is-not",
-       "%" in engine.visibility(_v(geometry={"x": 2873, "y": 33,
-                                             "width": 1392,
-                                             "height": 885}), _outs))
+       engine.visibility(_v(geometry={"x": 2873, "y": 33, "width": 1392,
+                                      "height": 885}), _outs) != "")
+    # A WINDOW STRADDLING TWO CELLS IS ON THE ONE HOLDING MOST OF IT, which
+    # is the scanner bug: Signal at ws(1,0) x=2870 on a 3x3 grid is on
+    # ws(2,0) to anyone looking, and the first version called it invisible.
+    _o3 = dict(_o, workspace={"x": 1, "y": 0, "grid_width": 3,
+                              "grid_height": 3})
+    ck("visible-a-window-straddling-into-the-next-cell-is-visible",
+       engine.visibility(_v(geometry={"x": 2870, "y": 33, "width": 1392,
+                                      "height": 885}), {"eDP-1": _o3}) == "")
+    ck("visible-a-window-overhanging-the-grid's-left-edge-is-visible",
+       engine.visibility(_v(geometry={"x": -2880 - 10, "y": 100,
+                                      "width": 500, "height": 400}),
+                         _outs) == "")
+    _st3 = engine.fit_entry({"workspace": [1, 0], "pos": [2870, 33],
+                             "size": [1392, 885]}, _o3)
+    ck("fit-rehomes-a-straddling-slot-to-the-cell-holding-it",
+       _st3["workspace"] == [2, 0] and _st3["pos"] == [0, 48])
     ck("visible-a-window-outside-the-grid-is-not",
        "outside" in engine.visibility(_v(geometry={"x": 2880 * 2, "y": 0,
                                                    "width": 500,
                                                    "height": 400}), _outs))
     ck("visible-a-window-half-off-is-still-visible",
-       engine.visibility(_v(geometry={"x": 2630, "y": 100, "width": 500,
+       engine.visibility(_v(geometry={"x": 2500, "y": 100, "width": 500,
                                       "height": 400}), _outs) == "")
 
     # RESCUE: the map first, else its own cell on its panel or the built-in
