@@ -3012,10 +3012,23 @@ def slot_keys(kb, app, ident, source=""):
     if base not in offered:
         return out
     pre = base + SLOT_SEP
-    out += sorted((k for k in kb
+    sibs = sorted((k for k in kb
                    if k.startswith(pre) and k[len(pre):].isdigit()),
                   key=lambda k: int(k[len(pre):]))
-    return out
+    # THE SIBLINGS GO RIGHT AFTER THEIR BASE, not at the end: after it, a
+    # LESS specific key (another account's source-alone fallback) is tried
+    # before the window's own family. Measured on dragonfly 2026-11-12: the
+    # second of two enclave shells took the stale `kitty NUL titan` slot,
+    # left over from a cascade, instead of its own family's slot 1.
+    # ...whether or not the base itself is still stored (a family whose
+    # base was forgotten keeps its siblings in the same place).
+    res = []
+    for k in offered:
+        if kb.get(k) and k not in res:
+            res.append(k)
+        if k == base:
+            res.extend(s for s in sibs if s not in res)
+    return res
 
 
 def slot_order(windows):

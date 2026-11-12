@@ -9709,6 +9709,28 @@ def _t_visible(ck):
           "workspace": {"x": 1, "y": 1, "grid_width": 2, "grid_height": 2}}
     _outs = {"eDP-1": _o}
 
+    # A WINDOW'S OWN FAMILY BEFORE ANOTHER ACCOUNT'S FALLBACK. Measured on
+    # dragonfly: the second of two enclave shells took a stale
+    # `kitty NUL titan` slot instead of its family's slot 1, because the
+    # indexed siblings were offered after the source-alone key.
+    _fk = {kkey("kitty", "titan"): {"pos": [1, 1]},
+           kkey("kitty", "titan:ab"): {"pos": [2, 2]},
+           engine.slot_key("kitty", "titan:ab", 1): {"pos": [3, 3]}}
+    _order = engine.slot_keys(_fk, "kitty", "titan:ab", "titan")
+    ck("slot-keys-a-family-before-the-source-fallback",
+       _order == [kkey("kitty", "titan:ab"),
+                  engine.slot_key("kitty", "titan:ab", 1),
+                  kkey("kitty", "titan")])
+    _fk2 = dict(_fk)
+    del _fk2[kkey("kitty", "titan:ab")]
+    ck("slot-keys-a-family-whose-base-is-gone-still-before-the-fallback",
+       engine.slot_keys(_fk2, "kitty", "titan:ab", "titan")
+       == [engine.slot_key("kitty", "titan:ab", 1), kkey("kitty", "titan")])
+    _k2, _e2 = engine.free_slot(_fk, {kkey("kitty", "titan:ab"): 7},
+                                "kitty", "titan:ab", "titan", 8, {7, 8})
+    ck("free-slot-the-second-shell-takes-its-family's-slot",
+       _k2 == engine.slot_key("kitty", "titan:ab", 1))
+
     # THE NET SCREEN comes from the compositor, so no plugin is needed.
     ck("workarea-is-the-compositor's-net-rect",
        engine.workarea(_o) == (0.0, 48.0, 2880.0, 1702.0))
