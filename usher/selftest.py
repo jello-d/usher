@@ -5173,6 +5173,23 @@ def _t_terminals(ck):
     ck("foreground-argv-of-nothing-is-empty",
        engine.foreground_argv(None) == [] and engine.foreground_argv(-1)
        == [])
+    # A RELAUNCHED COMMAND RUNS UNDER `ksh -c`, which has no job control, so
+    # its job shares the shell's group and tpgid names the SHELL. Reading
+    # that as idle keyed every relaunched `top` as a plain shell, measured
+    # live on dragonfly 2026-11-12.
+    _fp = engine.foreground_pid
+    ck("foreground-pid-a-job-in-its-own-group-is-tpgid",
+       _fp(10, 20, [(20, 20)]) == 20)
+    ck("foreground-pid-a-dash-c-job-shares-the-shell-group",
+       _fp(10, 10, [(11, 10)]) == 11)
+    ck("foreground-pid-an-idle-shell-is-none",
+       _fp(10, 10, []) is None)
+    ck("foreground-pid-a-background-job-is-not-foreground",
+       _fp(10, 10, [(11, 11)]) is None)
+    ck("foreground-pid-two-children-in-the-group-conclude-nothing",
+       _fp(10, 10, [(11, 10), (12, 10)]) is None)
+    ck("foreground-pid-unreadable-is-none",
+       _fp(10, 0, [(11, 10)]) is None and _fp(None, 5, []) is None)
 
     _kk, _kp = engine.kitty_key, engine.kitty_key_parts
     ck("kitty-key-plain-is-unchanged", _kk("/tmp") == "kitty:/tmp")

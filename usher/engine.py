@@ -215,10 +215,40 @@ def replay_line(argv, rules=None):
     return line if line in rules else ""
 
 
+def foreground_pid(shell_pid, tpgid, children):
+    """The pid whose argv is the shell's FOREGROUND JOB, or None. PURE.
+
+    `children` is the shell's children as (pid, pgrp). A job in another
+    process group than the shell's is the job-control case and tpgid names
+    it. A tpgid that IS the shell is two different states, and reading it
+    as "idle" alone is the bug this exists for: an INTERACTIVE shell at its
+    prompt, and a NON-INTERACTIVE one (`ksh -c "top; exec ksh -i"`, which is
+    exactly how usher relaunches a remembered command) whose child runs in
+    the shell's own group because `-c` has no job control. Exactly one child
+    in that group is the job; none, or several, concludes nothing."""
+    if not shell_pid or shell_pid < 0 or tpgid <= 0:
+        return None
+    if tpgid != shell_pid:
+        return tpgid
+    same = [c for c, g in children if g == tpgid]
+    return same[0] if len(same) == 1 else None
+
+
+def _proc_pgrp(pid):
+    """A process's group id, or None."""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8",
+                  errors="replace") as f:
+            return int(f.read().rsplit(")", 1)[1].split()[2])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
 def foreground_argv(shell_pid):
     """The argv of the job in the FOREGROUND of a shell's terminal, or [] when
     the shell itself is (idle at its prompt) or it cannot be read. From
-    /proc/<pid>/stat's tpgid, the terminal's foreground process group."""
+    /proc/<pid>/stat's tpgid, the terminal's foreground process group, and
+    `foreground_pid` for which process in it is the job."""
     if not shell_pid or shell_pid < 0:
         return []
     try:
@@ -228,9 +258,11 @@ def foreground_argv(shell_pid):
         tpgid = int(rest[5])
     except (OSError, IndexError, ValueError):
         return []
-    if tpgid <= 0 or tpgid == shell_pid:
-        return []
-    return _proc_argv(tpgid)
+    kids = []
+    if tpgid == shell_pid:
+        kids = [(c, _proc_pgrp(c)) for c in _proc_children(shell_pid)]
+    job = foreground_pid(shell_pid, tpgid, kids)
+    return _proc_argv(job) if job else []
 
 
 EXCLUDE_FILE = os.environ.get(
