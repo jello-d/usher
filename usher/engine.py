@@ -4425,19 +4425,201 @@ def forget_matches(kb, selectors):
     return sorted(out)
 
 
-def backup_knowledge():
-    """Copy the store aside before an edit, and return the path. Cheap, and
-    the only reason a mistake here is recoverable."""
-    src = kb_path()
-    dst = f"{src}.pre-forget-{time.strftime('%Y%m%d%H%M%S')}"
-    shutil.copy2(src, dst)
-    return dst
+# STORE SNAPSHOTS: an undo for learned state, kept OUTSIDE the store. A
+# corrupted slot (a cascade learned as a home, a re-key that missed, a stack)
+# overwrites what was right, and until now the only way back was a hand
+# rebuild from whatever copy happened to exist. Snapper-shaped: taken when
+# the store CHANGED, kept by recency buckets, aged out by count.
+SNAPSHOT_KEEP = (("hourly", 12, "%Y%m%d%H"),
+                 ("daily", 7, "%Y%m%d"),
+                 ("weekly", 2, "%G%V"))
+SNAPSHOT_EVERY = 300        # seconds between periodic looks; a look whose
+#                             store has not changed writes nothing
+SNAPSHOT_STAMP = "%Y%m%d-%H%M%S"
+# TAKEN BEFORE AN ACT (a forget, an undo, a desk change) and kept BY COUNT,
+# outside the buckets, which is snapper's pre/post rule. The buckets keep
+# only the newest snapshot of each hour, so a pre-forget snapshot would be
+# pruned by the very next periodic one in that hour, which already holds the
+# state AFTER the forget: the undo point would vanish within five minutes.
+SNAPSHOT_TAGGED = 10
+SNAPSHOT_RECENT = 6         # the newest few of all, whatever their bucket
 
 
-def forget_apply(kb, selectors, profile=None):
-    """Drop what `selectors` select from `kb` IN PLACE, back the store up,
-    save, and return the dropped keys. Each drop is logged, because the store
-    is learned data and watch.log is what says who removed it.
+def snapshot_dir(profile):
+    """Per DESK: a corruption on one desk must be undoable without rolling
+    back another."""
+    return os.path.join(STATE, "snapshots", profile)
+
+
+def snapshot_list(profile):
+    """[(epoch, path)] for a desk's snapshots, NEWEST FIRST. The time is the
+    file NAME, never its mtime, so a copy or a touch cannot reorder them.
+    A name is `<stamp>.json` or `<stamp>-<tag>.json`."""
+    out = []
+    d = snapshot_dir(profile)
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return []
+    for n in names:
+        if not n.endswith(".json"):
+            continue
+        try:
+            t = time.mktime(time.strptime(n[:15], SNAPSHOT_STAMP))
+        except ValueError:
+            continue
+        out.append((t, os.path.join(d, n)))
+    out.sort(reverse=True)
+    return out
+
+
+def snapshot_tag(path):
+    """The act a snapshot was taken before, or "" for a periodic one."""
+    return os.path.basename(path)[16:-5]
+
+
+def snapshot_keep(stamps, keep=SNAPSHOT_KEEP, recent=SNAPSHOT_RECENT):
+    """Which of `stamps` (epoch seconds) to keep. PURE.
+
+    For each bucket kind, the NEWEST snapshot in each of the most recent N
+    distinct buckets that hold one, which is snapper's rule: 12 hourly means
+    the last state of each of the 12 most recent hours anything changed in,
+    not a wall-clock window that empties while a desk is unplugged. The union
+    of the kinds is kept, and so are the `recent` newest of all, so a change
+    made a minute ago and the state just before it both survive the hour.
+    Tagged snapshots are not passed here: they are kept by count."""
+    stamps = sorted(stamps, reverse=True)
+    kept = set(stamps[:max(1, recent)])
+    for _kind, n, fmt in keep:
+        seen = []
+        for t in stamps:
+            b = time.strftime(fmt, time.localtime(t))
+            if b in seen:
+                continue
+            if len(seen) >= n:
+                break
+            seen.append(b)
+            kept.add(t)
+    return kept
+
+
+def _slot_view(kb):
+    """The store with `last_seen` left out, which moves every capture and so
+    says nothing about whether any SLOT changed."""
+    return {k: {f: v for f, v in e.items() if f != "last_seen"}
+            for k, e in kb.items() if isinstance(e, dict)}
+
+
+def take_snapshot(kb, profile, now=None, tag=""):
+    """Snapshot a desk's store if a slot changed since the last one, prune,
+    and return the new path, or None when nothing was written. Never fatal:
+    losing a snapshot costs an undo point, never a placement.
+
+    A TAGGED snapshot (the act it precedes: `forget`, `undo`, `desk`) is
+    written even when nothing changed, because it is the undo point for that
+    act and an untagged twin of it may be pruned by the hour's next one."""
+    now = time.time() if now is None else now
+    try:
+        have = snapshot_list(profile)
+        if have and not tag:
+            last = json_object(have[0][1])
+            if last is not None and _slot_view(last) == _slot_view(kb):
+                return None
+        d = snapshot_dir(profile)
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(
+            d, time.strftime(SNAPSHOT_STAMP, time.localtime(now))
+            + (f"-{tag}" if tag else "") + ".json")
+        write_json(path, json.dumps(kb, indent=2))
+        all_ = snapshot_list(profile)
+        plain = {t: p for t, p in all_ if not snapshot_tag(p)}
+        tagged = [p for _t, p in all_ if snapshot_tag(p)]
+        keep = snapshot_keep(list(plain), SNAPSHOT_KEEP, SNAPSHOT_RECENT)
+        drop = [p for t, p in plain.items() if t not in keep]
+        drop += tagged[SNAPSHOT_TAGGED:]
+        for p in drop:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        return path
+    except Exception as e:                                 # noqa: BLE001
+        logline(f"snapshot of {profile} failed: {e}")
+        return None
+
+
+def snapshot_find(profile, which):
+    """The snapshot `which` names: an INDEX into the newest-first list
+    (`1` is the newest), or a name or a unique prefix of one. None when it
+    names nothing or more than one."""
+    have = snapshot_list(profile)
+    if which.isdigit() and len(which) <= 3:
+        i = int(which)
+        return have[i - 1][1] if 1 <= i <= len(have) else None
+    hits = [p for _t, p in have
+            if os.path.basename(p).startswith(which)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def snapshot_merge(kb, snap, selectors=None):
+    """Merge a snapshot back into a store: (merged, restored keys). PURE.
+
+    ON A COLLISION THE SNAPSHOT WINS, and an entry only the store has
+    SURVIVES: this undoes what was overwritten without forgetting what was
+    learned since. Restricted to what `selectors` select, with forget's
+    selector rule, when given. An entry counts as restored only if a SLOT
+    field differs; `last_seen` takes the later of the two, so a restored
+    entry is not judged older than the store already knew it to be."""
+    merged = dict(kb)
+    keys = forget_matches(snap, selectors) if selectors else sorted(snap)
+    restored = []
+    for k in keys:
+        e = snap.get(k)
+        if not isinstance(e, dict):
+            continue
+        cur = kb.get(k)
+        if isinstance(cur, dict) and _slot_view({k: cur}) == _slot_view(
+                {k: e}):
+            continue
+        new = dict(e)
+        if isinstance(cur, dict):
+            new["last_seen"] = max(cur.get("last_seen", 0),
+                                   e.get("last_seen", 0))
+        merged[k] = new
+        restored.append(k)
+    return merged, restored
+
+
+def snapshot_purge(profile, selectors):
+    """Drop what `selectors` select from EVERY snapshot of a desk, and return
+    how many entries went. A PRIVACY purge has to reach these: a snapshot is
+    a backup by design, and a backup of a redaction is where the leak
+    survives, which this package has met three times."""
+    gone = 0
+    for _t, p in snapshot_list(profile):
+        kb = json_object(p)
+        if kb is None:
+            continue
+        hits = forget_matches(kb, selectors)
+        if hits:
+            for k in hits:
+                del kb[k]
+            write_json(p, json.dumps(kb, indent=2))
+            gone += len(hits)
+    return gone
+
+
+def forget_apply(kb, selectors, profile=None, purge=False):
+    """Drop what `selectors` select from `kb` IN PLACE, save, and return the
+    dropped keys. Each drop is logged, because the store is learned data and
+    watch.log is what says who removed it.
+
+    TWO INTENTS, AND THEY WANT OPPOSITE THINGS FROM HISTORY. A plain forget
+    is a correction that may be wrong, so the store is SNAPSHOT FIRST and
+    `usher undo` can bring it back. A PURGE (`--purge`) is a privacy act, so
+    no snapshot is taken and the selected entries are stripped from every
+    existing snapshot of this desk as well: a copy of what is being removed
+    is exactly what it must not leave behind.
 
     `profile` is the one `kb` was loaded under, for the daemon, which holds a
     store across display changes. None means resolve it now, which is right
@@ -4446,16 +4628,14 @@ def forget_apply(kb, selectors, profile=None):
     gone = forget_matches(kb, selectors)
     if not gone:
         return []
-    # THE BACKUP IS ANNOUNCED, because it RETAINS WHAT WAS JUST DROPPED and
-    # nothing else says where it is. That is the right default for the case
-    # this verb was built for (an entry dropped by mistake can be read back),
-    # and exactly wrong for a PRIVACY purge, where the backup is a copy of
-    # the thing being removed. Met for real: purging another account's leaked
-    # titles left them sitting in `knowledge-<profile>.json.pre-forget-...`,
-    # found only by sweeping the whole state directory afterwards. A side
-    # effect nobody is told about is one nobody cleans up.
-    _bk = os.path.basename(backup_knowledge())
-    logline(f"forget: backed the store up to {_bk}")
+    if purge:
+        n = snapshot_purge(profile, selectors)
+        logline(f"forget: purged {n} entr(ies) from this desk's snapshots")
+    else:
+        snap = take_snapshot(kb, profile, tag="forget")
+        if snap:
+            logline(f"forget: snapshot {os.path.basename(snap)} first, "
+                    f"so `usher undo` can bring these back")
     for k in gone:
         del kb[k]
         # `slot_base` so an indexed sibling logs its IDENTITY rather than
@@ -8662,6 +8842,7 @@ STATUS_FILE = os.path.join(RUNTIME_DIR, "usher.status")
 # editing the file under it loses the edit to the next capture, which rewrites
 # the whole store from memory. Consumed and removed, like ADOPT_FLAG.
 FORGET_FILE = os.path.join(RUNTIME_DIR, "usher.forget")
+UNDO_FILE = os.path.join(RUNTIME_DIR, "usher.undo")
 # THE SAME SHAPE, for the display-change edge: hwdp's hook writes the new
 # profile here and the WORKER does the work. It used to place windows from the
 # hook process itself, which is a second placer racing the daemon's, and the
@@ -8960,7 +9141,7 @@ ADOPT_FLAG = "session-adopt"   # armed by resume/reload, consumed at init.
 MODES = ("restore", "adopt", "quiet")
 
 
-def do_forget(selectors, apply=False):
+def do_forget(selectors, apply=False, purge=False):
     """Drop remembered slots the selectors name. Previews unless `apply`.
 
     WHY A VERB AND NOT A HAND EDIT. Five separate repair recipes in this
@@ -9004,12 +9185,78 @@ def do_forget(selectors, apply=False):
     if watcher_pid():
         os.makedirs(RUNTIME_DIR, exist_ok=True)
         with open(FORGET_FILE, "w") as f:
-            f.write("\n".join(selectors) + "\n")
+            # A SELECTOR IS A GLOB OVER AN IDENTITY and none starts with
+            # `!`, so the marker cannot be mistaken for one.
+            f.write(("!purge\n" if purge else "")
+                    + "\n".join(selectors) + "\n")
         print(f"asked the running daemon to drop {len(hits)}; it owns the"
               " store while it runs, so it makes the edit")
         return EXIT_OK
-    gone = forget_apply(kb, selectors)
+    gone = forget_apply(kb, selectors, purge=purge)
     print(f"dropped {len(gone)} (no daemon running, so applied here)")
+    return EXIT_OK
+
+
+def do_undo(which=None, selectors=None, apply=False):
+    """Merge a snapshot of this desk's store back in and put the windows
+    where it says. With no snapshot named, LIST them. Previews unless
+    `apply`.
+
+    THE DAEMON MAKES THE EDIT AND MOVES THE WINDOWS, for forget's reason and
+    one more: it relearns every open window from where it sits, so a merged
+    slot for an open window is overwritten the next time that window moves
+    unless the window is first MOVED to it. Without a daemon the merge is
+    applied here and `usher restore` places from it."""
+    prof = profile_id()
+    have = snapshot_list(prof)
+    if not which:
+        if not have:
+            print(f"no snapshots for this desk ({prof}) yet")
+            return EXIT_OK
+        now = time.time()
+        for i, (t, p) in enumerate(have, 1):
+            n = len(json_object(p) or {})
+            print(f"  {i:3}  {os.path.basename(p)[:15]}  "
+                  f"{(now - t) / 3600:6.1f}h ago  {n:4} entries  "
+                  f"{('before ' + snapshot_tag(p)) if snapshot_tag(p) else ''}")
+        print("usher undo N [SEL...] previews; --apply merges and places")
+        return EXIT_OK
+    path = snapshot_find(prof, which)
+    if not path:
+        die_cannot(f"usher: no single snapshot of {prof} is `{which}`;"
+                   " `usher undo` lists them")
+    snap = json_object(path)
+    if snap is None:
+        die_cannot(f"usher: {path} is not a readable store")
+    kb = load_knowledge(prof)
+    _m, restored = snapshot_merge(kb, snap, selectors)
+    for k in restored:
+        app, _, ident = slot_base(k).partition("\x00")
+        was, now_e = kb.get(k), snap[k]
+        before = (f"ws{[int(x) for x in was['workspace']]}"
+                  if isinstance(was, dict) and "workspace" in was else "new")
+        print(f"  {app[:20]:20} | {(ident or '(by app-id)')[:34]:34}"
+              f" {before} -> ws{[int(x) for x in now_e['workspace']]}")
+    name = os.path.basename(path)[:-5]
+    if not restored:
+        print(f"nothing in {name} differs from the store")
+        return EXIT_OK
+    if not apply:
+        print(f"{len(restored)} entr(ies) would be restored from {name}."
+              " Re-run with --apply to merge them and place the windows.")
+        return EXIT_OK
+    if watcher_pid():
+        os.makedirs(RUNTIME_DIR, exist_ok=True)
+        with open(UNDO_FILE, "w") as f:
+            f.write(json.dumps({"from": name, "sel": selectors or []}))
+        print(f"asked the running daemon to restore {len(restored)} from"
+              f" {name} and place the windows")
+        return EXIT_OK
+    take_snapshot(kb, prof, tag="undo")
+    merged, _r = snapshot_merge(kb, snap, selectors)
+    save_knowledge(merged, prof)
+    print(f"restored {len(restored)} from {name} (no daemon running, so"
+          " merged here); `usher restore` places the windows")
     return EXIT_OK
 
 

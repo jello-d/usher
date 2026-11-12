@@ -129,7 +129,7 @@ List the loaded window plugins (built-in + user).
 .B launch
 Respawn saved-but-absent windows now, without starting the daemon.
 .TP
-.B forget " SELECTOR... [--apply]"
+.B forget " SELECTOR... [--apply] [--purge]"
 Drop remembered slots. A SELECTOR is a glob over the identity a window is
 remembered by, which is what
 .B doctor
@@ -144,11 +144,37 @@ the app-id, which is what
 .I "forget signal"
 means. PREVIEWS by default and needs
 .B --apply
-to act, since this deletes learned data; the store is copied aside first
-either way. With the daemon running the edit is handed to IT rather than made
-here, because it owns the store while it runs: editing the file underneath it
-would lose the change to the next capture, which rewrites the whole store from
-memory.
+to act, since this deletes learned data; a snapshot is taken first, so
+.B undo
+can bring it back. With the daemon running the edit is handed to IT rather
+than made here, because it owns the store while it runs: editing the file
+underneath it would lose the change to the next capture, which rewrites the
+whole store from memory.
+.B --purge
+is for removing something that must not be kept: no snapshot is taken, and
+what the selectors name is stripped from every existing snapshot of this desk
+as well.
+.TP
+.B undo " [N|NAME] [SELECTOR...] [--apply]"
+Merge a snapshot of this desk's store back in and put the windows where it
+says. With nothing named, LIST the snapshots, newest first, numbered from 1.
+On a collision the snapshot wins; an entry learned since it was taken is
+kept. SELECTORs, as for
+.BR forget ,
+restrict what is restored. PREVIEWS by default; with
+.B --apply
+the store is snapshotted first, so an undo can itself be undone, and the
+running daemon makes the edit and re-places the windows. Without a daemon the
+merge is applied here and
+.B restore
+places from it.
+.IP
+The daemon takes a snapshot when a slot has changed (looking every five
+minutes), and before a forget, an undo and a display change. It keeps the
+newest of each of the last 12 hours, 7 days and 2 weeks that saw a change,
+the 6 newest of all, and the 10 newest taken before an act. A Chrome slot
+names one browser run's window, so restoring one from before a browser
+restart restores a slot nothing will match again.
 .TP
 .B reload
 Pick up new code in a running daemon and change NOTHING else: no restore, no

@@ -28,7 +28,7 @@ import time
 # function, which a rebind never touches.
 from . import chrome, engine
 from .engine import (PLACE_CAP, ARM_FILE, CAPTURE_FILE, EXCLUDE_FILE,
-                     FORGET_FILE,
+                     FORGET_FILE, UNDO_FILE,
                      IDLE_SETTLE,
                      INCLUDE_FILE, INVERT_STORE, LAUNCHED, REDISPLAY_FILE,
                      SWEEP_FILE,
@@ -485,6 +485,8 @@ class Watcher:
         # A RE-PLACE WAITING FOR THE GRID hwdp declared (see
         # _adopt_profile): {vids, want, until, was, prof, why}, or None.
         self.sweep_wait = None
+        # WHEN THE LAST PERIODIC SNAPSHOT LOOK WAS (see _poll_files).
+        self.snap_at = 0.0
         # WINDOWS OWED ONE PLACEMENT BECAUSE THE DISPLAYS CHANGED under them.
         # Distinct from late_ok: see _adopt_profile.
         self.redisplay_ok = set()
@@ -1449,6 +1451,7 @@ class Watcher:
                 "inc": store_mtime(INCLUDE_FILE),
                 "arm": store_mtime(ARM_FILE),
                 "forget": store_mtime(FORGET_FILE),
+                "undo": store_mtime(UNDO_FILE),
                 "capture": store_mtime(CAPTURE_FILE),
                 "redisplay": store_mtime(REDISPLAY_FILE),
                 "sweep": store_mtime(SWEEP_FILE),
@@ -1602,6 +1605,18 @@ class Watcher:
         if store_mtime(FORGET_FILE) != seen["forget"]:
             self._take_forget()
             seen["forget"] = store_mtime(FORGET_FILE)
+        if store_mtime(UNDO_FILE) != seen["undo"]:
+            self._take_undo()
+            seen["undo"] = store_mtime(UNDO_FILE)
+        # A PERIODIC LOOK, which writes nothing unless a slot changed
+        # (engine.take_snapshot), and never while the displays are in flux:
+        # the in-between layout is exactly what an undo must not hold.
+        if (time.time() - self.snap_at >= engine.SNAPSHOT_EVERY
+                and not self._in_transition()):
+            self.snap_at = time.time()
+            with self.lock:
+                kb, prof = dict(self.kb), self.kb_profile
+            engine.take_snapshot(kb, prof)
         if store_mtime(CAPTURE_FILE) != seen["capture"]:
             self._take_capture()
             seen["capture"] = store_mtime(CAPTURE_FILE)
@@ -1660,15 +1675,55 @@ class Watcher:
                 sel = [ln.strip() for ln in f if ln.strip()]
         except OSError:
             sel = []
+        purge = "!purge" in sel
+        sel = [x for x in sel if x != "!purge"]
         if sel:
             with self.lock:
-                gone = engine.forget_apply(self.kb, sel, self.kb_profile)
+                gone = engine.forget_apply(self.kb, sel, self.kb_profile,
+                                           purge=purge)
             logline(f"forget: dropped {len(gone)} on request")
         try:
             os.remove(FORGET_FILE)
         except OSError:
             pass
         return sel
+
+    def _take_undo(self):
+        """Apply a `usher undo --apply` request: snapshot the store as it is
+        (so the undo is itself undoable), merge the named snapshot in, save,
+        and RE-PLACE, holding learning for the verify budget. Without the
+        hold the capture loop relearns each window from where it still sits
+        before the placer has moved it, and the merge is undone by itself.
+        Consumed and removed like the forget request."""
+        try:
+            with open(UNDO_FILE) as f:
+                req = json.load(f)
+        except (OSError, ValueError):
+            req = None
+        try:
+            os.remove(UNDO_FILE)
+        except OSError:
+            pass
+        if not isinstance(req, dict) or not req.get("from"):
+            return None
+        with self.lock:
+            prof = self.kb_profile
+        path = engine.snapshot_find(prof, str(req["from"]))
+        snap = engine.json_object(path) if path else None
+        if snap is None:
+            logline(f"undo: no snapshot `{req['from']}` of {prof}")
+            return None
+        with self.lock:
+            engine.take_snapshot(dict(self.kb), prof, tag="undo")
+            merged, restored = engine.snapshot_merge(
+                self.kb, snap, req.get("sel") or None)
+            self.kb = merged
+            save_knowledge(self.kb, prof)
+            self.transition_until = time.time() + sum(PLACE_VERIFY) + 1.0
+        n = self._sweep()
+        logline(f"undo: restored {len(restored)} entr(ies) from "
+                f"{req['from']}; re-placing {n}")
+        return restored
 
     def _take_capture(self):
         """Apply a `usher save` request and remove it.
@@ -1880,6 +1935,10 @@ class Watcher:
             vids = []
         now = time.time()
         with self.lock:
+            # THE STORE BEING LEFT, as it stood: a desk change is the riskiest
+            # moment this daemon has, so it is an undo point.
+            engine.take_snapshot(dict(self.kb), self.kb_profile,
+                                 tag="desk")
             was, self.kb_profile = self.kb_profile, prof
             self.kb = load_knowledge(prof)
             self.profile_drift_at = 0.0

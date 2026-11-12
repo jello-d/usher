@@ -117,10 +117,10 @@ _hdr "the other instruments"
 python3 "$(dirname "$0")/orphan-watch.py" 2>&1 | tail -6 || true
 python3 "$(dirname "$0")/content-sweep.py" 2>&1 | tail -4 || true
 
-_hdr "backups this round left"
-# `usher forget` backs the store up BY DESIGN, which is right for a mistaken
-# purge and exactly wrong for a privacy one, so the paths are named rather
-# than left for a later sweep to find. This package has needed that three
-# times.
-ls -1 "${XDG_STATE_HOME:-$HOME/.local/state}"/usher/*.pre-forget-* 2>/dev/null \
-  || _say "(none)"
+_hdr "snapshots this round left"
+# `usher forget` SNAPSHOTS the store first BY DESIGN, which is right for a
+# mistaken purge and exactly wrong for a privacy one, so they are named
+# rather than left for a later sweep to find (`forget --purge` is the
+# privacy form, and takes none). This package has needed that three times.
+ls -1 "${XDG_STATE_HOME:-$HOME/.local/state}"/usher/snapshots/*/*-forget.json \
+  2>/dev/null || _say "(none)"

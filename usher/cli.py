@@ -61,7 +61,10 @@ VERBS = {
     "reload":          ("both", "pick up new code, touch nothing else"),
     "stop":            ("both", "stop the daemon (SIGTERM, not pkill)"),
     "launch":          ("both", "respawn saved-but-absent windows"),
-    "forget":          ("both", "drop remembered slots [SEL...] [--apply]"),
+    "forget":          ("both", "drop remembered slots [SEL...] [--apply]"
+                                " [--purge]"),
+    "undo":            ("both", "list snapshots, or restore [N|NAME] [SEL...]"
+                                " [--apply]"),
     "wind-down":       ("both", "last capture, then let the apps go"),
     "doctor":          ("both", "what it is doing, and what it is NOT"),
     "status":          ("both", "placement mode and seconds to settled"),
@@ -555,8 +558,13 @@ def _dispatch(verb, args):
                                              else "list")
         engine.do_restore(dry="--dry-run" in args, only=only, source=source)
     elif verb == "forget":
-        sys.exit(engine.do_forget([a for a in args[1:] if a != "--apply"],
-                                  apply="--apply" in args))
+        sys.exit(engine.do_forget(
+            [a for a in args[1:] if a not in ("--apply", "--purge")],
+            apply="--apply" in args, purge="--purge" in args))
+    elif verb == "undo":
+        _ua = [a for a in args[1:] if a != "--apply"]
+        sys.exit(engine.do_undo(_ua[0] if _ua else None, _ua[1:] or None,
+                                apply="--apply" in args))
     elif verb == "cleanly":
         sys.exit(do_cleanly(args[1:]) or 0)
     elif verb == "watch":         # start, or reload if running: RESTORE mode

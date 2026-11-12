@@ -119,6 +119,19 @@ def _doctor_store(out):
         f"  (schema {schema}, current {KB_SCHEMA})")
     for app, n in counts.most_common():
         out(f"                 {app or '(blank app-id)':32} {n}")
+    # THE UNDO HISTORY, so a reader reaching for `usher undo` knows before
+    # they ask whether there is anything to go back to, and how far.
+    _sn = engine.snapshot_list(profile_id())
+    if _sn:
+        _now = time.time()
+        _tg = sum(1 for _t, p in _sn if engine.snapshot_tag(p))
+        out(f"  snapshots    {len(_sn)} of this desk ({_tg} before an act),"
+            f" newest {(_now - _sn[0][0]) / 3600:.1f}h, oldest"
+            f" {(_now - _sn[-1][0]) / 3600:.1f}h ago; `usher undo` lists"
+            " them")
+    else:
+        out("  snapshots    none of this desk yet: the daemon takes one when"
+            " a slot changes")
     # UNMATCHABLE BY CONSTRUCTION, so the TTL is the only thing that removes
     # them and nothing said they were there. Counted rather than named: the
     # dry run already lists them as UNMATCHED-LAYOUT rows, and a count plus

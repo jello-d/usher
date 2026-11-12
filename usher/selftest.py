@@ -10476,7 +10476,7 @@ def _t_geometry(ck):
         engine.load_knowledge = lambda: dict(_fkb)
         engine.FORGET_FILE = os.path.join(_fdir, "usher.forget")
         _applied = []
-        engine.forget_apply = (lambda kb, sel, prof=None:
+        engine.forget_apply = (lambda kb, sel, prof=None, purge=False:
                                _applied.append(sel) or sel)
         # 1. a preview must touch NOTHING, with or without a daemon
         for _who, _pid in (("no-daemon", None), ("daemon-up", 99)):
@@ -10545,6 +10545,393 @@ def _t_geometry(ck):
     _keep2, _gone2 = engine._unlayout_split(_all, recorded=set())
     ck("unlayout-no-evidence-collapses-nothing",
        _gone2 == [] and len(_keep2) == len(_all))
+
+def _t_undo(ck):
+    """Store snapshots and `usher undo`: the retention, the merge rule, the
+    two forget intents, and the daemon's half. Runs under the area loop's
+    scratch STATE, so every snapshot written here is sandboxed."""
+    from .watch import Watcher
+    import time as _time
+    _wmod = sys.modules[Watcher.__module__]
+    K = engine.kkey
+
+    # ---- RETENTION: snapper's rule, newest per bucket ---------------------
+    _t0 = _time.mktime((2026, 11, 12, 15, 40, 0, 0, 0, -1))
+    _st = [_t0 - i * 1800 for i in range(30 * 48)]     # every 30m, 30 days
+    _kept = engine.snapshot_keep(_st, (("hourly", 12, "%Y%m%d%H"),
+                                       ("daily", 7, "%Y%m%d"),
+                                       ("weekly", 2, "%G%V")), recent=1)
+    ck("snapshot-keep-keeps-the-newest", _t0 in _kept)
+    ck("snapshot-keep-is-bounded-by-the-buckets",
+       len(_kept) <= 12 + 7 + 2 + 1)
+    _hrs = sorted({_time.strftime("%Y%m%d%H", _time.localtime(t))
+                   for t in _kept})
+    ck("snapshot-keep-has-twelve-hourly", len(
+        [h for h in _hrs if _time.mktime(_time.strptime(h, "%Y%m%d%H"))
+         > _t0 - 12 * 3600]) == 12)
+    # NEWEST IN ITS BUCKET: 14:40 and 14:10 share an hour, keep 14:40.
+    ck("snapshot-keep-takes-the-newest-in-a-bucket",
+       _t0 - 3600 in _kept and _t0 - 5400 not in _kept)
+    _days = {_time.strftime("%Y%m%d", _time.localtime(t)) for t in _kept}
+    _wks = {_time.strftime("%G%V", _time.localtime(t)) for t in _kept}
+    ck("snapshot-keep-has-seven-days-and-two-weeks",
+       len(_days) == 7 and len(_wks) == 2)
+    ck("snapshot-keep-of-nothing-is-nothing",
+       engine.snapshot_keep([]) == set())
+    # THE NEWEST FEW SURVIVE THEIR HOUR, so the state just before a change
+    # made a minute ago is still there to go back to.
+    _rc = engine.snapshot_keep(_st[:4], (("hourly", 12, "%Y%m%d%H"),),
+                               recent=3)
+    ck("snapshot-keep-keeps-the-recent-few-whatever-the-bucket",
+       set(_st[:3]) <= _rc)
+
+    # ---- TAKING ONE: only when a SLOT changed ------------------------------
+    _a = {K("signal", ""): {"app_id": "signal", "workspace": [1, 0],
+                            "pos": [0, 48], "size": [9, 9],
+                            "last_seen": 1.0}}
+    _p1 = engine.take_snapshot(_a, "UNDO", now=_t0 - 7200)
+    ck("snapshot-is-written-the-first-time", bool(_p1)
+       and os.path.exists(_p1))
+    _a2 = {k: dict(v, last_seen=99.0) for k, v in _a.items()}
+    ck("snapshot-skips-a-change-of-last-seen-alone",
+       engine.take_snapshot(_a2, "UNDO", now=_t0 - 3600) is None)
+    _b = {k: dict(v, pos=[5, 48]) for k, v in _a.items()}
+    _p2 = engine.take_snapshot(_b, "UNDO", now=_t0 - 3600)
+    ck("snapshot-is-written-when-a-slot-moved", bool(_p2) and _p2 != _p1)
+    ck("snapshot-list-is-newest-first",
+       [p for _t, p in engine.snapshot_list("UNDO")] == [_p2, _p1])
+    ck("snapshot-is-per-desk", engine.snapshot_list("ELSEWHERE") == [])
+    # PRUNED BY THE RETENTION AT CALL TIME, not a copy taken at import.
+    _rk, _rr = engine.SNAPSHOT_KEEP, engine.SNAPSHOT_RECENT
+    try:
+        engine.SNAPSHOT_KEEP = (("hourly", 1, "%Y%m%d%H"),)
+        engine.SNAPSHOT_RECENT = 1
+        _c = {k: dict(v, pos=[6, 48]) for k, v in _a.items()}
+        _p3 = engine.take_snapshot(_c, "UNDO", now=_t0)
+    finally:
+        engine.SNAPSHOT_KEEP, engine.SNAPSHOT_RECENT = _rk, _rr
+    ck("snapshot-prunes-what-the-retention-drops",
+       [p for _t, p in engine.snapshot_list("UNDO")] == [_p3])
+
+    # A TAGGED SNAPSHOT IS AN UNDO POINT FOR AN ACT, so it is written even
+    # over an unchanged store and it outlives the hour's next periodic one,
+    # which holds the state AFTER the act. That second half is the reason
+    # tags exist: by bucket alone the undo point was gone in five minutes.
+    _rk, _rr, _rt = (engine.SNAPSHOT_KEEP, engine.SNAPSHOT_RECENT,
+                     engine.SNAPSHOT_TAGGED)
+    try:
+        engine.SNAPSHOT_KEEP = (("hourly", 1, "%Y%m%d%H"),)
+        engine.SNAPSHOT_RECENT = 1
+        engine.SNAPSHOT_TAGGED = 2
+        engine.take_snapshot(_a, "TAG", now=_t0)
+        _pt = engine.take_snapshot(_a, "TAG", now=_t0 + 60, tag="forget")
+        ck("a-tagged-snapshot-is-written-over-an-unchanged-store",
+           bool(_pt) and engine.snapshot_tag(_pt) == "forget")
+        engine.take_snapshot(_b, "TAG", now=_t0 + 300)
+        _tl = [p for _t, p in engine.snapshot_list("TAG")]
+        ck("a-tagged-snapshot-outlives-the-next-periodic-one",
+           _pt in _tl and len(_tl) == 2)
+        engine.take_snapshot(_b, "TAG", now=_t0 + 360, tag="undo")
+        engine.take_snapshot(_b, "TAG", now=_t0 + 420, tag="desk")
+        _tl = [p for _t, p in engine.snapshot_list("TAG")]
+        ck("tagged-snapshots-are-kept-by-count",
+           _pt not in _tl
+           and [engine.snapshot_tag(p) for p in _tl].count("") == 1
+           and len(_tl) == 3)
+    finally:
+        engine.SNAPSHOT_KEEP, engine.SNAPSHOT_RECENT = _rk, _rr
+        engine.SNAPSHOT_TAGGED = _rt
+
+    # ---- FINDING ONE ------------------------------------------------------
+    engine.take_snapshot(_b, "UNDO", now=_t0 + 3600)
+    _have = [p for _t, p in engine.snapshot_list("UNDO")]
+    ck("snapshot-find-by-index", engine.snapshot_find("UNDO", "1")
+       == _have[0] and engine.snapshot_find("UNDO", "2") == _have[1])
+    ck("snapshot-find-out-of-range-is-none",
+       engine.snapshot_find("UNDO", "9") is None
+       and engine.snapshot_find("UNDO", "0") is None)
+    ck("snapshot-find-by-name",
+       engine.snapshot_find("UNDO", os.path.basename(_have[1])[:-5])
+       == _have[1])
+    ck("snapshot-find-an-ambiguous-prefix-is-none",
+       engine.snapshot_find("UNDO", "2026") is None)
+
+    # ---- THE MERGE: the snapshot wins, what is new survives --------------
+    _kb = {K("signal", ""): {"workspace": [0, 0], "pos": [1, 1],
+                             "last_seen": 50.0},
+           K("slack", "titan"): {"workspace": [1, 1], "pos": [2, 2],
+                                 "last_seen": 50.0},
+           K("kitty", "kitty:/new"): {"workspace": [2, 2], "pos": [3, 3],
+                                      "last_seen": 50.0}}
+    _sn = {K("signal", ""): {"workspace": [1, 0], "pos": [9, 9],
+                             "last_seen": 10.0},
+           K("slack", "titan"): {"workspace": [1, 1], "pos": [2, 2],
+                                 "last_seen": 10.0},
+           K("zoom", ""): {"workspace": [0, 1], "pos": [4, 4],
+                           "last_seen": 10.0},
+           K("junk", ""): "not an entry"}
+    _m, _r = engine.snapshot_merge(_kb, _sn)
+    ck("merge-the-snapshot-wins-on-a-collision",
+       _m[K("signal", "")]["pos"] == [9, 9])
+    ck("merge-keeps-what-only-the-store-has",
+       K("kitty", "kitty:/new") in _m)
+    ck("merge-re-adds-what-only-the-snapshot-has", K("zoom", "") in _m)
+    ck("merge-counts-only-what-changed",
+       sorted(_r) == sorted([K("signal", ""), K("zoom", "")]))
+    ck("merge-keeps-the-later-last-seen",
+       _m[K("signal", "")]["last_seen"] == 50.0)
+    ck("merge-skips-a-non-entry", K("junk", "") not in _m)
+    ck("merge-is-pure", _kb[K("signal", "")]["pos"] == [1, 1])
+    _m2, _r2 = engine.snapshot_merge(_kb, _sn, ["zoom"])
+    ck("merge-honours-selectors",
+       _r2 == [K("zoom", "")] and _m2[K("signal", "")]["pos"] == [1, 1])
+
+    # ---- FORGET: a correction is undoable, a purge is not ----------------
+    _rsave = engine.save_knowledge
+    try:
+        engine.save_knowledge = lambda kb, prof: None
+        _fkb = {K("slack", "titan"): {"app_id": "slack", "pos": [1, 1]},
+                K("signal", ""): {"app_id": "signal", "pos": [2, 2]}}
+        _n0 = len(engine.snapshot_list("FGT"))
+        engine.forget_apply(_fkb, ["titan"], "FGT")
+        _fs = engine.snapshot_list("FGT")
+        ck("forget-snapshots-first-so-it-can-be-undone",
+           len(_fs) == _n0 + 1
+           and K("slack", "titan") in engine.json_object(_fs[0][1])
+           and engine.snapshot_tag(_fs[0][1]) == "forget")
+        _fkb2 = {K("slack", "titan"): {"app_id": "slack", "pos": [1, 1]}}
+        engine.forget_apply(_fkb2, ["titan"], "FGT", purge=True)
+        _after = engine.snapshot_list("FGT")
+        ck("a-purge-takes-no-snapshot", len(_after) == len(_fs))
+        ck("a-purge-strips-every-snapshot", all(
+            K("slack", "titan") not in (engine.json_object(p) or {})
+            for _t, p in _after))
+        ck("a-purge-leaves-the-rest-of-a-snapshot", any(
+            K("signal", "") in (engine.json_object(p) or {})
+            for _t, p in _after))
+    finally:
+        engine.save_knowledge = _rsave
+
+    # ---- THE DAEMON'S HALF -----------------------------------------------
+    w = Watcher(launch=False)
+    _ud = tempfile.mkdtemp(prefix="usher-undo-", dir="/var/tmp")
+    _rfile, _rwf = engine.UNDO_FILE, _wmod.UNDO_FILE
+    _rsk, _rsw, _rlog = _wmod.save_knowledge, Watcher._sweep, _wmod.logline
+    _rts = engine.take_snapshot
+    _saved, _swept, _said, _snaps = [], [], [], []
+    try:
+        engine.UNDO_FILE = _wmod.UNDO_FILE = os.path.join(_ud, "usher.undo")
+        _wmod.save_knowledge = lambda kb, p: _saved.append((dict(kb), p))
+        Watcher._sweep = lambda self, vids=None: _swept.append(1) or 3
+        _wmod.logline = _said.append
+        w.kb, w.kb_profile = dict(_kb), "UNDO"
+        engine.take_snapshot = (lambda kb, p, now=None, tag="":
+                                _snaps.append((dict(kb), p, tag)) or None)
+        _name = os.path.basename(_have[0])[:-5]
+        with open(engine.UNDO_FILE, "w") as f:
+            json.dump({"from": _name, "sel": []}, f)
+        try:
+            _got = w._take_undo()
+        except Exception as _e:                            # noqa: BLE001
+            _got = "RAISED %s" % _e
+        ck("undo-request-restores-into-the-live-store",
+           isinstance(_got, list) and w.kb[K("signal", "")]["pos"]
+           == engine.json_object(_have[0])[K("signal", "")]["pos"])
+        ck("undo-request-keeps-what-is-new",
+           K("kitty", "kitty:/new") in w.kb)
+        ck("undo-request-snapshots-before-it-merges",
+           len(_snaps) == 1 and _snaps[0][1:] == ("UNDO", "undo")
+           and _snaps[0][0][K("signal", "")]["pos"] == [1, 1])
+        ck("undo-request-saves-and-places",
+           len(_saved) == 1 and _swept == [1])
+        # THE HOLD IS THE POINT: without it the capture loop relearns each
+        # window from where it still sits and the merge undoes itself.
+        ck("undo-request-holds-learning-while-it-places",
+           w._in_transition())
+        ck("undo-request-is-consumed", not os.path.exists(engine.UNDO_FILE))
+        ck("undo-request-says-so", any("undo: restored" in m for m in _said))
+        _swept.clear()
+        w.transition_until = 0.0
+        with open(engine.UNDO_FILE, "w") as f:
+            json.dump({"from": "no-such"}, f)
+        w._take_undo()
+        ck("undo-of-an-unknown-snapshot-changes-nothing",
+           _swept == [] and not os.path.exists(engine.UNDO_FILE))
+        with open(engine.UNDO_FILE, "w") as f:
+            f.write("{not json")
+        ck("undo-an-unreadable-request-is-consumed",
+           w._take_undo() is None and not os.path.exists(engine.UNDO_FILE))
+
+        # THE STORE BEING LEFT AT A DESK CHANGE is an undo point.
+        _snaps.clear()
+        w.kb, w.kb_profile = {K("signal", ""): {"pos": [7, 7]}}, "LEFT"
+
+        class _S:
+            def list_views(self, **k):
+                return []
+
+            def list_outputs(self):
+                return []
+        w.place_sock = _S()
+        _rld = _wmod.load_knowledge
+        _wmod.load_knowledge = lambda p=None: {}
+        try:
+            w._adopt_profile("NEXT", "test")
+        finally:
+            _wmod.load_knowledge = _rld
+            w.place_sock = None
+            w.sweep_wait = None
+            w.transition_until = 0.0
+        ck("a-desk-change-snapshots-the-store-it-leaves",
+           _snaps and _snaps[0][1:] == ("LEFT", "desk")
+           and _snaps[0][0] == {K("signal", ""): {"pos": [7, 7]}})
+
+        # THE PERIODIC LOOK, driven through the real poll, and never while
+        # the displays are in flux.
+        _seen = {"inv": engine.store_mtime(engine.INVERT_STORE),
+                 "exc": engine.store_mtime(engine.EXCLUDE_FILE),
+                 "inc": engine.store_mtime(engine.INCLUDE_FILE),
+                 "arm": engine.store_mtime(engine.ARM_FILE),
+                 "forget": engine.store_mtime(engine.FORGET_FILE),
+                 "undo": engine.store_mtime(engine.UNDO_FILE),
+                 "capture": engine.store_mtime(engine.CAPTURE_FILE),
+                 "redisplay": engine.store_mtime(engine.REDISPLAY_FILE),
+                 "sweep": engine.store_mtime(engine.SWEEP_FILE),
+                 "plugins": engine.plugins_sig(),
+                 "chrome": chrome.session_sig()}
+        _snaps.clear()
+        w.kb_profile = "PERIODIC"
+        w.snap_at = 0.0
+        w.transition_until = _time.time() + 60
+        w._poll_files(_seen)
+        ck("no-periodic-snapshot-during-a-display-change", _snaps == [])
+        w.transition_until = 0.0
+        w._poll_files(_seen)
+        ck("the-periodic-snapshot-is-taken-when-due",
+           len(_snaps) == 1 and _snaps[0][1:] == ("PERIODIC", ""))
+        w._poll_files(_seen)
+        ck("the-periodic-snapshot-waits-its-interval", len(_snaps) == 1)
+        # THE REQUEST IS CONSUMED BY THE REAL POLL, or every cell above
+        # passes while in production nothing ever applies an undo.
+        _tu = []
+        _rtu = w._take_undo
+        try:
+            w._take_undo = lambda: _tu.append(1)
+            _seen["undo"] = None
+            with open(engine.UNDO_FILE, "w") as f:
+                f.write("{}")
+            w._poll_files(_seen)
+        finally:
+            w._take_undo = _rtu
+        ck("the-poll-hands-an-undo-request-over", _tu == [1])
+
+        # A FORGET REQUEST CARRIES ITS INTENT.
+        _rfa, _rff = engine.forget_apply, engine.FORGET_FILE
+        _fa = []
+        try:
+            engine.FORGET_FILE = _wmod.FORGET_FILE = os.path.join(
+                _ud, "usher.forget")
+            engine.forget_apply = (lambda kb, sel, prof=None, purge=False:
+                                   _fa.append((sel, purge)) or [])
+            with open(engine.FORGET_FILE, "w") as f:
+                f.write("!purge\ntitan\n")
+            w._take_forget()
+        finally:
+            engine.forget_apply = _rfa
+            engine.FORGET_FILE = _wmod.FORGET_FILE = _rff
+        ck("a-purge-request-reaches-the-daemon-as-a-purge",
+           _fa == [(["titan"], True)])
+    finally:
+        engine.UNDO_FILE, _wmod.UNDO_FILE = _rfile, _rwf
+        _wmod.save_knowledge, Watcher._sweep = _rsk, _rsw
+        _wmod.logline = _rlog
+        engine.take_snapshot = _rts
+        w.transition_until = 0.0
+        shutil.rmtree(_ud, ignore_errors=True)
+
+    # ---- doctor SAYS WHETHER THERE IS ANYTHING TO GO BACK TO --------------
+    from . import doctor as _dsn
+    _dsv = (_dsn.load_knowledge, _dsn._doctor_surfaces, _dsn.profile_id)
+    try:
+        _dsn._doctor_surfaces = lambda *a, **k: None
+        _dsn.load_knowledge = lambda *a, **k: {}
+        _rows = {}
+        for _prof in ("TAG", "NO-SUCH-DESK"):
+            _dsn.profile_id = lambda *a, _p=_prof, **k: _p
+            _r = []
+            try:
+                _dsn._doctor_store(_r.append)
+            except Exception as _e:                        # noqa: BLE001
+                _r = [f"RAISED {_e}"]
+            _rows[_prof] = [x for x in _r if "snapshots" in x]
+        ck("doctor-counts-a-desk's-snapshots",
+           len(_rows["TAG"]) == 1 and "3 of this desk (2 before an act)"
+           in _rows["TAG"][0])
+        ck("doctor-says-when-there-are-none",
+           len(_rows["NO-SUCH-DESK"]) == 1
+           and "none" in _rows["NO-SUCH-DESK"][0])
+    finally:
+        (_dsn.load_knowledge, _dsn._doctor_surfaces,
+         _dsn.profile_id) = _dsv
+
+    # ---- THE CLIENT ------------------------------------------------------
+    _rwp, _rpid, _rlk = engine.watcher_pid, engine.profile_id, \
+        engine.load_knowledge
+    _rsk2 = engine.save_knowledge
+    _ud2 = tempfile.mkdtemp(prefix="usher-undo-", dir="/var/tmp")
+    _rfile2 = engine.UNDO_FILE
+    _out = io.StringIO()
+    _saved2 = []
+    try:
+        engine.UNDO_FILE = os.path.join(_ud2, "usher.undo")
+        engine.profile_id = lambda *a, **k: "UNDO"
+        engine.load_knowledge = lambda p=None: dict(_kb)
+        engine.save_knowledge = lambda kb, p: _saved2.append(dict(kb))
+        engine.watcher_pid = lambda: None
+        with contextlib.redirect_stdout(_out):
+            _rc0 = engine.do_undo()
+            _rc1 = engine.do_undo("1")
+        ck("undo-with-nothing-named-lists", _rc0 == engine.EXIT_OK
+           and "h ago" in _out.getvalue())
+        ck("undo-previews-and-touches-nothing", _rc1 == engine.EXIT_OK
+           and _saved2 == [] and not os.path.exists(engine.UNDO_FILE)
+           and "--apply" in _out.getvalue())
+        engine.watcher_pid = lambda: 4242
+        with contextlib.redirect_stdout(_out):
+            engine.do_undo("1", apply=True)
+        ck("undo-with-a-daemon-hands-it-over",
+           os.path.exists(engine.UNDO_FILE) and _saved2 == [])
+        engine.watcher_pid = lambda: None
+        _rts2, _tk = engine.take_snapshot, []
+        try:
+            engine.take_snapshot = (lambda kb, p, now=None, tag="":
+                                    _tk.append((dict(kb), tag)) or None)
+            with contextlib.redirect_stdout(_out):
+                engine.do_undo("1", apply=True)
+        finally:
+            engine.take_snapshot = _rts2
+        ck("undo-without-a-daemon-merges-here",
+           len(_saved2) == 1
+           and _saved2[0][K("signal", "")]["pos"] != [1, 1])
+        ck("undo-without-a-daemon-snapshots-first",
+           len(_tk) == 1 and _tk[0][1] == "undo"
+           and _tk[0][0][K("signal", "")]["pos"] == [1, 1])
+        _err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(_err), \
+                    contextlib.redirect_stdout(_out):
+                engine.do_undo("no-such", apply=True)
+            _ex = None
+        except SystemExit as _e:
+            _ex = _e.code
+        ck("undo-of-an-unknown-snapshot-cannot",
+           _ex == engine.EXIT_CANNOT and "lists them" in _err.getvalue())
+    finally:
+        engine.watcher_pid, engine.profile_id = _rwp, _rpid
+        engine.load_knowledge, engine.save_knowledge = _rlk, _rsk2
+        engine.UNDO_FILE = _rfile2
+        shutil.rmtree(_ud2, ignore_errors=True)
+
 
 def _t_snapshots(ck):
     """restoring from a stored milestone."""
@@ -12531,6 +12918,7 @@ def _t_displays(ck):
                        "inc": _word2.store_mtime(engine.INCLUDE_FILE),
                        "arm": _word2.store_mtime(engine.ARM_FILE),
                        "forget": _word2.store_mtime(engine.FORGET_FILE),
+                       "undo": _word2.store_mtime(engine.UNDO_FILE),
                        "capture": None,
                        "redisplay": _word2.store_mtime(
                            engine.REDISPLAY_FILE),
@@ -12567,6 +12955,7 @@ def _t_displays(ck):
                       "inc": _word2.store_mtime(engine.INCLUDE_FILE),
                       "arm": _word2.store_mtime(engine.ARM_FILE),
                       "forget": _word2.store_mtime(engine.FORGET_FILE),
+                      "undo": _word2.store_mtime(engine.UNDO_FILE),
                       "capture": _word2.store_mtime(engine.CAPTURE_FILE),
                       "redisplay": _word2.store_mtime(
                           engine.REDISPLAY_FILE),
@@ -13222,7 +13611,7 @@ def _t_watcher(ck):
     # hold is that a request is applied and then CONSUMED: left behind, it
     # would be re-applied on every poll.
     _rfk, _rsave = engine.FORGET_FILE, engine.save_knowledge
-    _rlog, _rbk = engine.logline, engine.backup_knowledge
+    _rlog = engine.logline
     _fd = tempfile.mkdtemp(prefix="usher-forget-", dir="/var/tmp")
     try:
         engine.FORGET_FILE = os.path.join(_fd, "usher.forget")
@@ -13231,7 +13620,6 @@ def _t_watcher(ck):
         _wmod.FORGET_FILE = engine.FORGET_FILE
         _saved = []
         engine.save_knowledge = lambda kb, prof: _saved.append(dict(kb))
-        engine.backup_knowledge = lambda: "/dev/null"
         engine.logline = lambda *a, **k: None
         w.kb = {engine.kkey("google-chrome", "chrome:win:9"): {},
                 engine.kkey("kitty", "term:resume"): {}}
@@ -13257,7 +13645,7 @@ def _t_watcher(ck):
            not os.path.exists(engine.FORGET_FILE) and len(_saved) == 1)
     finally:
         engine.FORGET_FILE, engine.save_knowledge = _rfk, _rsave
-        engine.logline, engine.backup_knowledge = _rlog, _rbk
+        engine.logline = _rlog
         _wmod.FORGET_FILE = _rwfk
         shutil.rmtree(_fd, ignore_errors=True)
 
@@ -13528,7 +13916,8 @@ def selftest():
                      _t_terminals, _t_cli_split,
                      _t_launch_source,
                      _t_relaunch, _t_chrome, _t_learn,
-                     _t_geometry, _t_placement, _t_snapshots, _t_profiles,
+                     _t_geometry, _t_placement, _t_snapshots, _t_undo,
+                     _t_profiles,
                      _t_migration, _t_watcher, _t_displays, _t_contracts):
             try:
                 with _quiet_log():
