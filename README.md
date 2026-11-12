@@ -93,9 +93,10 @@ of yes means the tiers above cannot serve you:
   WHICH window each one is, and only a plugin can. This is the whole reason
   the chrome plugin exists.
 - **The identity is not in the title.** chrome reads a SessionID out of the
-  browser's session file; kitty reads the shell's cwd out of `/proc`; mux reads
-  the command the window is running. A title that has to be right at the
-  instant you look is a bootstrap, not an identity.
+  browser's session file and finds which window it is by the SIZE Chrome
+  records for it, asking the title only to break a tie between windows of
+  one size; kitty reads the shell's cwd out of `/proc`; mux reads the command
+  the window is running. A title belongs to a page, not a window.
 - **The relaunch differs per window.** The registry describes an *app*, so the
   default starts one invocation per app. A terminal holding a specific remote
   session needs its own command, which is what `relaunch_command` is for.

@@ -44,7 +44,7 @@ from datetime import date
 # there is nothing here that can go stale. The engine's users of it are
 # ChromePlugin, chrome_profiles_for, and the selftest fixtures.
 from .chrome import (CHROME_FLAGS, CHROME_STAGGER, browser_pids,
-                     claim_by_elimination,
+                     claim_by_elimination, claim_by_size,
                      browser_started, chrome_bind_windows, chrome_profile_map,
                      chrome_slot, chrome_window_for, chrome_window_tabs,
                      is_chrome, is_chrome_slot, recorded_window_ids,
@@ -1298,6 +1298,9 @@ def stable_views(sock, tries=STABLE_TRIES):
 
 def snapshot(sock):
     _outs, _views, _stable = stable_views(sock)
+    # SIZES FIRST, so every identity stamped below that a size can decide
+    # never consults a title (chrome.claim_by_size).
+    note_chrome_sizes(_views)
     outputs = {o["name"]: o for o in _outs}
     inverts = load_inverts()
     windows = []
@@ -1969,6 +1972,30 @@ def source_of(v):
         if rec:
             return rec
     return window_origin(pview(v).get("pid"))[0] or ""
+
+
+def chrome_size_pool(views):
+    """[(view id, (width, height))] for OUR live Chrome views, which is what
+    `claim_by_size` matches against our own session files: ours only, for
+    chrome_elimination_pool's reason."""
+    out = []
+    for v in views:
+        if not is_chrome(app_of(v)) or source_of(v):
+            continue
+        g = v.get("geometry") or {}
+        if g.get("width") and g.get("height"):
+            out.append((v.get("id"), (g["width"], g["height"])))
+    return out
+
+
+def note_chrome_sizes(views):
+    """Name what our Chrome windows' sizes can name, before anything asks a
+    title. Returns the view ids claimed. Never raises: a failure here costs
+    the size its say, and the title join still runs."""
+    try:
+        return claim_by_size(chrome_size_pool(views))
+    except Exception:                                      # noqa: BLE001
+        return []
 
 
 def chrome_elimination_pool(views):
@@ -3252,7 +3279,7 @@ def spare_source_slots(kb, app, src, claimed):
     of these was learned from: the account names a Chrome window by joining
     its title to the session file, and two windows sharing a title are
     refused by design. Measured on dragonfly 2026-11-12: after a reboot two
-    work windows both read `<a work window title>`, so the one that had its own
+    work windows wore one title, so the one that had its own
     slot before the reboot came back unnamed, took the shared slot of the
     other, and the other was left at the cascade. These are what `free_slot`
     may offer such a window, and only on an exact SIZE match."""
@@ -5837,6 +5864,12 @@ SOURCE_REKEY_WORD = "rekey"
 # wildcard. A variable-length argument list would make the rule wildcarded
 # and a wildcard there is execution as the account.
 SOURCE_PID_WORD = "pid"
+# `size <identifier> <width> <height>`, beside the pid lines and for the same
+# reason: the account's window protocol carries no geometry, and its Chrome
+# windows are named by size before title (chrome.claim_by_size). Its own
+# word, so a parser that predates it ignores the line rather than losing
+# the pid line it would otherwise have had to share.
+SOURCE_SIZE_WORD = "size"
 DIGEST_LEN = 16
 # How often, at most, to ask one source to identify its windows again. The
 # ask is a sudo subprocess, and a window that can NEVER be identified
@@ -5963,6 +5996,28 @@ def source_pid_lines(views, src):
         if not isinstance(pid, int) or pid <= 0:
             continue
         out.append(f"{SOURCE_PID_WORD} {tlid} {pid}")
+        g = v.get("geometry") or {}
+        sz = ((g.get("width"), g.get("height")) if g.get("width")
+              else tuple(v.get("size") or ()))
+        if (len(sz) == 2 and all(isinstance(n, (int, float))
+                                 and not isinstance(n, bool) and n > 0
+                                 for n in sz)):
+            out.append(f"{SOURCE_SIZE_WORD} {tlid} {int(round(sz[0]))} "
+                       f"{int(round(sz[1]))}")
+    return out
+
+
+def parse_source_sizes(text):
+    """{identifier: (width, height)} out of what the owner sent. PURE, and
+    as lenient as parse_source_pids."""
+    out = {}
+    for ln in (text or "").splitlines():
+        parts = ln.split()
+        if (len(parts) == 4 and parts[0] == SOURCE_SIZE_WORD
+                and is_toplevel_identifier(parts[1])
+                and parts[2].isdigit() and parts[3].isdigit()
+                and int(parts[2]) > 0 and int(parts[3]) > 0):
+            out[parts[1]] = (int(parts[2]), int(parts[3]))
     return out
 
 
@@ -6035,7 +6090,8 @@ def source_views(rows, pids=None, uid=None):
                      "pid": pid, "id": tlid}
 
 
-def source_window_lines(rows, pids=None, resolve=None, uid=None):
+def source_window_lines(rows, pids=None, resolve=None, uid=None,
+                        sizes=None):
     """`window <identifier> <digest>` for each of THIS account's windows
     that it can resolve to a per-window identity. PURE given its one seam.
 
@@ -6076,6 +6132,13 @@ def source_window_lines(rows, pids=None, resolve=None, uid=None):
     # exactly one recorded id left, the pairing is forced. Every view here is
     # this account's own, so the pool is right by construction.
     if resolve is None:
+        # SIZES FIRST, relayed by the owner (this side's protocol has no
+        # geometry): see chrome.claim_by_size.
+        try:
+            claim_by_size([(tl, (sizes or {})[tl]) for tl, v in views
+                           if is_chrome(v["app-id"]) and tl in (sizes or {})])
+        except Exception:                                  # noqa: BLE001
+            pass
         try:
             claim_by_elimination(
                 [(tl, v["title"]) for tl, v in views
@@ -7358,7 +7421,9 @@ def do_source_capture():
     # DEGRADES RATHER THAN FAILING: no stdin, a relay that drops it, or an
     # older owner means an empty map, and then the roster is app-ids only,
     # which is exactly where this started.
-    _pids = parse_source_pids(_read_stdin())
+    _in = _read_stdin()
+    _pids = parse_source_pids(_in)
+    _sizes = parse_source_sizes(_in)
     _mine = {k: v for k, v in _pids.items() if own_pid(v)}
     if len(_mine) != len(_pids):
         # LOUD, AND COUNTED RATHER THAN PER WINDOW. The state that causes this
@@ -7393,7 +7458,7 @@ def do_source_capture():
     # AND WHICH WINDOW IS WHICH, for the apps where that is answerable here
     # and nowhere else. Printed rather than stored, because the owner cannot
     # read this account's files and the report is what already crosses.
-    for _ln in source_window_lines(rows, _mine):
+    for _ln in source_window_lines(rows, _mine, sizes=_sizes):
         print(_ln)
     # AND HOW THIS ACCOUNT'S OWN IDS MOVED ACROSS ITS LAST BROWSER RESTART,
     # which is what makes the per-window keys survive a login: they name the

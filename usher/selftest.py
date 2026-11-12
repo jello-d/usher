@@ -2815,8 +2815,9 @@ def _t_resolution(ck):
             # side would receive, not as the argument, because passing the
             # wrong row shape is the way this fails.
             ck("the-refresh-relays-this-sources-pids",
-               _ord_views and engine.source_pid_lines(
-                   _ord_views[-1] or [], "titan") == ["pid %s 1" % _TL2])
+               _ord_views and [ln for ln in engine.source_pid_lines(
+                   _ord_views[-1] or [], "titan")
+                   if ln.startswith("pid ")] == ["pid %s 1" % _TL2])
             ck("the-ordering-pass-did-not-store-the-source-alone-key",
                engine.kkey("google-chrome", "titan") not in _wo.kb)
             # AND IT REACHED THE SAVE, or the two above could pass over a
@@ -3911,10 +3912,238 @@ def _t_loupe(ck):
         engine.EXCLUDE_RULES = _rex
 
 
+def _t_chrome_sizes(ck):
+    """A Chrome window is named by its SIZE before its title. Measured on
+    dragonfly 2026-11-12: two work windows wore one title, so
+    the title join refused both, while their sizes (2527 and 2498 wide)
+    told them apart; and the session file records every window's size, the
+    live one being that plus a constant frame (+44,+71 on two boxes a month
+    apart)."""
+    import tempfile
+    _rss = chrome.chrome_session_sizes
+    _rtt = chrome.chrome_session_titles
+    _rwo = engine.window_origin
+    _rsi = engine._single_id
+    try:
+        # THE FILE: an open window's size is read, a window whose every tab
+        # is gone is not, whatever bounds it left behind.
+        _d = tempfile.mkdtemp(prefix="usher-sz-")
+        _p = os.path.join(_d, "Session_1")
+        with open(_p, "wb") as f:
+            f.write(chrome.snss_build(
+                [(11, 1, "u1", "A"), (22, 2, "u2", "B")],
+                bounds={11: (2415, 1607), 22: (2190, 1518), 33: (9, 9)}))
+        _ws = chrome.chrome_window_sizes(_p)
+        ck("sizes-read-from-the-session-file",
+           _ws == {11: (2415, 1607), 22: (2190, 1518)})
+        os.unlink(_p)
+        os.rmdir(_d)
+        ck("sizes-of-a-missing-file-are-none",
+           chrome.chrome_window_sizes(_p) == {})
+
+        # THE FRAME, by vote, with the measured numbers.
+        live = [(2459.0, 1678.0), (2234.0, 1589.0)]
+        rec = [(2415, 1607), (2190, 1518)]
+        ck("frame-is-derived", chrome.chrome_frame(live, rec) == (44, 71))
+        ck("frame-of-one-pair-is-not-evidence",
+           chrome.chrome_frame(live[:1], rec[:1]) is None)
+        ck("frame-tie-is-no-answer",
+           chrome.chrome_frame([(10, 0), (20, 0)], [(0, 0), (0, 0)])
+           is None)
+
+        def _claim(rec, views, cached=None):
+            chrome.chrome_session_sizes = lambda: rec
+            chrome._slot_cache.clear()
+            chrome._frame[0] = None
+            chrome._slot_cache.update(cached or {})
+            got = chrome.claim_by_size(views)
+            return got, dict(chrome._slot_cache)
+
+        R = {"1": (2483, 1631), "2": (2454, 1631), "3": (2221, 1631),
+             "4": (2645, 1631)}
+        # THE MEASURED REBOOT: two windows sharing a title, four sizes.
+        V = [(36, (2527, 1702)), (30, (2498, 1702)), (38, (2265, 1702)),
+             (34, (2689, 1702))]
+        got, c = _claim(R, V)
+        ck("size-names-every-window-of-a-distinct-size",
+           sorted(got) == [30, 34, 36, 38]
+           and c.get(36) == "chrome:win:1" and c.get(30) == "chrome:win:2"
+           and c.get(38) == "chrome:win:3")
+        # TWO LIVE WINDOWS OF ONE SIZE ARE TOLD APART BY NOTHING HERE.
+        got, c = _claim(dict(R, **{"5": (2483, 1631)}),
+                        V + [(40, (2527, 1702))])
+        ck("size-refuses-two-live-windows-of-one-size",
+           36 not in got and 40 not in got and 30 in got)
+        # ...and the TWIN rule alone decides when ONE recorded window
+        # matches: two live windows of its size cannot both be it.
+        got, c = _claim(R, V + [(40, (2527, 1702))])
+        ck("size-refuses-live-twins-even-with-one-recorded-match",
+           36 not in got and 40 not in got and 30 in got)
+        # ...nor two RECORDED windows of one size.
+        got, c = _claim(dict(R, **{"5": (2483, 1631)}), V)
+        ck("size-refuses-two-recorded-windows-of-one-size",
+           36 not in got and 30 in got)
+        # AN ID A LIVE VIEW ALREADY HOLDS IS NOT OFFERED AGAIN.
+        got, c = _claim(R, V + [(99, (1, 1))], cached={99: "chrome:win:1"})
+        ck("size-does-not-hand-out-a-held-id", 36 not in got and 30 in got)
+        # NO FRAME, NO CLAIM: one window is not evidence for a frame.
+        got, c = _claim({"1": (2483, 1631)}, [(36, (2527, 1702))])
+        ck("size-without-a-frame-claims-nothing", got == [])
+        # ...unless one was derived earlier this process.
+        chrome._frame[0] = (44, 71)
+        chrome.chrome_session_sizes = lambda: {"1": (2483, 1631)}
+        chrome._slot_cache.clear()
+        ck("size-uses-a-frame-derived-earlier",
+           chrome.claim_by_size([(36, (2527, 1702))]) == [36])
+
+        # THE POOL IS OURS ONLY: the ids are read from OUR session files,
+        # so another account's window is not a candidate for any of them.
+        _pv = [{"id": 1, "app-id": "google-chrome", "pid": os.getpid(),
+                "title": "x", "geometry": {"width": 9, "height": 9}},
+               {"id": 2, "app-id": "google-chrome", "pid": os.getpid(),
+                "title": "x", "source": "titan",
+                "geometry": {"width": 9, "height": 9}}]
+        ck("the-size-pool-is-ours-only",
+           engine.chrome_size_pool(_pv) == [(1, (9, 9))])
+
+        # THE THREE PLACES THAT NAME BY SIZE, driven, since every check
+        # above calls claim_by_size directly: a snapshot (so a stamped key
+        # never needed a title), the recheck, and the placer's first look.
+        class _SzSock:
+            @staticmethod
+            def list_outputs():
+                return [{"name": "DP-1",
+                         "geometry": {"x": 0, "y": 0, "width": 4000,
+                                      "height": 3000},
+                         "workspace": {"x": 0, "y": 0, "grid_width": 1,
+                                       "grid_height": 1}}]
+
+            @staticmethod
+            def list_views(**_kw):
+                return [dict(_trv("google-chrome", "Dash - Google Chrome",
+                                  pid=os.getpid(), vid=vid),
+                             **{"output-name": "DP-1",
+                                "geometry": {"x": 0, "y": 0, "width": w,
+                                             "height": 1702}})
+                        for vid, w in ((36, 2527), (30, 2498))]
+
+        def _fresh():
+            chrome.chrome_session_sizes = lambda: R
+            chrome.chrome_session_titles = lambda: {}
+            chrome._slot_cache.clear()
+            chrome._frame[0] = None
+
+        _fresh()
+        try:
+            _sn = engine.snapshot(_SzSock())
+            _keys = sorted(w.get("key") or "" for w in _sn["windows"])
+        except Exception as _e:                            # noqa: BLE001
+            _keys = ["RAISED %s" % _e]
+        ck("a-snapshot-names-chrome-windows-by-size",
+           _keys == ["chrome:win:1", "chrome:win:2"])
+        from .watch import Watcher
+        _fresh()
+        _wz = Watcher(launch=False)
+        _wz.place_sock = _SzSock()
+        _wz._try_place = lambda *_a, **_k: False
+        try:
+            _wz._recheck_all()
+        except Exception:                                  # noqa: BLE001
+            pass
+        ck("the-recheck-names-chrome-windows-by-size",
+           chrome._slot_cache.get(36) == "chrome:win:1")
+        _fresh()
+        try:
+            _wz._place_view(_SzSock.list_views()[0])
+        except Exception:                                  # noqa: BLE001
+            pass
+        ck("the-placer-names-a-chrome-window-by-size-first",
+           chrome._slot_cache.get(36) == "chrome:win:1")
+
+        # A TITLE JOIN THE SIZE CONTRADICTS IS REFUSED, and one it agrees
+        # with, or cannot judge, is not.
+        chrome.chrome_session_sizes = lambda: R
+        chrome._frame[0] = (44, 71)
+        chrome._slot_cache.clear()
+        chrome._live_sizes.clear()
+        chrome._live_sizes.update({36: (2527, 1702), 30: (2498, 1702)})
+        chrome.chrome_session_titles = lambda: {
+            "Dash": ("2", "u"), "Other": ("1", "u")}
+        ck("title-join-contradicted-by-size-is-refused",
+           chrome.window_slot(36, "Dash - Google Chrome") is None
+           and 36 not in chrome._slot_cache)
+        ck("title-join-the-size-agrees-with-stands",
+           chrome.window_slot(30, "Dash - Google Chrome")
+           == "chrome:win:2")
+        ck("title-join-with-no-size-evidence-stands",
+           chrome.window_slot(77, "Other - Google Chrome")
+           == "chrome:win:1")
+
+        # ELIMINATION SEES AN ID WHOSE TITLE IS SHARED, which the title map
+        # drops: with the other window of that title named, the last is
+        # forced.
+        chrome.chrome_session_titles = lambda: {"Solo": ("3", "u")}
+        chrome.chrome_session_sizes = lambda: {"1": (1, 1), "2": (2, 2),
+                                               "3": (3, 3)}
+        chrome._slot_cache.clear()
+        chrome._slot_cache[36] = "chrome:win:1"
+        ck("elimination-reaches-an-id-with-a-shared-title",
+           chrome.claim_by_elimination(
+               [(36, "Dash"), (30, "Dash"), (38, "Solo")]) == 30
+           and chrome._slot_cache.get(30) == "chrome:win:2")
+
+        # THE RELAY: the owner sends each window's size beside its pid, and
+        # the account names its windows by it.
+        _TLa, _TLb = "a" * 32, "b" * 32
+        engine.window_origin = lambda pid, *a, **k: ("titan", 997)
+        vs = [{"id": 1, "app-id": "google-chrome", "pid": 5,
+               "title": "Dash",
+               "security-context": {"toplevel-identifier": _TLa},
+               "geometry": {"width": 2527, "height": 1702}}]
+        _ln = engine.source_pid_lines(vs, "titan")
+        engine.window_origin = _rwo
+        ck("the-owner-relays-the-size", "size %s 2527 1702" % _TLa in _ln)
+        ck("sizes-parse",
+           engine.parse_source_sizes("\n".join(_ln + [
+               "size %s 0 5" % _TLb, "size nope 1 2", "pid x 1"]))
+           == {_TLa: (2527, 1702)})
+        chrome.chrome_session_sizes = lambda: R
+        chrome.chrome_session_titles = lambda: {}
+        chrome._slot_cache.clear()
+        chrome._frame[0] = None
+        rows = [{"identifier": _TLa, "app_id": "google-chrome",
+                 "title": "Dash"},
+                {"identifier": _TLb, "app_id": "google-chrome",
+                 "title": "Dash"},
+                {"identifier": "c" * 32, "app_id": "google-chrome",
+                 "title": "Solo"}]
+        engine._single_id = lambda v: chrome._slot_cache.get(v["id"])
+        try:
+            out = engine.source_window_lines(
+                rows, {}, uid=os.geteuid(),
+                sizes={_TLa: (2527, 1702), _TLb: (2498, 1702),
+                       "c" * 32: (2265, 1702)})
+        except Exception as _e:                            # noqa: BLE001
+            out = ["RAISED %s" % _e]
+        engine._single_id = _rsi
+        _dig = [ln.split()[2] if len(ln.split()) == 3 else "?" for ln in out]
+        ck("the-account-names-same-titled-windows-by-size",
+           len(out) == 3 and engine.SOURCE_NONE not in _dig
+           and len(set(_dig)) == 3)
+    finally:
+        chrome.chrome_session_sizes = _rss
+        chrome.chrome_session_titles = _rtt
+        engine.window_origin = _rwo
+        engine._single_id = _rsi
+        chrome._slot_cache.clear()
+        chrome._live_sizes.clear()
+        chrome._frame[0] = None
+
+
 def _t_size_slots(ck):
     """A window with no identity of its own takes the slot that remembers
     its SIZE. Measured on dragonfly 2026-11-12: after a reboot two work
-    Chrome windows shared the title `<a work window title>`, so the account could
+    Chrome windows shared one title, so the account could
     name neither; one took the other's shared slot and the other was left at
     the cascade, while Chrome had restored each at its exact remembered size
     (2527x1702, 2498x1702, 2265x1702)."""
@@ -6487,6 +6716,25 @@ def _t_roster(ck):
                 engine._read_stdin = _r_rs
             ck("capture-passes-the-relayed-pids-to-the-reporter",
                _got_pids == [{_TLP: os.getpid()}])
+            # AND THE SIZES, by which this side names its Chrome windows
+            # before any title (chrome.claim_by_size).
+            _got_sz = []
+            try:
+                engine._read_stdin = lambda *_a: (
+                    "pid %s %d\nsize %s 640 480\n"
+                    % (_TLP, os.getpid(), _TLP))
+
+                def _swl2(rows_, pids=None, **_k):
+                    _got_sz.append(dict(_k.get("sizes") or {}))
+                    return []
+
+                engine.source_window_lines = _swl2
+                _capture_out(engine.do_source_capture)
+            finally:
+                engine.source_window_lines = _r_swl
+                engine._read_stdin = _r_rs
+            ck("capture-passes-the-relayed-sizes-to-the-reporter",
+               _got_sz == [{_TLP: (640, 480)}])
             # AND A PID THAT IS NOT OURS IS REFUSED AND SAID OUT LOUD.
             # COUNTED rather than per window, because the state that causes
             # it (a proxy, or a pid namespace) causes it for every window at
@@ -14339,6 +14587,14 @@ def selftest():
     # real desk grid, a check on the host. Areas that test the wait stub it.
     _real_dg = engine.desk_grid
     engine.desk_grid = lambda: None
+    # NOR THIS BOX'S CHROME WINDOW SIZES: the size map (claim_by_size)
+    # reads the real session files wherever a snapshot or an elimination
+    # runs, so a fixture's Chrome views would otherwise be named from the
+    # developer's own
+    # browser, and a check would answer differently on every box.
+    _real_ss = chrome.chrome_session_sizes
+    chrome.chrome_session_sizes = lambda: {}
+    chrome._frame[0] = None
     engine.STATE = _scratch_state
     engine.SOURCES_FILE = _scratch_sources
     engine._SOURCES_ADOPTED = False
@@ -14349,7 +14605,7 @@ def selftest():
                      _t_sticky, _t_visible, _t_verify, _t_size_slots,
                      _t_terminals, _t_cli_split,
                      _t_launch_source,
-                     _t_relaunch, _t_chrome, _t_learn,
+                     _t_relaunch, _t_chrome, _t_chrome_sizes, _t_learn,
                      _t_geometry, _t_placement, _t_snapshots, _t_undo,
                      _t_profiles,
                      _t_migration, _t_watcher, _t_displays, _t_contracts):
@@ -14363,6 +14619,10 @@ def selftest():
     finally:
         engine.write_json = _real_wj
         engine.desk_grid = _real_dg
+        chrome.chrome_session_sizes = _real_ss
+        chrome._frame[0] = None
+        chrome._live_sizes.clear()
+        chrome._size_cache["sig"] = None
         engine.STATE = _real_state
         engine.SOURCES_FILE = _real_sources
         engine._SOURCES_ADOPTED = False

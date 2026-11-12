@@ -119,6 +119,10 @@ _SNSS_SET_SEL_NAV_INDEX = 7
 _SNSS_SET_SEL_TAB_IN_WIN = 8
 _SNSS_TAB_CLOSED = 16
 _SNSS_WINDOW_CLOSED = 17
+# SetWindowBounds3: int32 window, then x, y, width, height, show state. The
+# POSITION is a placeholder (a Wayland client is never told where it is, so
+# Chrome writes 0,0 or 10,10), and the SIZE is real.
+_SNSS_SET_WINDOW_BOUNDS3 = 14
 
 
 def _snss_i32(b, o):
@@ -141,6 +145,18 @@ def _snss_str16(b, o):        # WriteString16: int32 nchars, 2*nchars, pad to 4
     return s.decode("utf-16-le", "replace"), (o + 2 * n + 3) & ~3
 
 
+def _snss_records(d):
+    """(command id, payload) for each record of a session file's bytes."""
+    off = 8                                     # skip magic + int32 version
+    while off + 2 <= len(d):
+        (size,) = struct.unpack_from("<H", d, off)
+        off += 2
+        if size == 0 or off + size > len(d):
+            break
+        yield d[off], d[off + 1:off + size]
+        off += size
+
+
 def _snss_scan(path):
     """Walk one session file's records into raw tables, or None if it is not a
     session file. Split from parse_snss because the two halves fail differently:
@@ -149,17 +165,9 @@ def _snss_scan(path):
     d = open(path, "rb").read()
     if d[:4] != b"SNSS":
         return None
-    off = 8                                     # skip magic + int32 version
     tab_win, tab_idx, win_sel, tab_nav = {}, {}, {}, {}
     nav, closed_tabs, closed_wins = {}, set(), set()
-    while off + 2 <= len(d):
-        (size,) = struct.unpack_from("<H", d, off)
-        off += 2
-        if size == 0 or off + size > len(d):
-            break
-        cid = d[off]
-        p = d[off + 1:off + size]
-        off += size
+    for cid, p in _snss_records(d):
         try:
             if cid == _SNSS_SET_TAB_WINDOW:
                 w, o = _snss_i32(p, 0)
@@ -492,6 +500,12 @@ def window_slot(vid, title):
     if hit:
         return hit
     hit = chrome_window_for(title)
+    # A TITLE JOIN THE SIZE CONTRADICTS IS REFUSED. The title is the last
+    # resort (see claim_by_size), and a stale or shared title can name the
+    # wrong window outright; Chrome's record of that window's size is the
+    # cheap witness against it.
+    if hit and size_disagrees(vid, hit[len(_CHROME_SLOT):]):
+        return None
     if hit:
         _slot_cache[vid] = hit
     return hit
@@ -548,12 +562,22 @@ def claim_by_elimination(views):
             claimed.add(str(hit[0]))
         elif vid is not None:
             unmatched.append(vid)
-    free = sorted({str(w) for _ti, (w, _u) in t.items()
-                   if str(w) not in claimed})
+    # THE ID SET IS EVERY RECORDED WINDOW, not only those with a usable
+    # title: a window whose title it shares with another is dropped from
+    # the title map, and was therefore invisible here too, so two windows
+    # sharing a title could never be settled even when one was forced.
+    ids = {str(w) for _ti, (w, _u) in t.items()}
+    ids |= set(chrome_session_sizes())
+    free = sorted(i for i in ids if i not in claimed)
     if len(unmatched) == 1 and len(free) == 1:
         _slot_cache[unmatched[0]] = chrome_slot(free[0])
         return unmatched[0]
     return None
+
+
+def resolved(vid):
+    """Has this view already been named, by any means?"""
+    return vid in _slot_cache
 
 
 def forget_window(vid):
@@ -561,6 +585,7 @@ def forget_window(vid):
     but a cache that only ever grows is a leak in a process that runs for
     weeks."""
     _slot_cache.pop(vid, None)
+    _live_sizes.pop(vid, None)
 
 
 def chrome_window_tabs(path):
@@ -594,6 +619,145 @@ def chrome_window_tabs(path):
         if url:
             out.setdefault(w, set()).add(url)
     return {w: frozenset(u) for w, u in out.items()}
+
+
+def chrome_window_sizes(path):
+    """{window id: (width, height)} for one session file's OPEN windows, as
+    Chrome last recorded them. Never raises; a bad file yields {}.
+
+    A window with no open tab is not open, whatever bounds it left behind:
+    measured, a session file carries bounds records for windows closed
+    minutes earlier."""
+    try:
+        d = open(path, "rb").read()
+    except OSError:
+        return {}
+    tabs = _snss_scan(path)
+    if tabs is None:
+        return {}
+    tab_win, _ti, _ws, _tn, _nav, closed_tabs, closed_wins = tabs
+    open_wins = {w for t, w in tab_win.items()
+                 if t not in closed_tabs and w not in closed_wins}
+    sizes = {}
+    for cid, p in _snss_records(d):
+        if cid == _SNSS_SET_WINDOW_BOUNDS3 and len(p) >= 20:
+            w, _x, _y, wd, ht = struct.unpack_from("<iiiii", p, 0)
+            sizes[w] = (wd, ht)
+    return {w: s for w, s in sizes.items()
+            if w in open_wins and s[0] > 0 and s[1] > 0}
+
+
+_size_cache = {"sig": None, "map": {}}
+
+
+def chrome_session_sizes():
+    """{window id (str): (width, height)} across profiles' current sessions,
+    cached like chrome_session_titles."""
+    sig = session_sig()
+    if sig != _size_cache["sig"]:
+        merged = {}
+        for f in session_files():
+            try:
+                for w, sz in chrome_window_sizes(f).items():
+                    merged[str(w)] = sz
+            except Exception:                              # noqa: BLE001
+                continue
+        _size_cache["sig"] = sig
+        _size_cache["map"] = merged
+    return _size_cache["map"]
+
+
+def chrome_frame(live, recorded):
+    """The constant (dw, dh) between a live window's size and the size
+    Chrome records for it, or None. PURE.
+
+    IT IS THE FRAME, and it is constant per box: measured +44,+71 on
+    dragonfly 2026-11-12 for both of a profile's windows, and +44,+71 on
+    manifold a month earlier. DERIVED BY VOTE rather than hard-coded, since
+    a theme or scale can move it: every live size against every recorded
+    one, and the true difference is the only one most pairs agree on. Two
+    votes at least, and a clear winner, or the answer is no answer."""
+    votes = {}
+    for lw, lh in live:
+        for rw, rh in recorded:
+            d = (int(round(lw)) - int(rw), int(round(lh)) - int(rh))
+            votes[d] = votes.get(d, 0) + 1
+    ranked = sorted(votes.items(), key=lambda kv: -kv[1])
+    if not ranked or ranked[0][1] < 2:
+        return None
+    if len(ranked) > 1 and ranked[1][1] == ranked[0][1]:
+        return None
+    return ranked[0][0]
+
+
+# The frame last derived, for verifying a title join when this pass could
+# not derive one (one window, say), and our live chrome views' sizes, by
+# view id, as last listed.
+_frame = [None]
+_live_sizes = {}
+SIZE_TOL = 1    # px: Chrome restores and records a window's size exactly
+
+
+def _fits(a, b, tol=SIZE_TOL):
+    return abs(a[0] - b[0]) <= tol and abs(a[1] - b[1]) <= tol
+
+
+def claim_by_size(views):
+    """Name every live Chrome window its SIZE alone identifies. `views` is
+    [(view id, (width, height))] for EVERY one of our live Chrome views.
+    Returns the view ids it claimed.
+
+    THE SIZE BEFORE THE TITLE. The title is a page's, not a window's: two
+    windows showing one page share it, a web app rewrites it without
+    navigating, and Chrome records it only at navigation, so the join was
+    wrong or refused often enough to cost placements at every login.
+    Measured on dragonfly 2026-11-12: two work windows wore one title and
+    neither could be named, while their sizes (2527 and 2498
+    wide) told them apart outright. The session file records every window's
+    size, so a live window whose size, less the frame, matches exactly ONE
+    recorded window, and which no other unnamed live window shares, IS that
+    window.
+
+    IT REFUSES ON ANY TIE, which is the safety argument, as for
+    elimination: two windows of one size are told apart by the title or by
+    nothing. Writes the cache `window_slot` reads, so a claim lasts the
+    view's life."""
+    rec = chrome_session_sizes()
+    sizes = {vid: (round(s[0]), round(s[1])) for vid, s in views
+             if vid is not None and s and s[0] and s[1]}
+    _live_sizes.clear()
+    _live_sizes.update(sizes)
+    f = chrome_frame(list(sizes.values()), list(rec.values()))
+    if f:
+        _frame[0] = f
+    f = f or _frame[0]
+    if not f or not rec:
+        return []
+    held = {_slot_cache[v][len(_CHROME_SLOT):] for v in sizes
+            if v in _slot_cache}
+    free = {i: s for i, s in rec.items() if i not in held}
+    out = []
+    for vid, sz in sizes.items():
+        if vid in _slot_cache:
+            continue
+        want = (sz[0] - f[0], sz[1] - f[1])
+        ids = [i for i, s in free.items() if _fits(s, want)]
+        twins = [o for o, osz in sizes.items()
+                 if o != vid and o not in _slot_cache and _fits(osz, sz)]
+        if len(ids) == 1 and not twins:
+            _slot_cache[vid] = chrome_slot(ids[0])
+            out.append(vid)
+    return out
+
+
+def size_disagrees(vid, wid):
+    """Does view `vid`'s live size contradict Chrome's record of window
+    `wid`? False when either is unknown: a check with no evidence passes."""
+    f, sz = _frame[0], _live_sizes.get(vid)
+    rec = chrome_session_sizes().get(str(wid))
+    if not (f and sz and rec):
+        return False
+    return not _fits(rec, (sz[0] - f[0], sz[1] - f[1]), tol=2)
 
 
 def chrome_bind_windows(cur, prev):
@@ -737,7 +901,7 @@ def chrome_profile_map():
     return out
 
 
-def snss_build(tabs, ver=3):
+def snss_build(tabs, ver=3, bounds=None):
     """Build a minimal SNSS blob from [(window, tab, url, title), ...], for
     selftest: the inverse of the parser, Pickle 4-byte alignment and all.
 
@@ -772,4 +936,7 @@ def snss_build(tabs, ver=3):
                 + cmd(_SNSS_UPDATE_TAB_NAV, wi(len(pk)) + pk))
     for window in nth:
         out += cmd(_SNSS_SET_SEL_TAB_IN_WIN, wi(window) + wi(0))
+    for window, (w, h) in (bounds or {}).items():
+        out += cmd(_SNSS_SET_WINDOW_BOUNDS3,
+                   wi(window) + wi(10) + wi(10) + wi(w) + wi(h) + wi(1))
     return out

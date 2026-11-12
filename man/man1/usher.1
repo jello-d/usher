@@ -366,10 +366,11 @@ document rather than the window. One window is fine; several is what needs a
 plugin, and it is the whole reason the chrome plugin exists.
 .IP \(bu 2
 THE IDENTITY IS NOT IN THE TITLE. chrome reads a SessionID from the browser's
-session file, kitty the shell's cwd from
+session file and finds which window it is by the size Chrome records for it,
+asking the title only to break a tie between windows of one size; kitty reads
+the shell's cwd from
 .IR /proc ,
-mux the command the window runs. A title that has to be right at the instant
-you look is a bootstrap, not an identity.
+mux the command the window runs. A title belongs to a page, not a window.
 .IP \(bu 2
 THE RELAUNCH DIFFERS PER WINDOW. A desktop entry describes an APP, so the
 default starts one invocation per app; a terminal holding a specific remote

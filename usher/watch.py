@@ -869,6 +869,10 @@ class Watcher:
         title = engine.log_title(v)
         if SKIP_TITLE.search(title) or is_transient(v):
             return   # work / scratch / transient-chrome: leave where it opened
+        # A CHROME WINDOW IS NAMED BY ITS SIZE BEFORE ITS TITLE, and only
+        # the whole set can say a size is unique (chrome.claim_by_size).
+        if chrome.is_chrome(app) and not chrome.resolved(vid):
+            engine.note_chrome_sizes(self._live_views())
         if unidentified(v):
             # Its plugin cannot say which window this is, so the only key we
             # could look it up under is one the store is deliberately never
@@ -1450,6 +1454,7 @@ class Watcher:
         # OURS ONLY: the ids come from the OWNER's session files, so a
         # foreign chrome view is not a candidate for any of them. One got
         # handed an owner id here, live, with its title as the label.
+        engine.note_chrome_sizes(views)
         _claimed = chrome.claim_by_elimination(
             engine.chrome_elimination_pool(views))
         if _claimed is not None:
