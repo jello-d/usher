@@ -79,7 +79,7 @@ print("profile %s, %d store entries, %d live window(s), outputs %s"
 # ---- (4) THE LOGIN CONDITION: what would be started, with nothing live ----
 # Driven with live=[] so the answer is about a LOGIN and not about now.
 # THE TWO CANDIDATE FUNCTIONS RETURN DIFFERENT SHAPES: mux gives (cmd, size)
-# pairs and kitty gives FLAT cwd strings, one per missing window. Unpacking
+# pairs and kitty gives (cwd, command) pairs, one per missing window. Unpacking
 # both the same way raised here and not on the box with no terminals, which
 # is the four-helpers-four-shapes trap this repo records most often.
 mux_cmds = [c for c, _s in E.mux_candidates(rows, [])]
@@ -136,12 +136,17 @@ def starts(w):
     if app == "kitty":
         # A PLAIN SHELL: counted per cwd, so say how many shells that cwd
         # would get, since N windows in one directory is N spawns now.
+        # THE CANDIDATES ARE (cwd, command) PAIRS since the replay allowlist
+        # (a terminal running `top` is counted apart from an idle shell), and
+        # this rig reading them as cwd strings reported every plain shell
+        # as one that would never start.
         k = w.get("key") or ""
-        cwd = k.partition("kitty:")[2] if k.startswith("kitty:") else ""
+        cwd = E.kitty_key_parts(k) or ("", "")
         n = kitty_cwds.count(cwd)
         if not n:
             return (None, "no cwd to reopen it in (key %r)" % (k,))
-        return ("kitty", "%d plain shell(s) in %s" % (n, cwd))
+        return ("kitty", "%d shell(s) in %s%s" % (
+            n, cwd[0], " running " + cwd[1] if cwd[1] else ""))
     argv, why = E.desktop_launch_for(app, ents)
     if argv:
         return ("registry", " ".join(argv))
