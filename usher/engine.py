@@ -5604,7 +5604,8 @@ def rekey_source(kb, src, binding):
 
 
 def source_refresh_plan(live, last, now, seen=None,
-                        every=SOURCE_REFRESH_EVERY, settle=SOURCE_SETTLE):
+                        every=SOURCE_REFRESH_EVERY, settle=SOURCE_SETTLE,
+                        answered=None):
     """Which sources to ask to identify their windows, and the updated
     stability state. PURE, returning (sources, seen).
 
@@ -5643,11 +5644,16 @@ def source_refresh_plan(live, last, now, seen=None,
                 and not (w.get("key") or "")):
             waiting.setdefault(src, set()).add(w["identifier"])
         # A WINDOW STILL WAITING (no key: it resolved Pending) wants the ask,
-        # and so does a chrome window the account could not resolve at its
-        # last answer, which can resolve at the next.
+        # and so does a chrome window on its source-alone key that the
+        # account has NOT YET ANSWERED for. One it answered `-` for (nothing
+        # to add) is not asked about again: measured on dragonfly
+        # 2026-11-12, two such windows made the daemon sudo to that account
+        # every minute for as long as they were open, each time hearing `-`.
         if ((not (w.get("key") or "") and (w.get("app_id") or ""))
                 or (is_chrome(w.get("app_id") or "")
-                    and (w.get("key") or "") == src)):
+                    and (w.get("key") or "") == src
+                    and w.get("identifier")
+                    not in ((answered or {}).get(src) or {}))):
             want.add(src)
     out = []
     for src in sorted(want):

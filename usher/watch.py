@@ -1887,7 +1887,7 @@ class Watcher:
         try:
             plan, self.src_seen = engine.source_refresh_plan(
                 snap["windows"], self.src_asked, time.time(),
-                self.src_seen)
+                self.src_seen, answered=engine._SOURCE_WINDOWS)
         except Exception as e:                             # noqa: BLE001
             logline(f"could not plan a source refresh: {e}")
             return False

@@ -2315,6 +2315,18 @@ def _t_resolution(ck):
                _P(_pw2, {}, 1020.0 + engine.SOURCE_SETTLE,
                   _s1)[1]["titan"][2]
                == frozenset({"aaaa1111bbbb22", "cccc3333dddd44"}))
+            # A CHROME WINDOW THE ACCOUNT ANSWERED `-` FOR IS NOT ASKED
+            # ABOUT AGAIN: measured on dragonfly, two such windows made the
+            # daemon sudo every minute for as long as they were open.
+            _cr = [{"source": "titan", "app_id": "google-chrome",
+                    "key": "titan", "identifier": "eeee5555ffff66"}]
+            ck("refresh-a-chrome-window-answered-dash-is-not-asked-again",
+               "titan" not in engine.source_refresh_plan(
+                   _cr, {}, 1000.0,
+                   answered={"titan": {"eeee5555ffff66": ""}})[1])
+            ck("refresh-control-an-unanswered-chrome-window-is",
+               "titan" in engine.source_refresh_plan(
+                   _cr, {}, 1000.0, answered={"titan": {}})[1])
             # BUT NOT A WINDOW THAT CAN NEVER BE IDENTIFIED (no app-id also
             # has no key): asking about it would loop every interval.
             ck("refresh-is-not-triggered-by-a-window-with-no-app-id",
@@ -11622,7 +11634,7 @@ def _t_displays(ck):
         _pub = []
         try:
             engine.source_refresh_plan = (
-                lambda rows, asked, now, seen: (["titan"], {}))
+                lambda rows, asked, now, seen, **_k: (["titan"], {}))
             engine.source_trigger = lambda *a, **k: 1
             engine.publish_sources = lambda *a, **k: _pub.append(1) or True
             w.src_asked, w.src_seen = {}, {}
@@ -11635,13 +11647,26 @@ def _t_displays(ck):
             w.kb, w.kb_profile = {}, "DESK"
         ck("the-refresh-publishes-the-map-for-every-one-shot-verb",
            _pub == [1])
+        # AND IT HANDS THE PLAN WHAT EACH ACCOUNT HAS ALREADY ANSWERED, or a
+        # window answered `-` is asked about every minute forever.
+        _kw = []
+        try:
+            engine.source_refresh_plan = (
+                lambda rows, asked, now, seen, **_k: (_kw.append(_k)
+                                                      or ([], {})))
+            w._poll_sources({"windows": []})
+        finally:
+            engine.source_refresh_plan = _rsrp
+            w.src_asked, w.src_seen = {}, {}
+        ck("the-refresh-passes-what-each-account-answered",
+           bool(_kw) and _kw[0].get("answered") is engine._SOURCE_WINDOWS)
         # AND A PUBLISH THAT RAISES DOES NOT COST THE REFRESH, since every
         # outcome of that poll is optional: it is a sudo subprocess on the
         # capture thread and the windows keep the source-alone key without it.
         _raised = []
         try:
             engine.source_refresh_plan = (
-                lambda rows, asked, now, seen: (["titan"], {}))
+                lambda rows, asked, now, seen, **_k: (["titan"], {}))
             engine.source_trigger = lambda *a, **k: 1
             engine.publish_sources = _raise_it
             engine.logline = lambda *a, **k: None
