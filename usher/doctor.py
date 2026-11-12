@@ -78,10 +78,11 @@ def _doctor_surfaces(out):
     else:
         out("  default      NONE: a window whose cell no surface names has "
             "no destination at this desk (see `hwdp surfaces --check`)")
+    _nw = max(12, max(len(n) for n in surfaces))
     for name, s in sorted(surfaces.items()):
         bad = "" if engine.cell_fits(s, outs) else \
             "  CELL NOT IN THE LIVE GRID, so it is not seeded"
-        out(f"                 {name:12} {s['output']:8} "
+        out(f"                 {name:{_nw}} {s['output']:8} "
             f"ws{tuple(s['workspace'])} "
             f"{s['size'][0]}x{s['size'][1]} at "
             f"{s['pos'][0]},{s['pos'][1]}{bad}")
