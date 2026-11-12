@@ -84,6 +84,9 @@ from .engine import (
 # no other way to reach it, and reaching for the patched one would test the
 # stub.
 _real_logline = engine.logline
+# AND THE REAL desk_grid, for the same reason: the area loop stubs it out
+# for every area, so the cells testing the function itself need this one.
+_REAL_DESK_GRID = engine.desk_grid
 
 
 @contextlib.contextmanager
@@ -9990,6 +9993,26 @@ def _t_visible(ck):
         w.transition_until = time.time() + 60
         w._ensure_visible()
         ck("daemon-does-not-rescue-during-a-display-change", _moved == [])
+        # AND A CHANGE THAT STARTS MID-PASS STOPS IT: the gate above is read
+        # once, and the IPC after it can stall for seconds while outputs come
+        # and go, which is how a rescue ran two seconds INTO an undock on
+        # dragonfly 2026-11-12. The listing itself starts the change here.
+        _moved[:] = []
+        w.rescued.clear()
+        w.transition_until = 0.0
+        _lv0 = _S.list_views
+
+        def _lv_starts(self, filter_mapped_toplevel=False):
+            w.transition_until = time.time() + 60
+            return _views
+        _S.list_views = _lv_starts
+        try:
+            w._ensure_visible()
+        finally:
+            _S.list_views = _lv0
+            w.transition_until = 0.0
+        ck("daemon-stops-rescuing-when-a-change-starts-mid-pass",
+           _moved == [])
     except Exception as _e:                                # noqa: BLE001
         ck("daemon-visibility-raised: %s" % _e, False)
     finally:
@@ -11985,6 +12008,123 @@ def _t_displays(ck):
             w.placed.clear()
             w.kb, w.kb_profile = {}, "DESK"
 
+        # ---- THE RE-PLACE WAITS FOR THE GRID hwdp DECLARED ---------------
+        # A display change is several steps and the sweep is the last. Run
+        # against the OLD grid, a slot on a cell the new one adds is clamped
+        # onto the cells the old one had, and the windows pile up: measured
+        # on dragonfly 2026-11-12, an undock from 2x2 to 3x3.
+        _gs = engine.grid_settled
+        _g2 = [dict(_lo[0], workspace={"x": 0, "y": 0, "grid_width": 2,
+                                       "grid_height": 2})]
+        _g3 = [dict(_lo[0], workspace={"x": 0, "y": 0, "grid_width": 3,
+                                       "grid_height": 3})]
+        ck("grid-settled-with-nothing-declared", _gs(_g2, None))
+        ck("grid-settled-when-it-matches", _gs(_g3, (3, 3)))
+        ck("grid-not-settled-on-the-old-grid", not _gs(_g2, (3, 3)))
+        ck("grid-not-settled-with-no-outputs", not _gs([], (3, 3)))
+        ck("grid-not-settled-on-an-output-reporting-none",
+           not _gs([dict(_lo[0], workspace={})], (3, 3)))
+        _swept = []
+        _rsw, _rdg, _rld = Watcher._sweep, engine.desk_grid, \
+            _wmod.load_knowledge
+        _said6 = []
+        _rlg6 = _wmod.logline
+        try:
+            Watcher._sweep = lambda self, vids=None: (_swept.append(vids)
+                                                      or len(vids or []))
+            engine.desk_grid = lambda: (3, 3)
+            _wmod.load_knowledge = lambda p=None: {}
+            _wmod.logline = _said6.append
+            _gsock = _Sock(_lv, _g2)
+            w.place_sock = _gsock
+            w.sweep_wait = None
+            w._adopt_profile("LAPTOP", "test")
+            ck("a-dock-does-not-re-place-on-the-old-grid", _swept == [])
+            ck("a-dock-waiting-for-the-grid-holds-learning",
+               w._in_transition() and w.sweep_wait is not None)
+            ck("a-dock-waiting-for-the-grid-says-so",
+               any("waiting for the 3x3 grid" in m for m in _said6))
+            w._poll_sweep_wait(_Sock(_lv, _g2))
+            ck("the-wait-holds-while-the-grid-is-old", _swept == [])
+            # AND THE PLACER HOLDS TOO: an event in the interval is re-queued,
+            # not placed against the old grid and not dropped.
+            _seated7 = []
+            _rseat7 = Watcher._seat_view
+            try:
+                Watcher._seat_view = lambda self, v, e, o: (
+                    _seated7.append(v["id"]) or True)
+                w.pending.pop(42, None)
+                w._place_view(_lv[0])
+            finally:
+                Watcher._seat_view = _rseat7
+            ck("the-placer-holds-while-the-grid-is-old",
+               _seated7 == [] and 42 in w.pending)
+            w.pending.pop(42, None)
+            w._poll_sweep_wait(_Sock(_lv, _g3))
+            ck("the-re-place-runs-once-the-grid-arrives",
+               _swept == [[42]] and w.sweep_wait is None)
+            w._poll_sweep_wait(_Sock(_lv, _g3))
+            ck("the-re-place-runs-once", _swept == [[42]])
+            # BOUNDED: a grid that never arrives costs a late sweep, not none.
+            _swept.clear()
+            _said6.clear()
+            w._adopt_profile("LAPTOP", "test")
+            if w.sweep_wait:
+                w.sweep_wait["until"] = _time.time() - 1
+            w._poll_sweep_wait(_Sock(_lv, _g2))
+            ck("a-grid-that-never-arrives-still-gets-a-sweep",
+               _swept == [[42]]
+               and any("never arrived" in m for m in _said6))
+            # CONTROL: the grid already right re-places at once, as before.
+            _swept.clear()
+            w.place_sock = _Sock(_lv, _g3)
+            w._adopt_profile("LAPTOP", "test")
+            ck("a-dock-on-the-right-grid-re-places-at-once",
+               _swept == [[42]] and w.sweep_wait is None)
+            # AND NOTHING DECLARED WAITS FOR NOTHING.
+            _swept.clear()
+            engine.desk_grid = lambda: None
+            w.place_sock = _Sock(_lv, _g2)
+            w._adopt_profile("LAPTOP", "test")
+            ck("no-declared-grid-re-places-at-once", _swept == [[42]])
+        finally:
+            Watcher._sweep, engine.desk_grid = _rsw, _rdg
+            _wmod.load_knowledge, _wmod.logline = _rld, _rlg6
+            w.place_sock = None
+            w.sweep_wait = None
+            w.transition_until = 0.0
+            w.redisplay_ok = set()
+            w.kb, w.kb_profile = {}, "DESK"
+        # THE CAPTURE LOOP POLLS IT, or a waiting re-place waits for ever
+        # (until a later desk change replaced it). Asserted on the source,
+        # since driving the loop needs a live compositor.
+        _cl_src = inspect.getsource(Watcher._capture_loop)
+        ck("the-capture-loop-polls-the-waiting-re-place",
+           "self._poll_sweep_wait(cap)" in _cl_src)
+        # desk_grid PARSES hwdp's answer, and anything else is no answer.
+        _rrun, _rwh = engine.subprocess.run, engine.shutil.which
+
+        class _R:
+            def __init__(self, rc, out):
+                self.returncode, self.stdout, self.stderr = rc, out, ""
+        try:
+            engine.shutil.which = lambda n: "/x/hwdp"
+            for _out, _rc, _want, _nm in (("3 3\n", 0, (3, 3), "ok"),
+                                          ("", 0, None, "none-declared"),
+                                          ("3 3\n", 2, None, "refused"),
+                                          ("x y", 0, None, "garbage")):
+                engine.subprocess.run = (lambda *a, _o=_out, _c=_rc, **k:
+                                         _R(_c, _o))
+                try:
+                    _got_g = _REAL_DESK_GRID()
+                except Exception as _e:                    # noqa: BLE001
+                    _got_g = "RAISED %s" % _e
+                ck(f"desk-grid-{_nm}", _got_g == _want)
+            engine.shutil.which = lambda n: None
+            ck("desk-grid-no-hwdp", _REAL_DESK_GRID() is None)
+        finally:
+            engine.subprocess.run, engine.shutil.which = _rrun, _rwh
+
         # ---- AND THE PLACER CALLS THE SEEDER ------------------------------
         # The checks above prove surface_seed; they say nothing about whether
         # _place_view reaches it, and a bug in the code AROUND the tested part
@@ -13372,6 +13512,11 @@ def selftest():
        not _under_root(_real_state + "-other/current.json", _real_state))
 
     engine.write_json = _wj_canary
+    # AND THE GRID hwdp DECLARES, which `_adopt_profile` now ASKS before it
+    # re-places: left live, every adoption check would wait for this box's
+    # real desk grid, a check on the host. Areas that test the wait stub it.
+    _real_dg = engine.desk_grid
+    engine.desk_grid = lambda: None
     engine.STATE = _scratch_state
     engine.SOURCES_FILE = _scratch_sources
     engine._SOURCES_ADOPTED = False
@@ -13394,6 +13539,7 @@ def selftest():
                       f"{type(e).__name__}: {e}", file=sys.stderr)
     finally:
         engine.write_json = _real_wj
+        engine.desk_grid = _real_dg
         engine.STATE = _real_state
         engine.SOURCES_FILE = _real_sources
         engine._SOURCES_ADOPTED = False

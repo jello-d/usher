@@ -534,6 +534,49 @@ SURFACE_TTL = 5.0
 _SURFACES = {"map": None, "why": "", "at": 0.0, "default": None}
 
 
+def desk_grid():
+    """The workspace grid hwdp declares for the desk switched on NOW, as
+    (width, height), or None when it declares none or cannot be asked.
+
+    THE TRANSPOSE WAITS ON THIS. A display change is several steps (outputs
+    drop or arrive, kanshi arranges them, the integrator sets the grid) and
+    the sweep is the last; placed against the old grid, a slot on a cell the
+    new grid has is clamped onto one the old grid has, and windows pile up.
+    None means usher cannot know which grid is coming, so it does not wait
+    for one."""
+    exe = shutil.which("hwdp")
+    if not exe:
+        return None
+    try:
+        r = subprocess.run([exe, "surfaces", "--grid"], capture_output=True,
+                           text=True, timeout=5, stdin=subprocess.DEVNULL)
+    except Exception:                                      # noqa: BLE001
+        return None
+    g = (r.stdout or "").split() if r.returncode == 0 else []
+    if len(g) == 2 and all(x.isdigit() for x in g):
+        return int(g[0]), int(g[1])
+    return None
+
+
+def grid_settled(outputs, want):
+    """Has the compositor's grid reached `want` on every output? PURE.
+
+    No `want` is settled: there is nothing declared to wait for. No outputs
+    is NOT settled, since that is the middle of a change rather than its end.
+    An output reporting no grid concludes nothing and so is not settled
+    either: waiting costs at most the bound, a sweep against an unknown grid
+    is the pile-up this exists to prevent."""
+    if not want:
+        return True
+    if not outputs:
+        return False
+    for o in outputs:
+        ws = o.get("workspace") or {}
+        if (ws.get("grid_width"), ws.get("grid_height")) != tuple(want):
+            return False
+    return True
+
+
 def surface_map(fresh=False):
     """({surface: slot}, why) from `hwdp surfaces`, where a slot is the same
     shape a store entry uses: output, workspace, pos, size.

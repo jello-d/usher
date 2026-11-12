@@ -482,6 +482,9 @@ class Watcher:
         # WHEN THE DISPLAY TRANSITION ENDS. Nothing is learned before then:
         # see DOCK_HOLD.
         self.transition_until = 0.0
+        # A RE-PLACE WAITING FOR THE GRID hwdp declared (see
+        # _adopt_profile): {vids, want, until, was, prof, why}, or None.
+        self.sweep_wait = None
         # WINDOWS OWED ONE PLACEMENT BECAUSE THE DISPLAYS CHANGED under them.
         # Distinct from late_ok: see _adopt_profile.
         self.redisplay_ok = set()
@@ -836,6 +839,17 @@ class Watcher:
             # here; the parent field (-1 == none) is the reliable tell,
             # where is_transient's title match is not (a portal file
             # chooser has a null/foreign title).
+        # NOTHING IS PLACED WHILE A DISPLAY CHANGE WAITS FOR ITS GRID: a
+        # window event in that interval (a browser renames constantly) would
+        # be placed against the OLD grid, which is the pile-up the wait
+        # exists for. Re-queued rather than dropped, so a window that MAPPED
+        # in the interval, and is therefore not in the waiting sweep, still
+        # gets its look once the grid has arrived.
+        if self.sweep_wait:
+            with self.lock:
+                self.pending[vid] = {"v": v, "refetch": True,
+                                     "due": time.time() + TITLE_QUIET}
+            return
         app = app_of(v)
         # REDACTED FOR ANOTHER ACCOUNT. Every log line below renders
         # this value, and watch.log is the session user's readable
@@ -1310,6 +1324,13 @@ class Watcher:
             vid = v.get("id")
             if not why:
                 continue
+            # ASKED AGAIN PER WINDOW, not once above: the IPC this loop just
+            # made can stall for seconds while outputs come and go, and on
+            # dragonfly 2026-11-12 a rescue that passed the check before an
+            # undock ran two seconds INTO it, moving windows parked on the
+            # null output onto the old desk's map and grid.
+            if self._in_transition():
+                return
             n = self.rescued.get(vid, 0)
             if n >= RESCUE_TRIES:
                 if n == RESCUE_TRIES:
@@ -1443,6 +1464,7 @@ class Watcher:
             # and it is the half whose loss costs the layout.
             try:
                 self._poll_files(seen)
+                self._poll_sweep_wait(cap)
                 cap = self._poll_outputs(cap)
                 # AND THE PROFILE, not just the output NAMES that poll
                 # compares. A desk change that keeps the names is invisible to
@@ -1868,9 +1890,66 @@ class Watcher:
             # the positions we are still correcting. THE HOLD IS NOT THE
             # SWEEP: see _sweep, which is a blip and carries no hold at all.
             self.transition_until = now + sum(PLACE_VERIFY) + 1.0
+        # NOT UNTIL THE GRID IS THE NEW DESK'S. hwdp's request arrives with
+        # the PROFILE, and the grid is a separate step (the integrator's,
+        # from hwdp's declaration) that a sweep must not run ahead of: a slot
+        # on a cell the old grid lacks is clamped into it, so every window
+        # owed a cell the new grid adds lands on the same few the old one
+        # had. Measured on dragonfly 2026-11-12, an undock from 2x2 to 3x3.
+        # The hold stays in force while it waits, so nothing is learned from
+        # the in-between layout, and it is BOUNDED, so a grid that never
+        # arrives costs a late sweep rather than none.
+        want = engine.desk_grid()
+        try:
+            outs = self.place_sock.list_outputs()
+        except Exception:                                  # noqa: BLE001
+            outs = []
+        if not engine.grid_settled(outs, want):
+            with self.lock:
+                self.sweep_wait = {"vids": vids, "want": want,
+                                   "until": now + DOCK_HOLD, "was": was,
+                                   "prof": prof, "why": why}
+                self.transition_until = now + DOCK_HOLD + sum(PLACE_VERIFY)
+            logline(f"display profile {was} -> {prof} ({why}): waiting for "
+                    f"the {want[0]}x{want[1]} grid before re-placing")
+            return
+        with self.lock:
+            self.sweep_wait = None
+        self._finish_adopt(vids, was, prof, why)
+
+    def _finish_adopt(self, vids, was, prof, why, late=False):
+        """The re-place that ends a display change. Its own step because it
+        runs either at once or when the grid arrives (_poll_sweep_wait)."""
+        with self.lock:
+            self.transition_until = time.time() + sum(PLACE_VERIFY) + 1.0
         n = self._sweep(vids)
         logline(f"display profile {was} -> {prof} ({why}): {len(self.kb)} "
-                f"known window(s) here; re-placing {n}")
+                f"known window(s) here; re-placing {n}"
+                + ("; the grid never arrived, so against the one there is"
+                   if late else ""))
+
+    def _poll_sweep_wait(self, sock):
+        """Run a waiting re-place once the grid has arrived, or once the
+        bound has passed. Cheap and silent while nothing waits. `sock` is the
+        CAPTURE thread's own connection, which is where this runs."""
+        with self.lock:
+            sw = self.sweep_wait
+        if not sw:
+            return
+        try:
+            outs = sock.list_outputs()
+        except Exception:                                  # noqa: BLE001
+            outs = []
+        ok = engine.grid_settled(outs, sw["want"])
+        late = not ok and time.time() >= sw["until"]
+        if not ok and not late:
+            return
+        with self.lock:
+            if self.sweep_wait is not sw:
+                return
+            self.sweep_wait = None
+        self._finish_adopt(sw["vids"], sw["was"], sw["prof"], sw["why"],
+                           late=late)
 
     def _sweep(self, vids=None):
         """TRANSPOSE: put the windows that ALREADY EXIST where they belong
