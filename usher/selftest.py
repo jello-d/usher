@@ -11584,6 +11584,40 @@ def _t_displays(ck):
         # like Signal could never be seeded.
         ck("the-app-id-only-key-is-tried",
            len(engine.other_profile_entries("slack", "whatever", "HERE")) == 2)
+        # ANOTHER ACCOUNT'S WINDOW IS NEVER SEEDED FROM THE OWNER'S KEY,
+        # which `slack NUL` is: a work Slack would arrive wherever the
+        # owner's Slack sat at the other desk.
+        ck("another-account-is-not-offered-the-owners-entry",
+           engine.other_profile_entries("slack", "titan", "HERE",
+                                        "titan") == [])
+        with open(os.path.join(_sd, "knowledge-WORK.json"), "w") as f:
+            json.dump({engine.kkey("slack", "titan"):
+                       {"app_id": "slack", "surface": "wc",
+                        "last_seen": 5.0}}, f)
+        ck("another-account-finds-its-own-entry",
+           [e["surface"] for e in engine.other_profile_entries(
+               "slack", "titan", "HERE", "titan")] == ["wc"])
+
+        # A RE-KEY REACHES EVERY OTHER DESK, and only the others: the loaded
+        # store is the caller's to write.
+        _old = engine.kkey("google-chrome", "titan:old")
+        for prof in ("HERE", "AWAY"):
+            with open(os.path.join(_sd, f"knowledge-{prof}.json"), "w") as f:
+                json.dump({_old: {"app_id": "google-chrome",
+                                  "title": "titan:old", "surface": prof}}, f)
+        _rk = lambda kb: engine.rekey_source(kb, "titan", {"old": "new"})
+        _nrk = engine.rekey_other_stores(_rk, "HERE")
+        with open(os.path.join(_sd, "knowledge-AWAY.json")) as f:
+            _away_kb = json.load(f)
+        with open(os.path.join(_sd, "knowledge-HERE.json")) as f:
+            _here_kb = json.load(f)
+        ck("a-rekey-moves-another-desks-slot",
+           _nrk == 1 and engine.kkey("google-chrome", "titan:new")
+           in _away_kb and _old not in _away_kb)
+        ck("a-rekey-leaves-the-loaded-desk-to-its-caller",
+           _old in _here_kb)
+        ck("a-rekey-that-raises-is-not-fatal",
+           engine.rekey_other_stores(lambda kb: 1 / 0, "HERE") == 0)
     finally:
         engine.STATE = _st2
         shutil.rmtree(_sd, ignore_errors=True)
@@ -11968,7 +12002,7 @@ def _t_displays(ck):
             engine.surface_map = lambda fresh=False: (
                 {"ref": {"output": "eDP-1", "workspace": [0, 0],
                          "pos": [0, 300], "size": [800, 300]}}, "")
-            engine.other_profile_entries = lambda a, i, p=None: [
+            engine.other_profile_entries = lambda a, i, p=None, s="": [
                 {"surface": "ref", "size": [400, 200], "last_seen": 1.0}]
             w.kb, w.kb_profile = {}, "DESK"     # NOTHING learned here
             w.placed.clear()
@@ -11994,6 +12028,70 @@ def _t_displays(ck):
             w.redisplay_ok = {42}
             w._place_view(_lv[0])
             ck("an-unreadable-map-seeds-nothing", _seeded == [])
+
+            # ANOTHER ACCOUNT'S WINDOW WITH A PER-WINDOW KEY THIS DESK NEVER
+            # LEARNED IS SEEDED, not handed the account's shared fallback.
+            # Measured on dragonfly 2026-11-12: two work Chrome windows took
+            # the fallback, found it held, and stacked where Chrome opened
+            # them, while their own slots at the laptop desk named a surface
+            # this desk has. The fallback is HELD here by another live
+            # window, which is that measured state exactly.
+            _fapp = "workapp"
+            _fv = [dict(_lv[0], **{"id": 43, "app-id": _fapp, "pid": 777}),
+                   dict(_lv[0], **{"id": 44, "app-id": _fapp, "pid": 777})]
+            _fb = dict(_slot, app_id=_fapp, appid_only=False, title="titan",
+                       source="titan")
+            _rid, _run, _rwo = _wmod.identity, _wmod.unidentified, \
+                engine.window_origin
+            _asked_src = []
+            try:
+                _wmod.identity = lambda v: "titan:abc" if v["id"] == 43 \
+                    else "titan"
+                _wmod.unidentified = lambda v: False
+                engine.window_origin = lambda pid: ("titan", 997)
+                engine.surface_map = lambda fresh=False: (
+                    {"ref": {"output": "eDP-1", "workspace": [0, 0],
+                             "pos": [0, 300], "size": [800, 300]}}, "")
+                engine.other_profile_entries = (
+                    lambda a, i, p=None, s="":
+                        _asked_src.append(s) or
+                        [{"surface": "ref", "size": [400, 200],
+                          "last_seen": 1.0}])
+                w.place_sock = _Sock(_fv, [dict(_lo[0], workspace={
+                    "x": 0, "y": 0, "grid_width": 3, "grid_height": 3})])
+                w.kb = {engine.kkey(_fapp, "titan"): _fb}
+                w.slot_held = {engine.kkey(_fapp, "titan"): 44}
+                _seeded.clear()
+                w.placed.clear()
+                w.redisplay_ok = {43}
+                w.deadline[43] = _time.time() + 100
+                w._place_view(_fv[0])
+                ck("an-unlearned-per-window-key-is-seeded-not-the-fallback",
+                   _seeded == [(43, "ref", (0, 300))])
+                ck("the-seeded-window-holds-its-own-key-not-the-fallback",
+                   w.slot_held.get(engine.kkey(_fapp, "titan:abc")) == 43
+                   and w.slot_held.get(engine.kkey(_fapp, "titan")) == 44)
+                ck("the-seed-is-asked-with-the-account",
+                   _asked_src == ["titan"])
+                # CONTROL: a window with NO per-window key still takes the
+                # fallback, so the seed is not reached for a window the
+                # fallback really is for.
+                _seeded.clear()
+                _asked_src.clear()
+                w.placed.clear()
+                w.slot_held = {}
+                w.redisplay_ok = {44}
+                w.deadline[44] = _time.time() + 100
+                w._place_view(_fv[1])
+                ck("a-window-the-fallback-is-for-still-takes-it",
+                   _seeded == [(44, None, (100, 120))]
+                   and _asked_src == [])
+            finally:
+                _wmod.identity, _wmod.unidentified = _rid, _run
+                engine.window_origin = _rwo
+                w.slot_held = {}
+                for _i in (43, 44):
+                    w.deadline.pop(_i, None)
         finally:
             Watcher._seat_view = _rseat2
             engine.surface_map, engine.other_profile_entries = _rsm2, _rope
@@ -12111,6 +12209,58 @@ def _t_displays(ck):
             w.src_asked, w.src_seen = {}, {}
         ck("a-failed-publish-does-not-break-the-refresh",
            _ok_poll and not _raised)
+
+        # ---- A RE-KEY REACHES THE OTHER DESKS' STORES: the WIRING --------
+        # rekey_other_stores' own cells say nothing about whether the two
+        # re-keys call it, and both plants removing the call passed the
+        # suite before these existed.
+        _ros, _rtsr = engine.rekey_other_stores, engine.take_source_rekey
+        _calls = []
+        try:
+            engine.source_refresh_plan = (
+                lambda rows, asked, now, seen, **_k: (["titan"], {}))
+            engine.source_trigger = lambda *a, **k: 1
+            engine.take_source_rekey = lambda src: {"old": "new"}
+            engine.rekey_other_stores = (
+                lambda fn, prof: _calls.append((fn, prof)) or 0)
+            engine.publish_sources = lambda *a, **k: False
+            w.src_asked, w.src_seen = {}, {}
+            w.kb, w.kb_profile = {}, "DESK"
+            w._poll_sources({"windows": []})
+        finally:
+            engine.source_refresh_plan, engine.source_trigger = _rsrp, _rstr
+            engine.publish_sources, engine.take_source_rekey = _rpub, _rtsr
+            engine.rekey_other_stores = _ros
+            w.src_asked, w.src_seen = {}, {}
+        _probe = {engine.kkey("x", "titan:old"): {"title": "titan:old"}}
+        ck("a-source-rekey-reaches-the-other-desks",
+           len(_calls) == 1 and _calls[0][1] == "DESK"
+           and _calls[0][0](_probe) == 1
+           and engine.kkey("x", "titan:new") in _probe)
+        _calls.clear()
+        _said5 = []
+        _rrc, _rsk, _rlg = _wmod.rekey_chrome, _wmod.save_knowledge, \
+            _wmod.logline
+        try:
+            _stub_rc = lambda kb: 2                            # noqa: E731
+            _wmod.rekey_chrome = _stub_rc
+            _wmod.save_knowledge = lambda kb, p: None
+            _wmod.logline = _said5.append
+            engine.rekey_other_stores = (
+                lambda fn, prof: _calls.append((fn, prof)) or 3)
+            _rc_ok = w._rekey_chrome()
+        finally:
+            _wmod.rekey_chrome, _wmod.save_knowledge = _rrc, _rsk
+            _wmod.logline = _rlg
+            engine.rekey_other_stores = _ros
+        ck("a-chrome-rekey-reaches-the-other-desks",
+           _rc_ok is True and len(_calls) == 1
+           and _calls[0][0] is _stub_rc and _calls[0][1] == "DESK")
+        # AND IT SAYS SO: this line once sat below a `return` and printed
+        # nothing for a week while the re-key did its work unseen.
+        ck("a-chrome-rekey-is-logged",
+           any("re-keyed 2 window slot(s)" in m for m in _said5)
+           and any("re-keyed 3 slot(s) in other desks" in m for m in _said5))
 
         # ---- A HAND-ASKED CAPTURE IS THE DAEMON'S, and here is why -------
         # A one-shot verb resolves another account's windows to the SOURCE

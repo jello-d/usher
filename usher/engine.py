@@ -5703,6 +5703,42 @@ def rekey_source(kb, src, binding):
     return moved
 
 
+def rekey_other_stores(rekey, profile):
+    """Apply a re-key to every OTHER desk's store, and return how many slots
+    moved. `rekey` is `lambda kb: <moved>`, the same function the loaded
+    store was just given.
+
+    A BINDING IS A FACT ABOUT THE WINDOWS, NOT ABOUT A DESK. A browser
+    restart mints fresh ids for every window, and the binding that follows
+    them is reported ONCE: applied to the loaded store alone, every other
+    desk's slots for those same windows are left under ids no window will
+    carry again. Measured on dragonfly 2026-11-12: two work Chrome windows
+    arranged on the laptop desk, a restart, then a dock, and the seed could
+    not find them because the laptop store still named the OLD ids, so they
+    took the shared fallback slot and stacked.
+
+    A DORMANT STORE HAS NO OTHER WRITER (the worker writes only the profile
+    it loaded), which is what makes writing it here safe; the caller holds
+    its lock, so a desk change cannot load one of these mid-write. Never
+    fatal: a store this cannot read is skipped and keeps what it had."""
+    moved = 0
+    for path in glob.glob(os.path.join(STATE, "knowledge-*.json")):
+        name = os.path.basename(path)[len("knowledge-"):-len(".json")]
+        if name == profile:
+            continue
+        kb = json_object(path)
+        if kb is None:
+            continue
+        try:
+            n = rekey(kb)
+        except Exception:                                  # noqa: BLE001
+            continue
+        if n:
+            write_json(path, json.dumps(kb, indent=2))
+            moved += n
+    return moved
+
+
 def source_refresh_plan(live, last, now, seen=None,
                         every=SOURCE_REFRESH_EVERY, settle=SOURCE_SETTLE,
                         answered=None, dashed=None):

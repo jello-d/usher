@@ -947,13 +947,28 @@ class Watcher:
         if late_chance and not self._placing_now():
             logline(f"late chance (present at login, identifiable only now): "
                     f"{app[:18]} | {title[:30]}")
-        if not e:
+        # A PER-WINDOW IDENTITY THIS DESK NEVER LEARNED is not the same as
+        # "nothing learned": free_slot then answers the account's SHARED
+        # source-alone fallback, which describes some other window of that
+        # account, and the window's own learned home at another desk is a
+        # better answer. Measured on dragonfly 2026-11-12: two work Chrome
+        # windows with per-window keys only in the laptop store took the
+        # fallback, found it held, and were left stacked where Chrome opened
+        # them, while their laptop slots named a surface this desk has.
+        _ident = identity(v)
+        own_unlearned = bool(
+            _src and engine.source_ident(_src, _ident)
+            and skey == engine.kkey(app, _src))
+        seeded = False
+        if not e or own_unlearned:
             # NOTHING LEARNED HERE, so ask the surface map whether this window
             # has a named home at another desk. Deliberately AFTER the settled
             # gate above: a seed is a guess, so it may only happen where usher
             # was going to place anyway, which is place, an anchor, a
             # late chance, or a dock. A dock is exactly when it is wanted.
-            e = self._seed(app, v)
+            s = self._seed(app, v, _src or "")
+            if s:
+                e, skey, seeded = s, None, True
         if not e:
             return   # never seen this identity -> we don't know where it goes
         # ONE WINDOW PER SLOT. Whoever got here first owns it until it
@@ -969,8 +984,13 @@ class Watcher:
             # A SEED has no slot key of its own: the entry came from another
             # desk's store, so there is nothing in THIS store to hold. The
             # identity's own key is the right ledger entry, since that is
-            # what the next capture will write it under.
-            skey = engine.matched_key(self.kb, app, identity(v), _src or "")
+            # what the next capture will write it under. For another
+            # account's per-window identity that is ITS key and never the
+            # shared fallback, which matched_key would answer when nothing
+            # is stored and which another window may already hold.
+            skey = (engine.kkey(app, _ident)
+                    if seeded and _src and engine.source_ident(_src, _ident)
+                    else engine.matched_key(self.kb, app, _ident, _src or ""))
         with self.lock:
             holder = self.slot_held.get(skey)
         own = live_holder(holder, vid, _live)
@@ -1008,7 +1028,7 @@ class Watcher:
                 self.slot_held[skey] = vid
         return moved
 
-    def _seed(self, app, v):
+    def _seed(self, app, v, src=""):
         """A starting slot from the SURFACE this window occupies at another
         desk, or None. Logged, because silently placing from a guess is as bad
         as silently not placing: watch.log is what settles "usher or the
@@ -1027,8 +1047,11 @@ class Watcher:
             outs = {o["name"]: o for o in self.place_sock.list_outputs()}
         except Exception:
             return None
+        # THE ACCOUNT GOES WITH THE QUESTION, or another account's window is
+        # offered the OWNER's app-id-only key on the other desk: a work Slack
+        # seeded from wherever the owner's Slack sat.
         others = engine.other_profile_entries(app, identity(v),
-                                              self.kb_profile)
+                                              self.kb_profile, src)
         seed = engine.surface_seed(others, surfaces,
                                    engine.surface_default())
         if not seed:
@@ -1298,7 +1321,8 @@ class Watcher:
             app = app_of(v)
             try:
                 others = engine.other_profile_entries(
-                    app, identity(v) or "", self.kb_profile)
+                    app, identity(v) or "", self.kb_profile,
+                    engine.window_origin(v.get("pid"))[0] or "")
             except Exception:                              # noqa: BLE001
                 others = []
             tgt = engine.rescue_slot(v, outs, others, surfaces, dflt)
@@ -1662,14 +1686,21 @@ class Watcher:
                 moved = rekey_chrome(self.kb)
                 if moved:
                     save_knowledge(self.kb, self.kb_profile)
-            return True
+                other = engine.rekey_other_stores(rekey_chrome,
+                                                  self.kb_profile)
         except Exception as e:
             logline(f"chrome re-key error: {e}")
             return False
-            return
+        # SAID AFTER THE PASS, NOT AFTER THE RETURN. This line sat below a
+        # `return True` and was unreachable, so a re-key that saved every
+        # chrome window's slot left nothing in watch.log to say it had run.
         if moved:
             logline(f"chrome: re-keyed {moved} window slot(s) onto the"
                     f" restarted browser's session ids")
+        if other:
+            logline(f"chrome: re-keyed {other} slot(s) in other desks' "
+                    f"stores too")
+        return True
 
     def _held(self, windows):
         """The view ids whose CURRENT position must not be believed yet.
@@ -1990,13 +2021,22 @@ class Watcher:
                 if _d == "":
                     self.src_dashed[(src, _tl)] = \
                         self.src_dashed.get((src, _tl), 0) + 1
+            _bind = engine.take_source_rekey(src)
             with self.lock:
-                n = engine.rekey_source(self.kb, src,
-                                        engine.take_source_rekey(src))
+                n = engine.rekey_source(self.kb, src, _bind)
+                # EVERY DESK'S STORE, or the slots another desk learned for
+                # these same windows stay under ids nothing carries again.
+                n_other = engine.rekey_other_stores(
+                    lambda kb, _s=src, _b=_bind:
+                        engine.rekey_source(kb, _s, _b),
+                    self.kb_profile) if _bind else 0
             if n:
                 changed = True
                 logline(f"{src}: re-keyed {n} window slot(s) onto that "
                         f"account's restarted browser")
+            if n_other:
+                logline(f"{src}: re-keyed {n_other} slot(s) in other desks' "
+                        f"stores too")
         # PUBLISHED FOR EVERY ONE-SHOT VERB, because the map is per process:
         # without this `restore`, `restore --dry-run`, `predict` and `verify`
         # all read another account's windows as the source ALONE, and
