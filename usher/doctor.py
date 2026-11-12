@@ -661,14 +661,11 @@ def _doctor_placement(out, kb, live, outs):
         # have cannot be placed either, and saying it is placeable sends a
         # reader looking for a fault in the placer. Which of the two refusals
         # it is decides what to do about it, so they are worded apart.
+        # A STICKY WINDOW IS PLACED BY MONITOR AND POSITION (sticky_entry),
+        # so its cell never decides anything.
+        e = engine.sticky_entry(lv, e)
         _o = engine.entry_output(e, outs)
-        if engine.is_sticky(lv, e):
-            # FIRST, because it is the stronger statement: a sticky window is
-            # on every workspace and is never moved, so whether its slot's
-            # output is attached or its cell fits is beside the point.
-            out(f"  STICKY      {app_of(lv)[:13]:13} {e['title'][:34]:34}"
-                f" -> never moved (on every workspace)")
-        elif _o is None:
+        if _o is None:
             out(f"  UNPLACEABLE {app_of(lv)[:13]:13} {e['title'][:34]:34}"
                 f" -> {where} NOT ATTACHED")
         elif not engine.cell_fits(e, {_o["name"]: _o}):

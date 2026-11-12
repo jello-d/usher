@@ -616,6 +616,8 @@ def cell_fits(slot, outputs):
     o = outputs.get(slot.get("output"))
     if not o:
         return False
+    if slot.get("sticky"):
+        return True     # on every workspace, so no cell to be outside of
     ws = o.get("workspace") or {}
     gw = int(ws.get("grid_width") or 0)
     gh = int(ws.get("grid_height") or 0)
@@ -6859,33 +6861,39 @@ def target_geometry(e, o):
     ow = o["geometry"]["width"] or 1
     oh = o["geometry"]["height"] or 1
     cur = o["workspace"]
-    i, j = e["workspace"]
+    # A STICKY SLOT HAS NO WORKSPACE: the window is on every one, so it is
+    # placed against the CURRENT viewport (no whole-screen offset), which is
+    # the arithmetic that once stranded a sticky prompt 2450px off-screen.
+    i, j = ((cur["x"], cur["y"]) if e.get("sticky")
+            else e["workspace"])
     px, py = e["pos"]
     w, h = e["size"]
     return {"x": (i - cur["x"]) * ow + px, "y": (j - cur["y"]) * oh + py,
             "width": w, "height": h}
 
 
-def is_sticky(v, e=None):
-    """Is this window sticky, by what it IS now or by what its slot SAYS? PURE.
+def sticky_entry(v, e):
+    """The slot to place `v` from, marked sticky when EITHER side is. PURE.
 
     A STICKY WINDOW IS ON EVERY WORKSPACE, so it has no workspace to be put
-    on, and usher never moves one. That is a rule rather than an optimisation,
-    because the arithmetic cannot be made right: wayfire reports a view's
-    geometry relative to the current viewport and a sticky view follows the
-    viewport, so a placement "onto another workspace" is an offset of whole
-    screens that the window then CARRIES with it. Measured live 2026-11-11 on
-    dragonfly: a keyring prompt placed from a slot saved with the viewport on
-    one workspace while the viewport was on another sat 2450px left of the
-    screen edge, off-screen, on every workspace, until it was moved by hand.
+    on: it is placed by MONITOR AND POSITION against the current viewport
+    (target_geometry, cell_fits and placement_landed all read the slot's
+    flag). It used to be never moved at all, because a workspace offset is
+    always wrong for one: wayfire reports a view's geometry relative to the
+    current viewport and a sticky view follows the viewport, so a placement
+    "onto another workspace" is an offset of whole screens that the window
+    then CARRIES with it. Measured live 2026-11-11 on dragonfly: a keyring
+    prompt placed that way sat 2450px left of the screen edge, off-screen, on
+    every workspace, until it was moved by hand.
 
     BOTH SIDES ARE ASKED, because either alone leaves a hole. The live view
-    is the truth when it says so; the ENTRY is what catches a window whose
-    stickiness arrives after it maps (a rule applies it late, so the map
-    payload does not carry it yet) and the reverse case of a stored sticky
-    slot matching a window that is not, which `place()` would otherwise MAKE
-    sticky and offset in one request."""
-    return bool((v or {}).get("sticky")) or bool((e or {}).get("sticky"))
+    is the truth when it says so (a rule may make a window sticky after its
+    slot was learned), and the slot carries it for a window whose stickiness
+    arrives after it maps; `place()` sends the result, so a sticky window is
+    never un-stuck by being placed."""
+    if not e or e.get("sticky") or not (v or {}).get("sticky"):
+        return e
+    return dict(e, sticky=True)
 
 
 def place(sock, view_id, e, o):
@@ -6972,7 +6980,11 @@ def placement_landed(v, e, o, tol=PLACE_TOL):
     if o is None or v.get("output-name") != o.get("name"):
         return False
     got = place_of(v, {o["name"]: o})
-    if [int(n) for n in got["workspace"]] != [int(n) for n in e["workspace"]]:
+    # A STICKY SLOT IS LANDED BY OUTPUT AND POSITION: its workspace is
+    # whichever one is being viewed, so comparing the stored one would read
+    # a correct placement as failed.
+    if (not e.get("sticky") and [int(n) for n in got["workspace"]]
+            != [int(n) for n in e["workspace"]]):
         return False
     return (abs(got["pos"][0] - e["pos"][0]) <= tol and
             abs(got["pos"][1] - e["pos"][1]) <= tol)
@@ -7772,6 +7784,7 @@ def _prediction_rows():
             "label": w.get("title"),
             "cmd": w.get("cmd"),
             "expect_workspace": e.get("workspace") if e else None,
+            "expect_sticky": bool(e.get("sticky")) if e else False,
             "expect_pos": e.get("pos") if e else None,
             "expect_size": e.get("size") if e else None,
             "expect_output": eo["name"] if eo else None,
@@ -7870,7 +7883,11 @@ def _verify_deltas(w, row, tol):
     client that rounds a size to whole cells, and there is no near-miss
     version of being on another monitor."""
     bad = []
-    for field, exp in (("workspace", row["expect_workspace"]),
+    # A STICKY WINDOW IS ON EVERY WORKSPACE, so its workspace is whichever one
+    # was being viewed when each side was read: compare monitor and position.
+    _sticky = row.get("expect_sticky") or w.get("sticky")
+    for field, exp in (("workspace",
+                        None if _sticky else row["expect_workspace"]),
                        ("pos", row["expect_pos"]),
                        ("size", row["expect_size"])):
         got = w.get(field)
@@ -8021,12 +8038,7 @@ def do_restore(dry, only=None, source=None):
         # anyway strands the window past the edge of the virtual desktop,
         # where no workspace navigation reaches it, and the read-back confirms
         # the stranding rather than catching it.
-        # A STICKY WINDOW IS NEVER MOVED, so it is reported rather than put
-        # anywhere: see is_sticky for why no offset can be right for one.
-        if is_sticky(lv, e):
-            unplaceable.append((lv, e, "sticky, so it is on every workspace "
-                                "and is never moved"))
-            continue
+        e = sticky_entry(lv, e)
         if not cell_fits(e, {o["name"]: o}):
             _ws = o.get("workspace") or {}
             unplaceable.append((lv, e, f"saved on ws{tuple(e['workspace'])}, "
@@ -8038,8 +8050,10 @@ def do_restore(dry, only=None, source=None):
         g = lv.get("geometry", {}) or {}
         same = (g.get("x") == geom["x"] and g.get("y") == geom["y"] and
                 lv.get("output-name") == o["name"])
+        _cell = ("sticky" if e.get("sticky")
+                 else f"ws{tuple(e['workspace'])}")
         label = f"{app_of(lv)[:18]:18} -> {o['name']} " \
-            f"ws{tuple(e['workspace'])} pos{tuple(e['pos'])}" \
+            f"{_cell} pos{tuple(e['pos'])}" \
             + (" [inv]" if e.get("inverted") else "")
         if dry:
             print(("  ok   " if same else "  MOVE ") + label)

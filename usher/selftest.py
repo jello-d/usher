@@ -9686,14 +9686,39 @@ def _t_sticky(ck):
     import time as _t
 
     # THE DEFINITION, BOTH SIDES, and the absent forms a live payload takes.
-    ck("sticky-a-live-sticky-view-counts", engine.is_sticky({"sticky": True}))
-    ck("sticky-a-stored-sticky-slot-counts",
-       engine.is_sticky({}, {"sticky": True}))
-    ck("sticky-neither-side-is-not-sticky",
-       not engine.is_sticky({"sticky": False}, {"sticky": False}))
-    ck("sticky-missing-fields-are-not-sticky",
-       not engine.is_sticky(None) and not engine.is_sticky({}, None)
-       and not engine.is_sticky(None, {}))
+    _se = engine.sticky_entry
+    _plain = {"sticky": False, "workspace": [0, 0]}
+    _marked = _se({"sticky": True}, _plain)
+    ck("sticky-a-live-sticky-view-marks-the-slot",
+       _marked["sticky"] is True and _plain["sticky"] is False)
+    ck("sticky-a-stored-sticky-slot-is-kept",
+       _se({}, {"sticky": True}) == {"sticky": True})
+    ck("sticky-neither-side-leaves-the-slot-alone",
+       _se({"sticky": False}, _plain) is _plain)
+    ck("sticky-no-slot-is-no-slot", _se({"sticky": True}, None) is None)
+
+    # THE ARITHMETIC: placed against the CURRENT viewport, never offset.
+    _o = {"id": 1, "name": "DP-1",
+          "geometry": {"x": 0, "y": 0, "width": 100, "height": 100},
+          "workspace": {"x": 2, "y": 1, "grid_width": 3, "grid_height": 3}}
+    _st = {"workspace": [0, 0], "pos": [5, 6], "size": [9, 9],
+           "sticky": True, "output": "DP-1"}
+    ck("sticky-target-is-the-current-viewport",
+       engine.target_geometry(_st, _o)["x"] == 5
+       and engine.target_geometry(_st, _o)["y"] == 6)
+    ck("sticky-control-an-ordinary-slot-is-offset-to-its-cell",
+       engine.target_geometry(dict(_st, sticky=False), _o)["x"] == -195)
+    ck("sticky-a-sticky-slot-is-never-off-the-grid",
+       engine.cell_fits(dict(_st, workspace=[9, 9]), {"DP-1": _o}))
+    ck("sticky-control-an-ordinary-slot-off-the-grid-is",
+       not engine.cell_fits(dict(_st, workspace=[9, 9], sticky=False),
+                            {"DP-1": _o}))
+    _lv = {"output-name": "DP-1",
+           "geometry": {"x": 5, "y": 6, "width": 9, "height": 9}}
+    ck("sticky-landed-is-monitor-and-position",
+       engine.placement_landed(_lv, _st, _o))
+    ck("sticky-control-an-ordinary-slot-needs-its-cell",
+       not engine.placement_landed(_lv, dict(_st, sticky=False), _o))
 
     # ---- THE DAEMON, through the real placer --------------------------------
     w = Watcher(launch=False)
@@ -9713,7 +9738,8 @@ def _t_sticky(ck):
             return [{"id": i} for i in sorted(self.live)]
 
     w.place_sock = _Sock()
-    w._seat_view = lambda v, e, o: (seated.append(v["id"]) or True)
+    w._seat_view = lambda v, e, o: (seated.append((v["id"], e["sticky"]))
+                                    or True)
     _key = kkey("signal", "")
 
     def _entry(sticky):
@@ -9728,51 +9754,28 @@ def _t_sticky(ck):
                 "geometry": {"x": 0, "y": 0, "width": 1, "height": 1}}
 
     w.kb = {_key: _entry(False)}
-    _said = []
-    _l_e, _l_w = engine.logline, _ws.logline
-    try:
-        engine.logline = _ws.logline = _said.append
-        for _v in (1, 2, 3, 4):
-            w.deadline[_v] = now + PLACE_GRACE
-            w.identified.add(_v)
-        # a live view that SAYS it is sticky, against an ordinary slot
-        w._try_place(V(1, sticky=True))
-        ck("sticky-the-daemon-never-moves-a-live-sticky-window",
-           1 not in seated)
-        ck("sticky-and-says-so-naming-the-app",
-           any("sticky, never moved" in m and "signal" in m for m in _said))
-        w._try_place(V(1, sticky=True))
-        ck("sticky-and-only-once-per-window",
-           len([m for m in _said if "sticky, never moved" in m]) == 1)
-        # it claimed NO slot, so the next window of the same key is placed.
-        # This is also the CONTROL: a gate refusing everything fails here.
-        ck("sticky-a-skipped-window-holds-no-slot", not w.slot_held)
-        w._try_place(V(2))
-        ck("sticky-and-a-window-that-is-not-sticky-is-still-placed",
-           seated == [2])
-        # a STORED sticky slot, against a view that does not say so: this is
-        # the late-rule case and the one place() would turn into sticky + off
-        # screen in a single request
-        w.kb[_key] = _entry(True)
-        with w.lock:
-            w.slot_held.clear()
-        w._try_place(V(3))
-        ck("sticky-the-daemon-never-places-onto-a-sticky-slot", 3 not in seated)
-        w.kb[_key] = _entry(False)
-        with w.lock:
-            w.slot_held.clear()
-        w._try_place(V(4))
-        ck("sticky-and-the-same-window-is-placed-once-the-slot-is-not",
-           4 in seated)
-        # a forgotten view is said again, or a new window reusing the vid is
-        # refused in silence; driven through the real event, not the set
-        ck("sticky-the-refusal-is-recorded", 1 in w.sticky_said)
-        with contextlib.redirect_stdout(io.StringIO()):
-            w._on_event({"event": "view-unmapped", "view": {"id": 1}})
-        ck("sticky-the-refusal-is-forgotten-on-unmap",
-           1 not in w.sticky_said)
-    finally:
-        engine.logline, _ws.logline = _l_e, _l_w
+    for _v in (1, 2, 3):
+        w.deadline[_v] = now + PLACE_GRACE
+        w.identified.add(_v)
+    w._try_place(V(1, sticky=True))
+    ck("sticky-the-daemon-places-a-live-sticky-window-as-sticky",
+       seated == [(1, True)])
+    ck("sticky-and-the-store-entry-is-not-changed-by-it",
+       w.kb[_key]["sticky"] is False)
+    w.kb[_key] = _entry(True)
+    with w.lock:
+        w.slot_held.clear()
+    seated[:] = []
+    w._try_place(V(3))
+    ck("sticky-a-sticky-slot-places-its-window-sticky",
+       seated == [(3, True)])
+    w.kb[_key] = _entry(False)
+    with w.lock:
+        w.slot_held.clear()
+    seated[:] = []
+    w._try_place(V(2))
+    ck("sticky-control-an-ordinary-window-is-placed-unsticky",
+       seated == [(2, False)])
 
     # ---- THE ONE-SHOT RESTORE, which has its own mover ----------------------
     _go = {"id": 1, "name": "DP-1",
@@ -9820,19 +9823,21 @@ def _t_sticky(ck):
              engine.profile_id) = _s
         return _b.getvalue()
 
+    # The view sits at viewport (10,20) on ws(0,0) while the slot says
+    # ws(1,1) pos (10,20): an ordinary window must MOVE there, a sticky one
+    # is already where it belongs.
     _r_ok = _restore(False, False)
     _r_live = _restore(False, True)
     _r_slot = _restore(True, False)
-    ck("sticky-restore-control-an-ordinary-window-matches",
-       "matched 1/1" in _r_ok and "unplaceable 0" in _r_ok)
-    ck("sticky-restore-reports-a-sticky-view-unplaceable",
-       "unplaceable 1" in _r_live and "sticky" in _r_live)
-    ck("sticky-restore-reports-a-sticky-slot-unplaceable",
-       "unplaceable 1" in _r_slot and "sticky" in _r_slot)
-    ck("sticky-restore-never-offers-it-as-a-move",
-       "MOVE" not in _r_live and "MOVE" not in _r_slot)
+    ck("sticky-restore-control-an-ordinary-window-moves-to-its-cell",
+       "MOVE" in _r_ok and "unplaceable 0" in _r_ok)
+    ck("sticky-restore-a-sticky-view-at-its-spot-is-ok",
+       "  ok   " in _r_live and "sticky" in _r_live
+       and "unplaceable 0" in _r_live)
+    ck("sticky-restore-a-sticky-slot-at-its-spot-is-ok",
+       "  ok   " in _r_slot and "unplaceable 0" in _r_slot)
 
-    # ---- AND doctor SAYS SO rather than `placeable` -------------------------
+    # ---- AND doctor CALLS IT PLACEABLE, not STICKY or unplaceable -----------
     def _doc(entry_sticky, view_sticky):
         _lines = []
         _pm = engine.panel_map
@@ -9847,16 +9852,64 @@ def _t_sticky(ck):
             engine.panel_map = _pm
         return "\n".join(_lines)
 
-    _d_ok, _d_live, _d_slot = _doc(False, False), _doc(False, True), \
-        _doc(True, False)
-    ck("sticky-doctor-control-an-ordinary-window-is-placeable",
-       "placeable" in _d_ok and "STICKY" not in _d_ok)
-    ck("sticky-doctor-calls-a-sticky-view-sticky",
-       "STICKY" in _d_live and "placeable " not in _d_live)
-    ck("sticky-doctor-calls-a-sticky-slot-sticky",
-       "STICKY" in _d_slot and "placeable " not in _d_slot)
-    ck("sticky-doctors-states-are-pairwise-distinct",
-       _d_ok != _d_live and _d_live != "" and _d_ok != "")
+    _d_live = _doc(False, True)
+    _d_off = _doc(True, False)
+    ck("sticky-doctor-a-sticky-window-is-placeable",
+       "placeable" in _d_live and "STICKY" not in _d_live)
+    # a sticky slot naming a cell OFF this grid is still placeable: it has
+    # no cell. The ordinary twin of it is not, which is the control.
+    _k2 = _kent(True)
+    _k2["workspace"] = [5, 5]
+    _d_far = []
+    _d_far2 = []
+    _pm = engine.panel_map
+    try:
+        engine.panel_map = lambda *_a, **_k: {}
+        _dsk._doctor_placement(_d_far.append,
+                               {kkey("zzz-unowned", ""): _k2},
+                               [_kview(False)], {"DP-1": _go})
+        _dsk._doctor_placement(_d_far2.append,
+                               {kkey("zzz-unowned", ""):
+                                dict(_k2, sticky=False)},
+                               [_kview(False)], {"DP-1": _go})
+    except Exception as _e:                                # noqa: BLE001
+        _d_far.append("RAISED %s" % _e)
+    finally:
+        engine.panel_map = _pm
+    ck("sticky-doctor-a-sticky-slot-off-the-grid-is-placeable",
+       "placeable" in "\n".join(_d_far) and "OFF THIS GRID"
+       not in "\n".join(_d_far))
+    ck("sticky-doctor-control-an-ordinary-slot-off-the-grid-is-not",
+       "OFF THIS GRID" in "\n".join(_d_far2))
+    # AND A LIVE STICKY WINDOW makes its ordinary slot's cell irrelevant too.
+    _d_lv = []
+    _pm = engine.panel_map
+    try:
+        engine.panel_map = lambda *_a, **_k: {}
+        _dsk._doctor_placement(_d_lv.append,
+                               {kkey("zzz-unowned", ""):
+                                dict(_k2, sticky=False)},
+                               [_kview(True)], {"DP-1": _go})
+    except Exception as _e:                                # noqa: BLE001
+        _d_lv.append("RAISED %s" % _e)
+    finally:
+        engine.panel_map = _pm
+    ck("sticky-doctor-a-live-sticky-window-off-the-grid-is-placeable",
+       "OFF THIS GRID" not in "\n".join(_d_lv)
+       and "placeable" in "\n".join(_d_lv))
+    ck("sticky-doctor-does-not-raise", "RAISED" not in _d_off)
+
+    # ---- verify COMPARES A STICKY WINDOW BY MONITOR AND POSITION ------------
+    _row = {"expect_workspace": [0, 0], "expect_pos": [5, 6],
+            "expect_size": [9, 9], "expect_output": "DP-1",
+            "expect_sticky": True}
+    _w = {"workspace": [4, 3], "pos": [5, 6], "size": [9, 9],
+          "output": "DP-1", "sticky": True}
+    ck("sticky-verify-ignores-the-viewport-it-was-read-on",
+       engine._verify_deltas(_w, _row, 2) == [])
+    ck("sticky-verify-control-an-ordinary-row-sees-the-cell",
+       engine._verify_deltas(dict(_w, sticky=False),
+                            dict(_row, expect_sticky=False), 2) != [])
 
     # ---- predict GIVES EACH WINDOW OF A FAMILY ITS OWN SLOT ----------
     # It took the FIRST matching key for every window, so N shells of one
