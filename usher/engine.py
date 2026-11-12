@@ -4470,6 +4470,37 @@ def live_sources(views=None):
     return source_trigger_plan(vs)
 
 
+def ask_sources_to_capture(lv=None):
+    """Ask every other account with windows here to record its own desk NOW
+    (`usher save --sources`). Returns how many accepted.
+
+    FOR A CALLER THAT IS ABOUT TO TAKE THE DISPLAY AWAY. An account records
+    its roster by reading its own windows through its own display socket, so
+    it can only do it while that socket exists. A logout that stops the
+    graphical session target first (tackup's session-logoff, for the portal
+    race) removes the enclave's display before `cleanly logoff` runs, and its
+    capture is refused: measured on dragonfly 2026-11-12, every logout,
+    "WAYLAND_DISPLAY names /run/severance/titan/wayland-0, which does not
+    exist". So the caller runs this FIRST, and the wind-down's own ask then
+    finds the roster already written. Never fatal."""
+    try:
+        lv = ipc().list_views(filter_mapped_toplevel=True) if lv is None \
+            else lv
+    except Exception as e:                                 # noqa: BLE001
+        print(f"usher: could not read the windows to ask about: {e}",
+              file=sys.stderr)
+        return 0
+    plan = source_trigger_plan(lv)
+    if not plan:
+        print("usher: no other account has windows here, nothing to ask")
+        return 0
+    win = {}
+    n = source_trigger(plan, "capture", windows=win, views=lv)
+    for r in source_window_report(lv, win):
+        _announce(f"usher: window identity, {r}")
+    return n
+
+
 def do_save():
     """`usher save`: capture, or ask the daemon to. See capture_plan."""
     running = watcher_pid()

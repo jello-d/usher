@@ -34,7 +34,13 @@ sub-package).
 The daemon (started at login): record continuously, place on map. Re-running it
 reloads a running instance.
 .TP
-.B save | capture
+.B save | capture " [--sources]"
+.B \-\-sources
+also asks every other account with windows here to record its own desk, for
+a logout that is about to stop the graphical session and with it that
+account's display: run it first, while the account can still see its
+windows.
+.IP
 Snapshot the current layout into the store now, and SAY what it declined to
 remember and why: an entry nothing could ever match again is not memory, so
 the rule is to log one and never write it. The daemon logs the same refusals

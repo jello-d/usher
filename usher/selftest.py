@@ -6749,6 +6749,44 @@ def _t_cli_split(ck):
     ck("save-does-not-capture-straight-from-the-client",
        _save_body is not None and "do_save" in _save_body.group(1)
        and "do_capture" not in _save_body.group(1))
+    # `save --sources` ALSO ASKS THE OTHER ACCOUNTS, and plain save does not:
+    # driven through the real dispatch with both halves stubbed.
+    _calls = []
+    _rs = (engine.do_save, engine.ask_sources_to_capture)
+    try:
+        engine.do_save = lambda: _calls.append("save") or 0
+        engine.ask_sources_to_capture = lambda *a: _calls.append("src") or 1
+        for _args in (["save", "--sources"], ["save"]):
+            try:
+                cli._dispatch("save", _args)
+            except SystemExit:
+                pass
+    finally:
+        engine.do_save, engine.ask_sources_to_capture = _rs
+    ck("save-sources-asks-the-other-accounts-and-plain-save-does-not",
+       _calls == ["save", "src", "save"])
+    # AND THE ASK ITSELF: the accounts with windows here are each asked to
+    # capture, with the live views relayed; none asked when there are none.
+    _asked = []
+    _rq = (engine.source_trigger_plan, engine.source_trigger,
+           engine.source_window_report)
+    try:
+        engine.source_trigger_plan = lambda lv: ["titan"] if lv else []
+        engine.source_trigger = lambda srcs, action, **k: (
+            _asked.append((list(srcs), action, k.get("views"))) or 1)
+        engine.source_window_report = lambda lv, win: []
+        import contextlib as _ctx
+        import io as _sio
+        with _ctx.redirect_stdout(_sio.StringIO()):
+            _n1 = engine.ask_sources_to_capture([{"id": 1}])
+            _n0 = engine.ask_sources_to_capture([])
+    finally:
+        (engine.source_trigger_plan, engine.source_trigger,
+         engine.source_window_report) = _rq
+    ck("ask-sources-to-capture-asks-each-with-the-live-views",
+       _n1 == 1 and _asked == [(["titan"], "capture", [{"id": 1}])])
+    ck("ask-sources-to-capture-asks-nobody-when-there-is-nobody",
+       _n0 == 0 and len(_asked) == 1)
     # An internal verb carries no help, so it never appears in usage.
     ck("internal-verbs-are-hidden",
        cli.VERBS["_worker"][1] is None and cli.VERBS["_super"][1] is None)

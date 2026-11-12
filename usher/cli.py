@@ -523,7 +523,13 @@ def _hand_over_power(verb):
 def _dispatch(verb, args):
     """The verb bodies. Gating already happened; this is what each one does."""
     if verb in ("capture", "save"):
-        sys.exit(engine.do_save())
+        rc = engine.do_save()
+        # --sources: also ask every other account to record its own desk
+        # now, for a caller about to take the display away
+        # (ask_sources_to_capture)
+        if "--sources" in args:
+            engine.ask_sources_to_capture()
+        sys.exit(rc)
     elif verb == "lock":
         sys.exit(engine.do_lock(forced="--force" in args or "-f" in args))
 
