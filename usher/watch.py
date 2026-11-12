@@ -449,6 +449,21 @@ def do_watch(launch=True):
     Supervisor(launch).run()
 
 
+def _slot_peer(v, src):
+    """A live view as engine.slot_hints wants it: (vid, app, src, ident,
+    size), the size being the one the compositor reports NOW, which for a
+    window that has just mapped is the size its app restored."""
+    g = v.get("geometry") or {}
+    size = (g.get("width"), g.get("height")) if g.get("width") else None
+    return (v.get("id"), app_of(v), src, identity(v) or "", size)
+
+
+def _row_peer(w):
+    """A snapshot row as engine.slot_hints wants it."""
+    return (w.get("id"), w.get("app_id") or "", w.get("source") or "",
+            w.get("key") or "", w.get("size"))
+
+
 class Watcher:
     """The daemon proper: place windows to their known spot as they appear
     (react), and continuously record the layout into the knowledge base
@@ -910,8 +925,12 @@ class Watcher:
                     self.slot_held[_k] = _id
             except Exception as _e:                      # noqa: BLE001
                 logline(f"slot occupancy: {_e}")
-            skey, e = engine.free_slot(self.kb, self.slot_held, app,
-                                       identity(v), _src or "", vid, _live)
+            skey, e = engine.free_slot(
+                self.kb, self.slot_held, app, identity(v), _src or "", vid,
+                _live, **engine.slot_hints(
+                    self.kb, _slot_peer(v, _src or ""),
+                    [_slot_peer(w, engine.source_of(w) or "")
+                     for w in _views if app_of(w) == app]))
         # A STICKY WINDOW IS PLACED BY MONITOR AND POSITION, never onto a
         # workspace (see engine.sticky_entry): the slot is marked sticky when
         # the live window is, so the arithmetic and the read-back both skip
@@ -1864,9 +1883,12 @@ class Watcher:
             # slot taken". A window with a free one is going to be placed into
             # it and its position is then worth learning; one with none owns
             # nothing, so there is nowhere its position could honestly go.
-            k, _e = engine.free_slot(self.kb, ledger, w.get("app_id") or "",
-                                     w.get("key") or "",
-                                     w.get("source") or "", vid, live)
+            k, _e = engine.free_slot(
+                self.kb, ledger, w.get("app_id") or "", w.get("key") or "",
+                w.get("source") or "", vid, live, **engine.slot_hints(
+                    self.kb, _row_peer(w),
+                    [_row_peer(x) for x in windows
+                     if x.get("app_id") == w.get("app_id")]))
             if k is None:
                 continue          # no slot at all: nothing to be refused by
             h = ledger.get(k)

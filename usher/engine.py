@@ -3204,7 +3204,43 @@ def matched_key(kb, app, ident, src=""):
     return next((k for k in ks if kb.get(k)), ks[-1])
 
 
-def free_slot(kb, held, app, ident, src, vid, live):
+SIZE_MATCH = 3   # px either way. Chrome restores a window's size EXACTLY
+#                  (measured: six windows to the pixel); kitty rounds to
+#                  whole cells and is deliberately NOT covered, since a
+#                  near-miss there would pair the wrong two terminals.
+
+
+def size_matches(e, size, tol=SIZE_MATCH):
+    """Does slot `e` remember this window's size? PURE."""
+    try:
+        return (abs(float(e["size"][0]) - float(size[0])) <= tol
+                and abs(float(e["size"][1]) - float(size[1])) <= tol)
+    except (KeyError, IndexError, TypeError, ValueError):
+        return False
+
+
+def spare_source_slots(kb, app, src, claimed):
+    """`src`'s own per-window slots for `app` that NO live window claims.
+    PURE.
+
+    A WINDOW ITS ACCOUNT COULD NOT NAME THIS TIME may still be the window one
+    of these was learned from: the account names a Chrome window by joining
+    its title to the session file, and two windows sharing a title are
+    refused by design. Measured on dragonfly 2026-11-12: after a reboot two
+    work windows both read `<a work window title>`, so the one that had its own
+    slot before the reboot came back unnamed, took the shared slot of the
+    other, and the other was left at the cascade. These are what `free_slot`
+    may offer such a window, and only on an exact SIZE match."""
+    if not src:
+        return []
+    pre = kkey(app, src + ":")
+    return sorted(k for k in kb
+                  if k.startswith(pre) and slot_base(k) == k
+                  and k.partition("\x00")[2] not in claimed)
+
+
+def free_slot(kb, held, app, ident, src, vid, live, size=None, spare=(),
+              rivals=()):
     """The slot this window may take: (key, entry).
 
     `(None, None)` when the identity is not remembered at all, and the LAST
@@ -3234,17 +3270,51 @@ def free_slot(kb, held, app, ident, src, vid, live):
     # rects. The layout is identical either way, since the rects are a
     # bijection, but a visible shuffle that changes nothing is still worth not
     # doing.
-    for k in cands:
+    for k in list(cands) + [s for s in spare if s not in cands]:
         if held.get(k) == vid:
             return k, kb[k]
-    last = None
-    for k in cands:
-        if live_holder(held.get(k), vid, live) != "held":
-            return k, kb[k]
-        last = k
-    return (last, kb[last]) if last is not None else (None, None)
+    # THE SLOT THAT REMEMBERS THIS WINDOW'S SIZE, when exactly one free one
+    # does. The writer assigns shared slots by view id and the placer took
+    # the first free one, which is harmless only while the windows are
+    # interchangeable; Chrome restores each window at its remembered size
+    # before anything moves it, so the size says which rect is this
+    # window's. AMBIGUITY FALLS BACK to the order below, which is the old
+    # behaviour, so windows of one size are unaffected.
+    if size:
+        fit = [k for k in list(cands) + [s for s in spare if s not in cands]
+               if kb.get(k) and size_matches(kb[k], size)
+               and live_holder(held.get(k), vid, live) != "held"]
+        if len(fit) == 1:
+            return fit[0], kb[fit[0]]
+    # AND NOT A SLOT ANOTHER LIVE WINDOW'S SIZE CLAIMS, when there is a free
+    # one that is nobody's: `rivals` are the sizes of the other live windows
+    # sharing this identity, and taking the rect one of them will match
+    # leaves THAT window at the cascade, which is what happened above.
+    free = [k for k in cands
+            if live_holder(held.get(k), vid, live) != "held"]
+    unclaimed = [k for k in free
+                 if not any(size_matches(kb[k], r) for r in rivals)]
+    if unclaimed or free:
+        k = (unclaimed or free)[0]
+        return k, kb[k]
+    return (cands[-1], kb[cands[-1]]) if cands else (None, None)
 
 
+
+
+def slot_hints(kb, me, peers):
+    """free_slot's size, spare and rivals for window `me`. PURE.
+
+    `me` and each of `peers` are (vid, app, src, ident, size). ONE
+    DEFINITION for the placer and the learner's hold gate, which both ask
+    `free_slot` and must get the same slot for the same window, or the gate
+    holds a window out of the capture that the placer is about to seat."""
+    vid, app, src, ident, size = me
+    same = [p for p in peers if p[0] != vid and p[1] == app and p[2] == src]
+    rivals = [p[4] for p in same if p[3] == ident and p[4]]
+    spare = (spare_source_slots(kb, app, src, {p[3] for p in same})
+             if src and ident == src else [])
+    return {"size": size, "spare": spare, "rivals": rivals}
 
 
 def slot_squatters(kb, held, app, ident, src, vid, views, outs, panels=None):

@@ -3911,6 +3911,108 @@ def _t_loupe(ck):
         engine.EXCLUDE_RULES = _rex
 
 
+def _t_size_slots(ck):
+    """A window with no identity of its own takes the slot that remembers
+    its SIZE. Measured on dragonfly 2026-11-12: after a reboot two work
+    Chrome windows shared the title `<a work window title>`, so the account could
+    name neither; one took the other's shared slot and the other was left at
+    the cascade, while Chrome had restored each at its exact remembered size
+    (2527x1702, 2498x1702, 2265x1702)."""
+    K = engine.kkey
+    app, src = "google-chrome", "titan"
+    fam0, fam1 = K(app, src), engine.slot_key(app, src, 1)
+    bg = K(app, "titan:b48c")
+    kb = {fam0: {"size": [2498, 1702], "pos": [236, 48]},
+          fam1: {"size": [2265, 1702], "pos": [151, 52]},
+          bg: {"size": [2527, 1702], "pos": [198, 54]},
+          K(app, "titan:held"): {"size": [2318, 1633]},
+          engine.slot_key(app, "titan:b48c", 1): {"size": [2527, 1702]},
+          K("slack", "titan:zzz"): {"size": [2527, 1702]},
+          K(app, "other:zzz"): {"size": [2527, 1702]}}
+    ck("size-matches-within-the-tolerance",
+       engine.size_matches({"size": [2500, 1700]}, (2502, 1702))
+       and not engine.size_matches({"size": [2500, 1700]}, (2504, 1700))
+       and not engine.size_matches({}, (1, 1)))
+    ck("spare-slots-are-the-accounts-own-unclaimed-per-window-keys",
+       engine.spare_source_slots(kb, app, src, {"titan:held"}) == [bg]
+       and engine.spare_source_slots(kb, app, "", set()) == [])
+
+    def fs(size, spare=(), rivals=(), held=None, vid=9):
+        return engine.free_slot(kb, held or {}, app, src, src, vid,
+                                {9, 1, 2, 3}, size=size, spare=spare,
+                                rivals=rivals)[0]
+    ck("free-slot-takes-the-slot-of-its-size", fs((2265, 1702)) == fam1)
+    ck("free-slot-control-no-size-keeps-the-old-order", fs(None) == fam0)
+    ck("free-slot-a-size-nobody-remembers-keeps-the-old-order",
+       fs((1000, 1000)) == fam0)
+    ck("free-slot-takes-its-accounts-spare-slot-on-a-size-match",
+       fs((2527, 1702), spare=[bg]) == bg)
+    ck("free-slot-never-takes-a-spare-slot-without-a-size-match",
+       fs((1000, 1000), spare=[bg]) == fam0)
+    ck("free-slot-leaves-the-rect-a-rival-will-match",
+       fs((1000, 1000), rivals=[(2498, 1702)]) == fam1)
+    ck("free-slot-rivals-on-every-slot-keep-the-old-order",
+       fs((1000, 1000), rivals=[(2498, 1702), (2265, 1702)]) == fam0)
+    ck("free-slot-an-ambiguous-size-keeps-the-old-order",
+       engine.free_slot(dict(kb, **{fam1: {"size": [2498, 1702]}}), {}, app,
+                        src, src, 9, {9}, size=(2498, 1702))[0] == fam0)
+    ck("free-slot-a-held-size-match-is-not-taken",
+       fs((2265, 1702), held={fam1: 1}) == fam0)
+    ck("free-slot-keeps-a-spare-slot-it-already-holds",
+       fs((1, 1), spare=[bg], held={bg: 9}) == bg)
+    h = engine.slot_hints(kb, (9, app, src, src, (2527, 1702)),
+                          [(9, app, src, src, (2527, 1702)),
+                           (1, app, src, src, (2498, 1702)),
+                           (2, app, src, "titan:held", (2318, 1633)),
+                           (3, "slack", src, src, (5, 5))])
+    ck("slot-hints-spare-rivals-and-size",
+       h == {"size": (2527, 1702), "spare": [bg],
+             "rivals": [(2498, 1702)]})
+    ck("slot-hints-no-spare-for-a-window-that-has-its-own-identity",
+       engine.slot_hints(kb, (9, app, src, "titan:x", (1, 1)), [])["spare"]
+       == [])
+    # THE MEASURED CASE, IN EVERY ORDER: each window must land on its own
+    # rect whichever the compositor maps first.
+    import itertools
+    wins = {36: (2527, 1702), 30: (2498, 1702), 38: (2265, 1702)}
+    want = {36: bg, 30: fam0, 38: fam1}
+    ok = True
+    for order in itertools.permutations(wins):
+        held = {}
+        for vid in order:
+            peers = [(v, app, src, src, sz) for v, sz in wins.items()]
+            k = engine.free_slot(kb, held, app, src, src, vid, set(wins),
+                                 **engine.slot_hints(
+                                     kb, (vid, app, src, src, wins[vid]),
+                                     peers))[0]
+            held[k] = vid
+        ok = ok and all(held.get(want[v]) == v for v in wins)
+    ck("the-measured-reboot-lands-every-window-in-every-order", ok)
+    # AND THE LEARNER'S HOLD GATE ASKS THE SAME QUESTION: a window whose
+    # size names a free spare slot is not held out of the capture because
+    # the first shared slot is someone else's.
+    from .watch import Watcher
+    _w = Watcher(launch=False)
+    _w.kb = {fam0: kb[fam0], bg: kb[bg]}
+    _w.slot_held = {fam0: 30}
+    _rows = [{"id": 36, "app_id": app, "source": src, "key": src,
+              "size": [2527, 1702]},
+             {"id": 30, "app_id": app, "source": src, "key": src,
+              "size": [2498, 1702]}]
+    _w.st["armed_at"] = 0.0
+    try:
+        _hd = _w._held(_rows)
+    except Exception as _e:                                # noqa: BLE001
+        _hd = {"RAISED %s" % _e}
+    ck("the-hold-gate-sees-the-size-slot-too", 36 not in _hd)
+    _w.kb = {fam0: kb[fam0]}
+    try:
+        _hd = _w._held(_rows)
+    except Exception as _e:                                # noqa: BLE001
+        _hd = {"RAISED %s" % _e}
+    ck("the-hold-gate-control-holds-a-window-with-no-free-slot", 36 in _hd)
+
+
 def _t_slots(ck):
     """ONE WINDOW PER SLOT, driven through the real Watcher.
 
@@ -12813,11 +12915,39 @@ def _t_displays(ck):
                 ck("a-window-the-fallback-is-for-still-takes-it",
                    _seeded == [(44, None, (100, 120))]
                    and _asked_src == [])
+                # AND THE PLACER HANDS free_slot THE SIZE: two windows share
+                # the fallback, and the one placed first takes the slot of
+                # ITS size, not the first one.
+                _sv = [dict(_lv[0], **{"id": 47, "app-id": _fapp,
+                                        "pid": 777,
+                                        "geometry": {"x": 0, "y": 0,
+                                                     "width": 2265,
+                                                     "height": 1702}}),
+                       dict(_lv[0], **{"id": 48, "app-id": _fapp,
+                                        "pid": 777,
+                                        "geometry": {"x": 0, "y": 0,
+                                                     "width": 2498,
+                                                     "height": 1702}})]
+                _wmod.identity = lambda v: "titan"
+                w.place_sock = _Sock(_sv, [dict(_lo[0], workspace={
+                    "x": 0, "y": 0, "grid_width": 3, "grid_height": 3})])
+                w.kb = {engine.kkey(_fapp, "titan"):
+                        dict(_fb, pos=[10, 60], size=[2498, 1702]),
+                        engine.slot_key(_fapp, "titan", 1):
+                        dict(_fb, pos=[20, 70], size=[2265, 1702])}
+                _seeded.clear()
+                w.placed.clear()
+                w.slot_held = {}
+                w.redisplay_ok = {47}
+                w.deadline[47] = _time.time() + 100
+                w._place_view(_sv[0])
+                ck("the-placer-takes-the-slot-of-the-windows-size",
+                   _seeded == [(47, None, (20, 70))])
             finally:
                 _wmod.identity, _wmod.unidentified = _rid, _run
                 engine.window_origin = _rwo
                 w.slot_held = {}
-                for _i in (43, 44):
+                for _i in (43, 44, 47):
                     w.deadline.pop(_i, None)
         finally:
             Watcher._seat_view = _rseat2
@@ -14132,7 +14262,7 @@ def selftest():
         for area in (_t_registry, _t_resolution, _t_lock,
                      _t_toplevels, _t_roster,
                      _t_lifecycle, _t_desktop, _t_loupe, _t_slots,
-                     _t_sticky, _t_visible, _t_verify,
+                     _t_sticky, _t_visible, _t_verify, _t_size_slots,
                      _t_terminals, _t_cli_split,
                      _t_launch_source,
                      _t_relaunch, _t_chrome, _t_learn,
