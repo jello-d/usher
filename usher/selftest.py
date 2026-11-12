@@ -10730,10 +10730,17 @@ def _t_undo(ck):
         _name = os.path.basename(_have[0])[:-5]
         with open(engine.UNDO_FILE, "w") as f:
             json.dump({"from": _name, "sel": []}, f)
+        _rtr, _trd = engine.translate_snapshot, []
         try:
+            engine.translate_snapshot = (lambda sn, lg, since:
+                                         _trd.append(since) or (dict(sn), 0))
             _got = w._take_undo()
         except Exception as _e:                            # noqa: BLE001
             _got = "RAISED %s" % _e
+        finally:
+            engine.translate_snapshot = _rtr
+        ck("undo-request-follows-the-re-key-log-since-the-snapshot",
+           _trd == [engine.snapshot_time(_have[0])])
         ck("undo-request-restores-into-the-live-store",
            isinstance(_got, list) and w.kb[K("signal", "")]["pos"]
            == engine.json_object(_have[0])[K("signal", "")]["pos"])
@@ -10841,6 +10848,22 @@ def _t_undo(ck):
             engine.FORGET_FILE = _wmod.FORGET_FILE = _rff
         ck("a-purge-request-reaches-the-daemon-as-a-purge",
            _fa == [(["titan"], True)])
+        # A BROWSER RESTART WRITES ITS WHOLE BINDING TO THE LOG.
+        _rcb, _rrr2 = engine.chrome_session_binding, engine.record_rekeys
+        _rrc, _ros = _wmod.rekey_chrome, engine.rekey_other_stores
+        _rec2 = []
+        try:
+            engine.chrome_session_binding = lambda: {1: 2}
+            engine.record_rekeys = lambda pairs, now=None: _rec2.extend(pairs)
+            _wmod.rekey_chrome = lambda kb: 0
+            engine.rekey_other_stores = lambda *a, **k: 0
+            w._rekey_chrome()
+        finally:
+            engine.chrome_session_binding = _rcb
+            engine.record_rekeys = _rrr2
+            _wmod.rekey_chrome, engine.rekey_other_stores = _rrc, _ros
+        ck("a-browser-restart-logs-its-binding",
+           _rec2 == [("chrome:win:1", "chrome:win:2")])
     finally:
         engine.UNDO_FILE, _wmod.UNDO_FILE = _rfile, _rwf
         _wmod.save_knowledge, Watcher._sweep = _rsk, _rsw
@@ -10848,6 +10871,90 @@ def _t_undo(ck):
         engine.take_snapshot = _rts
         w.transition_until = 0.0
         shutil.rmtree(_ud, ignore_errors=True)
+
+    # ---- THE RE-KEY LOG: a snapshot's ids, carried to now ----------------
+    _lg = engine.rekey_log_path()
+    try:
+        os.remove(_lg)
+    except OSError:
+        pass
+    ck("rekey-log-records-moves",
+       engine.record_rekeys([("chrome:win:1", "chrome:win:2"),
+                             ("chrome:win:3", "chrome:win:3")], now=100) == 1)
+    ck("rekey-log-skips-a-move-already-logged",
+       engine.record_rekeys([("chrome:win:1", "chrome:win:2")],
+                            now=200) == 0)
+    engine.record_rekeys([("chrome:win:2", "chrome:win:5"),
+                          ("titan:aa", "titan:bb")], now=300)
+    with open(_lg, "a") as f:
+        f.write("not json\n[1, 2]\n[true, \"a\", \"b\"]\n")
+    _log = engine.read_rekey_log()
+    ck("rekey-log-reads-back-in-order-and-skips-junk",
+       [(a, b) for _t, a, b in _log] == [
+           ("chrome:win:1", "chrome:win:2"),
+           ("chrome:win:2", "chrome:win:5"), ("titan:aa", "titan:bb")])
+    _sk = {K("google-chrome", "chrome:win:1"): {"pos": [1, 1],
+                                                "title": "chrome:win:1"},
+           K("google-chrome", "chrome:win:1") + "\x002": {"pos": [2, 2]},
+           K("slack", "titan:aa"): {"pos": [3, 3]},
+           K("signal", ""): {"pos": [4, 4]}}
+    _tr, _tn = engine.translate_snapshot(_sk, _log, since=50)
+    ck("translate-follows-a-chain-to-the-id-of-now",
+       _tr.get(K("google-chrome", "chrome:win:5"), {}).get("pos") == [1, 1]
+       and _tr[K("google-chrome", "chrome:win:5")]["title"]
+       == "chrome:win:5")
+    ck("translate-carries-an-index",
+       _tr.get(K("google-chrome", "chrome:win:5") + "\x002",
+               {}).get("pos") == [2, 2])
+    ck("translate-follows-an-account's-moves",
+       K("slack", "titan:bb") in _tr and K("slack", "titan:aa") not in _tr)
+    ck("translate-leaves-what-never-moved",
+       _tr.get(K("signal", "")) == {"pos": [4, 4]} and _tn == 3)
+    ck("translate-ignores-moves-before-the-snapshot",
+       engine.translate_snapshot(_sk, _log, since=150)[0]
+       .get(K("google-chrome", "chrome:win:5")) is None
+       and K("google-chrome", "chrome:win:1") in
+       engine.translate_snapshot(_sk, _log, since=150)[0])
+    _clash = dict(_sk, **{K("slack", "titan:bb"): {"pos": [9, 9]}})
+    ck("translate-never-overwrites-the-snapshot's-own-answer",
+       engine.translate_snapshot(_clash, _log, since=50)[0]
+       [K("slack", "titan:bb")] == {"pos": [9, 9]})
+    ck("translate-is-pure", K("slack", "titan:aa") in _sk)
+    # THE POINT OF IT: a slot whose browser has restarted since now
+    # collides with the live one, and the snapshot wins.
+    _live = {K("google-chrome", "chrome:win:5"): {"pos": [7, 7]}}
+    _mg, _rs = engine.snapshot_merge(_live, _tr)
+    ck("a-translated-snapshot-restores-over-the-restarted-window",
+       _mg[K("google-chrome", "chrome:win:5")]["pos"] == [1, 1]
+       and K("google-chrome", "chrome:win:1") not in _mg)
+    ck("rekey-log-prunes-to-the-oldest-snapshot",
+       engine.prune_rekey_log(250) == 1
+       and [a for _t, a, _b in engine.read_rekey_log()]
+       == ["chrome:win:2", "titan:aa"])
+    # AND A SNAPSHOT PRUNES IT, so the log is as long as the history.
+    engine.record_rekeys([("chrome:win:90", "chrome:win:91")], now=1)
+    engine.take_snapshot({K("x", ""): {"pos": [1, 1]}}, "PRUNELOG",
+                         now=_t0)
+    ck("a-snapshot-prunes-the-re-key-log",
+       all(a != "chrome:win:90" for _t, a, _b in engine.read_rekey_log()))
+    # THE WHOLE BINDING, not only what a store held.
+    _rsh, _rwt = engine.session_history, engine.chrome_window_tabs
+    try:
+        engine.session_history = lambda: {"P": ["new", "old"]}
+        engine.chrome_window_tabs = lambda f: (
+            {20: frozenset({"a", "b"}), 21: frozenset({"c"})}
+            if f == "new" else
+            {10: frozenset({"a", "b"}), 11: frozenset({"c"}),
+             20: frozenset({"z"})})
+        _bd = engine.chrome_session_binding()
+    finally:
+        engine.session_history, engine.chrome_window_tabs = _rsh, _rwt
+    ck("the-session-binding-covers-every-window-of-the-last-run",
+       _bd == {10: 20, 11: 21})
+    try:
+        os.remove(_lg)
+    except OSError:
+        pass
 
     # ---- doctor SAYS WHETHER THERE IS ANYTHING TO GO BACK TO --------------
     from . import doctor as _dsn
@@ -10888,11 +10995,24 @@ def _t_undo(ck):
         engine.load_knowledge = lambda p=None: dict(_kb)
         engine.save_knowledge = lambda kb, p: _saved2.append(dict(kb))
         engine.watcher_pid = lambda: None
+        engine.record_rekeys([("chrome:win:777", "chrome:win:778")],
+                             now=_t0 + 7200)
+        _out_k = dict(_kb)
+        _out_k[K("google-chrome", "chrome:win:778")] = {
+            "workspace": [0, 0], "pos": [0, 0]}
+        engine.load_knowledge = lambda p=None: dict(_out_k)
+        _sp = engine.snapshot_find("UNDO", "1")
+        _sj = engine.json_object(_sp)
+        _sj[K("google-chrome", "chrome:win:777")] = {"workspace": [2, 2],
+                                                     "pos": [5, 5]}
+        engine.write_json(_sp, json.dumps(_sj))
         with contextlib.redirect_stdout(_out):
             _rc0 = engine.do_undo()
             _rc1 = engine.do_undo("1")
         ck("undo-with-nothing-named-lists", _rc0 == engine.EXIT_OK
            and "h ago" in _out.getvalue())
+        ck("undo-preview-follows-the-re-key-log",
+           "followed through" in _out.getvalue())
         ck("undo-previews-and-touches-nothing", _rc1 == engine.EXIT_OK
            and _saved2 == [] and not os.path.exists(engine.UNDO_FILE)
            and "--apply" in _out.getvalue())
@@ -12714,6 +12834,26 @@ def _t_displays(ck):
         ck("the-refresh-counts-each-dash-it-hears",
            w.src_dashed.get(("titan", "ab12")) == 2)
         w.src_dashed.clear()
+        # AND AN ACCOUNT'S RE-KEY GOES INTO THE LOG, or a snapshot of its
+        # windows from before its browser restarted cannot be merged back.
+        _rrr, _rpub2 = engine.record_rekeys, engine.publish_sources
+        _rec = []
+        try:
+            engine.source_refresh_plan = (
+                lambda rows, asked, now, seen, **_k: (["titan"], {}))
+            engine.source_trigger = (lambda *a, **k: engine._SOURCE_REKEY
+                                     .update(titan={"o1": "n1"}) or 1)
+            engine.record_rekeys = lambda pairs, now=None: _rec.extend(pairs)
+            engine.publish_sources = lambda *a, **k: True
+            w.kb, w.kb_profile = {}, "DESK"
+            w._poll_sources({"windows": []})
+        finally:
+            engine.source_refresh_plan, engine.source_trigger = _rsrp, _rst
+            engine.record_rekeys, engine.publish_sources = _rrr, _rpub2
+            engine._SOURCE_REKEY.clear()
+            w.src_asked, w.src_seen = {}, {}
+        ck("an-account's-re-key-is-logged",
+           _rec == [("titan:o1", "titan:n1")])
         # AND A PUBLISH THAT RAISES DOES NOT COST THE REFRESH, since every
         # outcome of that poll is optional: it is a sudo subprocess on the
         # capture thread and the windows keep the source-alone key without it.

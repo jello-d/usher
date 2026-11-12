@@ -3579,6 +3579,31 @@ def rekey_chrome(kb):
         return 0
     bound = chrome_bind_windows(
         cur, {w: u for w, u in prev.items() if w in stale})
+    return _rekey_chrome_apply(kb, stale, bound)
+
+
+def chrome_session_binding():
+    """{old id: new id} for EVERY window of the previous browser run that
+    binds to one of this run's, whether or not any store holds it. The
+    re-key log needs the whole binding, since a snapshot may hold a window
+    the live store has since forgotten; `rekey_chrome` binds only what is
+    stale in the store it is given, so the two are separate questions."""
+    hist = session_history()
+    cur, prev = {}, {}
+    for files in hist.values():
+        cur.update(chrome_window_tabs(files[0]))
+        for f in files[1:]:
+            for w, urls in chrome_window_tabs(f).items():
+                prev.setdefault(w, urls)
+    if not cur or not prev:
+        return {}
+    return chrome_bind_windows(
+        cur, {w: u for w, u in prev.items() if w not in cur})
+
+
+def _rekey_chrome_apply(kb, stale, bound):
+    """Move the stale chrome slots `bound` names: rekey_chrome's second
+    half, its own function to keep that one to a readable length."""
     moved = 0
     for old, new in bound.items():
         for _k in stale[old]:
@@ -4542,6 +4567,11 @@ def take_snapshot(kb, profile, now=None, tag=""):
                 os.remove(p)
             except OSError:
                 pass
+        _old = [snapshot_time(p) for p in glob.glob(
+            os.path.join(STATE, "snapshots", "*", "*.json"))]
+        _old = [t for t in _old if t is not None]
+        if _old:
+            prune_rekey_log(min(_old))
         return path
     except Exception as e:                                 # noqa: BLE001
         logline(f"snapshot of {profile} failed: {e}")
@@ -4607,6 +4637,122 @@ def snapshot_purge(profile, selectors):
             write_json(p, json.dumps(kb, indent=2))
             gone += len(hits)
     return gone
+
+
+# THE RE-KEY LOG: how a window's identity moved, so a snapshot taken before a
+# browser restart can still be merged back. A chrome slot names ONE browser
+# run's window, and a restart mints fresh ids for every window; the daemon
+# re-keys the live stores, and a snapshot is never rewritten (snapshots are
+# immutable, which is the user's call and the point of keeping them). So the
+# MOVES are kept beside them and applied when a snapshot is merged.
+#
+# THE WHOLE BINDING IS LOGGED, NOT JUST WHAT THE STORE HELD: a re-key moves
+# only keys the loaded store has, and a snapshot may hold a window the store
+# has since forgotten.
+REKEY_LOG = "rekeys.jsonl"
+
+
+def rekey_log_path():
+    """Global rather than per desk: a binding is a fact about the WINDOWS,
+    which every desk's snapshots name alike."""
+    return os.path.join(STATE, "snapshots", REKEY_LOG)
+
+
+def read_rekey_log():
+    """[(epoch, from_identity, to_identity)] in the order written, skipping
+    any line that is not exactly that shape."""
+    out = []
+    try:
+        with open(rekey_log_path()) as f:
+            lines = f.readlines()
+    except OSError:
+        return out
+    for ln in lines:
+        try:
+            t, a, b = json.loads(ln)
+        except (ValueError, TypeError):
+            continue
+        if (isinstance(t, (int, float)) and not isinstance(t, bool)
+                and isinstance(a, str) and isinstance(b, str) and a and b):
+            out.append((float(t), a, b))
+    return out
+
+
+def record_rekeys(pairs, now=None):
+    """Append the identity moves `pairs` [(from, to)] to the log, skipping an
+    identity pair and a move already logged (a re-key pass repeats while the
+    previous session file is still on disk), and return how many went in.
+    Never fatal: a lost entry costs a snapshot's chrome slots, never a
+    placement."""
+    now = time.time() if now is None else now
+    try:
+        have = {(a, b) for _t, a, b in read_rekey_log()}
+        new = [(a, b) for a, b in pairs
+               if a and b and a != b and (a, b) not in have]
+        if not new:
+            return 0
+        os.makedirs(os.path.dirname(rekey_log_path()), exist_ok=True)
+        with open(rekey_log_path(), "a") as f:
+            for a, b in dict.fromkeys(new):
+                f.write(json.dumps([now, a, b]) + "\n")
+        return len(new)
+    except Exception as e:                                 # noqa: BLE001
+        logline(f"re-key log write failed: {e}")
+        return 0
+
+
+def prune_rekey_log(before):
+    """Drop log entries older than `before`, the oldest snapshot on any desk:
+    a move older than every snapshot can never be applied to one, so the log
+    is as long as the history it serves and no longer."""
+    log = read_rekey_log()
+    keep = [e for e in log if e[0] >= before]
+    if len(keep) == len(log):
+        return 0
+    write_json(rekey_log_path(),
+               "".join(json.dumps(list(e)) + "\n" for e in keep))
+    return len(log) - len(keep)
+
+
+def snapshot_time(path):
+    """The epoch a snapshot was taken, from its NAME, or None."""
+    try:
+        return time.mktime(time.strptime(os.path.basename(path)[:15],
+                                         SNAPSHOT_STAMP))
+    except ValueError:
+        return None
+
+
+def translate_snapshot(snap, log, since):
+    """The snapshot with each identity carried through every move logged
+    AFTER `since`, in order, so a chain (a restart, then another) lands on
+    the id the window has NOW: (translated, how many keys moved). PURE.
+
+    The entry's key-title moves with its key, and an index is carried. A
+    translation that would land on a key the snapshot already holds is
+    skipped: the snapshot's own answer for that key wins, the same
+    conservatism the live re-keys keep."""
+    moves = [(a, b) for t, a, b in log if t > since]
+    if not moves:
+        return dict(snap), 0
+    out, n = {}, 0
+    for k, e in snap.items():
+        base = slot_base(k)
+        app, _, ident = slot_base(k).partition("\x00")
+        cur = ident
+        for a, b in moves:
+            if cur == a:
+                cur = b
+        if cur == ident or not isinstance(e, dict):
+            out.setdefault(k, e)
+            continue
+        nk = kkey(app, cur) + k[len(base):]
+        if nk in snap:
+            out.setdefault(k, e)
+            continue
+        out[nk] = dict(e, title=cur)
+        n += 1
+    return out, n
 
 
 def forget_apply(kb, selectors, profile=None, purge=False):
@@ -9228,6 +9374,11 @@ def do_undo(which=None, selectors=None, apply=False):
     snap = json_object(path)
     if snap is None:
         die_cannot(f"usher: {path} is not a readable store")
+    snap, moved = translate_snapshot(snap, read_rekey_log(),
+                                     snapshot_time(path) or 0)
+    if moved:
+        print(f"  ({moved} identit(ies) followed through the browser"
+              " restarts since it was taken)")
     kb = load_knowledge(prof)
     _m, restored = snapshot_merge(kb, snap, selectors)
     for k in restored:

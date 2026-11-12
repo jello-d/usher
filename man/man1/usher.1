@@ -172,9 +172,16 @@ places from it.
 The daemon takes a snapshot when a slot has changed (looking every five
 minutes), and before a forget, an undo and a display change. It keeps the
 newest of each of the last 12 hours, 7 days and 2 weeks that saw a change,
-the 6 newest of all, and the 10 newest taken before an act. A Chrome slot
-names one browser run's window, so restoring one from before a browser
-restart restores a slot nothing will match again.
+the 6 newest of all, and the 10 newest taken before an act.
+.IP
+A Chrome window's slot names one browser RUN's window id, and a restart
+mints fresh ids. Snapshots are never rewritten; instead every re-key the
+daemon makes is logged beside them, and an undo carries each id in the
+snapshot through the moves made since it was taken, so a slot from before a
+restart lands on the window as it is now. The log is pruned to the oldest
+snapshot, so it is exactly as long as the history it serves. A restart
+with no daemon running is logged when the daemon next starts, provided
+Chrome still keeps the previous session file to bind against.
 .TP
 .B reload
 Pick up new code in a running daemon and change NOTHING else: no restore, no

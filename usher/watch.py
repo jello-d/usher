@@ -1713,6 +1713,9 @@ class Watcher:
         if snap is None:
             logline(f"undo: no snapshot `{req['from']}` of {prof}")
             return None
+        # THE IDS IT NAMES MAY BE A BROWSER RUN OR TWO OLD; follow them.
+        snap, _moved = engine.translate_snapshot(
+            snap, engine.read_rekey_log(), engine.snapshot_time(path) or 0)
         with self.lock:
             engine.take_snapshot(dict(self.kb), prof, tag="undo")
             merged, restored = engine.snapshot_merge(
@@ -1722,7 +1725,9 @@ class Watcher:
             self.transition_until = time.time() + sum(PLACE_VERIFY) + 1.0
         n = self._sweep()
         logline(f"undo: restored {len(restored)} entr(ies) from "
-                f"{req['from']}; re-placing {n}")
+                f"{req['from']}"
+                + (f" ({_moved} carried through browser restarts)"
+                   if _moved else "") + f"; re-placing {n}")
         return restored
 
     def _take_capture(self):
@@ -1759,6 +1764,11 @@ class Watcher:
         i.e. exactly when the re-key is the thing that saves every chrome
         window's slot."""
         try:
+            # THE WHOLE BINDING INTO THE LOG FIRST, so a snapshot naming a
+            # window this store has forgotten can still be carried forward.
+            engine.record_rekeys(
+                [(engine.chrome_slot(o), engine.chrome_slot(n))
+                 for o, n in engine.chrome_session_binding().items()])
             with self.lock:
                 moved = rekey_chrome(self.kb)
                 if moved:
@@ -2160,6 +2170,9 @@ class Watcher:
                     self.src_dashed[(src, _tl)] = \
                         self.src_dashed.get((src, _tl), 0) + 1
             _bind = engine.take_source_rekey(src)
+            if _bind:
+                engine.record_rekeys([(f"{src}:{o}", f"{src}:{n}")
+                                      for o, n in _bind.items()])
             with self.lock:
                 n = engine.rekey_source(self.kb, src, _bind)
                 # EVERY DESK'S STORE, or the slots another desk learned for
