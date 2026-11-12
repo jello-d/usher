@@ -44,6 +44,7 @@ from datetime import date
 # there is nothing here that can go stale. The engine's users of it are
 # ChromePlugin, chrome_profiles_for, and the selftest fixtures.
 from .chrome import (CHROME_FLAGS, CHROME_STAGGER, browser_pids,
+                     claim_by_elimination,
                      browser_started, chrome_bind_windows, chrome_profile_map,
                      chrome_slot, chrome_window_for, chrome_window_tabs,
                      is_chrome, is_chrome_slot, recorded_window_ids,
@@ -5425,9 +5426,12 @@ def source_views(rows, pids=None, uid=None):
             # than per window, because the state that produces it produces it
             # for every window at once.
             continue
+        # THE IDENTIFIER STANDS IN FOR THE VIEW ID, which this account does
+        # not have: it is unique per window for this session, so chrome's
+        # per-view cache and elimination can key on it (source_window_lines).
         yield tlid, {"app-id": r.get("app_id") or "",
                      "title": r.get("title") or "",
-                     "pid": pid, "id": None}
+                     "pid": pid, "id": tlid}
 
 
 def source_window_lines(rows, pids=None, resolve=None, uid=None):
@@ -5465,7 +5469,19 @@ def source_window_lines(rows, pids=None, resolve=None, uid=None):
     """
     res = _single_id if resolve is None else resolve
     out = []
-    for tlid, v in source_views(rows, pids, uid):
+    views = list(source_views(rows, pids, uid))
+    # ELIMINATION, as the daemon does for the owner's own windows: when this
+    # account's Chrome has exactly one window the titles cannot join and
+    # exactly one recorded id left, the pairing is forced. Every view here is
+    # this account's own, so the pool is right by construction.
+    if resolve is None:
+        try:
+            claim_by_elimination(
+                [(tl, v["title"]) for tl, v in views
+                 if is_chrome(v["app-id"])])
+        except Exception:                                  # noqa: BLE001
+            pass
+    for tlid, v in views:
         try:
             ident = res(v)
         except Exception:                                  # noqa: BLE001
@@ -5655,7 +5671,7 @@ def source_refresh_plan(live, last, now, seen=None,
     partial roster with.
     """
     seen = dict(seen or {})
-    want, have, waiting = set(), {}, {}
+    want, have, waiting, dash_wait = set(), {}, {}, {}
     for w in live:
         src = w.get("source")
         if not src:
@@ -5671,13 +5687,20 @@ def source_refresh_plan(live, last, now, seen=None,
         # transient, and asking for ever is a sudo a minute for as long as
         # the window is open (both measured, see SOURCE_DASH_TRIES).
         _tl = w.get("identifier")
+        _n = (dashed or {}).get((src, _tl), 0)
         if ((not (w.get("key") or "") and (w.get("app_id") or ""))
                 or (is_chrome(w.get("app_id") or "")
                     and (w.get("key") or "") == src
                     and (_tl not in ((answered or {}).get(src) or {})
-                         or (dashed or {}).get((src, _tl), 0)
-                         < SOURCE_DASH_TRIES))):
+                         or _n < SOURCE_DASH_TRIES))):
             want.add(src)
+            # A `-` IS RE-ASKED ON A BACKOFF FROM `settle` (5, 10, 20, 40s),
+            # not at the once-a-minute rate: right after a login it is
+            # usually a page still loading, and a window sits on the shared
+            # fallback for as long as it is unanswered.
+            if _n:
+                dash_wait[src] = min(dash_wait.get(src, every),
+                                     settle * 2 ** (_n - 1))
     out = []
     for src in sorted(want):
         apps = frozenset(have.get(src, set()))
@@ -5699,7 +5722,8 @@ def source_refresh_plan(live, last, now, seen=None,
         # account has not been asked about it at all, and waiting out the
         # interval left it pending for a further minute. A pending window the
         # last ask did not include is a NEW question, not a repeat.
-        if now - last.get(src, 0) < every and not (ids - asked):
+        if (now - last.get(src, 0) < dash_wait.get(src, every)
+                and not (ids - asked)):
             continue
         out.append(src)
         seen[src] = (apps, since, ids)

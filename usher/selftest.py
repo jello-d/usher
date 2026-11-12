@@ -2329,6 +2329,22 @@ def _t_resolution(ck):
                    _cr, {}, 1000.0,
                    answered={"titan": {"eeee5555ffff66": ""}},
                    dashed={("titan", "eeee5555ffff66"): 1})[1])
+            # ON A BACKOFF FROM `settle`, not once a minute: 5s after the
+            # first `-`, 20s after the third.
+            ck("refresh-a-first-dash-is-re-asked-after-seconds",
+               engine.source_refresh_plan(
+                   _cr, {"titan": 994.0}, 1000.0,
+                   {"titan": (frozenset({"google-chrome"}), 900.0,
+                              frozenset())},
+                   answered={"titan": {"eeee5555ffff66": ""}},
+                   dashed={("titan", "eeee5555ffff66"): 1})[0] == ["titan"])
+            ck("refresh-a-third-dash-waits-longer",
+               engine.source_refresh_plan(
+                   _cr, {"titan": 985.0}, 1000.0,
+                   {"titan": (frozenset({"google-chrome"}), 900.0,
+                              frozenset())},
+                   answered={"titan": {"eeee5555ffff66": ""}},
+                   dashed={("titan", "eeee5555ffff66"): 3})[0] == [])
             ck("refresh-a-chrome-window-answered-dash-is-not-asked-for-ever",
                "titan" not in engine.source_refresh_plan(
                    _cr, {}, 1000.0,
@@ -8315,6 +8331,32 @@ def _t_relaunch(ck):
                    [{"app_id": "spotify", "title": "Some Song",
                      "identifier": _TL1}])
                == [f"window {_TL1} -"])
+            # THE ACCOUNT ELIMINATES TOO: two Chrome windows, one whose
+            # title joins and one whose does not, against two recorded ids,
+            # and the second is FORCED. Before this the account answered `-`
+            # for it, as the daemon would for the owner's own without its
+            # elimination pass.
+            _TL9 = "9" * 32
+            _ssn = chrome.chrome_session_titles
+            _scache = dict(chrome._slot_cache)
+            try:
+                chrome.chrome_session_titles = lambda: {
+                    "Known Page": (501, "u"), "Old Title": (502, "u")}
+                _elim = engine.source_window_lines(
+                    [{"app_id": "google-chrome",
+                      "title": "Known Page - Google Chrome",
+                      "identifier": _TL1},
+                     {"app_id": "google-chrome",
+                      "title": "Renamed Since - Google Chrome",
+                      "identifier": _TL9}],
+                    {_TL1: os.getpid(), _TL9: os.getpid()})
+            finally:
+                chrome.chrome_session_titles = _ssn
+                chrome._slot_cache.clear()
+                chrome._slot_cache.update(_scache)
+            ck("source-window-lines-eliminate-the-last-chrome-window",
+               f"window {_TL9} "
+               f"{engine.identity_digest(chrome.chrome_slot(502))}" in _elim)
             # AND THE TRIGGER SENDS THEM ON STDIN, not in the argv: the
             # arity is exactly three words, which is what lets the
             # integrator's sudoers rule name a FIXED command with no
@@ -8392,12 +8434,49 @@ def _t_chrome(ck):
     # tested honestly.
     _wins = {w for w, _u in chrome_session_titles().values()}
     ck("chrome-slots-are-windows",
-       all(chrome_window_for(t + " - Google Chrome").startswith("chrome:win:")
+       all((chrome_window_for(t + " - Google Chrome") or "")
+           .startswith("chrome:win:")
            for t in list(chrome_session_titles())[:5]))
     ck("chrome-slot-count-matches-windows",
        len({chrome_window_for(t + " - Google Chrome")
             for t in chrome_session_titles()}) == len(_wins))
     ck("chrome-unknown-title", chrome_window_for("nothing like this") is None)
+
+    # AN UNREAD COUNT IS NOT PART OF THE JOIN KEY: Chrome records a title at
+    # navigation, a web app rewrites its count without navigating, and the
+    # Team Notes window was unidentified for exactly that.
+    _pt = chrome._chrome_page_title
+    ck("chrome-title-key-drops-a-leading-count",
+       _pt("(2) Team Notes | Notion - Google Chrome")
+       == _pt("Team Notes | Notion - Google Chrome")
+       == "Team Notes | Notion")
+    ck("chrome-title-key-drops-an-inner-count",
+       _pt("Inbox (5) - a@b - Gmail") == _pt("Inbox (12) - a@b - Gmail"))
+    ck("chrome-title-key-keeps-other-text", _pt("Plan (draft)") ==
+       "Plan (draft)")
+    # BOTH SIDES, and two windows differing ONLY by a count are ambiguous,
+    # so neither is joined rather than one being paired wrongly.
+    _sf = (chrome.session_files, chrome.session_sig, chrome.parse_snss)
+    _sc = dict(chrome._snss_cache)
+    try:
+        chrome.session_files = lambda: ["/x"]
+        chrome.session_sig = lambda: ("fixture",)
+        chrome.parse_snss = lambda f: {"(2) Team Notes": (11, "u"),
+                                       "Roadmap (3)": (12, "u"),
+                                       "Roadmap (4)": (13, "u")}
+        chrome._snss_cache.update({"sig": None, "map": {}})
+        _m = chrome.chrome_session_titles()
+        ck("chrome-session-titles-are-normalised",
+           _m.get("Team Notes", (None,))[0] == 11)
+        ck("chrome-titles-differing-only-by-a-count-are-dropped",
+           "Roadmap" not in _m)
+        ck("chrome-a-live-title-with-a-count-joins",
+           chrome.chrome_window_for("(9) Team Notes - Google Chrome")
+           == chrome.chrome_slot(11))
+    finally:
+        chrome.session_files, chrome.session_sig, chrome.parse_snss = _sf
+        chrome._snss_cache.clear()
+        chrome._snss_cache.update(_sc)
 
     # THE TITLE IS A BOOTSTRAP, NOT AN IDENTITY: resolve once, then remember
     # for the life of the view. A Gmail window is `Inbox (1)` in the session

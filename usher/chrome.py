@@ -374,23 +374,47 @@ def chrome_session_titles():
     files = session_files()
     sig = session_sig()
     if sig != _snss_cache["sig"]:
-        merged = {}
+        merged, clash = {}, set()
         for f in files:
             try:
-                merged.update(parse_snss(f))
+                got = parse_snss(f)
             except Exception:
-                pass
+                continue
+            for raw, hit in got.items():
+                # NORMALISED HERE AS WELL AS ON THE LIVE SIDE, so the two
+                # are the same key; two windows that differ only by an
+                # unread count collide and are dropped as ambiguous.
+                k = _chrome_page_title(raw)
+                if k in merged and str(merged[k][0]) != str(hit[0]):
+                    clash.add(k)
+                merged[k] = hit
+        for k in clash:
+            merged.pop(k, None)
         _snss_cache["sig"] = sig
         _snss_cache["map"] = merged
     return _snss_cache["map"]
 
 
+_COUNT_RE = re.compile(r"\(\d+\+?\)")
+
+
 def _chrome_page_title(title):
-    """The page title, with the browser-name suffix stripped."""
+    """The page title as a JOIN KEY: the browser-name suffix stripped, and
+    every parenthesised NUMBER removed.
+
+    THE NUMBERS ARE UNREAD COUNTS, which a web app rewrites without
+    navigating, while Chrome records a title only AT navigation: so the
+    session file says "Team Notes | Notion" and the screen says "(2) Team
+    Notes | Notion", and the join misses. Measured on dragonfly 2026-11-12:
+    five of an account's ten windows unidentified 43s after a login, the
+    Team Notes window among them. Applied to BOTH sides, so two windows
+    whose titles differ ONLY by such a number collide and are dropped as
+    ambiguous (chrome_session_titles) rather than paired wrongly."""
     for suf in CHROME_SUFFIXES:
         if title.endswith(suf):
-            return title[:-len(suf)]
-    return title
+            title = title[:-len(suf)]
+            break
+    return " ".join(_COUNT_RE.sub("", title).split())
 
 
 def chrome_window_for(title):
