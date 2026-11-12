@@ -3186,6 +3186,26 @@ def next_slot_key(app, ident, used):
         n += 1
 
 
+def held_slot(keys, app, ident, src=""):
+    """Of the keys the placer's ledger says this window HOLDS, the one its
+    identity may write: (key, key-title), or (None, None). PURE.
+
+    A KEY IN ITS OWN FAMILY, or a per-window slot of its own source that it
+    was placed into as a SPARE (see spare_source_slots), whose key-title is
+    that slot's own identity: `entry_matches` reads the entry's title, so
+    writing the family's title under a per-window key would make the slot
+    unmatchable."""
+    base = kkey(app, ident)
+    pre = kkey(app, src + ":") if src and ident == src else None
+    for k in sorted(keys):
+        b = slot_base(k)
+        if b == base:
+            return k, ident
+        if pre and b.startswith(pre):
+            return k, b.partition("\x00")[2]
+    return None, None
+
+
 def matched_key(kb, app, ident, src=""):
     """The store key this window matches, or the fallback it would take. PURE.
 
@@ -3208,6 +3228,11 @@ SIZE_MATCH = 3   # px either way. Chrome restores a window's size EXACTLY
 #                  (measured: six windows to the pixel); kitty rounds to
 #                  whole cells and is deliberately NOT covered, since a
 #                  near-miss there would pair the wrong two terminals.
+
+
+SPARE_SPAN = 600  # s: how far behind the account's newest slot a spare
+#                   may be. A reboot or a lost name is minutes; a slot an
+#                   hour behind belongs to a window that was closed.
 
 
 def size_matches(e, size, tol=SIZE_MATCH):
@@ -3234,9 +3259,22 @@ def spare_source_slots(kb, app, src, claimed):
     if not src:
         return []
     pre = kkey(app, src + ":")
+    # ONLY THE RECENT ONES. A per-window slot outlives its window by up to
+    # the TTL, and Chrome's ids die with the browser run, so most of an
+    # account's per-window slots name windows long closed: measured on
+    # dragonfly 2026-11-12, six of them all 2500 wide and up to a day old.
+    # Offered as spares, any one could take a window of that size to a
+    # rect it has not been at since. A window whose name was lost at THIS
+    # login was live at the last capture, so its slot is as recent as the
+    # newest the account has (forgive_dormancy shifts a whole store by its
+    # downtime, so a reboot does not age it).
+    fam = [kb[k].get("last_seen", 0) for k in kb
+           if k.startswith(kkey(app, src)) and isinstance(kb[k], dict)]
+    floor = max(fam, default=0) - SPARE_SPAN
     return sorted(k for k in kb
                   if k.startswith(pre) and slot_base(k) == k
-                  and k.partition("\x00")[2] not in claimed)
+                  and k.partition("\x00")[2] not in claimed
+                  and kb[k].get("last_seen", 0) >= floor)
 
 
 def free_slot(kb, held, app, ident, src, vid, live, size=None, spare=(),
@@ -4238,7 +4276,8 @@ def upsert(kb, windows, when, outputs=None, refused=None):
     prune_kb(kb, when)
 
 
-def _learn_stamp(kb, groups, windows, counts, when, hold=(), refused=None):
+def _learn_stamp(kb, groups, windows, counts, when, hold=(), refused=None,
+                 ledger=None):
     """Write each live view's placement under the right key. `hold` is the set
     of view ids whose CURRENT position must not be believed yet: see the
     watcher's _held: a window the placer has not got to is sitting where its
@@ -4251,6 +4290,22 @@ def _learn_stamp(kb, groups, windows, counts, when, hold=(), refused=None):
     # ONE SLOT PER WINDOW, sorted by view id: see slot_order and upsert, which
     # must agree with this or the two writers key a shared identity
     # differently, which is the divergence `stamp_key` exists to prevent.
+    # THE PLACER'S LEDGER DECIDES THE LABELS when it has one. A window keeps
+    # the key it was placed into, and no window writes over a key another
+    # LIVE window holds. Assigning by view id alone disagreed with the
+    # placer whenever it chose by size, so the next sweep moved windows onto
+    # each other's rects; and a window the ledger refused (more windows than
+    # slots) could only be held out of the learn entirely, so it was NEVER
+    # remembered while its siblings were open. Measured on dragonfly
+    # 2026-11-12: three unnamed work windows, two slots, and the third's
+    # hand-placed rect was not in the store. With the holders' keys reserved
+    # it takes a NEW sibling and overwrites nothing.
+    live = {w.get("id") for w in windows if w.get("id") is not None}
+    mine, reserved = {}, set()
+    for k, h in (ledger or {}).items():
+        if h in live:
+            mine.setdefault(h, []).append(k)
+            reserved.add(k)
     used = set()
     for w in slot_order(windows):
         app, vid = w["app_id"], w.get("id")
@@ -4298,9 +4353,12 @@ def _learn_stamp(kb, groups, windows, counts, when, hold=(), refused=None):
         decided = stamp_key(w, app, key, counts)
         if decided is not None:
             _i, _kt, _only = decided
-            _k = next_slot_key(app, _i, used)
+            _k, _ht = held_slot(mine.get(vid, ()), app, _i,
+                                w.get("source") or "")
+            if _k is None or _k in used:
+                _k, _ht = next_slot_key(app, _i, used | reserved), None
             used.add(_k)
-            kb[_k] = kb_entry(w, _kt, _only, when)
+            kb[_k] = kb_entry(w, _ht or _kt, _only, when)
         # NO TITLE-GROUP BRANCH, for upsert's reason: every window that
         # passes the readiness gate now gets a key from `stamp_key`, so the
         # fallback this used to need is unreachable. The GROUPS themselves go
@@ -4449,7 +4507,7 @@ def _refuse(refused, w, r):
 
 
 def learn(kb, groups, windows, when, hold=(), seen=None, outputs=None,
-          refused=None):
+          refused=None, ledger=None):
     """Watch-time knowledge update: each live view's placement, under the key
     its identity and slot index give it.
 
@@ -4486,7 +4544,7 @@ def learn(kb, groups, windows, when, hold=(), seen=None, outputs=None,
     # degroup rule itself ("a title two live views wear is not a
     # discriminator") is answered at the source now: a title is not a key at
     # all, so there is nothing for two windows to share.
-    _learn_stamp(kb, groups, windows, counts, when, hold, refused)
+    _learn_stamp(kb, groups, windows, counts, when, hold, refused, ledger)
     # `hold` deliberately does NOT reach the terminal purge: that asks "is
     # this window still HERE", which a held window plainly is. Hiding it
     # would drop the very entry we are protecting.

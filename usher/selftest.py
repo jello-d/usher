@@ -3918,6 +3918,7 @@ def _t_size_slots(ck):
     name neither; one took the other's shared slot and the other was left at
     the cascade, while Chrome had restored each at its exact remembered size
     (2527x1702, 2498x1702, 2265x1702)."""
+    import time as _t
     K = engine.kkey
     app, src = "google-chrome", "titan"
     fam0, fam1 = K(app, src), engine.slot_key(app, src, 1)
@@ -3988,29 +3989,48 @@ def _t_size_slots(ck):
             held[k] = vid
         ok = ok and all(held.get(want[v]) == v for v in wins)
     ck("the-measured-reboot-lands-every-window-in-every-order", ok)
-    # AND THE LEARNER'S HOLD GATE ASKS THE SAME QUESTION: a window whose
-    # size names a free spare slot is not held out of the capture because
-    # the first shared slot is someone else's.
-    from .watch import Watcher
-    _w = Watcher(launch=False)
-    _w.kb = {fam0: kb[fam0], bg: kb[bg]}
-    _w.slot_held = {fam0: 30}
-    _rows = [{"id": 36, "app_id": app, "source": src, "key": src,
-              "size": [2527, 1702]},
-             {"id": 30, "app_id": app, "source": src, "key": src,
-              "size": [2498, 1702]}]
-    _w.st["armed_at"] = 0.0
+    # AND THE LEARNER WRITES A WINDOW BACK INTO THE SPARE IT WAS PLACED
+    # INTO, under that slot's OWN identity: `entry_matches` reads the
+    # entry's title, so the family's title under a per-window key would
+    # make the slot unmatchable, and writing the window into a NEW family
+    # sibling instead would leave it two slots at the next login.
+    def _row(vid, size, pos):
+        return {"id": vid, "app_id": app, "source": src, "key": src,
+                "owner": 997, "title": "", "output": "eDP-1",
+                "workspace": [1.0, 2.0], "pos": pos, "size": size}
+    _kbl = {fam0: dict(kb[fam0]), bg: dict(kb[bg])}
     try:
-        _hd = _w._held(_rows)
+        engine.learn(_kbl, {}, [_row(36, [2527.0, 1702.0], [7.0, 8.0]),
+                                _row(30, [2498.0, 1702.0], [9.0, 9.0])],
+                     _t.time(), ledger={bg: 36, fam0: 30})
     except Exception as _e:                                # noqa: BLE001
-        _hd = {"RAISED %s" % _e}
-    ck("the-hold-gate-sees-the-size-slot-too", 36 not in _hd)
-    _w.kb = {fam0: kb[fam0]}
-    try:
-        _hd = _w._held(_rows)
-    except Exception as _e:                                # noqa: BLE001
-        _hd = {"RAISED %s" % _e}
-    ck("the-hold-gate-control-holds-a-window-with-no-free-slot", 36 in _hd)
+        _kbl = {"RAISED %s" % _e: {}}
+    ck("the-learner-writes-a-spare-back-under-its-own-identity",
+       (_kbl.get(bg) or {}).get("pos") == [7.0, 8.0]
+       and (_kbl.get(bg) or {}).get("title") == bg.partition("\x00")[2])
+    ck("and-the-window-takes-no-family-slot-as-well",
+       sorted(k for k in _kbl if engine.slot_base(k) == fam0) == [fam0]
+       and (_kbl.get(fam0) or {}).get("pos") == [9.0, 9.0])
+    # held_slot, pure
+    ck("held-slot-own-family",
+       engine.held_slot([fam1], app, src, src) == (fam1, src))
+    ck("held-slot-a-spare-carries-its-own-identity",
+       engine.held_slot([bg], app, src, src)
+       == (bg, bg.partition("\x00")[2]))
+    ck("held-slot-not-another-identitys-key",
+       engine.held_slot([bg], app, "kitty:/x", src) == (None, None))
+    ck("held-slot-no-spare-for-a-named-window",
+       engine.held_slot([bg], app, "titan:other", src) == (None, None))
+    # AND ONLY A RECENT SLOT IS A SPARE: a per-window slot an hour behind
+    # the account's newest belongs to a window that was closed.
+    _now = _t.time()
+    _old = engine.kkey(app, src + ":deadbeefdeadbeef")
+    _kbs = {fam0: dict(kb[fam0], last_seen=_now),
+            bg: dict(kb[bg], last_seen=_now - 120),
+            _old: dict(kb[bg], last_seen=_now - 3600)}
+    _sp = engine.spare_source_slots(_kbs, app, src, set())
+    ck("a-recent-per-window-slot-is-a-spare", bg in _sp)
+    ck("a-stale-per-window-slot-is-not", _old not in _sp)
 
 
 def _t_slots(ck):
@@ -4576,6 +4596,31 @@ def _t_slots(ck):
                 # AND IT WROTE NOTHING, the control: a pass that remembered
                 # the window would make the row above meaningless.
                 ck("the-capture-pass-refused-that-window", not _wc.kb)
+
+                # AND IT HANDS THE LEARN ITS LEDGER, driven, since every
+                # ledger cell above calls `learn` directly and a capture pass
+                # that dropped the argument passed them all. The holder has
+                # the HIGHER view id, so only the ledger keeps the cascade
+                # window out of its key.
+                class _LedSock(_RefSock):
+                    @staticmethod
+                    def list_views(**_kw):
+                        return [dict(_trv("zzz-unowned", "a", pid=os.getpid(),
+                                          vid=vid),
+                                     **{"output-name": "DP-1",
+                                        "geometry": {"x": x, "y": x,
+                                                     "width": 10,
+                                                     "height": 10}})
+                                for vid, x in ((1, 50), (2, 10))]
+                _wl = Watcher(launch=False)
+                _wl._profile_drift = lambda: False
+                _wl.transition_until = 0
+                _wl.kb, _wl.groups = {}, {}
+                _lk = kkey("zzz-unowned", "")
+                _wl.slot_held[_lk] = 2
+                _wl._capture_once(_LedSock())
+                ck("the-capture-pass-hands-learn-its-ledger",
+                   (_wl.kb.get(_lk) or {}).get("pos", [None])[0] == 10)
             finally:
                 _wslot.save_knowledge, _wslot.persist = _r_sk2, _r_pe2
         finally:
@@ -4686,7 +4731,10 @@ def _t_slots(ck):
 
         g.slot_held[_SK] = 1
         _h = g._held(_wins)
-        ck("gate-a-refused-window-is-held-even-when-settled", 2 in _h)
+        # A REFUSED WINDOW IS NOT HELD ANY MORE: the learner reserves the
+        # holder's key and gives it a new sibling instead (below). Held, it
+        # was never remembered while its siblings were open.
+        ck("gate-a-refused-window-is-not-held-any-more", 2 not in _h)
         ck("gate-the-holder-itself-is-not-held", 1 not in _h)
         # A HOLDER THAT IS NOT LIVE IS NOT A HOLDER, or a closed window would
         # freeze its slot forever. The live set is the SNAPSHOT's, which is
@@ -4702,13 +4750,41 @@ def _t_slots(ck):
 
         # THE DAMAGE ITSELF, which only a LEARN pass expresses: a check on
         # `_held` alone says nothing about what reaches the store.
+        #
+        # THE HOLDER HAS THE HIGHER VIEW ID HERE, on purpose: by view id
+        # alone the cascade window would be written into the holder's key,
+        # which is the overwrite. Only the ledger can stop that, so the
+        # fixture has to be the order where it is load-bearing.
+        _inv = [_fw(1, [2.0, 0.0], [172.0, 150.0]),
+                _fw(2, [0.0, 1.0], [128.0, 155.0])]
         _kb4 = {_SK: dict(_base)}
-        g.slot_held[_SK] = 1
-        engine.learn(_kb4, {}, _wins, _t.time(), hold=g._held(_wins))
+        g.slot_held.clear()
+        g.slot_held[_SK] = 2
+        engine.learn(_kb4, {}, _inv, _t.time(), hold=g._held(_inv),
+                     ledger=dict(g.slot_held))
         ck("gate-the-slot-keeps-the-HOLDER-geometry",
            (_kb4.get(_SK) or {}).get("pos") == [128.0, 155.0])
         ck("gate-the-slot-did-not-take-the-cascade",
            (_kb4.get(_SK) or {}).get("workspace") == [0.0, 1.0])
+        ck("gate-the-refused-window-takes-a-new-sibling",
+           (_kb4.get(engine.slot_key("google-chrome", "titan", 1)) or {})
+           .get("pos") == [172.0, 150.0])
+        # ...and the ledger is what did it: the same pass without one
+        # assigns by view id and writes the cascade over the holder.
+        _kb4b = {_SK: dict(_base)}
+        engine.learn(_kb4b, {}, _inv, _t.time())
+        ck("gate-control-without-the-ledger-the-labels-follow-the-view-id",
+           (_kb4b.get(_SK) or {}).get("pos") == [172.0, 150.0])
+        # A DEAD HOLDER RESERVES NOTHING: a ledger entry whose window is gone
+        # (its unmap never reached us) must not push a live window onto a
+        # new sibling and leave the old slot to go stale.
+        _kb4c = {_SK: dict(_base)}
+        engine.learn(_kb4c, {}, _inv[:1], _t.time(), ledger={_SK: 99})
+        ck("gate-a-dead-holder-reserves-no-key",
+           sorted(_kb4c) == [_SK]
+           and _kb4c[_SK]["pos"] == [172.0, 150.0])
+        g.slot_held.clear()
+        g.slot_held[_SK] = 1
         # AND THE CONTROL, or both of those pass over a learn that wrote
         # nothing at all: with no holder the pass DOES reach the store.
         #
@@ -4841,8 +4917,16 @@ def _t_slots(ck):
         with g.lock:
             for _i, _k6 in enumerate(sorted(_f6)):
                 g.slot_held[_k6] = _FOUR[_i]["id"]
-        ck("gate-holds-the-window-that-has-no-slot-left",
-           g._held(_FIVE) == frozenset({9}))
+        ck("gate-does-not-hold-the-window-that-has-no-slot-left",
+           g._held(_FIVE) == frozenset())
+        _kb7 = dict(_kb6)
+        engine.learn(_kb7, {}, _FIVE, _t.time(), hold=g._held(_FIVE),
+                     ledger=dict(g.slot_held))
+        _f7 = [k for k in _kb7 if engine.slot_base(k) == sorted(_f6)[0]]
+        ck("a-fifth-window-gets-a-fifth-slot", len(_f7) == 5)
+        ck("and-the-four-holders-keep-their-own-rects",
+           all(_kb7[k]["pos"] == _FOUR[_i]["pos"]
+               for _i, k in enumerate(sorted(_f6))))
     finally:
         pass
 

@@ -458,12 +458,6 @@ def _slot_peer(v, src):
     return (v.get("id"), app_of(v), src, identity(v) or "", size)
 
 
-def _row_peer(w):
-    """A snapshot row as engine.slot_hints wants it."""
-    return (w.get("id"), w.get("app_id") or "", w.get("source") or "",
-            w.get("key") or "", w.get("size"))
-
-
 class Watcher:
     """The daemon proper: place windows to their known spot as they appear
     (react), and continuously record the layout into the knowledge base
@@ -1839,61 +1833,13 @@ class Watcher:
                      if w.get("id") is not None
                      and w["id"] not in self.placed
                      and now <= self.deadline.get(w["id"], 0)}
-        # AND A WINDOW THE LEDGER REFUSED, IN ANY MODE, which is the half this
-        # was missing. Several windows can share one store key (another
-        # account's app, or two terminals in one directory): the ledger gives
-        # the slot to ONE and leaves the rest where they opened. Those others
-        # are never placed, so the clause above released them the moment place
-        # mode ended, and the capture loop then learned a CASCADE position
-        # into a key the window does not own, overwriting the holder's
-        # geometry. Self-worsening, because the next login restores the
-        # cascade and the pass repeats.
-        #
-        # MEASURED on manifold 2026-11-06 from the pre-logoff pair: ten of one
-        # account's Chrome windows shared `google-chrome NUL titan`, one was
-        # placed to ws[0,1] and nine were refused, and the slot went
-        # ws[0,1] pos[128,155] -> ws[2,0] pos[172,150], which is exactly where
-        # one of the refused windows was sitting.
-        #
-        # SO SUCH A WINDOW HAS NO MEMORY, which is what `doctor` already tells
-        # the user ("1 gets the remembered place, the rest stay where they
-        # opened"). It owns no slot, so there is nowhere its position could
-        # honestly be written.
-        #
-        # THE LIVE SET COMES FROM THE SNAPSHOT, not from `_live_ids()`: that
-        # reads `place_sock`, whose one writer is the PLACER thread, and this
-        # runs on the capture thread. The snapshot in hand IS the live set at
-        # this instant, which is the same evidence `live_holder` wants and
-        # costs no extra round trip.
-        live = {w.get("id") for w in windows if w.get("id") is not None}
-        with self.lock:
-            ledger = dict(self.slot_held)
-        for w in windows:
-            vid = w.get("id")
-            if vid is None or vid in held:
-                continue
-            # THROUGH `free_slot`, THE SAME DEFINITION THE PLACER USES, and
-            # it has to be: with a slot per window this asked `matched_key`,
-            # which answers the IDENTITY's key for all N of them, so the
-            # ledger showed one holder and the other N-1 were held out of the
-            # capture. That would suppress the learning of exactly the
-            # windows the extra slots exist to serve.
-            #
-            # SO THE QUESTION IS "IS EVERY SLOT TAKEN", not "is the identity's
-            # slot taken". A window with a free one is going to be placed into
-            # it and its position is then worth learning; one with none owns
-            # nothing, so there is nowhere its position could honestly go.
-            k, _e = engine.free_slot(
-                self.kb, ledger, w.get("app_id") or "", w.get("key") or "",
-                w.get("source") or "", vid, live, **engine.slot_hints(
-                    self.kb, _row_peer(w),
-                    [_row_peer(x) for x in windows
-                     if x.get("app_id") == w.get("app_id")]))
-            if k is None:
-                continue          # no slot at all: nothing to be refused by
-            h = ledger.get(k)
-            if h is not None and h != vid and h in live:
-                held.add(vid)
+        # A WINDOW THE LEDGER REFUSED IS NOT HELD ANY MORE. It was, because
+        # learning it wrote its cascade into the holder's key (measured on
+        # manifold 2026-11-06, one slot for ten windows). With a slot per
+        # window the learner reserves every key a live window holds and gives
+        # a refused one a NEW sibling, so nothing is overwritten; holding it
+        # instead meant it was never remembered at all while its siblings
+        # were open (see _learn_stamp).
         return frozenset(held)
 
     def _in_transition(self):
@@ -2282,7 +2228,7 @@ class Watcher:
             roll = self.st["layout"]
             learn(self.kb, self.groups, snap["windows"], snap["time"], hold,
                   seen=self.seen_terms, outputs=snap["outputs"],
-                  refused=refused)
+                  refused=refused, ledger=dict(self.slot_held))
             self.st["dirty"] = False
             self.st["layout"] = False
             save_knowledge(self.kb, self.kb_profile)
