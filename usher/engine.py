@@ -8817,11 +8817,24 @@ def placement_landed(v, e, o, tol=PLACE_TOL, size=True):
     # A STICKY SLOT IS LANDED BY OUTPUT AND POSITION: its workspace is
     # whichever one is being viewed, so comparing the stored one would read
     # a correct placement as failed.
-    if (not e.get("sticky") and [int(n) for n in got["workspace"]]
-            != [int(n) for n in e["workspace"]]):
+    # ON THE WHOLE PLANE, not cell and offset apart: a window snug to a
+    # cell's left or top edge overhangs into the cell before it by its
+    # shadow, so the compositor reports it in THAT cell at a far offset
+    # (ws(1,0) x=2864 for a slot at ws(2,0) x=-16, Signal on dragonfly
+    # 2026-11-13), which is the same place and read as a miss.
+    ow, oh = _grid(o)[:2]
+    try:
+        if e.get("sticky"):
+            dx = got["pos"][0] - float(e["pos"][0])
+            dy = got["pos"][1] - float(e["pos"][1])
+        else:
+            dx = ((float(got["workspace"][0]) - float(e["workspace"][0]))
+                  * ow + got["pos"][0] - float(e["pos"][0]))
+            dy = ((float(got["workspace"][1]) - float(e["workspace"][1]))
+                  * oh + got["pos"][1] - float(e["pos"][1]))
+    except (KeyError, IndexError, TypeError, ValueError):
         return False
-    if not (abs(got["pos"][0] - e["pos"][0]) <= tol and
-            abs(got["pos"][1] - e["pos"][1]) <= tol):
+    if not (abs(dx) <= tol and abs(dy) <= tol):
         return False
     if not size:
         return True

@@ -5361,6 +5361,20 @@ def _t_verify(ck):
     ck("verify-a-smaller-size-is-landed",
        placement_landed(_v(110, 120, w=10, h=10), _e, _o))
     ck("verify-rejects-a-gone-window", not placement_landed(None, _e, _o))
+    # A SNUG WINDOW OVERHANGS INTO THE CELL BEFORE IT by its shadow, so the
+    # compositor reports it there at a far offset: the same place, which a
+    # cell-then-offset comparison read as a miss (Signal at ws(2,0) x=-16,
+    # reported ws(1,0) x=2864, dragonfly 2026-11-13). On the whole plane.
+    _sn = dict(_e, workspace=[1, 1], pos=[-16, 32])
+    _gsn = target_geometry(_sn, _o)
+    _vsn = {"output-name": _o["name"], "geometry": dict(
+        _gsn, width=_sn["size"][0], height=_sn["size"][1])}
+    ck("verify-lands-a-snug-window-reported-in-the-cell-before",
+       placement_landed(_vsn, _sn, _o)
+       and place_of(_vsn, {_o["name"]: _o})["workspace"] != [1, 1])
+    _off = dict(_sn, workspace=[0, 1])
+    ck("verify-still-rejects-a-window-a-cell-away",
+       not placement_landed(_vsn, _off, _o))
 
     logged = []
     _real_log = _w.logline
