@@ -1578,8 +1578,13 @@ class Watcher:
                 continue
             why = engine.visibility(v, outs)
             vid = v.get("id")
-            if not why:
+            # VISIBLE BUT LARGER THAN ITS PANEL is the other half of the
+            # invariant: refit in place (engine.oversize_fit), under the
+            # same seen-twice and per-window bound as a rescue
+            fit = None if why else engine.oversize_fit(v, outs)
+            if not why and not fit:
                 continue
+            why = why or "larger than its panel's work area"
             # ASKED AGAIN PER WINDOW, not once above: the IPC this loop just
             # made can stall for seconds while outputs come and go, and on
             # dragonfly 2026-11-12 a rescue that passed the check before an
@@ -1593,12 +1598,25 @@ class Watcher:
             n = self.rescued.get(vid, 0)
             if n >= RESCUE_TRIES:
                 if n == RESCUE_TRIES:
-                    logline(f"still not visible after {n} rescue(s), giving "
+                    logline(f"still not "
+                            f"{'fitting' if fit else 'visible'} after {n} "
+                            f"rescue(s), giving "
                             f"up: {app_of(v)[:18]} | "
                             f"{engine.log_title(v)[:30]} ({why})")
                     self.rescued[vid] = n + 1
                 continue
             app = app_of(v)
+            if fit:
+                o = outs[fit["output"]]
+                place(sock, vid, fit, o)
+                self.rescued[vid] = n + 1
+                _g = v.get("geometry") or {}
+                logline(f"refit to {o['name']}'s work area, it was larger: "
+                        f"{app[:18]} {int(_g.get('width', 0))}x"
+                        f"{int(_g.get('height', 0))} -> "
+                        f"{int(fit['size'][0])}x{int(fit['size'][1])} | "
+                        f"{engine.log_title(v)[:30]}")
+                continue
             try:
                 others = engine.other_profile_entries(
                     app, identity(v) or "", self.kb_profile,

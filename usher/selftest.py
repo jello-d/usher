@@ -7323,6 +7323,31 @@ def _t_cli_split(ck):
         engine.do_save, engine.ask_sources_to_capture = _rs
     ck("save-sources-asks-the-other-accounts-and-plain-save-does-not",
        _calls == ["save", "src", "save"])
+    # `verify` REFUSES AN ARGUMENT IT DOES NOT TAKE: a bare path was
+    # ignored and the default prediction read instead, so a check against
+    # one desk reported on another (dragonfly 2026-11-13). Driven through
+    # the real dispatch, with the comparison itself stubbed.
+    import contextlib as _vctx
+    import io as _vio
+    _vcalls, _verr = [], _vio.StringIO()
+    _rv = engine.do_verify
+    try:
+        engine.do_verify = lambda against=None, tol=2: (
+            _vcalls.append(against) or 0)
+        _vrc = []
+        for _args in (["verify"], ["verify", "--against", "/p.json"],
+                      ["verify", "/p.json"], ["verify", "--against"]):
+            try:
+                with _vctx.redirect_stderr(_verr):
+                    cli._dispatch("verify", _args)
+            except SystemExit as _x:
+                _vrc.append(_x.code)
+    finally:
+        engine.do_verify = _rv
+    ck("verify-takes-against-and-refuses-anything-else",
+       _vcalls == [None, "/p.json"]
+       and _vrc == [0, 0, engine.EXIT_CANNOT, engine.EXIT_CANNOT]
+       and "did not understand: /p.json" in _verr.getvalue())
     # AND THE ASK ITSELF: the accounts with windows here are each asked to
     # capture, with the live views relayed; none asked when there are none.
     _asked = []
@@ -10859,6 +10884,63 @@ def _t_visible(ck):
     _dv._doctor_visible(_lines.append, _views[:1], _outs)
     ck("doctor-says-when-every-window-can-be-seen",
        any("[OK]" in x for x in _lines))
+
+    # STEP 1 OF THE RULE, HELD AS AN INVARIANT: a window LARGER THAN ITS
+    # PANEL'S WORK AREA is refit in place. A Chrome window moved to another
+    # monitor put its old size back seconds after the read-back confirmed
+    # the new one (dragonfly 2026-11-13: 2148 wide at 13:33:48, 2666 on a
+    # 2160-wide panel six seconds later).
+    _big = engine.oversize_fit(_v(geometry={"x": 100, "y": 100,
+                                            "width": 3000, "height": 1000}),
+                               _outs)
+    ck("an-oversized-window-is-refit-to-its-work-area",
+       bool(_big) and _big["size"] == [2880.0, 1000.0]
+       and _big["output"] == "eDP-1")
+    ck("a-window-that-fits-is-not-refit",
+       engine.oversize_fit(_v(), _outs) is None)
+    ck("a-few-pixels-over-is-within-the-tolerance",
+       engine.oversize_fit(_v(geometry={"x": 0, "y": 48, "width": 2885,
+                                        "height": 500}), _outs) is None)
+    ck("a-fullscreen-window-is-not-refit",
+       engine.oversize_fit(_v(fullscreen=True, geometry={
+           "x": 0, "y": 0, "width": 2880, "height": 1800}), _outs) is None)
+    # AND THE DAEMON DOES IT, under the rescue's seen-twice and bound
+    wz = Watcher(launch=False)
+    _moved2, _said2 = [], []
+    _views2 = [_v(id=21, geometry={"x": 100, "y": 100, "width": 3000,
+                                   "height": 1000}), _v(id=22)]
+
+    class _S2:
+        def list_outputs(self):
+            return [_o]
+
+        def list_views(self, filter_mapped_toplevel=False):
+            return _views2
+
+        def send_json(self, msg):
+            _moved2.append(msg["data"]["id"])
+
+    wz.place_sock = _S2()
+    _rs2 = (engine.surface_map, engine.surface_default,
+            engine.other_profile_entries, _wm.logline)
+    try:
+        engine.surface_map = lambda fresh=False: ({}, "")
+        engine.surface_default = lambda fresh=False: None
+        engine.other_profile_entries = lambda *a, **k: []
+        _wm.logline = _said2.append
+        wz._ensure_visible()
+        wz._ensure_visible()
+        ck("the-daemon-refits-only-the-oversized-window",
+           _moved2 == [21]
+           and any("refit to eDP-1's work area" in m for m in _said2))
+        for _ in range(_wm.RESCUE_TRIES + 2):
+            wz._ensure_visible()
+        ck("a-window-that-keeps-growing-is-given-up-on-by-name",
+           _moved2.count(21) == _wm.RESCUE_TRIES
+           and any("still not fitting" in m for m in _said2))
+    finally:
+        (engine.surface_map, engine.surface_default,
+         engine.other_profile_entries, _wm.logline) = _rs2
 
 
 def _t_sticky(ck):

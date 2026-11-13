@@ -544,6 +544,16 @@ def _dispatch(verb, args):
     elif verb == "verify":
         k = args.index("--against") if "--against" in args else -1
         ref = args[k + 1] if (k >= 0 and k + 1 < len(args)) else None
+        # AN ARGUMENT IT DOES NOT TAKE IS REFUSED, NOT DROPPED: a bare path
+        # was ignored and the DEFAULT prediction read in its place, so a
+        # check against one desk silently reported on another
+        # (dragonfly 2026-11-13).
+        extra = [a for i, a in enumerate(args)
+                 if i > 0 and not (k >= 0 and i in (k, k + 1))]
+        if extra or (k >= 0 and ref is None):
+            engine.die_cannot(
+                "usher verify takes only `--against FILE`; did not "
+                f"understand: {' '.join(extra) or '--against with no FILE'}")
         sys.exit(engine.do_verify(against=ref))
 
     elif verb == "restore":

@@ -8513,6 +8513,44 @@ def visibility(v, outputs):
     return ""
 
 
+# HOW MUCH LARGER THAN ITS WORK AREA a window may be before it is refit:
+# enough to absorb a client's rounding, never a window hanging off a panel.
+OVERSIZE_TOL = 8
+
+
+def oversize_fit(v, outputs, tol=OVERSIZE_TOL):
+    """Live view `v` refit to its panel's WORK AREA when it is larger than
+    that, as an entry to place, or None. PURE.
+
+    STEP 1 OF THE PLACEMENT RULE (scale to fit) HELD AS AN INVARIANT, not
+    only at the moment of placing. A Chrome window moved to another monitor
+    puts back the size it last had there SECONDS after it has been resized
+    and the read-back has confirmed it: on dragonfly 2026-11-13 two work
+    browser windows were 2148 and 2160 wide at 13:33:48 and 2666 and 2312
+    on a 2160-wide panel six seconds later, past every read-back. Nobody
+    makes a window wider than the screen on purpose, so this is a check of
+    the RESULT, the way `visibility` is.
+
+    It keeps the window where it is (fit_entry clamps only what it must) and
+    leaves a FULLSCREEN window alone, which covers the bars by design."""
+    o = outputs.get(v.get("output-name"))
+    if not o or v.get("fullscreen"):
+        return None
+    p = place_of(v, outputs)
+    _x, _y, ww, wh = workarea(o)
+    try:
+        sw, sh = float(p["size"][0]), float(p["size"][1])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+    if ww <= 0 or wh <= 0 or (sw <= ww + tol and sh <= wh + tol):
+        return None
+    e = {"output": o["name"], "workspace": list(p["workspace"]),
+         "pos": list(p["pos"]), "size": [sw, sh],
+         "sticky": bool(v.get("sticky")), "fullscreen": False}
+    f = fit_entry(e, o)
+    return f if (f["size"], f["pos"]) != (e["size"], e["pos"]) else None
+
+
 def rescue_slot(v, outputs, others=(), surfaces=None, default=None):
     """Where to put an invisible window: a slot on this desk. PURE.
 
