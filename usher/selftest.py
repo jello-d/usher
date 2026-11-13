@@ -13005,6 +13005,37 @@ def _t_displays(ck):
     _tall = dict(_away, size=[9000, 1800])
     ck("a-seed-is-clamped-to-the-surface",
        engine.surface_seed([_tall], _m)["size"] == [3840, 1080])
+    # A SEED IS PUT BESIDE WHAT THE SWEEP ALREADY PLACED (fit_beside), along
+    # the region's long axis. The first row is the measured case: two work
+    # browser windows seeded near the top of one portrait surface at a dock
+    # (dragonfly 2026-11-13).
+    _fb2 = engine.fit_beside
+    _port = (0, 0, 2160, 3840)
+    ck("fit-beside-stacks-on-a-portrait",
+       _fb2((0, 137, 2160, 1702), _port, [(0, 103, 2160, 1702)])
+       == (0, 1805, 2160, 1702))
+    ck("fit-beside-goes-side-by-side-on-a-landscape",
+       _fb2((100, 0, 1400, 1700), (0, 0, 2880, 1800),
+            [(0, 0, 1400, 1700)]) == (1400, 0, 1400, 1700))
+    ck("fit-beside-leaves-a-seed-that-overlaps-nothing",
+       _fb2((0, 2000, 2160, 1700), _port, [(0, 103, 2160, 1702)]) is None)
+    ck("fit-beside-shrinks-into-a-gap-of-at-least-half",
+       _fb2((0, 50, 2160, 1702), (0, 0, 2160, 3000),
+            [(0, 0, 2160, 1700)]) == (0, 1700, 2160, 1300))
+    ck("fit-beside-leaves-it-when-no-gap-is-half-its-length",
+       _fb2((0, 50, 1000, 1700), (0, 0, 1000, 2000),
+            [(0, 0, 1000, 1700)]) is None)
+    # a window BESIDE it on the other axis is not in its way: with the left
+    # column counted the axis is full and the answer would be None
+    ck("fit-beside-ignores-a-window-beside-it-on-the-other-axis",
+       _fb2((1100, 100, 1000, 1700), _port,
+            [(0, 0, 1000, 3840), (1100, 0, 1000, 1700)])
+       == (1100, 1700, 1000, 1700))
+    ck("fit-beside-takes-the-gap-nearest-the-seed",
+       _fb2((0, 1200, 1000, 900), (0, 0, 1000, 4000),
+            [(0, 1000, 1000, 1000)]) == (0, 2000, 1000, 900))
+    ck("fit-beside-ignores-an-edge-shared-by-a-few-pixels",
+       _fb2((0, 1690, 2160, 1702), _port, [(0, 0, 2160, 1702)]) is None)
     # AND IT CANNOT INVENT ONE. No surface recorded, or a name this desk does
     # not have, both decline: a seed is allowed to be approximate, never
     # fabricated.
@@ -13587,6 +13618,7 @@ def _t_displays(ck):
                     _seeded.clear()
                     w.kb = {engine.kkey(_app, ""): here}
                     w.slot_held = {}
+                    w.sweep_rects = {}
                     w.placed.clear()
                     w.redisplay_ok = {42}
                     w.deadline[42] = _time.time() + 100
@@ -13770,6 +13802,7 @@ def _t_displays(ck):
                                            surface="elsewhere",
                                            last_seen=190.0)}
                         w.slot_held = {}
+                        w.sweep_rects = {}
                         w.placed.clear()
                         w.left_keys = ({61: _mk0, 62: _mk1} if left
                                        else {})
@@ -13833,12 +13866,76 @@ def _t_displays(ck):
                     ck("the-capture-records-each-windows-learned-key",
                        "assigned=assigned" in _co
                        and "self.learned.update(assigned)" in _co)
+
+                    # TWO SEEDS INTO ONE SURFACE IN ONE SWEEP: the second is
+                    # put beside the first, not on it. Driven through
+                    # _place_view, since fit_beside's table says nothing
+                    # about whether the placer asks it.
+                    _bv = [dict(_lv[0], **{"id": 71, "app-id": _fapp,
+                                            "pid": 777}),
+                           dict(_lv[0], **{"id": 72, "app-id": _fapp,
+                                            "pid": 777})]
+                    _wmod.identity = lambda v: f"titan:w{v['id']}"
+                    engine.surface_map = lambda fresh=False: (
+                        {"tall": {"output": "eDP-1", "workspace": [0, 0],
+                                  "pos": [0, 0], "size": [800, 3000]}}, "")
+                    engine.other_profile_entries = (
+                        lambda a, i, p=None, s="": [
+                            {"surface": "tall", "size": [800, 1000],
+                             "last_seen": 1.0}])
+
+                    def _two(cells):
+                        _seeded.clear()
+                        w.kb, w.slot_held, w.sweep_rects = {}, {}, {}
+                        w.placed.clear()
+                        w.left_keys, w.left_from = {}, None
+                        w.place_sock = _Sock(_bv, [_mo])
+                        for _i, _v in zip((71, 72), _bv):
+                            w.redisplay_ok = {_i}
+                            w.deadline[_i] = _time.time() + 100
+                            w._place_view(_v)
+                            if cells:
+                                w.sweep_rects = {}
+                        return list(_seeded)
+
+                    ck("a-second-seed-in-a-surface-goes-beside-the-first",
+                       _two(False) == [(71, "tall", (0, 0)),
+                                       (72, "tall", (0, 1000))])
+                    # CONTROL: with nothing placed before it in the sweep
+                    # the second seed is where the surface puts it, or the
+                    # row above passes over a placer that moves every seed.
+                    ck("a-seed-with-nothing-beside-it-is-not-moved",
+                       _two(True) == [(71, "tall", (0, 0)),
+                                      (72, "tall", (0, 0))])
+                    # ONLY IN A SWEEP: a seed placed in place mode with no
+                    # desk change is not moved by rects that, outside a
+                    # sweep, would describe windows that have since moved.
+                    _seeded.clear()
+                    w.kb, w.slot_held = {}, {}
+                    w.sweep_rects = {(_mo["name"], (0, 0)):
+                                     [(0, 0, 800, 1000)]}
+                    w.placed.clear()
+                    w.redisplay_ok = set()
+                    w._placing_now = lambda: True
+                    try:
+                        w.deadline[72] = _time.time() + 100
+                        w._place_view(_bv[1])
+                    finally:
+                        del w._placing_now
+                    ck("outside-a-sweep-a-seed-is-not-moved-beside",
+                       _seeded == [(72, "tall", (0, 0))])
+                    # AND EACH SWEEP STARTS WITH NONE, or a later dock lays
+                    # windows out around rects from an earlier one.
+                    w.sweep_rects = {("x", (0, 0)): [(0, 0, 1, 1)]}
+                    w._sweep([71])
+                    ck("a-sweep-forgets-the-last-sweeps-rects",
+                       w.sweep_rects == {})
                 finally:
                     engine.left_entry = _rle
                     engine.desk_left_at = _rdl2
                     engine.desk_loaded_at = _rdld2
                     w.left_keys, w.left_from = {}, None
-                    for _i in (61, 62):
+                    for _i in (61, 62, 71, 72):
                         w.deadline.pop(_i, None)
             finally:
                 _wmod.identity, _wmod.unidentified = _rid, _run

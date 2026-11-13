@@ -527,6 +527,10 @@ class Watcher:
         # for every member.
         self.learned = {}
         self.left_keys, self.left_from = {}, None
+        # WHAT THE CURRENT SWEEP HAS PLACED, (output, cell) -> [(x, y, w, h)],
+        # so a SEED can be put beside them rather than on top (fit_beside).
+        # Cleared by each sweep: outside one, nothing is being laid out.
+        self.sweep_rects = {}
         # (vid, slot key) pairs we have already SAID were refused, so the
         # standing condition is reported once per window instead of on every
         # rename. Discarded with the rest of a view's state on unmap.
@@ -1119,11 +1123,44 @@ class Watcher:
         o = entry_output(e, outs)
         if not o:
             return
+        # ONLY IN A SWEEP: outside one the rects would describe windows
+        # that have since moved, and nothing is being laid out together.
+        if seeded and dock_chance:
+            e = self._beside(e, o, app, title)
         moved = self._seat_view(v, e, o)
         if moved:
             with self.lock:
                 self.slot_held[skey] = vid
+                if dock_chance:
+                    self.sweep_rects.setdefault(
+                        (o["name"], tuple(e.get("workspace") or ())),
+                        []).append(tuple(e["pos"]) + tuple(e["size"]))
         return moved
+
+    def _beside(self, e, o, app, title):
+        """A SEED moved off the windows this sweep already placed in its
+        region (engine.fit_beside), or `e` unchanged. The region is the
+        surface it was seeded from, or the whole output for the default."""
+        with self.lock:
+            taken = list(self.sweep_rects.get(
+                (o["name"], tuple(e.get("workspace") or ())), ()))
+        if not taken:
+            return e
+        name = e.get("seeded_from") or ""
+        s = (engine.surface_default() if e.get("seeded_default")
+             else engine.surface_map()[0].get(name))
+        if s and s.get("output") == o["name"]:
+            region = tuple(s["pos"]) + tuple(s["size"])
+        else:
+            g = o["geometry"]
+            region = (0, 0, g["width"], g["height"])
+        r = engine.fit_beside(tuple(e["pos"]) + tuple(e["size"]), region,
+                              taken)
+        if not r:
+            return e
+        logline(f"seeded beside {len(taken)} window(s) already in "
+                f"`{name}`: {app[:18]} | {title[:30]}")
+        return dict(e, pos=[r[0], r[1]], size=[r[2], r[3]])
 
     def _left_entry(self, vid, app, ident):
         """This window's OWN entry on the desk left at the last desk change,
@@ -2169,6 +2206,7 @@ class Watcher:
         with self.lock:
             self.placed.clear()
             self.slot_held.clear()
+            self.sweep_rects = {}
             self.verify.clear()
             self.place_tries.clear()
             self.late_ok.clear()

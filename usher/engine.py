@@ -1200,6 +1200,81 @@ def surface_seed(others, surfaces, default=None):
     return None
 
 
+# A SEED OVERLAPPING A PLACEMENT ALREADY MADE BY MORE THAN THIS SHARE OF THE
+# SMALLER OF THE TWO is moved beside it (fit_beside). Small enough to ignore
+# the few pixels two neighbours share at an edge.
+SEED_OVERLAP = 0.10
+
+
+def _overlap_share(a, b):
+    """How much of the SMALLER of two (x, y, w, h) rects the other covers."""
+    ix = min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0])
+    iy = min(a[1] + a[3], b[1] + b[3]) - max(a[1], b[1])
+    if ix <= 0 or iy <= 0:
+        return 0.0
+    return ix * iy / max(1.0, min(a[2] * a[3], b[2] * b[3]))
+
+
+def fit_beside(rect, region, taken):
+    """Where a SEEDED window goes so it does not cover a window already
+    placed in its region, as an (x, y, w, h) rect, or None to leave it.
+    PURE.
+
+    A seed is a guess with no arrangement behind it, so two windows seeded
+    into one region from where they sat at another desk (both near the top
+    of a laptop panel, say) land on each other. Measured at a dock on
+    dragonfly 2026-11-13: two work browser windows in one portrait surface.
+    A LEARNED slot is never moved by this: it is somebody's arrangement.
+
+    ALONG THE REGION'S LONG AXIS, keeping the other coordinate: a portrait
+    region stacks windows top to bottom, a landscape one side by side. It
+    takes the gap nearest the seed's own position that fits the window; with
+    none, the LARGEST gap if that keeps at least half the window's length
+    along the axis, shrinking it to the gap; else None, and the overlap
+    stands, which is what happened before."""
+    x, y, w, h = (float(n) for n in rect)
+    rx, ry, rw, rh = (float(n) for n in region)
+    near = [t for t in taken if _overlap_share((x, y, w, h), t)
+            > SEED_OVERLAP]
+    if not near:
+        return None
+    vert = rh >= rw
+    lo, span = (ry, rh) if vert else (rx, rw)
+    size, at = (h, y) if vert else (w, x)
+    # what the windows already here occupy along the axis, within the
+    # region, counting only those across the seed's own width (or height):
+    # a window BESIDE it on the other axis is not in its way
+    c0, c1 = (x, x + w) if vert else (y, y + h)
+    busy = sorted((max(lo, (t[1] if vert else t[0])),
+                   min(lo + span, (t[1] + t[3]) if vert
+                       else (t[0] + t[2])))
+                  for t in taken
+                  if min(c1, (t[0] + t[2]) if vert else (t[1] + t[3]))
+                  > max(c0, t[0] if vert else t[1]))
+    gaps, edge = [], lo
+    for a, b in busy:
+        if a > edge:
+            gaps.append((edge, a))
+        edge = max(edge, b)
+    if lo + span > edge:
+        gaps.append((edge, lo + span))
+    fits = [(a, b) for a, b in gaps if b - a >= size]
+    if fits:
+        a, b = min(fits, key=lambda g: abs(min(max(at, g[0]), g[1] - size)
+                                           - at))
+        start, ext = min(max(at, a), b - size), size
+    else:
+        if not gaps:
+            return None
+        a, b = max(gaps, key=lambda g: g[1] - g[0])
+        if b - a < size / 2:
+            return None
+        start, ext = a, b - a
+    if vert:
+        return (x, start, w, ext)
+    return (start, y, ext, h)
+
+
 def entry_output(e, outputs, panels=None):
     """The live output entry `e` should be placed on, or None.
 

@@ -539,8 +539,17 @@ same surface, where it is a finer answer than the surface's fraction; a slot
 anywhere else (including outside every surface) is stale, so the surface wins
 and the next capture relearns it. Once you have arrived, what you arrange by
 hand is learned and kept: a slot learned since you arrived is never overruled.
-Two windows sharing one identity keep their own slots, since a surface cannot
-tell them apart. To keep a spot no surface covers, name it in the desk's map.
+Two windows sharing one identity (two shells in one directory) each go to
+the surface its own slot held on the desk you came from. To keep a spot no
+surface covers, name it in the desk's map.
+
+**Seeded windows are laid out beside each other.** A window placed from a
+surface rather than from a learned slot is a guess, so two of them seeded into
+one surface at a desk change are not stacked on top of each other: the second
+goes beside the first along the surface's long axis (one under the other on a
+portrait panel), shrinking into the gap if it must keep at least half its
+length, and staying where the surface put it otherwise. Learned slots are
+never moved by this; they are your arrangement.
 
 **No window is left where it cannot be seen.** Whatever put it there (a
 parked window that lost a shared slot, a slot learned mostly off its panel, a
