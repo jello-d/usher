@@ -1087,10 +1087,11 @@ def _free_share(off, ext, span, size):
     window's few pixels of margin into a third of a tall panel: a Chrome
     window filling the laptop panel (61px from the top, 34px from the
     bottom) landed 1399px down a 3840px portrait panel (dragonfly,
-    2026-11-13)."""
+    2026-11-13). AND "ABOUT EQUAL" IS 1%: at 10% two near-full windows a
+    few pixels apart on the laptop were both centred onto ONE rect."""
     free = max(0, int(span) - int(size))
     before, after = float(off), 1.0 - float(off) - float(ext)
-    if abs(before - after) <= 0.1:
+    if abs(before - after) <= 0.01:
         return free // 2
     if before < after:
         return min(max(0, int(round(before * span))), free)

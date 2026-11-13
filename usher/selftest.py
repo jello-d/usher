@@ -13157,7 +13157,12 @@ def _t_displays(ck):
     ck("free-share-centres-equal-margins",
        engine._free_share(0.35, 0.3, 1000, 300) == 350)
     ck("free-share-a-near-full-window-is-not-flung-down-the-region",
-       engine._free_share(0.0356, 0.9456, 3840, 1702) == 1069)
+       engine._free_share(0.0356, 0.9456, 3840, 1702) == 2066)
+    # TWO NEAR-FULL WINDOWS A FEW PIXELS APART ARE NOT CENTRED ONTO ONE
+    # RECT, which a loose "about equal" did to two Chrome windows.
+    ck("free-share-two-near-full-windows-stay-apart",
+       engine._free_share(0.0356, 0.9456, 3840, 1702)
+       != engine._free_share(0.0267, 0.9456, 3840, 1702))
     ck("free-share-never-leaves-the-region",
        engine._free_share(0.9, 0.5, 1000, 600) == 400)
     # AN UNPLACED NAME FALLS TO THE DEFAULT, keeping its own cell
