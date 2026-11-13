@@ -1076,6 +1076,16 @@ def surface_target(app, ident, src, profile, outs):
     return seed, ""
 
 
+def _free_share(off, ext, free):
+    """Where a window goes along one axis of a region with `free` pixels to
+    spare, keeping the share of the free space it had where it was learned:
+    `off` and `ext` are its offset and extent there as fractions of that
+    region. PURE."""
+    room = 1.0 - float(ext)
+    r = float(off) / room if room > 1e-6 else 0.0
+    return int(round(min(max(r, 0.0), 1.0) * max(0, free)))
+
+
 def surface_seed(others, surfaces, default=None):
     """A starting slot for a window this desk has never learned, from the
     SURFACE it occupies on another desk. None when nothing can be derived.
@@ -1131,12 +1141,18 @@ def surface_seed(others, surfaces, default=None):
             (not to_default and not by_cell)
             or (to_default and name == default.get("name"))) else None
         if frac and len(frac) == 4:
-            # SCALED INTO THE TARGET: the same part of the region, at this
-            # desk's resolution, clamped so it never overflows it.
-            w = max(1, min(int(frac[2] * sw), sw))
-            h = max(1, min(int(frac[3] * sh), sh))
-            x = sx + min(max(0, int(frac[0] * sw)), sw - w)
-            y = sy + min(max(0, int(frac[1] * sh)), sh - h)
+            # SCALED TO FIT, NOT IN PROPORTION. The window keeps its own size
+            # wherever the target region has room for it, and shrinks only
+            # as far as it must: proportional scaling made a terminal on a
+            # 2880-wide laptop panel 25% narrower on a 2160-wide portrait one
+            # with plenty of room beside it (dragonfly, 2026-11-13). The
+            # POSITION keeps its share of the FREE space, so a window flush
+            # against an edge stays flush and a centred one stays centred.
+            ow, oh = (e.get("size") or [0, 0])[:2]
+            w = max(1, min(int(ow or frac[2] * sw), sw))
+            h = max(1, min(int(oh or frac[3] * sh), sh))
+            x = sx + _free_share(frac[0], frac[2], sw - w)
+            y = sy + _free_share(frac[1], frac[3], sh - h)
         else:
             w = min(int(e.get("size", [0, 0])[0]) or sw, sw)
             h = min(int(e.get("size", [0, 0])[1]) or sh, sh)
@@ -8293,7 +8309,7 @@ def live_holder(holder, vid, live_ids):
     return "held" if holder in live_ids else "stale"
 
 
-def placement_landed(v, e, o, tol=PLACE_TOL):
+def placement_landed(v, e, o, tol=PLACE_TOL, size=True):
     """Did view v actually END UP on the slot e asks for, on output o?
 
     A placement is a REQUEST and the compositor may ignore it. wayfire's own
@@ -8304,10 +8320,16 @@ def placement_landed(v, e, o, tol=PLACE_TOL):
     or the human", and a far easier one: a read-back a moment after issuing
     cannot be confounded by a person, because nobody drags a window in 600ms.
 
-    THE SIZE IS DELIBERATELY NOT COMPARED. A client may legitimately refuse a
-    size (kitty rounds to whole cells and adds padding), and that is not
-    evidence the placement failed. The workspace and the position are what a
-    placement is for, and what a lost race destroys.
+    THE SIZE IS COMPARED IN ONE DIRECTION ONLY. A client may legitimately
+    come out a little SMALLER than asked (kitty rounds to whole cells), which
+    is not evidence the placement failed. But one that stays LARGER than
+    asked kept its own size over ours, and on a smaller panel that is a
+    window hanging off the edge. Measured on dragonfly 2026-11-13: a Chrome
+    window moved to another monitor keeps the size it last had on that
+    monitor and ignores the one sent with the move, while the same request
+    repeated on the same monitor is honoured. Five of them were left 2500px
+    wide on a 2160px portrait panel by a dock. `size=False` asks about the
+    position alone, which is how the caller tells a size miss apart.
     """
     if v is None or not e or not o:
         return False
@@ -8329,8 +8351,22 @@ def placement_landed(v, e, o, tol=PLACE_TOL):
     if (not e.get("sticky") and [int(n) for n in got["workspace"]]
             != [int(n) for n in e["workspace"]]):
         return False
-    return (abs(got["pos"][0] - e["pos"][0]) <= tol and
-            abs(got["pos"][1] - e["pos"][1]) <= tol)
+    if not (abs(got["pos"][0] - e["pos"][0]) <= tol and
+            abs(got["pos"][1] - e["pos"][1]) <= tol):
+        return False
+    if not size:
+        return True
+    try:
+        return (got["size"][0] <= float(e["size"][0]) + SIZE_OVER
+                and got["size"][1] <= float(e["size"][1]) + SIZE_OVER)
+    except (KeyError, IndexError, TypeError, ValueError):
+        return True
+
+
+# HOW MUCH LARGER THAN ASKED A WINDOW MAY COME OUT before a placement counts
+# as not landed. Above a terminal's cell, far below the 300 to 600px a client
+# keeping its own size produces (see placement_landed).
+SIZE_OVER = 48
 
 
 def apply_fullscreen(sock, view_id):

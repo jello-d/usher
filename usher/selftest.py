@@ -5334,6 +5334,17 @@ def _t_verify(ck):
        placement_landed(_v(110, 120, w=44, h=51), _e, _o))
     ck("verify-rejects-the-wrong-output",
        not placement_landed(_v(110, 120, out="DP-2"), _e, _o))
+    # BUT A WINDOW THAT STAYED LARGER THAN ASKED KEPT ITS OWN SIZE OVER
+    # OURS: a Chrome window moved to another monitor takes the size it last
+    # had there, and was left 2500px wide on a 2160px panel (dragonfly
+    # 2026-11-13). Smaller is still fine; `size=False` is the position alone.
+    _big = _v(110, 120, w=30 + engine.SIZE_OVER + 1)
+    ck("verify-rejects-a-window-that-kept-a-larger-size",
+       not placement_landed(_big, _e, _o))
+    ck("verify-a-larger-size-is-still-landed-by-position",
+       placement_landed(_big, _e, _o, size=False))
+    ck("verify-a-smaller-size-is-landed",
+       placement_landed(_v(110, 120, w=10, h=10), _e, _o))
     ck("verify-rejects-a-gone-window", not placement_landed(None, _e, _o))
 
     logged = []
@@ -5354,6 +5365,19 @@ def _t_verify(ck):
         ck("verify-miss-reopens-the-window", 7 not in w.placed)
         ck("verify-miss-requeues-for-another-go", 7 in w.pending)
         ck("verify-miss-is-logged", any("did not take" in m for m in logged))
+
+        # ONLY THE SIZE MISSED: the same placement is RE-ISSUED at once, not
+        # sent back through the gates a dock's one-time entitlement already
+        # passed and would now refuse.
+        logged[:] = []
+        w = _wat(_v(110, 120, w=30 + engine.SIZE_OVER + 1))
+        _reseat = []
+        w._seat_view = lambda v, e, o: _reseat.append((v["id"], e, o))
+        w._verify_one(7, {"e": _e, "o": _o})
+        ck("verify-size-miss-reissues-the-same-placement",
+           _reseat == [(7, _e, _o)] and 7 not in w.pending)
+        ck("verify-size-miss-is-logged",
+           any("size did not take" in m for m in logged))
 
         # A HIT IS SILENT AND CHANGES NOTHING, which is the common case.
         logged[:] = []
@@ -13106,14 +13130,29 @@ def _t_displays(ck):
     ck("frac-of-an-empty-region-is-none",
        engine.surface_frac(_wc, {"pos": [0, 0], "size": [0, 9]}) is None)
 
-    # THE SEED SCALES: the same part of the region at this desk's resolution
+    # THE SEED SCALES TO FIT, NOT IN PROPORTION: the window keeps its own
+    # 900x700 in the 3840x1080 region, and keeps its SHARE OF THE FREE SPACE
+    # (halfway along x, flush against the bottom). Proportional scaling made
+    # it 1920x540, which on a narrower panel is a terminal shrunk with room
+    # to spare beside it (dragonfly, 2026-11-13).
     _fa = dict(_away, surface="comms", surface_frac=[0.25, 0.5, 0.5, 0.5])
     _fs = engine.surface_seed([_fa], _mm, _md)
-    ck("seed-scales-the-window-into-the-region",
-       _fs["pos"] == [960, 540] and _fs["size"] == [1920, 540])
-    ck("seed-a-fraction-overflowing-the-region-is-clamped",
+    ck("seed-keeps-the-windows-own-size-where-there-is-room",
+       _fs["size"] == [900, 700])
+    ck("seed-keeps-the-windows-share-of-the-free-space",
+       _fs["pos"] == [1470, 380])
+    ck("seed-a-share-past-the-edge-stays-flush-with-it",
        engine.surface_seed([dict(_fa, surface_frac=[0.9, 0.9, 0.5, 0.5])],
-                           _mm, _md)["pos"] == [1920, 540])
+                           _mm, _md)["pos"] == [2940, 380])
+    # AND SHRINKS ONLY AS FAR AS IT MUST: wider than the region, it is cut
+    # to the region's width and keeps its height.
+    ck("seed-a-window-wider-than-the-region-is-cut-to-fit",
+       engine.surface_seed([dict(_fa, size=[5000, 700])], _mm, _md)
+       ["size"] == [3840, 700])
+    ck("free-share-an-edge-and-a-full-width-window",
+       engine._free_share(0.0, 0.3, 500) == 0
+       and engine._free_share(0.7, 0.3, 500) == 500
+       and engine._free_share(0.2, 1.0, 500) == 0)
     # AN UNPLACED NAME FALLS TO THE DEFAULT, keeping its own cell
     _ds = engine.surface_seed([dict(_away, surface="nowhere")], _mm, _md)
     ck("seed-an-unplaced-name-falls-to-the-default",
@@ -13141,10 +13180,12 @@ def _t_displays(ck):
        (engine.surface_seed([dict(_away, surface="gone",
                                   surface_frac=[0.5, 0.5, 0.1, 0.1])],
                             _mm, _md) or {}).get("pos") == [0, 0])
+    _dfs = engine.surface_seed([dict(_away, surface="rest",
+                                     surface_frac=[0.5, 0.5, 0.1, 0.1])],
+                               _mm, _md) or {}
     ck("seed-the-default's-own-fraction-is",
-       (engine.surface_seed([dict(_away, surface="rest",
-                                  surface_frac=[0.5, 0.5, 0.1, 0.1])],
-                            _mm, _md) or {}).get("pos") == [1440, 900])
+       _dfs.get("size") == [900, 700] and _dfs.get("pos", [0, 0])[0] > 0
+       and _dfs.get("pos", [0, 0])[1] > 0)
     ck("clamp-cell-brings-a-cell-inside-the-grid",
        engine.clamp_cell({"output": "DP-2", "workspace": [5, 9]}, _g)
        ["workspace"] == [2, 2])

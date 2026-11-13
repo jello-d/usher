@@ -1255,6 +1255,17 @@ class Watcher:
             logline(f"place did not take after {n} tries, left where it is: "
                     f"{app[:18]} | {title[:28]}")
             return
+        # ONLY THE SIZE MISSED: the window is where we put it and kept a
+        # larger size of its own (a Chrome window moved to another monitor
+        # takes the size it last had there). The decision is made, so the
+        # same placement is RE-ISSUED here rather than sent back through the
+        # gates, which a dock's one-time entitlement has already passed and
+        # would now refuse. On the same monitor the size is honoured.
+        if placement_landed(v, e, o, size=False):
+            logline(f"size did not take (try {n}), re-sizing: "
+                    f"{app[:18]} | {title[:34]}")
+            self._seat_view(v, e, o)
+            return
         logline(f"place did not take (try {n}), re-placing: "
                 f"{app[:18]} | {title[:34]}")
         with self.lock:
