@@ -123,6 +123,11 @@ LEARN_HOLD = sum(PLACE_VERIFY) + PLACE_LATE + 1.0
 # pending whose size changes away from the one it was given is looked at
 # this soon, not at PLACE_LATE. Long enough for a burst of configures.
 SIZE_SETTLE = 0.3
+# A SWEEP THAT CANNOT LIST THE WINDOWS retries this many times, this far
+# apart: mid-undock a listing raised on a half-removed view, and one try
+# re-placed nothing (dragonfly 2026-11-13 17:14:42).
+SWEEP_LIST_TRIES = 6
+SWEEP_LIST_PAUSE = 0.5
 # The visibility guarantee (Watcher._ensure_visible): how often it looks,
 # and how many times one window is rescued before usher says so and stops.
 VISIBLE_EVERY = 5.0
@@ -2346,8 +2351,14 @@ class Watcher:
             vids = [v.get("id") for v in
                     self.place_sock.list_views(filter_mapped_toplevel=True)]
         except Exception as e:
-            logline(f"redisplay: cannot list views: {e}")
-            vids = []
+            # NOT "no windows": the sweep lists them itself when it runs
+            # (vids=None), by which time the outputs have usually settled.
+            # An empty list here re-placed nothing at all (dragonfly
+            # 2026-11-13 17:14:42, "re-placing 0", 17 of 21 left as the
+            # undock put them).
+            logline(f"redisplay: cannot list views yet ({e}); the sweep "
+                    f"will list them")
+            vids = None
         now = time.time()
         with self.lock:
             # THE STORE BEING LEFT, as it stood: a desk change is the riskiest
@@ -2459,12 +2470,22 @@ class Watcher:
         sweep exists to move. Measured when it shipped that way: the log said
         "re-placing" over a sweep that could not act."""
         if vids is None:
-            try:
-                vids = [v.get("id") for v in
-                        self.place_sock.list_views(filter_mapped_toplevel=True)]
-            except Exception as e:
-                logline(f"sweep: cannot list views: {e}")
-                return 0
+            # A LISTING THAT FAILS DURING A DISPLAY CHANGE IS USUALLY A
+            # MOMENT'S TEARDOWN, so it is retried briefly before giving up;
+            # giving up still voids the ledgers and asks for a re-check
+            # below, rather than returning with nothing done.
+            for _try in range(SWEEP_LIST_TRIES):
+                try:
+                    vids = [v.get("id") for v in self.place_sock.list_views(
+                        filter_mapped_toplevel=True)]
+                    break
+                except Exception as e:                     # noqa: BLE001
+                    if _try + 1 == SWEEP_LIST_TRIES:
+                        logline(f"sweep: cannot list views after "
+                                f"{SWEEP_LIST_TRIES} tries: {e}")
+                        vids = []
+                    else:
+                        time.sleep(SWEEP_LIST_PAUSE)
         now = time.time()
         with self.lock:
             self.placed.clear()

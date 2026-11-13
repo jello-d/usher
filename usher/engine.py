@@ -64,6 +64,53 @@ try:
 except ImportError:
     WayfireSocket = WPE = None
 
+
+def tolerant_views(views, mapped_toplevel=False):
+    """The view list as a list of dicts, filtered the way pywayfire's
+    `filter_mapped_toplevel` filters it, WITHOUT RAISING on a description
+    that lacks a field. PURE.
+
+    pywayfire indexes `v["mapped"]`, `v["role"]` and `v["pid"]`, and during
+    an undock the compositor answered with a view that had no `mapped`: the
+    listing raised, the re-place that follows a desk change ran over NO
+    windows ("re-placing 0"), and seventeen of 21 were left where the
+    undock put them (dragonfly 2026-11-13 17:14:42). A view caught half
+    torn down is simply left out of that one listing."""
+    if not isinstance(views, list):
+        return []
+    out = [v for v in views if isinstance(v, dict)]
+    if mapped_toplevel:
+        out = [v for v in out if v.get("mapped") is True
+               and v.get("role") != "desktop-environment"
+               and v.get("pid", -1) != -1]
+    return out
+
+
+def tolerant_outputs(outputs):
+    """The output list, keeping only outputs that carry a name and a
+    geometry. PURE. An output being removed was answered without its
+    `name` in the same undock, and every `{o["name"]: o ...}` raised."""
+    if not isinstance(outputs, list):
+        return []
+    return [o for o in outputs if isinstance(o, dict) and o.get("name")
+            and isinstance(o.get("geometry"), dict)]
+
+
+if WayfireSocket is not None:
+    class UsherSocket(WayfireSocket):
+        """pywayfire's socket, with the two listings usher reads made
+        tolerant of a half-torn-down view or output (tolerant_views,
+        tolerant_outputs). Built only by ipc() and connect()."""
+
+        def list_views(self, filter_mapped_toplevel=False):
+            return tolerant_views(super().list_views(False),
+                                  filter_mapped_toplevel)
+
+        def list_outputs(self):
+            return tolerant_outputs(super().list_outputs())
+else:
+    UsherSocket = None
+
 # The work/personal boundary: this daemon runs as the personal account, so it
 # must not record or move work-enclave windows. mux stamps work terminals with
 # a "[WORK: <label>]" title banner; anything matching this is ignored end to
@@ -10274,7 +10321,7 @@ def ipc():
     compositor that `usher-mgr` was talking to happily. A selftest check now
     asserts these two are the only constructors.
     """
-    return WayfireSocket(wayfire_socket())
+    return UsherSocket(wayfire_socket())
 
 
 def connect(retries=25, delay=0.2):
@@ -10291,7 +10338,7 @@ def connect(retries=25, delay=0.2):
     last = None
     for _ in range(retries):
         try:
-            return WayfireSocket(wayfire_socket())
+            return UsherSocket(wayfire_socket())
         except Exception as e:      # socket absent/unready: wait and retry
             last = e
             time.sleep(delay)

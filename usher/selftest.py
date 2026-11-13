@@ -8076,10 +8076,37 @@ def _t_cli_split(ck):
                 continue
             for _sub in ast.walk(_node):
                 if (isinstance(_sub, ast.Call)
-                        and getattr(_sub.func, "id", None) == "WayfireSocket"
+                        and getattr(_sub.func, "id", None)
+                        in ("WayfireSocket", "UsherSocket")
                         and _node.name not in ("ipc", "connect")):
                     _bad.append(f"{_m.__name__}.{_node.name}")
     ck("only-ipc-and-connect-build-a-socket", not _bad)
+    # AND THEY BUILD THE TOLERANT ONE: a listing that raised on a view with
+    # no `mapped` mid-undock re-placed NO windows (dragonfly 2026-11-13)
+    _doors = {}
+    for _node in ast.walk(ast.parse(inspect.getsource(engine))):
+        if isinstance(_node, ast.FunctionDef) and \
+                _node.name in ("ipc", "connect"):
+            _doors[_node.name] = {getattr(_c.func, "id", None)
+                                  for _c in ast.walk(_node)
+                                  if isinstance(_c, ast.Call)}
+    ck("both-doors-build-the-tolerant-socket",
+       all("UsherSocket" in _doors.get(_d, ()) for _d in ("ipc", "connect")))
+    def _tv(*a):
+        try:
+            return engine.tolerant_views(*a)
+        except Exception as _x:                            # noqa: BLE001
+            return f"RAISED {_x!r}"
+    _ok = {"mapped": True, "role": "toplevel", "pid": 5, "id": 1}
+    ck("a-view-missing-a-field-is-left-out-not-raised-on",
+       _tv([_ok, {"id": 2}, {"mapped": True, "id": 3}, "junk"], True)
+       == [_ok, {"mapped": True, "id": 3}][:1]
+       and _tv([_ok, {"id": 2}], False) == [_ok, {"id": 2}]
+       and _tv(None, True) == [] and _tv({"error": "x"}, True) == [])
+    ck("an-output-missing-its-name-is-left-out",
+       engine.tolerant_outputs([{"name": "A", "geometry": {}}, {"id": 2},
+                                {"name": "B"}])
+       == [{"name": "A", "geometry": {}}])
 
     # NO MODULE IMPORTS A REBOUND ENGINE GLOBAL BY VALUE, which the package
     # split named as THE one real hazard in splitting this program: the
@@ -14019,6 +14046,39 @@ def _t_displays(ck):
             ck("a-grid-that-never-arrives-still-gets-a-sweep",
                _swept == [[42]]
                and any("never arrived" in m for m in _said6))
+            # A LISTING THAT FAILS IS NOT "NO WINDOWS": the sweep lists them
+            # itself when it runs. Mid-undock a listing raised and the
+            # re-place ran over none (dragonfly 2026-11-13 17:14:42).
+            _swept.clear()
+
+            class _BadList(_Sock):
+                def list_views(self, **kw):
+                    raise KeyError("mapped")
+            w.place_sock = _BadList(_lv, _g3)
+            w._adopt_profile("LAPTOP", "test")
+            ck("a-failed-listing-leaves-the-sweep-to-list-them",
+               _swept == [None])
+            # AND THE SWEEP RETRIES A LISTING THAT FAILS, before giving up
+            _calls2 = []
+
+            class _FlakyList(_Sock):
+                def list_views(self, **kw):
+                    _calls2.append(1)
+                    if len(_calls2) == 1:
+                        raise KeyError("mapped")
+                    return self._v
+            _rsw2, _rpause = Watcher._sweep, _wmod.SWEEP_LIST_PAUSE
+            try:
+                Watcher._sweep = _rsw
+                _wmod.SWEEP_LIST_PAUSE = 0.0
+                w.place_sock = _FlakyList(_lv, _g3)
+                w.redisplay_ok = set()
+                w._sweep(None)
+                ck("the-sweep-retries-a-listing-that-failed",
+                   len(_calls2) == 2 and w.redisplay_ok == {42})
+            finally:
+                Watcher._sweep, _wmod.SWEEP_LIST_PAUSE = _rsw2, _rpause
+                w.redisplay_ok = set()
             # CONTROL: the grid already right re-places at once, as before.
             _swept.clear()
             w.place_sock = _Sock(_lv, _g3)
