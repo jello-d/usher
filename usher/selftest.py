@@ -4230,7 +4230,7 @@ def _t_size_slots(ck):
     _kbl = {fam0: dict(kb[fam0]), bg: dict(kb[bg])}
     try:
         engine.learn(_kbl, {}, [_row(36, [2527.0, 1702.0], [7.0, 8.0]),
-                                _row(30, [2498.0, 1702.0], [9.0, 9.0])],
+                                _row(30, [2498.0, 1702.0], [900.0, 9.0])],
                      _t.time(), ledger={bg: 36, fam0: 30})
     except Exception as _e:                                # noqa: BLE001
         _kbl = {"RAISED %s" % _e: {}}
@@ -4239,7 +4239,7 @@ def _t_size_slots(ck):
        and (_kbl.get(bg) or {}).get("title") == bg.partition("\x00")[2])
     ck("and-the-window-takes-no-family-slot-as-well",
        sorted(k for k in _kbl if engine.slot_base(k) == fam0) == [fam0]
-       and (_kbl.get(fam0) or {}).get("pos") == [9.0, 9.0])
+       and (_kbl.get(fam0) or {}).get("pos") == [900.0, 9.0])
     # held_slot, pure
     ck("held-slot-own-family",
        engine.held_slot([fam1], app, src, src) == (fam1, src))
@@ -4260,6 +4260,45 @@ def _t_size_slots(ck):
     _sp = engine.spare_source_slots(_kbs, app, src, set())
     ck("a-recent-per-window-slot-is-a-spare", bg in _sp)
     ck("a-stale-per-window-slot-is-not", _old not in _sp)
+
+    # A WINDOW NAMED SINCE IT WAS PLACED INTO THE SHARED SLOT releases it:
+    # the shared slot holds its rect, and an unnamed window would land on
+    # top of it at the next login.
+    def _nrow(vid, key, pos):
+        return {"id": vid, "app_id": app, "source": src, "key": key,
+                "owner": 997, "title": "", "output": "eDP-1",
+                "workspace": [1.0, 2.0], "pos": pos, "size": [9.0, 9.0]}
+    _kbr = {fam0: dict(kb[fam0], source=src, last_seen=_now)}
+    _named = src + ":b48c"
+    engine.learn(_kbr, {}, [_nrow(36, _named, [5.0, 5.0])], _now,
+                 ledger={fam0: 36})
+    ck("a-named-window-releases-the-shared-slot-it-held",
+       fam0 not in _kbr and K(app, _named) in _kbr)
+    _kbr = {fam0: dict(kb[fam0], source=src, last_seen=_now)}
+    engine.learn(_kbr, {}, [_nrow(36, _named, [5.0, 5.0])], _now,
+                 ledger={})
+    ck("control-a-shared-slot-nobody-held-stays",
+       fam0 in _kbr)
+    # ONLY THE SHARED SLOT: a named slot it held under another name is
+    # memory of a window, not a leftover of the shared one.
+    _prev = K(app, src + ":prev")
+    _kbr = {_prev: dict(kb[fam0], source=src, last_seen=_now)}
+    engine.learn(_kbr, {}, [_nrow(36, _named, [5.0, 5.0])], _now,
+                 ledger={_prev: 36})
+    ck("control-a-named-slot-it-held-is-not-released", _prev in _kbr)
+    # AND THE SAME AT LOAD: a shared slot repeating a named slot's rect is
+    # a learned stack and goes; the named one stays.
+    _r = {"output": "eDP-1", "workspace": [1, 2], "pos": [303.0, 49.0],
+          "size": [9, 9], "source": src}
+    _kbd = {fam0: dict(_r), K(app, _named): dict(_r),
+            fam1: dict(_r, pos=[900.0, 9.0])}
+    _du = dict(engine.duplicate_slots(_kbd))
+    ck("a-shared-slot-repeating-a-named-rect-is-a-stack",
+       _du.get(fam0) == K(app, _named))
+    ck("control-a-shared-slot-elsewhere-is-not", fam1 not in _du)
+    ck("control-the-owners-own-family-is-not-touched",
+       engine.duplicate_slots({K("kitty", "kitty:/h"): dict(_r, source=""),
+                               K(app, _named): dict(_r)}) == [])
 
 
 def _t_slots(ck):
@@ -10352,8 +10391,29 @@ def _t_visible(ck):
                          _outs) == "")
     _st3 = engine.fit_entry({"workspace": [1, 0], "pos": [2870, 33],
                              "size": [1392, 885]}, _o3)
+    # REHOMED, AND THEN LEFT EXACTLY WHERE IT WAS: it fits and is mostly
+    # on screen, so the 10px overhang is the user's and is reproduced. It
+    # used to be clamped to [0, 48], which is the measured Signal nudge.
     ck("fit-rehomes-a-straddling-slot-to-the-cell-holding-it",
-       _st3["workspace"] == [2, 0] and _st3["pos"] == [0, 48])
+       _st3["workspace"] == [2, 0] and _st3["pos"] == [-10, 33])
+    ck("fit-strict-still-clamps-it-into-the-work-area",
+       engine.fit_entry({"workspace": [1, 0], "pos": [2870, 33],
+                         "size": [1392, 885]}, _o3, strict=True)["pos"]
+       == [0, 48])
+    # A FITTING, MOSTLY VISIBLE SLOT UNDER THE BAR IS LEFT ALONE...
+    _ex = {"workspace": [0, 0], "pos": [103, 64], "size": [2498, 1702]}
+    ck("fit-leaves-a-visible-slot-exactly-as-learned",
+       engine.fit_entry(_ex, _o3) is _ex)
+    # ...ONE LARGER THAN THE WORK AREA IS CUT AND CLAMPED...
+    _big = engine.fit_entry({"workspace": [0, 0], "pos": [10, 10],
+                             "size": [3000, 1790]}, _o3)
+    ck("fit-cuts-a-slot-larger-than-the-work-area",
+       _big["size"] == [2880, 1702] and _big["pos"] == [0, 48])
+    # ...AND ONE MOSTLY OFF ITS PANEL IS BROUGHT ON.
+    _off = engine.fit_entry({"workspace": [2, 2], "pos": [2700, 1600],
+                             "size": [800, 600]}, _o3)
+    ck("fit-brings-a-mostly-hidden-slot-on-screen",
+       _off["pos"] == [2080, 1150])
     ck("visible-a-window-outside-the-grid-is-not",
        "outside" in engine.visibility(_v(geometry={"x": 2880 * 2, "y": 0,
                                                    "width": 500,

@@ -4164,6 +4164,30 @@ def duplicate_slots(kb, tol=None):
                 kept.append(k)
             else:
                 out.append((k, dup))
+    # AND ACROSS AN ACCOUNT'S SHARED FAMILY AND ITS NAMED SLOTS. A window of
+    # another account that was unnamed when first learned took the shared
+    # (source-alone) slot, was named later and learned again under its own
+    # key, and left the shared slot holding its rect. At the next login an
+    # unnamed window takes the shared slot and lands on top of it. Measured
+    # on dragonfly 2026-11-12, the shared slot repeating a named window's
+    # rect to the pixel. The NAMED slot is kept: it is that window's memory.
+    gone = {k for k, _j in out}
+    named = {}
+    for k in kb:
+        app, _, ident = slot_base(k).partition("\x00")
+        src = (kb[k] or {}).get("source") or ""
+        if src and ident.startswith(src + ":"):
+            named.setdefault((app, src), []).append(k)
+    for k in sorted(kb, key=_slot_index):
+        e = kb[k]
+        app, _, ident = slot_base(k).partition("\x00")
+        src = (e or {}).get("source") or ""
+        if k in gone or not src or ident != src:
+            continue
+        dup = next((j for j in sorted(named.get((app, src), ()))
+                    if _same_rect(e, kb[j], tol)), None)
+        if dup is not None:
+            out.append((k, dup))
     return out
 
 
@@ -4386,6 +4410,16 @@ def _learn_stamp(kb, groups, windows, counts, when, hold=(), refused=None,
                 _k, _ht = next_slot_key(app, _i, used | reserved), None
             used.add(_k)
             kb[_k] = kb_entry(w, _ht or _kt, _only, when)
+            # A WINDOW NAMED SINCE IT WAS PLACED INTO ITS ACCOUNT'S SHARED
+            # SLOT leaves that slot behind holding its rect, and at the next
+            # login an unnamed window lands on top of it (duplicate_slots
+            # catches the same thing at load, while the rect still matches).
+            _src = w.get("source") or ""
+            if _src and _i != _src:
+                for _old in mine.get(vid, ()):
+                    if (_old != _k and _old not in used
+                            and slot_base(_old) == kkey(app, _src)):
+                        kb.pop(_old, None)
         # NO TITLE-GROUP BRANCH, for upsert's reason: every window that
         # passes the readiness gate now gets a key from `stamp_key`, so the
         # fallback this used to need is unreachable. The GROUPS themselves go
@@ -7854,7 +7888,7 @@ def rehome(e, o):
     return dict(e, workspace=[nx, ny], pos=[ax - nx * ow, ay - ny * oh])
 
 
-def fit_entry(e, o):
+def fit_entry(e, o, strict=False):
     """`e` with its rect moved, and shrunk if it must be, to lie inside the
     WORK AREA of output `o`, in the cell that holds most of it. PURE; `e`
     itself when nothing changes.
@@ -7867,7 +7901,18 @@ def fit_entry(e, o):
     inside the grid, and only then is the rect clamped, so a window is
     never pulled off the workspace it is actually on. The size is cut to
     the work area too, so a window learned on a larger panel or under
-    thinner bars cannot hang off the bottom of this one."""
+    thinner bars cannot hang off the bottom of this one.
+
+    BUT A WINDOW THAT FITS AND IS MOSTLY ON SCREEN IS LEFT EXACTLY WHERE IT
+    WAS, unless `strict`. The clamp exists to rescue a window that cannot
+    be seen, and applied to every placement it moved windows the user had
+    put there on purpose: measured on dragonfly 2026-11-12, four of 21
+    slots matched the screen exactly and a restore would still have moved
+    them by 1 to 16px, Signal among them for overhanging the panel's edge
+    by 12px. A restore that cannot reproduce what it learned is not a
+    restore. So the clamp runs only when the window is larger than the work
+    area, or less than VISIBLE_MIN of it would be on its panel: the same
+    test the visibility rescue applies to a live window."""
     if not e or not o:
         return e
     base = e
@@ -7892,6 +7937,12 @@ def fit_entry(e, o):
         px, py = float(e["pos"][0]), float(e["pos"][1])
     except (KeyError, IndexError, TypeError, ValueError):
         return base
+    if not strict and sw <= w and sh <= h:
+        ow, oh = _grid(o)[:2]
+        vis = (max(0.0, min(px + sw, ow) - max(px, 0.0))
+               * max(0.0, min(py + sh, oh) - max(py, 0.0)))
+        if ow > 0 and oh > 0 and vis >= VISIBLE_MIN * sw * sh:
+            return e
     nw, nh = min(sw, w), min(sh, h)
     nx = min(max(px, x), x + w - nw)
     ny = min(max(py, y), y + h - nh)
@@ -7971,7 +8022,7 @@ def rescue_slot(v, outputs, others=(), surfaces=None, default=None):
     o = outputs.get(tgt["output"])
     if o is None:
         return None
-    return fit_entry(clamp_cell(tgt, outputs), o)
+    return fit_entry(clamp_cell(tgt, outputs), o, strict=True)
 
 
 def place(sock, view_id, e, o):
