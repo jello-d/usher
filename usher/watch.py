@@ -98,12 +98,16 @@ TITLE_QUIET_FAST = 0.15  # everything else: the title is already stable at map
 # for the compositor to have APPLIED the request we are checking, or every
 # placement reads as failed; 0.6s against a measured sub-second apply.
 PLACE_VERIFY = (0.6, 1.5, 3.0)
-# AND ONE LATE LOOK at a placement that landed: a Chrome window moved to
+# AND LATE LOOKS at a placement that landed: a Chrome window moved to
 # another monitor takes the size it is given and then PUTS BACK the size it
 # had before, about four to six seconds later, past every read-back above
 # (dragonfly 2026-11-13: right at 14:47:59, back to its docked size at
-# 14:48:03, twice in one undock). Seconds after the placement landed.
+# 14:48:03, twice in one undock). For PLACE_LATE seconds after it landed
+# the size is looked at every LATE_EVERY: these follow a desk change or a
+# login, which are rare, so settling fast is worth the queries (the user,
+# 2026-11-13). The geometry event (SIZE_SETTLE) is usually faster still.
 PLACE_LATE = 10.0
+LATE_EVERY = 1.0
 # HOW LONG LEARNING WAITS after re-placing everything (a desk change, a map
 # edit, an undo): past every read-back, the late look included, or the
 # capture records a size an app has just put back.
@@ -1436,14 +1440,22 @@ class Watcher:
             return             # the window is gone: nothing left to verify
         e, o = item["e"], item["o"]
         if item.get("late"):
-            self._late_look(v, e, o)
+            # AGAIN EVERY LATE_EVERY until PLACE_LATE has passed, unless
+            # this look re-seated it (which arms its own read-backs)
+            if not self._late_look(v, e, o) and \
+                    time.time() + LATE_EVERY <= item.get("until", 0):
+                with self.lock:
+                    self.verify.setdefault(vid, dict(
+                        item, due=time.time() + LATE_EVERY))
             return
         if placement_landed(v, e, o):
             # IT STUCK, which is the overwhelmingly common case and says
-            # nothing worth logging. ONE LATE LOOK follows (_late_look).
+            # nothing worth logging. LATE LOOKS follow (_late_look).
+            now = time.time()
             with self.lock:
-                self.verify[vid] = dict(
-                    item, late=True, due=time.time() + PLACE_LATE)
+                self.verify[vid] = dict(item, late=True,
+                                        due=now + LATE_EVERY,
+                                        until=now + PLACE_LATE)
             return
         app, title = app_of(v), engine.log_title(v)
         with self.lock:
@@ -1510,19 +1522,20 @@ class Watcher:
         alone: that was somebody."""
         if v.get("output-name") != o.get("name") or \
                 not engine.size_put_back(v, e):
-            return
+            return False
         try:
             outs = {x["name"]: x for x in self.place_sock.list_outputs()}
         except Exception:                                  # noqa: BLE001
-            return
+            return False
         o2 = outs.get(o.get("name"))
         if not o2:
-            return
+            return False
         cur = engine.place_of(v, outs)
         e2 = dict(e, workspace=list(cur["workspace"]), pos=list(cur["pos"]))
         logline(f"size put back after it took, re-sizing: "
                 f"{app_of(v)[:18]} | {engine.log_title(v)[:34]}")
         self._seat_view(v, e2, o2)
+        return True
 
     def _restate(self, vid, e):
         """Re-apply the window STATE a geometry move does not carry: the

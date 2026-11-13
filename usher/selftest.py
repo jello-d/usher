@@ -5403,9 +5403,12 @@ def _t_verify(ck):
         # AND ARMS ONE LATE LOOK, for a size an app puts back seconds later
         # (a Chrome window moved to another monitor: right at 14:47:59,
         # back to its docked size at 14:48:03, dragonfly 2026-11-13)
-        ck("verify-hit-arms-one-late-look",
+        # EVERY LATE_EVERY for PLACE_LATE, not once at the end: these follow
+        # a desk change, which is rare, so settling fast is worth it
+        ck("verify-hit-arms-late-looks-every-second",
            w.verify.get(7, {}).get("late") is True
-           and w.verify[7]["due"] > time.time() + _w.PLACE_LATE - 1)
+           and w.verify[7]["due"] <= time.time() + _w.LATE_EVERY + 0.1
+           and w.verify[7]["until"] > time.time() + _w.PLACE_LATE - 1)
         _eb = dict(_e, size=[300, 300])
         ck("a-size-put-back-smaller-or-larger-is-seen",
            engine.size_put_back(_v(0, 0, w=250, h=300), _eb)
@@ -5473,6 +5476,31 @@ def _t_verify(ck):
         w._verify_one(7, {"e": _eb, "o": _o, "late": True})
         ck("the-late-look-is-silent-when-the-size-held",
            _reseat2 == [] and logged == [] and 7 not in w.verify)
+        # AND LOOKS AGAIN while inside its window, then stops
+        w = _wat(_v(110, 120, w=300, h=300))
+        w.place_sock = _LSock([_o])
+        w._verify_one(7, {"e": _eb, "o": _o, "late": True,
+                          "until": time.time() + 5})
+        _again = w.verify.get(7, {})
+        w2 = _wat(_v(110, 120, w=300, h=300))
+        w2.place_sock = _LSock([_o])
+        w2._verify_one(7, {"e": _eb, "o": _o, "late": True,
+                           "until": time.time() + 0.5})
+        ck("the-late-look-repeats-until-its-window-ends",
+           _again.get("late") is True
+           and _again["due"] <= time.time() + _w.LATE_EVERY + 0.1
+           and 7 not in w2.verify)
+        # BOUNDED: a look that RE-SEATED the window does not arm the next
+        # one itself (the re-seat arms its own read-backs, inside the retry
+        # budget), or a window that keeps putting its size back is resized
+        # every second regardless of the budget
+        w = _wat(_v(110, 120, w=250, h=300))
+        w.place_sock = _LSock([_o])
+        w._seat_view = lambda v, e, o: True     # budget spent: arms nothing
+        w._verify_one(7, {"e": _eb, "o": _o, "late": True,
+                          "until": time.time() + 5})
+        ck("a-late-look-that-resized-does-not-arm-the-next",
+           7 not in w.verify)
         # THE PUT-BACK IS ITSELF AN EVENT: a geometry change that takes a
         # just-placed window (its late look pending) away from the size it
         # was given brings the look forward to SIZE_SETTLE, instead of
