@@ -533,6 +533,9 @@ class Watcher:
         # from}], so a SEED goes beside them rather than on top.
         # Cleared by each sweep: outside one, nothing is being laid out.
         self.sweep_rects = {}
+        # WHAT THE SURFACE MAP SAID at the last look, and for which desk:
+        # an edit to the map is acted on like a desk change (_poll_surfaces)
+        self.surface_sig, self.surface_sig_for = None, None
         # (vid, slot key) pairs we have already SAID were refused, so the
         # standing condition is reported once per window instead of on every
         # rename. Discarded with the rest of a view's state on unmap.
@@ -1049,6 +1052,18 @@ class Watcher:
                 logline(f"surface over this desk's slot: {app[:18]} | "
                         f"{title[:30]}")
                 e, seeded = s, True
+        # A SLOT THE MAP HAS MOVED OUT FROM UNDER (engine.slot_drifted): its
+        # surface is somewhere else now, so the window goes there, laid out
+        # from its OWN entry (its name and where in the surface it sat).
+        # Trusting the rect would send it back where the surface used to be.
+        if (e and not seeded and not own_unlearned and not e.get("sticky")
+                and engine.slot_drifted(e, engine.surface_map()[0],
+                                        self._resolved_output(e))):
+            s = self._seed(app, v, _src or "", e)
+            if s:
+                logline(f"surface moved since this slot was learned: "
+                        f"{app[:18]} | {title[:30]}")
+                e, seeded = s, True
         if not e or own_unlearned:
             # NOTHING LEARNED HERE, so ask the surface map whether this window
             # has a named home at another desk. Deliberately AFTER the settled
@@ -1224,6 +1239,16 @@ class Watcher:
                 with self.lock:
                     t["rect"], t["e"] = nr, e2
         return dict(e, pos=[r[0], r[1]], size=[r[2], r[3]])
+
+    def _resolved_output(self, e):
+        """The name of the output slot `e` resolves to now (entry_output,
+        which follows the panel), or None when it cannot be asked."""
+        try:
+            o = entry_output(e, {x["name"]: x for x in
+                                 self.place_sock.list_outputs()})
+        except Exception:                                  # noqa: BLE001
+            return None
+        return o["name"] if o else None
 
     def _left_entry(self, vid, app, ident):
         """This window's OWN entry on the desk left at the last desk change,
@@ -1719,6 +1744,8 @@ class Watcher:
                 # PROFILE_TTL, which the id cache bounds.
                 if not self._in_transition():
                     self._profile_drift()
+                if not self._in_transition():
+                    self._poll_surfaces()
                 self._write_status()
                 pollstreak = 0
             except Exception as e:                         # noqa: BLE001
@@ -1739,6 +1766,43 @@ class Watcher:
             except Exception as e:
                 errstreak += 1
                 cap = self._capture_failed(e, cap, errstreak)
+
+    def _poll_surfaces(self):
+        """Act on an edit to THIS desk's surface map like a desk change:
+        hold learning and re-place every window, so each goes to its
+        surface where the map now puts it (slot_drifted, in _place_view).
+
+        THE HOLD IS THE POINT, and it has to come first: the capture
+        re-records which surface each window sits in under the CURRENT map,
+        so after an edit the first capture would re-label windows still at
+        their old positions with whatever surface now covers that spot, and
+        the intent ("this window belongs in `product`") would be gone before
+        anything acted on it. This runs before the capture step in the same
+        pass, and the map is cached, so the capture cannot see a newer map
+        than this did.
+
+        ONLY THE LOADED DESK'S OWN MAP. hwdp answers for the desk it sees, so
+        across a desk change the map changes too; that is the adoption's to
+        handle, and here the new map only becomes the baseline. A map that
+        could not be read concludes nothing."""
+        try:
+            m, why = engine.surface_map()
+            if why:
+                return
+            sig = engine.surface_sig(m, engine.surface_default())
+            prof = engine.profile_id()
+        except Exception:                                  # noqa: BLE001
+            return
+        with self.lock:
+            was, was_for = self.surface_sig, self.surface_sig_for
+            self.surface_sig, self.surface_sig_for = sig, prof
+            ours = prof == self.kb_profile
+        if was is None or was_for != prof or not ours or was == sig:
+            return
+        with self.lock:
+            self.transition_until = time.time() + sum(PLACE_VERIFY) + 1.0
+        n = self._sweep()
+        logline(f"surface map changed: re-placing {n} window(s)")
 
     def _poll_outputs(self, cap):
         """Notice an output arriving or leaving, because the COMPOSITOR DOES

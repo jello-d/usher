@@ -778,6 +778,42 @@ def surface_of(w, surfaces):
     return surface_region(w, surfaces)[0]
 
 
+def surface_sig(surfaces, default=None):
+    """What a surface map SAYS, as a comparable value: each surface's name,
+    output, cell and rect, and the default's. PURE. Two reads of an
+    unchanged map give equal values whatever order hwdp printed them in."""
+    def one(name, s):
+        return (name, s.get("output"),
+                tuple(s.get("workspace") or ()), tuple(s.get("pos") or ()),
+                tuple(s.get("size") or ()))
+    return (tuple(sorted(one(n, s) for n, s in (surfaces or {}).items())),
+            one(default.get("name") or "", default) if default else None)
+
+
+def slot_drifted(e, surfaces, output=None):
+    """True when learned slot `e` no longer lies in the surface it was
+    learned in, under the map as it stands NOW. PURE.
+
+    THE SURFACE NAME IS THE INTENT, THE RECT ONLY A TUNING of it, valid
+    while it still lies in that surface. Move a surface to another panel and
+    every slot learned in it still names it while its rect points at the old
+    panel; trusting the name would send those windows back where the surface
+    used to be. False when there is nothing to check: no surface recorded,
+    or a name this map no longer has (renamed or deleted), where there is no
+    intent left to enforce and the rect stands.
+
+    `output` is the output the slot RESOLVES to now (entry_output, which
+    follows the PANEL), when the caller knows it: a slot names its monitor
+    by panel, and a connector renamed under it (another dock port) is the
+    same monitor, not a drift."""
+    name = (e or {}).get("surface") or ""
+    if not name or name not in (surfaces or {}):
+        return False
+    if output:
+        e = dict(e, output=output)
+    return surface_of(e, surfaces) != name
+
+
 def surface_region(w, surfaces, default=None):
     """(name, slot) of the surface window w sits in, or ("", None): the
     rect-returning form of surface_of, which the learn side needs to record
@@ -9662,6 +9698,16 @@ def restore_by_surface(pairs, unlive, live, outs, profile):
                 seed, _why = surface_target(app, ident, src, profile, outs)
                 if seed:
                     e = seed
+        # A SLOT THE MAP HAS MOVED OUT FROM UNDER: its surface is somewhere
+        # else now, so the window goes there, from its own entry
+        _o = entry_output(e, outs)
+        if not e.get("seeded_from") and not e.get("sticky") and \
+                slot_drifted(e, surface_map()[0],
+                             _o["name"] if _o else None):
+            seed, _why = surface_target(app, ident, _src(lv), profile,
+                                        outs, [e])
+            if seed:
+                e = seed
         out.append((lv, e))
     still = []
     for lv in unlive:

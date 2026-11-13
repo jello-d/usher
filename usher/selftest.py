@@ -12638,7 +12638,8 @@ def _t_displays(ck):
     _sfm = {"ref": {"output": "DP-1", "workspace": [1, 0],
                     "pos": [0, 400], "size": [1000, 400]}}
 
-    def _surf_restore(here_surface, last_seen=50.0, kb=True, clock=None):
+    def _surf_restore(here_surface, last_seen=50.0, kb=True, clock=None,
+                      inside=False, renamed=False):
         _s = (engine.ipc, engine.load_knowledge, engine.panel_map,
               engine.profile_id, engine.surface_map,
               engine.surface_default, engine.other_profile_entries,
@@ -12648,9 +12649,14 @@ def _t_displays(ck):
             engine.ipc = lambda: _RSock()
             engine.load_knowledge = lambda *_a, **_k: (
                 {kkey("zzz-unowned", ""): dict(
-                    _rent([0, 0]), surface=here_surface,
-                    last_seen=last_seen)} if kb else {})
-            engine.panel_map = lambda *_a, **_k: {}
+                    _rent([1, 0] if inside else [0, 0]),
+                    surface=here_surface, last_seen=last_seen,
+                    **({"pos": [10, 420]} if inside else {}),
+                    **({"output": "OLD-1", "panel": "p" * 12}
+                       if renamed else {}))}
+                if kb else {})
+            engine.panel_map = lambda *_a, **_k: (
+                {"DP-1": "p" * 12} if renamed else {})
             engine.profile_id = lambda *_a, **_k: "rigprof"
             engine.surface_map = lambda fresh=False: (_sfm, "")
             engine.surface_default = lambda fresh=False: None
@@ -12671,9 +12677,18 @@ def _t_displays(ck):
     _rs = _surf_restore("elsewhere")
     ck("restore-puts-a-stale-slot-on-its-surface",
        "MOVE" in _rs and "ws(1, 0)" in _rs and "(surface ref)" in _rs)
-    _ra = _surf_restore("ref")
+    _ra = _surf_restore("ref", inside=True)
     ck("restore-keeps-a-slot-on-the-same-surface",
-       "ws(0, 0)" in _ra and "(surface" not in _ra)
+       "ws(1, 0)" in _ra and "(surface" not in _ra)
+    # A SLOT ITS SURFACE HAS MOVED AWAY FROM: it still names `ref` but lies
+    # on another cell, so the map was edited since it was learned, and the
+    # window goes where `ref` is now, even with no other desk involved
+    _rr = _surf_restore("ref", inside=True, renamed=True)
+    ck("restore-keeps-a-slot-on-a-renamed-connector",
+       "ws(1, 0)" in _rr and "(surface" not in _rr)
+    _rd = _surf_restore("ref", clock=(None, None))
+    ck("restore-moves-a-slot-its-surface-has-left",
+       "MOVE" in _rd and "ws(1, 0)" in _rd and "(surface ref)" in _rd)
     ck("restore-keeps-a-slot-learned-since-arriving",
        "(surface" not in _surf_restore("elsewhere", last_seen=250.0))
     ck("restore-uses-the-daemons-clock-and-without-one-keeps-the-slot",
@@ -13642,6 +13657,78 @@ def _t_displays(ck):
         _cl_src = inspect.getsource(Watcher._capture_loop)
         ck("the-capture-loop-polls-the-waiting-re-place",
            "self._poll_sweep_wait(cap)" in _cl_src)
+
+        # ---- AN EDIT TO THE SURFACE MAP IS ACTED ON LIKE A DESK CHANGE -----
+        # The user tweaks which surfaces map to which panels. A slot learned
+        # in a surface still NAMES it while its rect points where the surface
+        # used to be (slot_drifted), and the capture would re-label windows
+        # under the new map before anything acted, so the poll holds
+        # learning and sweeps.
+        _sA = {"ref": {"output": "DP-1", "workspace": [0, 0],
+                       "pos": [0, 0], "size": [1000, 500]}}
+        _sB = {"ref": {"output": "DP-2", "workspace": [0, 0],
+                       "pos": [0, 0], "size": [1000, 500]}}
+        _in_ref = {"surface": "ref", "output": "DP-1", "workspace": [0, 0],
+                   "pos": [10, 10], "size": [100, 100]}
+        ck("a-slot-in-its-surface-has-not-drifted",
+           not engine.slot_drifted(_in_ref, _sA))
+        ck("a-slot-whose-surface-moved-has-drifted",
+           engine.slot_drifted(_in_ref, _sB))
+        # A CONNECTOR RENAMED UNDER THE SLOT is the same monitor: what it
+        # resolves to now decides, not the name it was learned under
+        ck("a-slot-on-a-renamed-connector-has-not-drifted",
+           not engine.slot_drifted(_in_ref, _sB, output="DP-2")
+           and engine.slot_drifted(_in_ref, _sA, output="DP-2"))
+        ck("a-slot-with-no-surface-or-a-gone-one-has-not-drifted",
+           not engine.slot_drifted(dict(_in_ref, surface=""), _sB)
+           and not engine.slot_drifted(dict(_in_ref, surface="gone"), _sB))
+        ck("the-surface-sig-sees-a-move-and-ignores-order",
+           engine.surface_sig(_sA) != engine.surface_sig(_sB)
+           and engine.surface_sig(_sA) != engine.surface_sig(
+               {"ref": dict(_sA["ref"], pos=[0, 500])})
+           and engine.surface_sig(dict(_sA, x=_sB["ref"]))
+           == engine.surface_sig({"x": _sB["ref"], "ref": _sA["ref"]}))
+        _rps = (engine.surface_map, engine.surface_default,
+                engine.profile_id, Watcher._sweep, _wmod.logline)
+        _swept2, _map = [], [(_sA, "")]
+        try:
+            engine.surface_map = lambda fresh=False: _map[0]
+            engine.surface_default = lambda fresh=False: None
+            engine.profile_id = lambda *a, **k: "DESK"
+            Watcher._sweep = lambda self, vids=None: (
+                _swept2.append(self._in_transition()) or 3)
+            _wmod.logline = lambda m: None
+            w.kb_profile = "DESK"
+            w.surface_sig, w.surface_sig_for = None, None
+            w.transition_until = 0.0
+            w._poll_surfaces()
+            ck("the-first-look-at-the-map-is-the-baseline", _swept2 == [])
+            w._poll_surfaces()
+            ck("an-unchanged-map-sweeps-nothing", _swept2 == [])
+            _map[0] = (_sB, "")
+            w._poll_surfaces()
+            ck("an-edited-map-sweeps-with-learning-held",
+               _swept2 == [True])
+            _map[0] = ({}, "could not ask")
+            w._poll_surfaces()
+            _map[0] = (_sB, "")
+            w._poll_surfaces()
+            ck("an-unreadable-map-is-not-a-change", _swept2 == [True])
+            # ANOTHER DESK'S MAP is the adoption's to handle
+            engine.profile_id = lambda *a, **k: "OTHER"
+            _map[0] = (_sA, "")
+            w._poll_surfaces()
+            ck("a-map-for-another-desk-only-becomes-the-baseline",
+               _swept2 == [True])
+        finally:
+            (engine.surface_map, engine.surface_default,
+             engine.profile_id, Watcher._sweep, _wmod.logline) = _rps
+            w.transition_until = 0.0
+            w.surface_sig, w.surface_sig_for = None, None
+            w.kb_profile = "DESK"
+        _pos = _cl_src.find("self._poll_surfaces()")
+        ck("the-capture-loop-polls-the-map-before-it-captures",
+           0 <= _pos < _cl_src.find("self._capture_once(cap)"))
         # desk_grid PARSES hwdp's answer, and anything else is no answer.
         _rrun, _rwh = engine.subprocess.run, engine.shutil.which
 
@@ -13751,8 +13838,36 @@ def _t_displays(ck):
                 # arriving is this session's truth; an older other desk
                 # does not decide.
                 ck("a-slot-on-the-same-surface-tunes-the-placement",
-                   _dict_run(dict(_dh, surface="ref"))
-                   == [(42, None, (100, 120))])
+                   _dict_run(dict(_dh, surface="ref", pos=[100, 320]))
+                   == [(42, None, (100, 320))])
+                # AND A CONNECTOR RENAMED UNDER IT is the same monitor:
+                # learned as "OLD-1", its panel resolves to eDP-1, inside
+                # `ref`, so it is still a tuning, not a drift
+                _rpm = engine.panel_map
+                engine.panel_map = lambda *a, **k: {"eDP-1": "p" * 12}
+                try:
+                    ck("a-slot-on-a-renamed-connector-still-tunes",
+                       _dict_run(dict(_dh, surface="ref", pos=[100, 320],
+                                      output="OLD-1", panel="p" * 12))
+                       == [(42, None, (100, 320))])
+                finally:
+                    engine.panel_map = _rpm
+                # A SLOT ITS SURFACE HAS LEFT: it names `ref` but lies
+                # outside it, so the map was edited since; with no other
+                # desk to decide (an older one), the window still goes where
+                # `ref` is now, laid out from its own entry
+                # (and no other desk knows the window, so only its OWN
+                # entry can say where it belongs)
+                engine.desk_left_at = lambda p: 160.0
+                _rope3 = engine.other_profile_entries
+                engine.other_profile_entries = lambda a, i, p=None, s="": []
+                try:
+                    ck("a-slot-its-surface-has-left-goes-to-the-surface",
+                       _dict_run(dict(_dh, surface="ref"))
+                       == [(42, "ref", (0, 300))])
+                finally:
+                    engine.other_profile_entries = _rope3
+                engine.desk_left_at = lambda p: 100.0
                 ck("a-slot-learned-since-arriving-is-not-overruled",
                    _dict_run(dict(_dh, last_seen=250.0))
                    == [(42, None, (100, 120))])

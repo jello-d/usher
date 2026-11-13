@@ -543,6 +543,14 @@ Two windows sharing one identity (two shells in one directory) each go to
 the surface its own slot held on the desk you came from. To keep a spot no
 surface covers, name it in the desk's map.
 
+**Editing the map is applied on its own.** A learned slot remembers the
+surface it was learned in, and that name is the intent: the slot's rect is
+honoured only while it still lies inside that surface as the map stands now.
+Move a surface to another panel and its windows follow it, laid out where they
+sat in it; usher notices the edit within a few seconds, holds learning (so
+windows still at their old positions are not re-labelled), and re-places
+everything. Rename or delete a surface and its windows keep their rects.
+
 **Seeded windows are laid out, in a fixed order.** A window placed from a
 surface rather than from a learned slot is a guess, and three rules apply in
 order: (1) it is scaled to fit the surface; (2) if that puts it over a window
