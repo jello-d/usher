@@ -1082,7 +1082,8 @@ def surface_target(app, ident, src, profile, outs, others=None):
         return None, ""
     if others is None:
         others = other_profile_entries(app, ident, profile, src)
-    seed = surface_seed(others, surfaces, surface_default())
+    seed = surface_seed(others, surfaces, surface_default(),
+                        frame_inset() if src else (0, 0, 0, 0))
     if not seed:
         return None, ""
     if seed.get("seeded_default"):
@@ -1116,7 +1117,55 @@ def _free_share(off, ext, span, size):
     return min(max(0, free - int(round(after * span))), free)
 
 
-def surface_seed(others, surfaces, default=None):
+def frame_inset(sock=None):
+    """(left, top, right, bottom): how far the compositor draws OUTSIDE a
+    window of another account, in logical pixels, or zeros.
+
+    wayfire-mods' enclave-mark frames such a window `thickness` px outside
+    its geometry on every side, plus a NAME TAB above the top edge. A window
+    at the panel's edge therefore has its frame cut off and reads as hanging
+    off the screen (the work calendar at x=0 on dragonfly, 2026-11-13).
+    Read live from the plugin's own options, so a config change follows.
+    The tab is the label's text extents plus 20% padding top and bottom
+    (wf::cairo_text_t), about 1.7x the font size; 2x is used, to be safe.
+    Zeros when the plugin is not loaded or the compositor cannot be asked:
+    nothing is drawn outside a window, so nothing needs to be left clear."""
+    now = time.time()
+    if _FRAME["at"] and now - _FRAME["at"] < 60:
+        return _FRAME["inset"]
+    inset = (0, 0, 0, 0)
+    try:
+        s = sock or ipc()
+
+        def opt(name):
+            r = s.get_option_value(f"enclave-mark/{name}")
+            if not isinstance(r, dict) or r.get("result") != "ok":
+                raise ValueError(name)
+            return str(r.get("value"))
+        t = max(0, int(opt("thickness")))
+        tab = (2 * max(0, int(opt("label_size")))
+               if opt("label").strip().lower() in ("true", "1") else 0)
+        inset = (t, t + tab, t, t)
+    except Exception:                                      # noqa: BLE001
+        inset = (0, 0, 0, 0)
+    _FRAME.update(at=now, inset=inset)
+    return inset
+
+
+_FRAME = {"at": 0.0, "inset": (0, 0, 0, 0)}
+
+
+def inset_pos(pos, size, start, span, before, after):
+    """`pos` along one axis, kept `before`/`after` inside a region of `span`
+    from `start` when the window fits between the two, else unchanged: a
+    window as wide as the region (maxed on that axis) may sit on its edge,
+    since using the space matters more than showing a frame. PURE."""
+    if size > span - before - after:
+        return pos
+    return min(max(pos, start + before), start + span - after - size)
+
+
+def surface_seed(others, surfaces, default=None, inset=(0, 0, 0, 0)):
     """A starting slot for a window this desk has never learned, from the
     SURFACE it occupies on another desk. None when nothing can be derived.
 
@@ -1186,6 +1235,10 @@ def surface_seed(others, surfaces, default=None):
             w = min(int(e.get("size", [0, 0])[0]) or sw, sw)
             h = min(int(e.get("size", [0, 0])[1]) or sh, sh)
             x, y = sx, sy
+        # CLEAR OF A FRAME DRAWN OUTSIDE THE WINDOW (frame_inset), on each
+        # axis where it fits inside it
+        x = inset_pos(x, w, sx, sw, inset[0], inset[2])
+        y = inset_pos(y, h, sy, sh, inset[1], inset[3])
         seed = dict(e)
         seed.update({"output": s["output"],
                      # THE DEFAULT HAS NO CELL (`* *`), so the window keeps

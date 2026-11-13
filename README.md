@@ -552,7 +552,10 @@ portrait panel), and if no gap fits it whole but the seeded windows in its way
 and it fit end to end, they are stacked from the surface's start; (3)
 otherwise it is cascaded, stepping down and right until it no longer sits
 exactly on another window, so every window keeps a visible edge. It is never
-made smaller than the surface requires. Windows are read where they are now,
+made smaller than the surface requires. Another account's windows are kept
+clear of the frame the compositor draws around them (enclave-mark's border
+and name tab, read from its options), unless they fill the surface on that
+axis. Windows are read where they are now,
 so one you moved or closed meanwhile is not in the way. Learned slots are
 never moved by any of this; they are your arrangement.
 

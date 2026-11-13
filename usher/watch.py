@@ -1192,6 +1192,15 @@ class Watcher:
         # start, and a surface starting at the panel's edge would put the
         # first window under the top bar.
         region = engine.clip_rect(region, engine.workarea(o)) or region
+        # AND CLEAR OF A FRAME DRAWN OUTSIDE ANOTHER ACCOUNT'S WINDOW, so a
+        # stack or a cascade does not push one onto the panel's edge
+        if e.get("source"):
+            _l, _t, _r, _b = engine.frame_inset()
+            _in = (region[0] + _l, region[1] + _t,
+                   region[2] - _l - _r, region[3] - _t - _b)
+            if _in[2] >= float(e["size"][0]) and \
+                    _in[3] >= float(e["size"][1]):
+                region = _in
         mine = tuple(float(n) for n in tuple(e["pos"]) + tuple(e["size"]))
         r, moves = engine.lay_out_seed(
             mine, region, taken,

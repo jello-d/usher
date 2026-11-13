@@ -87,6 +87,7 @@ _real_logline = engine.logline
 # AND THE REAL desk_grid, for the same reason: the area loop stubs it out
 # for every area, so the cells testing the function itself need this one.
 _REAL_DESK_GRID = engine.desk_grid
+_REAL_FRAME_INSET = engine.frame_inset
 
 
 @contextlib.contextmanager
@@ -13054,6 +13055,69 @@ def _t_displays(ck):
     ck("lay-out-does-not-repack-what-cannot-fit-end-to-end",
        _lo2((0, 1000, 2160, 2000), _port, [(0, 1069, 2160, 2000)], {0})
        == ((0, 1000, 2160, 2000), {}))
+    # CLEAR OF ANOTHER ACCOUNT'S FRAME: enclave-mark draws outside the
+    # window, so one at x=0 has its frame cut off by the panel edge (the
+    # work calendar, dragonfly 2026-11-13). Inset where it fits; a window
+    # as wide as the region (maxed) may still sit on the edge.
+    ck("inset-pos-keeps-a-window-clear-of-the-edge",
+       engine.inset_pos(0, 2100, 0, 2160, 4, 4) == 4
+       and engine.inset_pos(60, 2100, 0, 2160, 4, 4) == 56)
+    ck("inset-pos-lets-a-maxed-window-use-the-edge",
+       engine.inset_pos(0, 2158, 0, 2160, 4, 4) == 0)
+    _fsurf = {"cal": {"output": "DP-7", "workspace": [0, 0],
+                      "pos": [0, 0], "size": [2160, 1920]}}
+    _fent = {"surface": "cal", "size": [2100, 1500],
+             "surface_frac": [0.0365, 0.0583, 0.8944, 0.8389]}
+    ck("a-seed-is-inset-from-a-frame",
+       engine.surface_seed([_fent], _fsurf, inset=(4, 26, 4, 4))["pos"]
+       == [56, 112]
+       and engine.surface_seed([_fent], _fsurf)["pos"] == [60, 112])
+
+    class _FrameSock:
+        def __init__(self, vals):
+            self.v = vals
+
+        def get_option_value(self, name):
+            k = name.split("/", 1)[1]
+            return ({"result": "ok", "value": self.v[k]} if k in self.v
+                    else {"error": "no such option"})
+    _rfi = engine._FRAME.copy()
+    try:
+        engine._FRAME.update(at=0.0)
+        _got_fi = _REAL_FRAME_INSET(_FrameSock(
+            {"thickness": "4", "label": "true", "label_size": "11"}))
+        engine._FRAME.update(at=0.0)
+        _no_tab = _REAL_FRAME_INSET(_FrameSock(
+            {"thickness": "6", "label": "false", "label_size": "11"}))
+        engine._FRAME.update(at=0.0)
+        _absent = _REAL_FRAME_INSET(_FrameSock({}))
+        ck("frame-inset-reads-the-plugins-options",
+           _got_fi == (4, 26, 4, 4) and _no_tab == (6, 6, 6, 6))
+        ck("frame-inset-is-zero-without-the-plugin",
+           _absent == (0, 0, 0, 0))
+    finally:
+        engine._FRAME.update(_rfi)
+    # AND surface_target ASKS FOR IT, for another account's window only
+    _rst = (engine.surface_map, engine.surface_default,
+            engine.other_profile_entries, engine.frame_inset)
+    try:
+        engine.surface_map = lambda fresh=False: (_fsurf, "")
+        engine.surface_default = lambda fresh=False: None
+        engine.other_profile_entries = lambda a, i, p=None, s="": [
+            dict(_fent, surface_frac=[0.0, 0.0583, 0.8944, 0.8389],
+                 size=[1500, 1500])]
+        engine.frame_inset = lambda sock=None: (4, 26, 4, 4)
+        _fo = {"DP-7": {"name": "DP-7", "geometry": {
+            "x": 0, "y": 0, "width": 2160, "height": 3840},
+            "workspace": {"x": 0, "y": 0, "grid_width": 2,
+                          "grid_height": 2}}}
+        _ft = engine.surface_target("app", "titan:x", "titan", "P", _fo)[0]
+        _fn = engine.surface_target("app", "", "", "P", _fo)[0]
+        ck("another-accounts-seed-is-inset-from-its-frame",
+           _ft and _fn and _ft["pos"][0] == 4 and _fn["pos"][0] == 0)
+    finally:
+        (engine.surface_map, engine.surface_default,
+         engine.other_profile_entries, engine.frame_inset) = _rst
     # STEP 3: a seed EXACTLY on another, with no room beside it and no
     # repack, steps off it so the one under it keeps a visible edge
     ck("an-exact-stack-is-cascaded-off",
@@ -14020,6 +14084,42 @@ def _t_displays(ck):
                     ck("the-placer-never-repacks-a-learned-window",
                        _placing((0, 800, 800, 1500), (0, 800, 800, 1500))
                        == [(72, "tall", (0, 0))])
+                    # AND ANOTHER ACCOUNT'S WINDOW IS LAID OUT CLEAR OF ITS
+                    # FRAME: the stack under 71 starts below the tab
+                    _rfi2 = engine.frame_inset
+                    try:
+                        engine.frame_inset = lambda sock=None: (4, 26, 4, 4)
+                        # 71 is a SEED at 800, so 72 (seeded at 26, 1000
+                        # long) fits no gap and the two are repacked from
+                        # the region's start: below the tab, not at 0
+                        _seeded.clear()
+                        w.kb, w.slot_held = {}, {}
+                        _e = {"output": "eDP-1", "workspace": [0, 0],
+                              "pos": [4, 800], "size": [790, 1500],
+                              "seeded_from": "tall"}
+                        _bv[0]["geometry"] = target_geometry(_e, _mo)
+                        w.place_sock = _Sock(_bv, [_mo])
+                        w.sweep_rects = {(_mo["name"], (0, 0)): [
+                            {"rect": (4, 800, 790, 1500), "vid": 71,
+                             "seed": True, "e": _e}]}
+                        w.placed.clear()
+                        w.redisplay_ok = {72}
+                        w.deadline[72] = _time.time() + 100
+                        engine.other_profile_entries = (
+                            lambda a, i, p=None, s="": [
+                                {"surface": "tall", "size": [790, 1000],
+                                 "last_seen": 1.0, "source": "titan"}])
+                        w._place_view(_bv[1])
+                        ck("a-stack-of-anothers-windows-clears-its-frame",
+                           sorted(_seeded)
+                           == [(71, "tall", (4.0, 1026.0)),
+                               (72, "tall", (4.0, 26.0))])
+                    finally:
+                        engine.frame_inset = _rfi2
+                        engine.other_profile_entries = (
+                            lambda a, i, p=None, s="": [
+                                {"surface": "tall", "size": [800, 1000],
+                                 "last_seen": 1.0}])
                     # A KICK STARTS A NEW PASS, laid out afresh
                     ck("a-kick-clears-the-passes-rects",
                        "self.sweep_rects = {}" in inspect.getsource(
@@ -15423,6 +15523,11 @@ def selftest():
     # real desk grid, a check on the host. Areas that test the wait stub it.
     _real_dg = engine.desk_grid
     engine.desk_grid = lambda: None
+    # NOR THE LIVE ENCLAVE FRAME: frame_inset asks the compositor, so a seed
+    # for another account's window would be inset on a box running
+    # enclave-mark and not elsewhere. Its own cells drive the real one.
+    _real_fi = engine.frame_inset
+    engine.frame_inset = lambda sock=None: (0, 0, 0, 0)
     # NOR THIS BOX'S CHROME WINDOW SIZES: the size map (claim_by_size)
     # reads the real session files wherever a snapshot or an elimination
     # runs, so a fixture's Chrome views would otherwise be named from the
@@ -15462,6 +15567,7 @@ def selftest():
     finally:
         engine.write_json = _real_wj
         engine.desk_grid = _real_dg
+        engine.frame_inset = _real_fi
         chrome.chrome_session_sizes = _real_ss
         chrome._frame[0] = None
         chrome._live_sizes.clear()
