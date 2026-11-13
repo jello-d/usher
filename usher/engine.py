@@ -3453,7 +3453,8 @@ def slot_hints(kb, me, peers):
     return {"size": size, "spare": spare, "rivals": rivals}
 
 
-def slot_squatters(kb, held, app, ident, src, vid, views, outs, panels=None):
+def slot_squatters(kb, held, app, ident, src, vid, views, outs, panels=None,
+                   idents=None):
     """{slot key: view id} for slots another live window ALREADY SITS ON.
 
     **THE HOLDER OF A SLOT IS THE WINDOW AT ITS RECT, not whichever window the
@@ -3467,7 +3468,14 @@ def slot_squatters(kb, held, app, ident, src, vid, views, outs, panels=None):
     Only an UNHELD slot is claimed, and only for a window of the same app
     that has genuinely landed there (`placement_landed`: output, workspace
     and position, never the size). PURE, so the cells are checkable with no
-    compositor."""
+    compositor.
+
+    AND ONLY BY A WINDOW OF THE SAME IDENTITY, when `idents` ({view id:
+    identity}) says what the others are. One identity's slots are
+    interchangeable among ITS windows and nobody else's: measured on
+    dragonfly 2026-11-13, five of another account's Chrome windows sat on
+    one cascade rect, each with its OWN per-window identity, and each was
+    counted as the holder of the others' slots, so all were refused."""
     out = {}
     # ONE WINDOW CLAIMS AT MOST ONE SLOT, and not at all if it already holds
     # one. A store that once learned a stack holds slots with the same (or
@@ -3485,6 +3493,8 @@ def slot_squatters(kb, held, app, ident, src, vid, views, outs, panels=None):
         for w in views:
             wid = w.get("id")
             if wid == vid or wid in spent or (w.get("app-id") or "") != app:
+                continue
+            if idents is not None and idents.get(wid) != ident:
                 continue
             if placement_landed(w, e, o):
                 out[k] = wid

@@ -921,10 +921,12 @@ class Watcher:
             try:
                 _outs0 = {o["name"]: o for o in
                           self.place_sock.list_outputs()}
+                _ids = {w.get("id"): identity(w) for w in _views
+                        if app_of(w) == app and w.get("id") != vid}
                 for _k, _id in engine.slot_squatters(
                         self.kb, self.slot_held, app, identity(v),
                         _src or "", vid, _views, _outs0,
-                        engine.panel_map()).items():
+                        engine.panel_map(), idents=_ids).items():
                     self.slot_held[_k] = _id
             except Exception as _e:                      # noqa: BLE001
                 logline(f"slot occupancy: {_e}")
@@ -1870,8 +1872,8 @@ class Watcher:
         that the app's cascade position IS the window's home.
 
         A window is released the moment it is placed, or when its grace runs
-        out and usher is no longer going to act on it. In settled state nothing
-        is placed, so nothing is held."""
+        out and usher is no longer going to act on it. In settled state only a
+        window still owed its late chance is held (below)."""
         now = time.time()
         held = set()
         if self._placing_now():
@@ -1879,6 +1881,23 @@ class Watcher:
                      if w.get("id") is not None
                      and w["id"] not in self.placed
                      and now <= self.deadline.get(w["id"], 0)}
+        # AND A WINDOW STILL OWED ITS LATE CHANCE, in ANY mode. One that
+        # mapped while placing and could not be identified until after the
+        # place window closed is exactly the window `late_ok` exists for, and
+        # the capture that identifies it runs BEFORE the placer looks.
+        # Measured on dragonfly's 2026-11-13 login: another account's seven
+        # Chrome windows were named at 00:05:30, two seconds after place
+        # ended; that capture learned all seven at Chrome's cascade, over the
+        # slots the same pass had just re-keyed, and the late chance at
+        # 00:05:32 then had nothing left to aim at. `identified` is what the
+        # placer's first look records, so the hold ends there whether it
+        # placed the window, found it taken, or found nothing remembered.
+        held |= {w["id"] for w in windows
+                 if w.get("id") is not None
+                 and w["id"] in self.late_ok
+                 and w["id"] not in self.identified
+                 and w["id"] not in self.placed
+                 and now <= self.deadline.get(w["id"], 0)}
         # A WINDOW THE LEDGER REFUSED IS NOT HELD ANY MORE. It was, because
         # learning it wrote its cascade into the holder's key (measured on
         # manifold 2026-11-06, one slot for ten windows). With a slot per

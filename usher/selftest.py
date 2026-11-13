@@ -5297,6 +5297,23 @@ def _t_verify(ck):
        placement_landed(_v(110 + PLACE_TOL, 120 - PLACE_TOL), _e, _o))
     ck("verify-rejects-just-outside-tolerance",
        not placement_landed(_v(110 + PLACE_TOL + 1, 120), _e, _o))
+    # A SQUATTER MUST SHARE THE IDENTITY. A window sitting on a slot's rect
+    # holds it, but only if the slot is one of ITS identity's: five of
+    # another account's Chrome windows on one cascade rect, each with its own
+    # identity, were each counted as holding the others' slots (dragonfly
+    # 2026-11-13). The bare call is the CONTROL, or a squatter that never
+    # claims would pass the refusal cell.
+    _sq_kb = {engine.kkey("calibre-gui", ""): dict(_e)}
+    _sq_peer = dict(_v(110, 120), id=8)
+    _sq_k = engine.kkey("calibre-gui", "")
+    ck("squatter-claims-a-slot-its-identity-sits-on",
+       engine.slot_squatters(_sq_kb, {}, "calibre-gui", "", "", 7,
+                             [_sq_peer], {"DP-1": _o},
+                             idents={8: ""}) == {_sq_k: 8})
+    ck("squatter-of-another-identity-claims-nothing",
+       engine.slot_squatters(_sq_kb, {}, "calibre-gui", "", "", 7,
+                             [_sq_peer], {"DP-1": _o},
+                             idents={8: "someone-else"}) == {})
     # THE ONE THAT MATTERS: the cascade position, a whole workspace off.
     ck("verify-catches-the-cascade-position",
        not placement_landed(_v(10, 20), _e, _o))
@@ -13442,6 +13459,31 @@ def _t_displays(ck):
                 w._place_view(_sv[0])
                 ck("the-placer-takes-the-slot-of-the-windows-size",
                    _seeded == [(47, None, (20, 70))])
+                # AND THE PLACER TELLS slot_squatters WHO IS WHO: window 52,
+                # of ANOTHER identity, sits exactly on window 51's slot, and
+                # 51 must still be seated rather than refused as "taken".
+                _qo = dict(_lo[0], workspace={
+                    "x": 0, "y": 0, "grid_width": 3, "grid_height": 3})
+                _qe = dict(_fb, pos=[30, 80], size=[400, 200],
+                           title="titan:aaa")
+                _qg = target_geometry(_qe, _qo)
+                _qv = [dict(_lv[0], **{"id": 51, "app-id": _fapp,
+                                        "pid": 777}),
+                       dict(_lv[0], **{"id": 52, "app-id": _fapp,
+                                        "pid": 777, "geometry": _qg,
+                                        "output-name": _qo["name"]})]
+                _wmod.identity = lambda v: ("titan:aaa" if v["id"] == 51
+                                            else "titan:bbb")
+                w.place_sock = _Sock(_qv, [_qo])
+                w.kb = {engine.kkey(_fapp, "titan:aaa"): _qe}
+                _seeded.clear()
+                w.placed.clear()
+                w.slot_held = {}
+                w.redisplay_ok = {51}
+                w.deadline[51] = _time.time() + 100
+                w._place_view(_qv[0])
+                ck("a-window-of-another-identity-does-not-squat-a-slot",
+                   _seeded == [(51, None, (30, 80))])
             finally:
                 _wmod.identity, _wmod.unidentified = _rid, _run
                 engine.window_origin = _rwo
@@ -14552,7 +14594,30 @@ def _t_watcher(ck):
        w._held(_wins) == frozenset())
     w.deadline[7] = now + 60
     w.st["armed_at"] = now - PLACE_CAP - 1          # settled
+    w.late_ok.clear()
+    w.identified.clear()
     ck("hold-holds-nothing-in-settled-state", w._held(_wins) == frozenset())
+    # A WINDOW OWED ITS LATE CHANCE IS HELD IN ANY MODE, until the placer's
+    # first look: the capture that identifies it runs before the placer, and
+    # learning it there wrote another account's whole desk at the cascade
+    # (dragonfly 2026-11-13). Each release is its own cell, or a hold that
+    # never lifted would pass the first one.
+    w.late_ok.add(7)
+    ck("hold-keeps-a-window-owed-its-late-chance-when-settled",
+       w._held(_wins) == {7})
+    w.identified.add(7)
+    ck("hold-releases-a-late-window-once-the-placer-has-looked",
+       w._held(_wins) == frozenset())
+    w.identified.discard(7)
+    w.placed.add(7)
+    ck("hold-releases-a-late-window-once-placed",
+       w._held(_wins) == frozenset())
+    w.placed.discard(7)
+    w.deadline[7] = now - 1
+    ck("hold-releases-a-late-window-when-its-grace-runs-out",
+       w._held(_wins) == frozenset())
+    w.deadline[7] = now + 60
+    w.late_ok.clear()
 
     # EVENT ROUTING. A map grants the grace and feeds the settle clock; a
     # place-event queues the view for the placer with the right settle; an
