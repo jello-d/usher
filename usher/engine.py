@@ -8760,6 +8760,24 @@ def live_holder(holder, vid, live_ids):
     return "held" if holder in live_ids else "stale"
 
 
+# HOW FAR A WINDOW'S SIZE MAY DRIFT from the one it was given before it
+# counts as PUT BACK (watch.PLACE_LATE): more than a client's rounding to
+# whole cells (kitty: a few px), far less than a put-back size.
+SIZE_BACK = 32
+
+
+def size_put_back(v, e, tol=SIZE_BACK):
+    """Is live view `v` now a different size from the slot `e` it was
+    placed into, larger OR smaller, by more than `tol`? PURE. The late
+    look (watch.PLACE_LATE) asks this of a placement that had landed."""
+    g = v.get("geometry") or {}
+    try:
+        return (abs(float(g["width"]) - float(e["size"][0])) > tol
+                or abs(float(g["height"]) - float(e["size"][1])) > tol)
+    except (KeyError, IndexError, TypeError, ValueError):
+        return False
+
+
 def placement_landed(v, e, o, tol=PLACE_TOL, size=True):
     """Did view v actually END UP on the slot e asks for, on output o?
 

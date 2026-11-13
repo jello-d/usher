@@ -5400,6 +5400,32 @@ def _t_verify(ck):
         w._verify_one(7, {"e": _e, "o": _o})
         ck("verify-hit-leaves-it-placed", 7 in w.placed)
         ck("verify-hit-is-silent", logged == [])
+        # AND ARMS ONE LATE LOOK, for a size an app puts back seconds later
+        # (a Chrome window moved to another monitor: right at 14:47:59,
+        # back to its docked size at 14:48:03, dragonfly 2026-11-13)
+        ck("verify-hit-arms-one-late-look",
+           w.verify.get(7, {}).get("late") is True
+           and w.verify[7]["due"] > time.time() + _w.PLACE_LATE - 1)
+        _eb = dict(_e, size=[300, 300])
+        ck("a-size-put-back-smaller-or-larger-is-seen",
+           engine.size_put_back(_v(0, 0, w=250, h=300), _eb)
+           and engine.size_put_back(_v(0, 0, w=300, h=360), _eb)
+           and not engine.size_put_back(_v(0, 0, w=290, h=310), _eb))
+        logged[:] = []
+        w = _wat(_v(110, 120, w=250, h=300))
+        _reseat2 = []
+        w._seat_view = lambda v, e, o: _reseat2.append(v["id"])
+        w._verify_one(7, {"e": _eb, "o": _o, "late": True})
+        ck("the-late-look-resizes-a-size-put-back",
+           _reseat2 == [7]
+           and any("size put back" in m for m in logged))
+        logged[:] = []
+        w = _wat(_v(110, 120, w=300, h=300))
+        _reseat2[:] = []
+        w._seat_view = lambda v, e, o: _reseat2.append(v["id"])
+        w._verify_one(7, {"e": _eb, "o": _o, "late": True})
+        ck("the-late-look-is-silent-when-the-size-held",
+           _reseat2 == [] and logged == [] and 7 not in w.verify)
 
         # BOUNDED: at the end of the budget the window is left where it is
         # rather than fought over for the whole 120s grace.
@@ -13702,10 +13728,12 @@ def _t_displays(ck):
         ck("redisplay-is-consumed",
            not os.path.exists(engine.REDISPLAY_FILE))
         # It ends the hold, but not before the re-place can be read back.
+        # ...the LATE look included, or the capture learns a size an app
+        # has just put back (PLACE_LATE)
         ck("redisplay-holds-for-the-verify-budget",
            w._in_transition()
-           and w.transition_until <= _time.time() + sum(_wmod.PLACE_VERIFY)
-           + 1.5)
+           and _time.time() + _wmod.PLACE_LATE < w.transition_until
+           <= _time.time() + _wmod.LEARN_HOLD + 0.5)
         _n = len(_asked)
         ck("redisplay-absent-request-is-a-no-op",
            w._take_redisplay() == "" and len(_asked) == _n)

@@ -98,6 +98,16 @@ TITLE_QUIET_FAST = 0.15  # everything else: the title is already stable at map
 # for the compositor to have APPLIED the request we are checking, or every
 # placement reads as failed; 0.6s against a measured sub-second apply.
 PLACE_VERIFY = (0.6, 1.5, 3.0)
+# AND ONE LATE LOOK at a placement that landed: a Chrome window moved to
+# another monitor takes the size it is given and then PUTS BACK the size it
+# had before, about four to six seconds later, past every read-back above
+# (dragonfly 2026-11-13: right at 14:47:59, back to its docked size at
+# 14:48:03, twice in one undock). Seconds after the placement landed.
+PLACE_LATE = 10.0
+# HOW LONG LEARNING WAITS after re-placing everything (a desk change, a map
+# edit, an undo): past every read-back, the late look included, or the
+# capture records a size an app has just put back.
+LEARN_HOLD = sum(PLACE_VERIFY) + PLACE_LATE + 1.0
 # The visibility guarantee (Watcher._ensure_visible): how often it looks,
 # and how many times one window is rescued before usher says so and stops.
 VISIBLE_EVERY = 5.0
@@ -1421,8 +1431,20 @@ class Watcher:
             return             # the window is gone: nothing left to verify
         e, o = item["e"], item["o"]
         if placement_landed(v, e, o):
-            return             # it stuck, which is the overwhelmingly common
-            #                    case and says nothing worth logging
+            # IT STUCK, which is the overwhelmingly common case and says
+            # nothing worth logging. ONE LATE LOOK follows, for a size an
+            # app puts back seconds later (PLACE_LATE): resized again if it
+            # was, which a second time sticks, and bounded by the same
+            # budget as every retry here, since re-seating counts a try.
+            if not item.get("late"):
+                with self.lock:
+                    self.verify[vid] = dict(
+                        item, late=True, due=time.time() + PLACE_LATE)
+            elif engine.size_put_back(v, e):
+                logline(f"size put back after it took, re-sizing: "
+                        f"{app_of(v)[:18]} | {engine.log_title(v)[:34]}")
+                self._seat_view(v, e, o)
+            return
         app, title = app_of(v), engine.log_title(v)
         with self.lock:
             n = self.place_tries.get(vid, 0)
@@ -1832,7 +1854,7 @@ class Watcher:
         if was is None or was_for != prof or not ours or was == sig:
             return
         with self.lock:
-            self.transition_until = time.time() + sum(PLACE_VERIFY) + 1.0
+            self.transition_until = time.time() + LEARN_HOLD
         n = self._sweep()
         logline(f"surface map changed: re-placing {n} window(s)")
 
@@ -2054,7 +2076,7 @@ class Watcher:
                 self.kb, snap, req.get("sel") or None)
             self.kb = merged
             save_knowledge(self.kb, prof)
-            self.transition_until = time.time() + sum(PLACE_VERIFY) + 1.0
+            self.transition_until = time.time() + LEARN_HOLD
         n = self._sweep()
         logline(f"undo: restored {len(restored)} entr(ies) from "
                 f"{req['from']}"
@@ -2269,7 +2291,7 @@ class Watcher:
             # budget: learning the instant we issue placements would record
             # the positions we are still correcting. THE HOLD IS NOT THE
             # SWEEP: see _sweep, which is a blip and carries no hold at all.
-            self.transition_until = now + sum(PLACE_VERIFY) + 1.0
+            self.transition_until = now + LEARN_HOLD
         # NOT UNTIL THE GRID IS THE NEW DESK'S. hwdp's request arrives with
         # the PROFILE, and the grid is a separate step (the integrator's,
         # from hwdp's declaration) that a sweep must not run ahead of: a slot
@@ -2301,7 +2323,7 @@ class Watcher:
         """The re-place that ends a display change. Its own step because it
         runs either at once or when the grid arrives (_poll_sweep_wait)."""
         with self.lock:
-            self.transition_until = time.time() + sum(PLACE_VERIFY) + 1.0
+            self.transition_until = time.time() + LEARN_HOLD
         n = self._sweep(vids)
         logline(f"display profile {was} -> {prof} ({why}): {len(self.kb)} "
                 f"known window(s) here; re-placing {n}"
