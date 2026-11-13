@@ -5523,6 +5523,28 @@ def _t_verify(ck):
         _d, _far = _due_after(250, late=False)
         ck("a-size-change-before-the-placement-landed-is-the-read-backs",
            abs(_d - _far) < 0.5)
+        # THE WATCH EXTENDS ITSELF WHILE THE WINDOW IS BUSY, like place
+        # mode: a change pushes its end to LATE_QUIET after, within the cap
+        def _until_after(until_in, cap_in):
+            w = _wat(_v(110, 120, w=300, h=300))
+            now = time.time()
+            w.verify[7] = {"e": _eb, "o": _o, "late": True,
+                           "due": now + 1, "until": now + until_in,
+                           "cap": now + cap_in}
+            w._on_event({"event": "view-geometry-changed",
+                         "view": dict(_v(140, 120, w=300, h=300), id=7)})
+            return w.verify[7]["until"] - time.time()
+        ck("a-change-extends-the-watch-to-a-quiet-period",
+           abs(_until_after(1, 60) - _w.LATE_QUIET) < 0.5)
+        ck("the-watch-never-passes-its-cap",
+           _until_after(1, 2) <= 2.05)
+        ck("a-change-never-shortens-the-watch",
+           _until_after(20, 60) > 19)
+        w = _wat(_v(110, 120))
+        w._verify_one(7, {"e": _e, "o": _o})
+        ck("a-landing-sets-the-floor-and-the-cap",
+           w.verify[7]["until"] - time.time() > _w.PLACE_LATE - 1
+           and w.verify[7].get("cap", 0) - time.time() > _w.LATE_CAP - 1)
 
         # BOUNDED: at the end of the budget the window is left where it is
         # rather than fought over for the whole 120s grace.

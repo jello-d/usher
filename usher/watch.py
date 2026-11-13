@@ -108,6 +108,12 @@ PLACE_VERIFY = (0.6, 1.5, 3.0)
 # 2026-11-13). The geometry event (SIZE_SETTLE) is usually faster still.
 PLACE_LATE = 10.0
 LATE_EVERY = 1.0
+# AND THE WINDOW EXTENDS ITSELF WHILE THE WINDOW IS BUSY, the way place mode
+# does (START_FLOOR, IDLE_SETTLE, PLACE_CAP): PLACE_LATE is only the floor,
+# any size change pushes the end out to LATE_QUIET after it, and LATE_CAP
+# bounds it whatever happens (the user, 2026-11-13).
+LATE_QUIET = 5.0
+LATE_CAP = 60.0
 # HOW LONG LEARNING WAITS after re-placing everything (a desk change, a map
 # edit, an undo): past every read-back, the late look included, or the
 # capture records a size an app has just put back.
@@ -1455,7 +1461,8 @@ class Watcher:
             with self.lock:
                 self.verify[vid] = dict(item, late=True,
                                         due=now + LATE_EVERY,
-                                        until=now + PLACE_LATE)
+                                        until=now + PLACE_LATE,
+                                        cap=now + LATE_CAP)
             return
         app, title = app_of(v), engine.log_title(v)
         with self.lock:
@@ -1499,12 +1506,17 @@ class Watcher:
         the put-back by about SIZE_SETTLE. Cheap enough for every geometry
         event: one dict lookup unless a late look is pending."""
         vid = v.get("id")
+        now = time.time()
         with self.lock:
             item = self.verify.get(vid)
             if not item or not item.get("late"):
                 return
+            # ANY change keeps the watch open until LATE_QUIET after it,
+            # within LATE_CAP of the landing
+            item["until"] = min(item.get("cap", now),
+                                max(item.get("until", 0), now + LATE_QUIET))
             if engine.size_put_back(v, item["e"]):
-                item["due"] = min(item["due"], time.time() + SIZE_SETTLE)
+                item["due"] = min(item["due"], now + SIZE_SETTLE)
 
     def _late_look(self, v, e, o):
         """PLACE_LATE after a placement landed: has the app PUT BACK an old
