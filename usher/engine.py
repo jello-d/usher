@@ -1076,14 +1076,25 @@ def surface_target(app, ident, src, profile, outs):
     return seed, ""
 
 
-def _free_share(off, ext, free):
-    """Where a window goes along one axis of a region with `free` pixels to
-    spare, keeping the share of the free space it had where it was learned:
-    `off` and `ext` are its offset and extent there as fractions of that
-    region. PURE."""
-    room = 1.0 - float(ext)
-    r = float(off) / room if room > 1e-6 else 0.0
-    return int(round(min(max(r, 0.0), 1.0) * max(0, free)))
+def _free_share(off, ext, span, size):
+    """Where a window of `size` goes along one axis of a region `span` long,
+    from its offset and extent where it was learned, as fractions of that
+    region. PURE.
+
+    IT KEEPS TO THE EDGE IT WAS NEARER, with that margin as the same share
+    of the region, and is CENTRED when its two margins were about equal.
+    Keeping the share of the FREE space instead amplifies a near-full
+    window's few pixels of margin into a third of a tall panel: a Chrome
+    window filling the laptop panel (61px from the top, 34px from the
+    bottom) landed 1399px down a 3840px portrait panel (dragonfly,
+    2026-11-13)."""
+    free = max(0, int(span) - int(size))
+    before, after = float(off), 1.0 - float(off) - float(ext)
+    if abs(before - after) <= 0.1:
+        return free // 2
+    if before < after:
+        return min(max(0, int(round(before * span))), free)
+    return min(max(0, free - int(round(after * span))), free)
 
 
 def surface_seed(others, surfaces, default=None):
@@ -1146,13 +1157,12 @@ def surface_seed(others, surfaces, default=None):
             # as far as it must: proportional scaling made a terminal on a
             # 2880-wide laptop panel 25% narrower on a 2160-wide portrait one
             # with plenty of room beside it (dragonfly, 2026-11-13). The
-            # POSITION keeps its share of the FREE space, so a window flush
-            # against an edge stays flush and a centred one stays centred.
+            # POSITION keeps to the edge it was nearer (see _free_share).
             ow, oh = (e.get("size") or [0, 0])[:2]
             w = max(1, min(int(ow or frac[2] * sw), sw))
             h = max(1, min(int(oh or frac[3] * sh), sh))
-            x = sx + _free_share(frac[0], frac[2], sw - w)
-            y = sy + _free_share(frac[1], frac[3], sh - h)
+            x = sx + _free_share(frac[0], frac[2], sw, w)
+            y = sy + _free_share(frac[1], frac[3], sh, h)
         else:
             w = min(int(e.get("size", [0, 0])[0]) or sw, sw)
             h = min(int(e.get("size", [0, 0])[1]) or sh, sh)

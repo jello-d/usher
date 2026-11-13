@@ -13131,17 +13131,17 @@ def _t_displays(ck):
        engine.surface_frac(_wc, {"pos": [0, 0], "size": [0, 9]}) is None)
 
     # THE SEED SCALES TO FIT, NOT IN PROPORTION: the window keeps its own
-    # 900x700 in the 3840x1080 region, and keeps its SHARE OF THE FREE SPACE
-    # (halfway along x, flush against the bottom). Proportional scaling made
-    # it 1920x540, which on a narrower panel is a terminal shrunk with room
-    # to spare beside it (dragonfly, 2026-11-13).
+    # 900x700 in the 3840x1080 region, centred where its margins were
+    # equal (x) and flush against the edge it touched (the bottom).
+    # Proportional scaling made it 1920x540, which on a narrower panel is a
+    # terminal shrunk with room to spare beside it (dragonfly, 2026-11-13).
     _fa = dict(_away, surface="comms", surface_frac=[0.25, 0.5, 0.5, 0.5])
     _fs = engine.surface_seed([_fa], _mm, _md)
     ck("seed-keeps-the-windows-own-size-where-there-is-room",
        _fs["size"] == [900, 700])
-    ck("seed-keeps-the-windows-share-of-the-free-space",
+    ck("seed-keeps-the-windows-place-in-the-region",
        _fs["pos"] == [1470, 380])
-    ck("seed-a-share-past-the-edge-stays-flush-with-it",
+    ck("seed-a-margin-past-the-edge-stays-inside-it",
        engine.surface_seed([dict(_fa, surface_frac=[0.9, 0.9, 0.5, 0.5])],
                            _mm, _md)["pos"] == [2940, 380])
     # AND SHRINKS ONLY AS FAR AS IT MUST: wider than the region, it is cut
@@ -13149,10 +13149,17 @@ def _t_displays(ck):
     ck("seed-a-window-wider-than-the-region-is-cut-to-fit",
        engine.surface_seed([dict(_fa, size=[5000, 700])], _mm, _md)
        ["size"] == [3840, 700])
-    ck("free-share-an-edge-and-a-full-width-window",
-       engine._free_share(0.0, 0.3, 500) == 0
-       and engine._free_share(0.7, 0.3, 500) == 500
-       and engine._free_share(0.2, 1.0, 500) == 0)
+    # THE NEARER EDGE KEEPS ITS MARGIN, equal margins centre, and a
+    # near-full window is not flung down a tall panel by amplified margins.
+    ck("free-share-keeps-the-nearer-edges-margin",
+       engine._free_share(0.1, 0.3, 1000, 300) == 100
+       and engine._free_share(0.6, 0.3, 1000, 300) == 600)
+    ck("free-share-centres-equal-margins",
+       engine._free_share(0.35, 0.3, 1000, 300) == 350)
+    ck("free-share-a-near-full-window-is-not-flung-down-the-region",
+       engine._free_share(0.0356, 0.9456, 3840, 1702) == 1069)
+    ck("free-share-never-leaves-the-region",
+       engine._free_share(0.9, 0.5, 1000, 600) == 400)
     # AN UNPLACED NAME FALLS TO THE DEFAULT, keeping its own cell
     _ds = engine.surface_seed([dict(_away, surface="nowhere")], _mm, _md)
     ck("seed-an-unplaced-name-falls-to-the-default",
