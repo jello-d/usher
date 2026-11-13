@@ -13036,6 +13036,23 @@ def _t_displays(ck):
             [(0, 1000, 1000, 1000)]) == (0, 2000, 1000, 900))
     ck("fit-beside-ignores-an-edge-shared-by-a-few-pixels",
        _fb2((0, 1690, 2160, 1702), _port, [(0, 0, 2160, 1702)]) is None)
+    # AND REPACKS EARLIER SEEDS when nothing fits as it stands: the measured
+    # case is a near-full window CENTRED on a tall portrait, leaving 1069px
+    # above and below, so the next 1702px window has no gap. Both seeds,
+    # 2 x 1702 <= 3840, so both are stacked from the top.
+    _lo2 = engine.lay_out_seed
+    ck("lay-out-repacks-earlier-seeds-to-fit",
+       _lo2((0, 2066, 2160, 1702), _port, [(0, 1069, 2160, 1702)], {0})
+       == ((0, 1702, 2160, 1702), {0: (0, 0, 2160, 1702)}))
+    ck("lay-out-never-moves-a-learned-slot",
+       _lo2((0, 2066, 2160, 1702), _port, [(0, 1069, 2160, 1702)], ())
+       == ((0, 0, 2160, 1069), {}))
+    ck("lay-out-does-not-repack-what-cannot-fit-end-to-end",
+       _lo2((0, 1000, 2160, 2000), _port, [(0, 1069, 2160, 2000)], {0})
+       == ((0, 0, 2160, 1069), {}))
+    ck("lay-out-moves-nothing-when-a-gap-fits",
+       _lo2((0, 137, 2160, 1702), _port, [(0, 103, 2160, 1702)], {0})
+       == ((0, 1805, 2160, 1702), {}))
     # AND IT CANNOT INVENT ONE. No surface recorded, or a name this desk does
     # not have, both decline: a seed is allowed to be approximate, never
     # fabricated.
@@ -13382,6 +13399,10 @@ def _t_displays(ck):
 
             def list_views(self, **kw):
                 return self._v
+
+            def get_view(self, vid):
+                return next((v for v in self._v if v.get("id") == vid),
+                            None)
 
             def list_outputs(self):
                 return self._o
@@ -13901,6 +13922,11 @@ def _t_displays(ck):
                     ck("a-second-seed-in-a-surface-goes-beside-the-first",
                        _two(False) == [(71, "tall", (0, 0)),
                                        (72, "tall", (0, 1000))])
+                    # and the sweep recorded both AS SEEDS, which is what
+                    # lets a later seed move them (lay_out_seed)
+                    ck("the-sweep-records-its-seeds-as-movable",
+                       [t["vid"] for t in w.sweep_rects.get(
+                           (_mo["name"], (0, 0)), [])] == [71, 72])
                     # CONTROL: with nothing placed before it in the sweep
                     # the second seed is where the surface puts it, or the
                     # row above passes over a placer that moves every seed.
@@ -13912,8 +13938,9 @@ def _t_displays(ck):
                     # sweep, would describe windows that have since moved.
                     _seeded.clear()
                     w.kb, w.slot_held = {}, {}
-                    w.sweep_rects = {(_mo["name"], (0, 0)):
-                                     [(0, 0, 800, 1000)]}
+                    w.sweep_rects = {(_mo["name"], (0, 0)): [
+                        {"rect": (0, 0, 800, 1000), "vid": None,
+                         "e": {}}]}
                     w.placed.clear()
                     w.redisplay_ok = set()
                     w._placing_now = lambda: True
@@ -13924,9 +13951,28 @@ def _t_displays(ck):
                         del w._placing_now
                     ck("outside-a-sweep-a-seed-is-not-moved-beside",
                        _seeded == [(72, "tall", (0, 0))])
+                    # AND A SEED PLACED EARLIER IN THE SWEEP IS MOVED to
+                    # make room: 71 sits at 800, leaving gaps of 800 and 700
+                    # for 72's 1000, and the two fit end to end in 3000.
+                    _seeded.clear()
+                    w.kb, w.slot_held = {}, {}
+                    w.placed.clear()
+                    w.place_sock = _Sock(_bv, [_mo])
+                    w.sweep_rects = {(_mo["name"], (0, 0)): [
+                        {"rect": (0, 800, 800, 1500), "vid": 71,
+                         "e": {"output": "eDP-1", "workspace": [0, 0],
+                               "pos": [0, 800], "size": [800, 1500],
+                               "seeded_from": "tall"}}]}
+                    w.redisplay_ok = {72}
+                    w.deadline[72] = _time.time() + 100
+                    w._place_view(_bv[1])
+                    ck("an-earlier-seed-is-moved-to-make-room",
+                       sorted(_seeded) == [(71, "tall", (0.0, 1000.0)),
+                                           (72, "tall", (0.0, 0.0))])
                     # AND EACH SWEEP STARTS WITH NONE, or a later dock lays
                     # windows out around rects from an earlier one.
-                    w.sweep_rects = {("x", (0, 0)): [(0, 0, 1, 1)]}
+                    w.sweep_rects = {("x", (0, 0)): [
+                        {"rect": (0, 0, 1, 1), "vid": None, "e": {}}]}
                     w._sweep([71])
                     ck("a-sweep-forgets-the-last-sweeps-rects",
                        w.sweep_rects == {})

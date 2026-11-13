@@ -547,8 +547,10 @@ surface covers, name it in the desk's map.
 surface rather than from a learned slot is a guess, so two of them seeded into
 one surface at a desk change are not stacked on top of each other: the second
 goes beside the first along the surface's long axis (one under the other on a
-portrait panel), shrinking into the gap if it must keep at least half its
-length, and staying where the surface put it otherwise. Learned slots are
+portrait panel). If no gap fits it but the seeds in its way and it fit end
+to end, they are stacked from the surface's start, moving the earlier ones;
+failing that it shrinks into the largest gap if that keeps at least half its
+length, and otherwise stays where the surface put it. Learned slots are
 never moved by this; they are your arrangement.
 
 **No window is left where it cannot be seen.** Whatever put it there (a

@@ -1275,6 +1275,51 @@ def fit_beside(rect, region, taken):
     return (start, y, ext, h)
 
 
+def lay_out_seed(rect, region, taken, movable=()):
+    """fit_beside, plus REPACKING: (rect or None, {index into taken: rect}).
+    PURE.
+
+    fit_beside moves only the NEW seed, so a seed placed earlier in the
+    sweep can leave no gap that fits: a near-full window CENTRED on a tall
+    portrait panel leaves a third above and below, and the next window is
+    squeezed into one of them (dragonfly 2026-11-13, measured in the repair
+    dry run). When every window in its way along the axis is a SEED of this
+    sweep (`movable`, indices into `taken`) and they all fit end to end, they
+    are stacked from the region's start in the order they sit, and the
+    earlier ones are moved too. A learned slot in the way means no repack:
+    it is somebody's arrangement, so it falls back to fit_beside."""
+    r = fit_beside(rect, region, taken)
+    if r is None or (r[2], r[3]) == (float(rect[2]), float(rect[3])):
+        return r, {}
+    x, y, w, h = (float(n) for n in rect)
+    rx, ry, rw, rh = (float(n) for n in region)
+    vert = rh >= rw
+    c0, c1 = (x, x + w) if vert else (y, y + h)
+    lo, span = (ry, rh) if vert else (rx, rw)
+    way = [i for i, t in enumerate(taken)
+           if min(c1, (t[0] + t[2]) if vert else (t[1] + t[3]))
+           > max(c0, t[0] if vert else t[1])]
+    if not way or any(i not in movable for i in way):
+        return r, {}
+    # (start along the axis, length, index or None for the new seed)
+    seq = sorted([((t[1] if vert else t[0]), (t[3] if vert else t[2]), i)
+                  for i, t in ((i, taken[i]) for i in way)]
+                 + [((y if vert else x), (h if vert else w), None)],
+                 key=lambda s: (s[0], s[2] is None))
+    if sum(s[1] for s in seq) > span:
+        return r, {}
+    at, out, moves = lo, None, {}
+    for _start, ln, i in seq:
+        t = tuple(float(n) for n in (taken[i] if i is not None else rect))
+        nr = (t[0], at, t[2], t[3]) if vert else (at, t[1], t[2], t[3])
+        if i is None:
+            out = nr
+        elif nr != t:
+            moves[i] = nr
+        at += ln
+    return out, moves
+
+
 def entry_output(e, outputs, panels=None):
     """The live output entry `e` should be placed on, or None.
 

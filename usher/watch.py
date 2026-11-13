@@ -527,8 +527,10 @@ class Watcher:
         # for every member.
         self.learned = {}
         self.left_keys, self.left_from = {}, None
-        # WHAT THE CURRENT SWEEP HAS PLACED, (output, cell) -> [(x, y, w, h)],
-        # so a SEED can be put beside them rather than on top (fit_beside).
+        # WHAT THE CURRENT SWEEP HAS PLACED, (output, cell) -> [{"rect":
+        # (x, y, w, h), "vid": the window if it was SEEDED, so a later seed
+        # may move it (lay_out_seed), else None, "e": what it was placed
+        # from}], so a SEED goes beside them rather than on top.
         # Cleared by each sweep: outside one, nothing is being laid out.
         self.sweep_rects = {}
         # (vid, slot key) pairs we have already SAID were refused, so the
@@ -1134,7 +1136,10 @@ class Watcher:
                 if dock_chance:
                     self.sweep_rects.setdefault(
                         (o["name"], tuple(e.get("workspace") or ())),
-                        []).append(tuple(e["pos"]) + tuple(e["size"]))
+                        []).append({"rect": tuple(e["pos"])
+                                    + tuple(e["size"]),
+                                    "vid": vid if seeded else None,
+                                    "e": e})
         return moved
 
     def _beside(self, e, o, app, title):
@@ -1142,10 +1147,11 @@ class Watcher:
         region (engine.fit_beside), or `e` unchanged. The region is the
         surface it was seeded from, or the whole output for the default."""
         with self.lock:
-            taken = list(self.sweep_rects.get(
+            here = list(self.sweep_rects.get(
                 (o["name"], tuple(e.get("workspace") or ())), ()))
-        if not taken:
+        if not here:
             return e
+        taken = [t["rect"] for t in here]
         name = e.get("seeded_from") or ""
         s = (engine.surface_default() if e.get("seeded_default")
              else engine.surface_map()[0].get(name))
@@ -1154,12 +1160,24 @@ class Watcher:
         else:
             g = o["geometry"]
             region = (0, 0, g["width"], g["height"])
-        r = engine.fit_beside(tuple(e["pos"]) + tuple(e["size"]), region,
-                              taken)
+        r, moves = engine.lay_out_seed(
+            tuple(e["pos"]) + tuple(e["size"]), region, taken,
+            {i for i, t in enumerate(here) if t["vid"] is not None})
         if not r:
             return e
         logline(f"seeded beside {len(taken)} window(s) already in "
-                f"`{name}`: {app[:18]} | {title[:30]}")
+                f"`{name}`: {app[:18]} | {title[:30]}"
+                + (f" (moving {len(moves)} up)" if moves else ""))
+        for i, nr in moves.items():
+            t = here[i]
+            e2 = dict(t["e"], pos=[nr[0], nr[1]], size=[nr[2], nr[3]])
+            try:
+                v2 = self.place_sock.get_view(t["vid"])
+            except Exception:                              # noqa: BLE001
+                continue
+            if v2 and self._seat_view(v2, e2, o):
+                with self.lock:
+                    t["rect"], t["e"] = nr, e2
         return dict(e, pos=[r[0], r[1]], size=[r[2], r[3]])
 
     def _left_entry(self, vid, app, ident):
