@@ -10302,6 +10302,113 @@ def _t_placement(ck):
         _gw._on_event({"event": "view-unmapped", "view": {"id": 9}})
     ck("the-refusal-is-forgotten-on-unmap", 9 not in _gw.cell_said)
 
+def _t_unique_sizes(ck):
+    """EVERY WINDOW OF AN APP HAS A SIZE OF ITS OWN (engine.size_nudges).
+
+    A window's size is how usher tells apart windows sharing an identity
+    (claim_by_size, free_slot), so two at one size are told apart by title
+    or by nothing. Measured on dragonfly 2026-11-12: two pairs of work Chrome
+    windows at identical sizes. A few pixels is invisible; the store is not
+    blind to it."""
+    from .watch import Watcher
+    nudges = engine.size_nudges
+
+    def _v(i, w, h, app="google-chrome", **k):
+        d = {"id": i, "app-id": app, "parent": -1,
+             "geometry": {"x": 10, "y": 20, "width": w, "height": h}}
+        d.update(k)
+        return d
+
+    def _stable(vs):
+        return {v["id"]: (v["geometry"]["width"], v["geometry"]["height"])
+                for v in vs}
+
+    a = [_v(1, 2498, 1702), _v(2, 2498, 1702)]
+    ck("unique-nudges-the-newer-twin", nudges(a, _stable(a), set())
+       == [(2, (2492, 1702))])
+    ck("unique-waits-for-a-size-that-held", nudges(a, {}, set()) == [])
+    ck("unique-a-refusing-window-keeps-its-size-and-the-other-gives-way",
+       nudges(a, _stable(a), {(2, (2498, 1702))}) == [(1, (2492, 1702))])
+    ck("unique-gives-up-when-both-refuse",
+       nudges(a, _stable(a), {(1, (2498, 1702)), (2, (2498, 1702))}) == [])
+    b = [_v(1, 2498, 1702), _v(2, 2498, 1702, fullscreen=True)]
+    ck("unique-an-immovable-window-keeps-its-size",
+       nudges(b, _stable(b), set()) == [(1, (2492, 1702))])
+    c = [_v(1, 2498, 1702), _v(2, 2498, 1702, app="kitty")]
+    ck("unique-is-per-app", nudges(c, _stable(c), set()) == [])
+    d = [_v(1, 2498, 1702), _v(2, 2501, 1700)]
+    ck("unique-a-near-miss-is-a-clash",
+       len(nudges(d, _stable(d), set())) == 1)
+    e = [_v(1, 2498, 1702), _v(2, 2502, 1702)]
+    ck("unique-four-pixels-apart-is-already-unique",
+       nudges(e, _stable(e), set()) == [])
+    f = [_v(1, 2498, 1702), _v(2, 2498, 1702, parent=1)]
+    ck("unique-ignores-a-dialog", nudges(f, _stable(f), set()) == [])
+    g = [_v(i, 1085, 672, app="kitty") for i in range(1, 7)]
+    _p = nudges(g, _stable(g), set())
+    _sizes = [(1085, 672)] + [s for _i, s in _p]
+    ck("unique-six-of-one-size-all-get-their-own",
+       len(_p) == 5 and all(
+           not (abs(x[0] - y[0]) <= engine.SIZE_MATCH
+                and abs(x[1] - y[1]) <= engine.SIZE_MATCH)
+           for i, x in enumerate(_sizes) for y in _sizes[i + 1:]))
+    ck("unique-only-ever-shrinks",
+       all(s[0] <= 1085 and s[1] <= 672 for _i, s in _p))
+
+    # THE DAEMON: settled, it resizes the newer twin keeping its position;
+    # placing, it touches nothing.
+    w = Watcher(launch=False)
+    _sent = []
+    _views = [_v(1, 2498, 1702, **{"output-id": 3}),
+              _v(2, 2498, 1702, **{"output-id": 3})]
+
+    class _S:
+        def list_views(self, filter_mapped_toplevel=False):
+            return _views
+
+        def send_json(self, msg):
+            _sent.append(msg["data"])
+
+    w.place_sock = _S()
+    _wm = sys.modules[Watcher.__module__]
+    _rl, _said = _wm.logline, []
+    try:
+        _wm.logline = _said.append
+        w._placing_now = lambda: True
+        w._ensure_unique_sizes()
+        w._ensure_unique_sizes()
+        ck("unique-daemon-waits-while-placing", _sent == [])
+        w._placing_now = lambda: False
+        w._ensure_unique_sizes()
+        ck("unique-daemon-waits-for-a-second-pass", _sent == [])
+        w._ensure_unique_sizes()
+        ck("unique-daemon-resizes-the-newer-twin-in-place",
+           _sent == [{"id": 2, "output_id": 3, "geometry": {
+               "x": 10, "y": 20, "width": 2492, "height": 1702}}])
+        ck("unique-daemon-says-so", any("nudged" in m for m in _said))
+        # The stub never applies a resize, i.e. an app refusing it: the other
+        # twin is asked next, and then nothing more, ever.
+        w._ensure_unique_sizes()
+        w._ensure_unique_sizes()
+        w._ensure_unique_sizes()
+        ck("unique-daemon-asks-each-window-once",
+           [m["id"] for m in _sent] == [2, 1])
+    except Exception as _e:                                # noqa: BLE001
+        ck("unique-daemon-raised: %s" % _e, False)
+    finally:
+        _wm.logline = _rl
+
+    # AND THE PLACER TICK RUNS IT, with the visibility pass and only then.
+    w3 = Watcher(launch=False)
+    _ran = []
+    w3._ensure_visible = lambda: None
+    w3._ensure_unique_sizes = lambda: _ran.append(1)
+    w3.visible_due = 0.0
+    w3._placer_step()
+    w3._placer_step()
+    ck("placer-step-runs-the-unique-size-pass-when-due", _ran == [1])
+
+
 def _t_visible(ck):
     """NO WINDOW IS LEFT WHERE IT CANNOT BE SEEN.
 
@@ -14662,7 +14769,8 @@ def selftest():
         for area in (_t_registry, _t_resolution, _t_lock,
                      _t_toplevels, _t_roster,
                      _t_lifecycle, _t_desktop, _t_loupe, _t_slots,
-                     _t_sticky, _t_visible, _t_verify, _t_size_slots,
+                     _t_sticky, _t_visible, _t_unique_sizes, _t_verify,
+                     _t_size_slots,
                      _t_terminals, _t_cli_split,
                      _t_launch_source,
                      _t_relaunch, _t_chrome, _t_chrome_sizes, _t_learn,

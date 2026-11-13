@@ -3257,6 +3257,77 @@ SIZE_MATCH = 3   # px either way. Chrome restores a window's size EXACTLY
 #                  near-miss there would pair the wrong two terminals.
 
 
+NUDGE_STEPS = ((-6, 0), (0, -6), (-12, 0), (0, -12), (-6, -6), (-18, 0),
+               (0, -18), (-12, -6), (-6, -12), (-24, 0))
+# px. SHRINK ONLY, so a nudged window can never grow off its panel's edge,
+# and each step clears SIZE_MATCH from the size it started at. A few pixels
+# on a 2500-wide window is invisible; the permutations exist so that four or
+# five windows of one size still each find a free one.
+
+
+def size_nudges(views, prev, tried):
+    """Make every window's size unique within its app: [(vid, (w, h))] to
+    resize. PURE.
+
+    WHY. A window's SIZE is how usher tells apart windows that share an
+    identity: Chrome restores each window at its exact size and records it,
+    so `claim_by_size` names a window by it before any title is asked, and
+    `free_slot` uses it to pick which of a family's slots is this window's.
+    Two windows of one app at one size defeat both, and the only remaining
+    witness is the title. Measured on dragonfly 2026-11-12: two pairs of work
+    Chrome windows at identical sizes, named only because their titles
+    happened to differ that login. Nobody notices six pixels; the store
+    does.
+
+    `views` are raw compositor views of ONE desk; `prev` is {vid: (w, h)}
+    from the last pass, so only a window whose size has HELD across a pass is
+    touched (one being dragged or still restoring is not); `tried` is the set
+    of (vid, (w, h)) already nudged, so an app that refuses a size is asked
+    once and never fought.
+
+    THE OLDEST WINDOW KEEPS ITS SIZE (lowest view id), and a window that
+    cannot be nudged (fullscreen, tiled, sticky, minimized, a dialog, not
+    yet stable) still claims its size, so the movable one gives way."""
+    groups = {}
+    for v in views:
+        if (v.get("parent", -1) or -1) != -1:
+            continue
+        g = v.get("geometry") or {}
+        if not g.get("width") or not g.get("height"):
+            continue
+        size = (int(round(g["width"])), int(round(g["height"])))
+        movable = not (v.get("fullscreen") or v.get("sticky")
+                       or v.get("minimized") or v.get("tiled-edges")
+                       or prev.get(v.get("id")) != size
+                       or (v.get("id"), size) in tried)
+        groups.setdefault((v.get("app-id") or "").lower(), []).append(
+            (v.get("id"), size, movable))
+    out = []
+    for app, ws in groups.items():
+        if not app or len(ws) < 2:
+            continue
+
+        def clash(s, taken):
+            return any(abs(s[0] - t[0]) <= SIZE_MATCH
+                       and abs(s[1] - t[1]) <= SIZE_MATCH for t in taken)
+
+        taken = [s for _v, s, m in ws if not m]
+        for vid, size, _m in sorted((w for w in ws if w[2]),
+                                    key=lambda w: w[0]):
+            if not clash(size, taken):
+                taken.append(size)
+                continue
+            for dw, dh in NUDGE_STEPS:
+                cand = (size[0] + dw, size[1] + dh)
+                if not clash(cand, taken):
+                    out.append((vid, cand))
+                    taken.append(cand)
+                    break
+            else:
+                taken.append(size)
+    return out
+
+
 SPARE_SPAN = 600  # s: how far behind the account's newest slot a spare
 #                   may be. A reboot or a lost name is minutes; a slot an
 #                   hour behind belongs to a window that was closed.

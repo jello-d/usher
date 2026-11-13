@@ -532,6 +532,11 @@ class Watcher:
         self.visible_due = 0.0
         self.rescued = {}
         self.unseen = set()   # vids invisible on the last pass (see above)
+        # The unique-size pass: each window's size on the last pass (only a
+        # size that has HELD is nudged) and the (vid, size) pairs already
+        # nudged from, so an app refusing a size is asked once.
+        self.size_prev = {}
+        self.size_tried = set()
         # VIEWS WE HAVE ALREADY SAID ARE STICKY and so never moved. A third
         # set for the same reason as the one above: it is a property of the
         # window, and a browser renames constantly.
@@ -1312,6 +1317,42 @@ class Watcher:
         if now >= self.visible_due:
             self.visible_due = now + VISIBLE_EVERY
             self._guarded("visible", self._ensure_visible)
+            self._guarded("unique", self._ensure_unique_sizes)
+
+    def _ensure_unique_sizes(self):
+        """No two windows of one app keep the same size (engine.size_nudges).
+
+        ONLY WHEN SETTLED and outside a display change: while placing,
+        windows are still arriving at their restored sizes and the size is
+        exactly what the placer is reading to tell them apart."""
+        if self._in_transition() or self._placing_now():
+            self.size_prev = {}
+            return
+        with self.lock:
+            if self.pending:
+                return
+        sock = self.place_sock
+        views = [v for v in self._live_views() if not is_transient(v)]
+        if not views:
+            return
+        plan = engine.size_nudges(views, self.size_prev, self.size_tried)
+        self.size_prev = {
+            v.get("id"): (int(round(v["geometry"]["width"])),
+                          int(round(v["geometry"]["height"])))
+            for v in views if (v.get("geometry") or {}).get("width")}
+        byid = {v.get("id"): v for v in views}
+        for vid, (w, h) in plan:
+            v = byid[vid]
+            g = v["geometry"]
+            self.size_tried.add((vid, self.size_prev[vid]))
+            sock.send_json({
+                "method": "window-rules/configure-view",
+                "data": {"id": vid, "output_id": v.get("output-id"),
+                         "geometry": {"x": g["x"], "y": g["y"],
+                                      "width": w, "height": h}}})
+            logline(f"nudged to a size of its own, "
+                    f"{int(g['width'])}x{int(g['height'])} -> {w}x{h}: "
+                    f"{app_of(v)[:18]} | {engine.log_title(v)[:30]}")
 
     def _ensure_visible(self):
         """NO WINDOW IS LEFT WHERE IT CANNOT BE SEEN, whatever put it there.
@@ -2417,6 +2458,8 @@ class Watcher:
                                   if p[0] != v["id"]}
                 self.cell_said.discard(v["id"])
                 self.rescued.pop(v["id"], None)
+                self.size_tried = {p for p in self.size_tried
+                                   if p[0] != v["id"]}
                 # and having said it would never be remembered, for the same
                 # two reasons: a vid is reused, and a set that only grows is a
                 # leak in a process that runs for weeks.
