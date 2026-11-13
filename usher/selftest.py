@@ -5466,9 +5466,11 @@ def _t_verify(ck):
         w._verify_one(7, {"e": _eb, "o": _o, "late": True})
         ck("the-late-look-leaves-a-window-moved-to-another-output",
            _reseat2 == [])
-        # AND WHEN THE SIZE WAS PUT BACK AND THE WINDOW HAS MOVED SINCE, it
-        # is resized WHERE IT IS NOW, read on fresh outputs: re-seating it
-        # at the slot would undo the move
+        # AND WHEN THE SIZE WAS PUT BACK, the app put its old POSITION back
+        # with it, so the window goes back onto its SLOT, size and position,
+        # on fresh outputs. Resizing it where it was left it where the app
+        # had moved it, and three windows took a further round (dragonfly
+        # 2026-11-13 17:05:40).
         _sw = dict(_o, workspace={"x": 0, "y": 0, "grid_width": 2,
                                   "grid_height": 2})
         _mv = _v(900, 700, w=250, h=300)
@@ -5476,12 +5478,14 @@ def _t_verify(ck):
         w.place_sock = _LSock([_sw])
         _reseat2[:] = []
         w._seat_view = lambda v, e, o: _reseat2.append(
-            (tuple(e["workspace"]), tuple(e["pos"]), tuple(e["size"])))
-        w._verify_one(7, {"e": _eb, "o": _o, "late": True})
-        _now = engine.place_of(_mv, {"DP-1": _sw})
-        ck("a-size-put-back-is-resized-where-the-window-is-now",
-           _reseat2 == [(tuple(_now["workspace"]), tuple(_now["pos"]),
-                         (300, 300))])
+            (tuple(e["workspace"]), tuple(e["pos"]), tuple(e["size"]),
+             o["workspace"]["x"]))
+        # (the output as stored at placement shows ANOTHER workspace in view)
+        w._verify_one(7, {"e": _eb, "late": True, "o": dict(_o, workspace={
+            "x": 1, "y": 1, "grid_width": 2, "grid_height": 2})})
+        ck("a-size-put-back-goes-back-onto-its-slot-on-fresh-outputs",
+           _reseat2 == [(tuple(_eb["workspace"]), tuple(_eb["pos"]),
+                         (300, 300), 0)])
         logged[:] = []
         w = _wat(_v(110, 120, w=300, h=300))
         w.place_sock = _LSock([_o])

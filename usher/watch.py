@@ -1525,13 +1525,17 @@ class Watcher:
 
         IT ASKS ONLY ABOUT SIZE, and that is the whole difference from the
         read-backs above. Those run within seconds, before anyone could have
-        moved the window or switched workspace; ten seconds later either may
-        have happened. Measured on dragonfly 2026-11-13: the first version
-        judged position too, against the output AS IT WAS when placed, and
-        after a workspace switch read every window on the desk as not having
-        landed and re-placed all 21. So the window is resized WHERE IT IS
-        NOW, on fresh outputs, and one moved to another output is left
-        alone: that was somebody."""
+        switched workspace; ten seconds later they may have. Measured on
+        dragonfly 2026-11-13: the first version judged position too, against
+        the output AS IT WAS when placed, and after a workspace switch read
+        every window on the desk as not having landed and re-placed all 21.
+
+        BUT A PUT-BACK SIZE COMES WITH A PUT-BACK POSITION, so the window
+        goes back onto its SLOT, size and position, against fresh outputs.
+        The second version resized it where it was, which was where the app
+        had just moved it: three windows read as not landed a second later
+        and took a further round (dragonfly 2026-11-13 17:05:40). A window
+        now on another output is still left alone."""
         if v.get("output-name") != o.get("name") or \
                 not engine.size_put_back(v, e):
             return False
@@ -1542,11 +1546,9 @@ class Watcher:
         o2 = outs.get(o.get("name"))
         if not o2:
             return False
-        cur = engine.place_of(v, outs)
-        e2 = dict(e, workspace=list(cur["workspace"]), pos=list(cur["pos"]))
-        logline(f"size put back after it took, re-sizing: "
+        logline(f"size put back after it took, re-placing: "
                 f"{app_of(v)[:18]} | {engine.log_title(v)[:34]}")
-        self._seat_view(v, e2, o2)
+        self._seat_view(v, e, o2)
         return True
 
     def _restate(self, vid, e):
