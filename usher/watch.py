@@ -518,6 +518,15 @@ class Watcher:
         # taskbar is invisible. Worst for an app_id-keyed app, where
         # kkey(app, "") matches EVERY window of that app whatever its title.
         self.slot_held = {}
+        # WHICH KEY EACH LIVE WINDOW WAS LAST LEARNED UNDER on the loaded
+        # desk (vid -> store key, filled by learn), and that same map for the
+        # desk we LEFT at the last desk change, with its profile. A window
+        # whose identity it shares with siblings (two shells in one
+        # directory) has an indexed key of its own on that desk, and only
+        # this says which: other_profile_entries sees slot 0 of the family
+        # for every member.
+        self.learned = {}
+        self.left_keys, self.left_from = {}, None
         # (vid, slot key) pairs we have already SAID were refused, so the
         # standing condition is reported once per window instead of on every
         # rename. Discarded with the rest of a view's state on unmap.
@@ -1013,17 +1022,23 @@ class Watcher:
         # ASKED ONLY WHEN THIS DESK'S LAST USE IS KNOWN: the other stores
         # are read from disk, and with no `left_at` the answer is no anyway.
         _left = engine.desk_left_at(self.kb_profile)
+        # THIS WINDOW'S OWN ENTRY ON THE DESK IT CAME FROM, when known. With
+        # it the question is about THIS window, so a family is no longer a
+        # reason to skip the surface (`shared` is 1): each member goes to the
+        # surface it held, not slot 0's.
+        _mine = self._left_entry(vid, app, _ident)
         if (e and not own_unlearned and not e.get("sticky")
                 and _left is not None):
-            _shared = sum(1 for w in _views if app_of(w) == app
-                          and identity(w) == _ident)
+            _shared = 1 if _mine else sum(
+                1 for w in _views if app_of(w) == app
+                and identity(w) == _ident)
             dictate = engine.surface_dictates(
-                e, engine.other_profile_entries(app, _ident,
-                                                self.kb_profile, _src or ""),
+                e, [_mine] if _mine else engine.other_profile_entries(
+                    app, _ident, self.kb_profile, _src or ""),
                 _left, _shared,
                 engine.desk_loaded_at(self.kb_profile))
         if dictate:
-            s = self._seed(app, v, _src or "")
+            s = self._seed(app, v, _src or "", _mine)
             if s:
                 logline(f"surface over this desk's slot: {app[:18]} | "
                         f"{title[:30]}")
@@ -1034,7 +1049,7 @@ class Watcher:
             # gate above: a seed is a guess, so it may only happen where usher
             # was going to place anyway, which is place, an anchor, a
             # late chance, or a dock. A dock is exactly when it is wanted.
-            s = self._seed(app, v, _src or "")
+            s = self._seed(app, v, _src or "", _mine)
             if s:
                 e, skey, seeded = s, None, True
         if not e:
@@ -1062,6 +1077,20 @@ class Watcher:
         with self.lock:
             holder = self.slot_held.get(skey)
         own = live_holder(holder, vid, _live)
+        if own == "held" and _mine:
+            # A FAMILY MEMBER THIS DESK HAS NO FREE SLOT FOR, AT A DESK
+            # CHANGE. Left in place it keeps the old desk's coordinates on a
+            # grid that may be smaller, i.e. some arbitrary workspace: a work
+            # terminal landed on `personal-overflow` that way (dragonfly
+            # 2026-11-13). Its own entry on the desk it came from names its
+            # surface, so it goes there, under a NEW sibling key the next
+            # capture will learn it into.
+            s = e if seeded else self._seed(app, v, _src or "", _mine)
+            if s:
+                with self.lock:
+                    skey = engine.next_slot_key(
+                        app, _ident, set(self.slot_held) | set(self.kb))
+                e, seeded, own = s, True, None
         if own == "held":
             # ONCE PER WINDOW, NOT PER EVENT. This runs from every map and
             # every rename, and a browser renames constantly, so logging it
@@ -1096,7 +1125,18 @@ class Watcher:
                 self.slot_held[skey] = vid
         return moved
 
-    def _seed(self, app, v, src=""):
+    def _left_entry(self, vid, app, ident):
+        """This window's OWN entry on the desk left at the last desk change,
+        by the key it was learned under there, or None. Only while that key
+        is still this identity's (its family base), so a window whose
+        identity changed since is asked about by identity instead."""
+        with self.lock:
+            k, was = self.left_keys.get(vid), self.left_from
+        if not k or engine.slot_base(k) != engine.kkey(app, ident):
+            return None
+        return engine.left_entry(was, k)
+
+    def _seed(self, app, v, src="", mine=None):
         """A starting slot from the SURFACE this window occupies at another
         desk, or None. engine.surface_target decides, the same definition
         `restore` uses. Logged, because silently placing from a guess is as
@@ -1112,8 +1152,9 @@ class Watcher:
             outs = {o["name"]: o for o in self.place_sock.list_outputs()}
         except Exception:
             return None
-        seed, why = engine.surface_target(app, identity(v), src,
-                                          self.kb_profile, outs)
+        seed, why = engine.surface_target(
+            app, identity(v), src, self.kb_profile, outs,
+            [mine] if mine else None)
         if not seed:
             if why:
                 logline(f"{why}: not seeding {app[:18]}")
@@ -2014,6 +2055,12 @@ class Watcher:
             engine.take_snapshot(dict(self.kb), self.kb_profile,
                                  tag="desk")
             was, self.kb_profile = self.kb_profile, prof
+            # WHERE EACH WINDOW LIVED ON THE DESK BEING LEFT, by its own key,
+            # for the re-place (see _left_entry). Learning has been held
+            # since the displays started changing, so this is the map of the
+            # desk as it was, not of the collapse.
+            self.left_keys, self.left_from = dict(self.learned), was
+            self.learned = {}
             self.kb = load_knowledge(prof)
             engine.publish_desk_clock(prof)
             self.profile_drift_at = 0.0
@@ -2311,9 +2358,15 @@ class Watcher:
         refused = []
         with self.lock:
             roll = self.st["layout"]
+            assigned = {}
             learn(self.kb, self.groups, snap["windows"], snap["time"], hold,
                   seen=self.seen_terms, outputs=snap["outputs"],
-                  refused=refused, ledger=dict(self.slot_held))
+                  refused=refused, ledger=dict(self.slot_held),
+                  assigned=assigned)
+            # MERGED, NOT REPLACED: a window held out of this pass keeps the
+            # key it was learned under before. Dropped only on unmap and at a
+            # desk change, which is when the map is handed to left_keys.
+            self.learned.update(assigned)
             self.st["dirty"] = False
             self.st["layout"] = False
             save_knowledge(self.kb, self.kb_profile)
@@ -2489,6 +2542,8 @@ class Watcher:
                 for _k in [k for k, _vid in self.slot_held.items()
                            if _vid == v["id"]]:
                     self.slot_held.pop(_k, None)
+                self.learned.pop(v["id"], None)
+                self.left_keys.pop(v["id"], None)
                 # and forget having SAID it was refused, or a new window
                 # reusing this vid would be refused silently. Same reason the
                 # rest of this block exists: a per-view set that only grows

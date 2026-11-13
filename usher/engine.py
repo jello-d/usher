@@ -915,16 +915,16 @@ def other_profile_entries(app, ident, profile=None, source=""):
     newest first. Reads the stores directly, since the point is the desks that
     are not attached.
 
-    IT SEES ONLY SLOT 0 OF AN INDEXED FAMILY, and that is RECORDED RATHER
-    THAN FIXED because it changes nothing observable. The only consumer is
-    `surface_seed`, which uses the entry to learn WHICH SURFACE the window
-    belongs to and derives the rect from the surface map, so four windows
-    asking for a seed would all be handed the same surface and the same rect
-    whether this returned one entry or four; the slot ledger then places one
-    and leaves three, exactly as it does today. Distributing seeds among
-    windows is a ledger-aware SEED, which is a feature nobody has asked for
-    and not what this function is missing. Noted so the limit is not
-    rediscovered as a defect."""
+    IT SEES ONLY SLOT 0 OF AN INDEXED FAMILY, so it cannot say which
+    surface a SECOND window of that family held. An earlier note here said
+    that changed nothing observable; it stopped being true once the surface
+    decided placement at a desk change. Two work-account terminals together
+    on the laptop's `product` were split at a dock (dragonfly 2026-11-13):
+    one went to a stale slot, the other was left at its laptop position,
+    which on the smaller grid was `personal-overflow`. The daemon now asks
+    `left_entry` with the exact key each window held on the desk it left;
+    this stays the answer when that is unknown (a one-shot `restore`, or a
+    window learned on no desk this session)."""
     profile = profile or profile_id()
     keys = match_keys(app, ident, source, ident_first=True)
     found = []
@@ -946,6 +946,19 @@ def other_profile_entries(app, ident, profile=None, source=""):
                 break
     found.sort(key=lambda e: e.get("last_seen", 0), reverse=True)
     return found
+
+
+def left_entry(profile, key):
+    """The entry stored under exactly `key` in desk `profile`'s store, or
+    None. For the daemon at a desk change: it knows which key each window
+    was learned under on the desk it is leaving, so a member of an indexed
+    family finds ITS OWN entry there, where other_profile_entries finds
+    slot 0 of the family for every member."""
+    if not profile or not key:
+        return None
+    kb = json_object(os.path.join(STATE, f"knowledge-{profile}.json"))
+    e = kb.get(key) if kb else None
+    return e if isinstance(e, dict) else None
 
 
 def surface_dictates(here, others, left_at, shared=1, loaded_at=None):
@@ -973,7 +986,8 @@ def surface_dictates(here, others, left_at, shared=1, loaded_at=None):
     `left_at`, an other-desk entry with no surface, or a window SHARING its
     identity with another live window, where other_profile_entries sees only
     slot 0 of the family and would send every member to one surface, i.e. a
-    stack."""
+    stack. The daemon passes shared=1 when `others` is the window's OWN
+    entry (left_entry), since then there is no family to confuse."""
     if not here or not others or left_at is None or shared > 1:
         return False
     # AN ENTRY LEARNED SINCE THIS DESK WAS ADOPTED IS THIS SESSION'S TRUTH,
@@ -1048,7 +1062,7 @@ def desk_clock(profile, path=None):
     return desk_left_at(profile), desk_loaded_at(profile)
 
 
-def surface_target(app, ident, src, profile, outs):
+def surface_target(app, ident, src, profile, outs, others=None):
     """Where the SURFACE map puts this window at this desk, as (slot, why):
     a slot, or None and a reason worth saying (an empty reason when there is
     simply no map or no other desk to learn from). One definition for the
@@ -1059,11 +1073,15 @@ def surface_target(app, ident, src, profile, outs):
     offered the OWNER's app-id-only key on the other desk. THE DEFAULT HAS NO
     CELL, so it is brought inside this grid; any other surface's cell is
     hwdp's passthrough and is CHECKED, since seeding into a cell the live
-    grid lacks puts a window where no workspace navigation reaches it."""
+    grid lacks puts a window where no workspace navigation reaches it.
+
+    `others` is the caller's own answer to "where was this window", when it
+    has a better one than other_profile_entries (see left_entry)."""
     surfaces, _why = surface_map()
     if not surfaces:
         return None, ""
-    others = other_profile_entries(app, ident, profile, src)
+    if others is None:
+        others = other_profile_entries(app, ident, profile, src)
     seed = surface_seed(others, surfaces, surface_default())
     if not seed:
         return None, ""
@@ -4569,7 +4587,7 @@ def upsert(kb, windows, when, outputs=None, refused=None):
 
 
 def _learn_stamp(kb, groups, windows, counts, when, hold=(), refused=None,
-                 ledger=None):
+                 ledger=None, assigned=None):
     """Write each live view's placement under the right key. `hold` is the set
     of view ids whose CURRENT position must not be believed yet: see the
     watcher's _held: a window the placer has not got to is sitting where its
@@ -4651,6 +4669,8 @@ def _learn_stamp(kb, groups, windows, counts, when, hold=(), refused=None,
                 _k, _ht = next_slot_key(app, _i, used | reserved), None
             used.add(_k)
             kb[_k] = kb_entry(w, _ht or _kt, _only, when)
+            if assigned is not None and vid is not None:
+                assigned[vid] = _k
             # A WINDOW NAMED SINCE IT WAS PLACED INTO ITS ACCOUNT'S SHARED
             # SLOT leaves that slot behind holding its rect, and at the next
             # login an unnamed window lands on top of it (duplicate_slots
@@ -4809,7 +4829,7 @@ def _refuse(refused, w, r):
 
 
 def learn(kb, groups, windows, when, hold=(), seen=None, outputs=None,
-          refused=None, ledger=None):
+          refused=None, ledger=None, assigned=None):
     """Watch-time knowledge update: each live view's placement, under the key
     its identity and slot index give it.
 
@@ -4818,7 +4838,11 @@ def learn(kb, groups, windows, when, hold=(), seen=None, outputs=None,
     owned app keys on what its plugin says (Chrome's window id, mux's
     command, kitty's cwd, Loupe's picture). So the degroup rule and the
     title GROUPS are both retired: there is nothing for two views to share,
-    and `groups` survives only as a parameter the callers still pass."""
+    and `groups` survives only as a parameter the callers still pass.
+
+    `assigned`, when given, is filled with view id -> the key each window
+    was written under, so the daemon can find a window's OWN entry on this
+    desk after it has left it (see left_entry)."""
     counts = own_app_counts(windows)
     live = {w["id"] for w in windows if w.get("id") is not None}
     # A WINDOW ON AN OUTPUT NOBODY HAS JOINS THE HOLD, which is the right
@@ -4846,7 +4870,8 @@ def learn(kb, groups, windows, when, hold=(), seen=None, outputs=None,
     # degroup rule itself ("a title two live views wear is not a
     # discriminator") is answered at the source now: a title is not a key at
     # all, so there is nothing for two windows to share.
-    _learn_stamp(kb, groups, windows, counts, when, hold, refused, ledger)
+    _learn_stamp(kb, groups, windows, counts, when, hold, refused, ledger,
+                 assigned)
     # `hold` deliberately does NOT reach the terminal purge: that asks "is
     # this window still HERE", which a held window plainly is. Hiding it
     # would drop the very entry we are protecting.

@@ -3884,6 +3884,19 @@ def _t_loupe(ck):
         ck("learn-gives-two-pictures-two-slots",
            sorted(k.split("\x00")[1] for k in _kb)
            == ["loupe:a.png", "loupe:b.png"])
+        # LEARN SAYS WHICH KEY EACH WINDOW WENT UNDER, which is what lets the
+        # daemon find a family member's OWN entry on the desk it leaves (see
+        # left_entry). Two windows of ONE identity: each its own key.
+        _kba, _asg = {}, {}
+        # AT DIFFERENT RECTS, or prune drops the second as a learned stack
+        _fam = [dict(_w, title="a.png", pos=[1.0 + 50 * _n, 1.0])
+                for _n, _w in enumerate(_ws)]
+        engine.learn(_kba, {}, _fam, 1_800_000_000, assigned=_asg)
+        _fk = engine.kkey(LoupePlugin.APP, "loupe:a.png")
+        ck("learn-reports-each-family-members-own-key",
+           _asg == {1: _fk, 2: engine.slot_key(LoupePlugin.APP,
+                                                "loupe:a.png", 1)}
+           and set(_asg.values()) == set(_kba))
         # ...and an unresolvable viewer beside them is not remembered at
         # all, which is the control: a learn that keyed everything passes
         # the row above on its own.
@@ -13708,6 +13721,125 @@ def _t_displays(ck):
                 w._place_view(_qv[0])
                 ck("a-window-of-another-identity-does-not-squat-a-slot",
                    _seeded == [(51, None, (30, 80))])
+
+                # A FAMILY AT A DESK CHANGE: two windows of ONE identity (two
+                # shells in one directory). Measured on dragonfly 2026-11-13:
+                # together on the laptop's `product`, and at the dock one
+                # took this desk's stale slot and the other was left at its
+                # laptop position, i.e. on `personal-overflow`. Each member
+                # must go to the surface ITS OWN entry on the desk it left
+                # names, the one this desk has no slot for included.
+                _mo = dict(_lo[0], workspace={
+                    "x": 0, "y": 0, "grid_width": 3, "grid_height": 3})
+                _mv = [dict(_lv[0], **{"id": 61, "app-id": _fapp,
+                                        "pid": 777}),
+                       dict(_lv[0], **{"id": 62, "app-id": _fapp,
+                                        "pid": 777})]
+                _mk0 = engine.kkey(_fapp, "titan:fam")
+                _mk1 = engine.slot_key(_fapp, "titan:fam", 1)
+                _left_store = {
+                    _mk0: {"surface": "ref", "size": [400, 200],
+                           "last_seen": 150.0},
+                    _mk1: {"surface": "ref2", "size": [400, 200],
+                           "last_seen": 150.0}}
+                _rle, _rdl2, _rdld2 = (engine.left_entry,
+                                       engine.desk_left_at,
+                                       engine.desk_loaded_at)
+                _slot0 = []
+                try:
+                    _wmod.identity = lambda v: "titan:fam"
+                    engine.left_entry = lambda p, k: (
+                        _left_store.get(k) if p == "LAPTOP" else None)
+                    engine.desk_left_at = lambda p: 100.0
+                    engine.desk_loaded_at = lambda p: 200.0
+                    # what other_profile_entries would say: slot 0 for all
+                    engine.other_profile_entries = (
+                        lambda a, i, p=None, s="":
+                            _slot0.append(i) or [_left_store[_mk0]])
+                    engine.surface_map = lambda fresh=False: (
+                        {"ref": {"output": "eDP-1", "workspace": [0, 0],
+                                 "pos": [0, 300], "size": [800, 300]},
+                         "ref2": {"output": "eDP-1", "workspace": [1, 0],
+                                  "pos": [0, 300], "size": [800, 300]}},
+                        "")
+                    w.place_sock = _Sock(_mv, [_mo])
+
+                    def _fam_run(left):
+                        _seeded.clear()
+                        w.kb = {_mk0: dict(_fb, title="titan:fam",
+                                           surface="elsewhere",
+                                           last_seen=190.0)}
+                        w.slot_held = {}
+                        w.placed.clear()
+                        w.left_keys = ({61: _mk0, 62: _mk1} if left
+                                       else {})
+                        w.left_from = "LAPTOP" if left else None
+                        w.redisplay_ok = {61, 62}
+                        for _i in (61, 62):
+                            w.deadline[_i] = _time.time() + 100
+                        w._place_view(_mv[0])
+                        w._place_view(_mv[1])
+                        return list(_seeded)
+
+                    ck("each-family-member-goes-to-its-own-surface",
+                       _fam_run(True)
+                       == [(61, "ref", (0, 300)), (62, "ref2", (0, 300))])
+                    ck("the-member-with-no-slot-here-holds-a-new-sibling",
+                       w.slot_held.get(_mk0) == 61
+                       and w.slot_held.get(_mk1) == 62)
+                    ck("an-exact-entry-is-not-asked-by-identity",
+                       _slot0 == [])
+                    # CONTROL: with no record of the desk left, the old
+                    # behaviour stands: the family is exempt from the
+                    # surface, the first takes this desk's slot and the
+                    # second is left where it is. Without this the rows
+                    # above pass over a placer that seeds every window.
+                    ck("without-the-desk-left-a-family-keeps-the-old-rule",
+                       _fam_run(False) == [(61, None, (100, 120))])
+                    # A KEY FROM ANOTHER IDENTITY IS NOT THIS WINDOW'S: its
+                    # identity changed since it was learned, so it is asked
+                    # about by identity instead. With the control.
+                    w.left_keys, w.left_from = (
+                        {61: engine.kkey(_fapp, "titan:other")}, "LAPTOP")
+                    _left_store[engine.kkey(_fapp, "titan:other")] = {
+                        "surface": "ref"}
+                    ck("a-left-key-of-another-identity-is-not-used",
+                       w._left_entry(61, _fapp, "titan:fam") is None
+                       and w._left_entry(61, _fapp, "titan:other")
+                       == {"surface": "ref"})
+                    # AND A DESK CHANGE HANDS THE LEARNED MAP OVER, or none
+                    # of the above is ever reached in production.
+                    _rsw3, _rld3 = Watcher._sweep, _wmod.load_knowledge
+                    try:
+                        Watcher._sweep = lambda self, vids=None: 0
+                        _wmod.load_knowledge = lambda p: {}
+                        w.learned = {61: _mk1}
+                        w.kb_profile = "LAPTOP"
+                        w._adopt_profile("DOCK", "test")
+                        ck("a-desk-change-keeps-each-windows-key-there",
+                           w.left_keys == {61: _mk1}
+                           and w.left_from == "LAPTOP"
+                           and w.learned == {})
+                    finally:
+                        Watcher._sweep, _wmod.load_knowledge = _rsw3, _rld3
+                        w.sweep_wait = None
+                        w.transition_until = 0.0
+                        w.kb_profile = "DESK"
+                    # AND THE CAPTURE RECORDS IT. Asserted on the source,
+                    # since driving a capture needs a snapshot of a live
+                    # compositor; the pure half is
+                    # learn-reports-each-family-members-own-key.
+                    _co = inspect.getsource(Watcher._capture_once)
+                    ck("the-capture-records-each-windows-learned-key",
+                       "assigned=assigned" in _co
+                       and "self.learned.update(assigned)" in _co)
+                finally:
+                    engine.left_entry = _rle
+                    engine.desk_left_at = _rdl2
+                    engine.desk_loaded_at = _rdld2
+                    w.left_keys, w.left_from = {}, None
+                    for _i in (61, 62):
+                        w.deadline.pop(_i, None)
             finally:
                 _wmod.identity, _wmod.unidentified = _rid, _run
                 engine.window_origin = _rwo
