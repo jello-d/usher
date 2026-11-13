@@ -1160,6 +1160,10 @@ class Watcher:
         else:
             g = o["geometry"]
             region = (0, 0, g["width"], g["height"])
+        # ONLY THE PART NOT UNDER A BAR: a repack stacks from the region's
+        # start, and a surface starting at the panel's edge would put the
+        # first window under the top bar.
+        region = engine.clip_rect(region, engine.workarea(o)) or region
         r, moves = engine.lay_out_seed(
             tuple(e["pos"]) + tuple(e["size"]), region, taken,
             {i for i, t in enumerate(here) if t["vid"] is not None})

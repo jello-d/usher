@@ -13050,6 +13050,10 @@ def _t_displays(ck):
     ck("lay-out-does-not-repack-what-cannot-fit-end-to-end",
        _lo2((0, 1000, 2160, 2000), _port, [(0, 1069, 2160, 2000)], {0})
        == ((0, 0, 2160, 1069), {}))
+    ck("clip-rect-is-the-overlap-or-none",
+       engine.clip_rect((0, 0, 2160, 3840), (0, 48, 2160, 3742))
+       == (0, 48, 2160, 3742)
+       and engine.clip_rect((0, 0, 10, 10), (20, 20, 5, 5)) is None)
     ck("lay-out-moves-nothing-when-a-gap-fits",
        _lo2((0, 137, 2160, 1702), _port, [(0, 103, 2160, 1702)], {0})
        == ((0, 1805, 2160, 1702), {}))
@@ -13782,8 +13786,12 @@ def _t_displays(ck):
                 # laptop position, i.e. on `personal-overflow`. Each member
                 # must go to the surface ITS OWN entry on the desk it left
                 # names, the one this desk has no slot for included.
+                # as tall as the "tall" surface below: a surface lies on
+                # its panel, and the seed region is clipped to the panel
                 _mo = dict(_lo[0], workspace={
-                    "x": 0, "y": 0, "grid_width": 3, "grid_height": 3})
+                    "x": 0, "y": 0, "grid_width": 3, "grid_height": 3},
+                    geometry={"x": 0, "y": 0, "width": 800,
+                              "height": 3000})
                 _mv = [dict(_lv[0], **{"id": 61, "app-id": _fapp,
                                         "pid": 777}),
                        dict(_lv[0], **{"id": 62, "app-id": _fapp,
@@ -13969,6 +13977,28 @@ def _t_displays(ck):
                     ck("an-earlier-seed-is-moved-to-make-room",
                        sorted(_seeded) == [(71, "tall", (0.0, 1000.0)),
                                            (72, "tall", (0.0, 0.0))])
+                    # ...and not under a bar: with 50px reserved at the top
+                    # the stack starts below it.
+                    _mo2 = dict(_mo, geometry={"x": 0, "y": 0,
+                                               "width": 800,
+                                               "height": 3000},
+                                workarea={"x": 0, "y": 50, "width": 800,
+                                          "height": 2950})
+                    _seeded.clear()
+                    w.kb, w.slot_held = {}, {}
+                    w.placed.clear()
+                    w.place_sock = _Sock(_bv, [_mo2])
+                    w.sweep_rects = {(_mo["name"], (0, 0)): [
+                        {"rect": (0, 800, 800, 1500), "vid": 71,
+                         "e": {"output": "eDP-1", "workspace": [0, 0],
+                               "pos": [0, 800], "size": [800, 1500],
+                               "seeded_from": "tall"}}]}
+                    w.redisplay_ok = {72}
+                    w.deadline[72] = _time.time() + 100
+                    w._place_view(_bv[1])
+                    ck("a-repack-starts-below-the-bar",
+                       sorted(_seeded) == [(71, "tall", (0.0, 1050.0)),
+                                           (72, "tall", (0.0, 50.0))])
                     # AND EACH SWEEP STARTS WITH NONE, or a later dock lays
                     # windows out around rects from an earlier one.
                     w.sweep_rects = {("x", (0, 0)): [

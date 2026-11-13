@@ -1275,6 +1275,16 @@ def fit_beside(rect, region, taken):
     return (start, y, ext, h)
 
 
+def clip_rect(a, b):
+    """The (x, y, w, h) where two rects overlap, or None. PURE."""
+    x0, y0 = max(a[0], b[0]), max(a[1], b[1])
+    x1 = min(a[0] + a[2], b[0] + b[2])
+    y1 = min(a[1] + a[3], b[1] + b[3])
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return (x0, y0, x1 - x0, y1 - y0)
+
+
 def lay_out_seed(rect, region, taken, movable=()):
     """fit_beside, plus REPACKING: (rect or None, {index into taken: rect}).
     PURE.
