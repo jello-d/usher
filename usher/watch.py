@@ -108,6 +108,11 @@ PLACE_LATE = 10.0
 # edit, an undo): past every read-back, the late look included, or the
 # capture records a size an app has just put back.
 LEARN_HOLD = sum(PLACE_VERIFY) + PLACE_LATE + 1.0
+# THE LATE LOOK IS BROUGHT FORWARD by the put-back itself: the compositor
+# reports the app's resize as a geometry event, so a window with a late look
+# pending whose size changes away from the one it was given is looked at
+# this soon, not at PLACE_LATE. Long enough for a burst of configures.
+SIZE_SETTLE = 0.3
 # The visibility guarantee (Watcher._ensure_visible): how often it looks,
 # and how many times one window is rescued before usher says so and stops.
 VISIBLE_EVERY = 5.0
@@ -1470,6 +1475,25 @@ class Watcher:
             self.placed.discard(vid)
             self.pending[vid] = {"v": v, "refetch": True, "due": time.time()}
 
+    def _size_changed(self, v):
+        """A window's geometry changed. If it was just placed (its late look
+        is pending) and its size is no longer the one it was given, bring
+        the late look forward to SIZE_SETTLE from now.
+
+        THE PUT-BACK IS ITSELF AN EVENT, so waiting PLACE_LATE for it is
+        only the fallback. Measured on dragonfly 2026-11-13: a Chrome window
+        moved to DP-7 at 16:08:04 put back its old size within seconds and
+        was not corrected until 16:08:30; with this the correction follows
+        the put-back by about SIZE_SETTLE. Cheap enough for every geometry
+        event: one dict lookup unless a late look is pending."""
+        vid = v.get("id")
+        with self.lock:
+            item = self.verify.get(vid)
+            if not item or not item.get("late"):
+                return
+            if engine.size_put_back(v, item["e"]):
+                item["due"] = min(item["due"], time.time() + SIZE_SETTLE)
+
     def _late_look(self, v, e, o):
         """PLACE_LATE after a placement landed: has the app PUT BACK an old
         size? If so the size is given again, which a second time sticks,
@@ -1654,7 +1678,10 @@ class Watcher:
             if self._in_transition():
                 return
             self.unseen.add(vid)
-            if vid not in suspect:
+            # SEEN TWICE only for a window that cannot be SEEN: a position
+            # read during a workspace switch can be wrong, a size cannot,
+            # so a window larger than its panel is refit on first sight
+            if vid not in suspect and not fit:
                 continue
             n = self.rescued.get(vid, 0)
             if n >= RESCUE_TRIES:
@@ -2761,6 +2788,8 @@ class Watcher:
             # that arrives before the windows move. hwdp's hook follows with
             # the new profile; this just stops us believing anything meanwhile.
             self._begin_transition(ev)
+        if ev == "view-geometry-changed" and v.get("id") is not None:
+            self._size_changed(v)
         if ev == "view-mapped" and v.get("id") is not None:
             self.deadline[v["id"]] = time.time() + PLACE_GRACE  # start grace
             if self._placing_now():

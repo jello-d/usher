@@ -5473,6 +5473,28 @@ def _t_verify(ck):
         w._verify_one(7, {"e": _eb, "o": _o, "late": True})
         ck("the-late-look-is-silent-when-the-size-held",
            _reseat2 == [] and logged == [] and 7 not in w.verify)
+        # THE PUT-BACK IS ITSELF AN EVENT: a geometry change that takes a
+        # just-placed window (its late look pending) away from the size it
+        # was given brings the look forward to SIZE_SETTLE, instead of
+        # waiting PLACE_LATE (16:08:04 placed, corrected only at 16:08:30,
+        # dragonfly 2026-11-13). Driven through _on_event, the real entry.
+        def _due_after(geom_w, late=True):
+            w = _wat(_v(110, 120, w=300, h=300))
+            far = time.time() + 60
+            w.verify[7] = {"e": _eb, "o": _o, "late": late, "due": far}
+            w._on_event({"event": "view-geometry-changed",
+                         "view": dict(_v(110, 120, w=geom_w, h=300),
+                                      id=7)})
+            return w.verify[7]["due"] - time.time(), far - time.time()
+        _d, _far = _due_after(250)
+        ck("a-size-put-back-brings-the-late-look-forward",
+           _d <= _w.SIZE_SETTLE + 0.5)
+        _d, _far = _due_after(300)
+        ck("a-geometry-event-at-the-given-size-changes-nothing",
+           abs(_d - _far) < 0.5)
+        _d, _far = _due_after(250, late=False)
+        ck("a-size-change-before-the-placement-landed-is-the-read-backs",
+           abs(_d - _far) < 0.5)
 
         # BOUNDED: at the end of the budget the window is left where it is
         # rather than fought over for the whole 120s grace.
@@ -11011,7 +11033,8 @@ def _t_visible(ck):
         engine.surface_default = lambda fresh=False: None
         engine.other_profile_entries = lambda *a, **k: []
         _wm.logline = _said2.append
-        wz._ensure_visible()
+        # ON FIRST SIGHT: a size is not a flaky read the way a position
+        # during a workspace switch is, so it needs no second pass
         wz._ensure_visible()
         ck("the-daemon-refits-only-the-oversized-window",
            _moved2 == [21]
@@ -11068,7 +11091,6 @@ def _t_visible(ck):
                                        "height": 1000},
                       **{"security-context": {"app-id": "titan"}})]
         _sent.clear()
-        w3._ensure_visible()
         w3._ensure_visible()
         ck("the-refit-allows-a-shadow-but-not-for-a-framed-window",
            [d["id"] for d in _sent] == [34])
