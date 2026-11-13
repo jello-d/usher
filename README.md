@@ -532,10 +532,15 @@ at that desk's resolution. Undocking uses the same path, so a window whose
 monitor has gone lands in its region on the laptop instead of staying parked
 out of sight.
 
-It is a SEED, never a projection, and only where a profile has no learned slot
-for that window. The moment the window is placed, the capture loop learns its
-real geometry and that learned slot wins from then on, so arranging a window
-by hand at one desk never overrules what you arranged at another.
+**The surface decides; a desk's learned slot only tunes it.** When you
+arrive at a desk, a window goes to the surface it held on the desk you came
+from. This desk's learned slot for it is used only when that slot sits in the
+same surface, where it is a finer answer than the surface's fraction; a slot
+anywhere else (including outside every surface) is stale, so the surface wins
+and the next capture relearns it. Once you have arrived, what you arrange by
+hand is learned and kept: a slot learned since you arrived is never overruled.
+Two windows sharing one identity keep their own slots, since a surface cannot
+tell them apart. To keep a spot no surface covers, name it in the desk's map.
 
 **No window is left where it cannot be seen.** Whatever put it there (a
 parked window that lost a shared slot, a slot learned mostly off its panel, a

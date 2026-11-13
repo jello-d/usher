@@ -1001,6 +1001,32 @@ class Watcher:
             _src and engine.source_ident(_src, _ident)
             and skey == engine.kkey(app, _src))
         seeded = False
+        # THE SURFACE DECIDES, THIS DESK'S SLOT ONLY TUNES IT (see
+        # engine.surface_dictates): a slot here that disagrees with the
+        # surface the window has held on another desk since this one was
+        # last used is drift, and is replaced by the surface's placement.
+        # Same gate as the seed below, so it acts only where usher was going
+        # to place anyway. A sticky window keeps its slot: it has no
+        # workspace, so a surface cannot name its place.
+        dictate = False
+        # ASKED ONLY WHEN THIS DESK'S LAST USE IS KNOWN: the other stores
+        # are read from disk, and with no `left_at` the answer is no anyway.
+        _left = engine.desk_left_at(self.kb_profile)
+        if (e and not own_unlearned and not e.get("sticky")
+                and _left is not None):
+            _shared = sum(1 for w in _views if app_of(w) == app
+                          and identity(w) == _ident)
+            dictate = engine.surface_dictates(
+                e, engine.other_profile_entries(app, _ident,
+                                                self.kb_profile, _src or ""),
+                _left, _shared,
+                engine.desk_loaded_at(self.kb_profile))
+        if dictate:
+            s = self._seed(app, v, _src or "")
+            if s:
+                logline(f"surface over this desk's slot: {app[:18]} | "
+                        f"{title[:30]}")
+                e, seeded = s, True
         if not e or own_unlearned:
             # NOTHING LEARNED HERE, so ask the surface map whether this window
             # has a named home at another desk. Deliberately AFTER the settled

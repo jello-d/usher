@@ -1645,6 +1645,12 @@ def _t_resolution(ck):
             json.dumps({"k\x00x": {"last_seen": _n0 - 60 * 86400},
                         "k\x00y": {"last_seen": _n0 - 200 * 86400}}))
         _l2 = engine.load_knowledge("DESK")
+        # AND THE DESK'S LAST USE IS READ BEFORE THE SHIFT: after it, every
+        # entry looks newer than anything elsewhere and surface_dictates
+        # would answer "this desk" for ever.
+        ck("load-records-when-the-desk-was-last-used-before-the-shift",
+           abs((engine.desk_left_at("DESK") or 0)
+               - (_n0 - 60 * 86400)) < 1)
         engine.prune_kb(_l2, time.time())
         ck("load-forgiveness-still-prunes-what-was-stale-at-that-desk",
            len(_l2) == 1)
@@ -12874,6 +12880,30 @@ def _t_displays(ck):
        engine.surface_seed([dict(_away, surface="nowhere")], _m) is None)
     ck("nothing-from-another-desk-is-no-seed",
        engine.surface_seed([], _m) is None)
+
+    # ---- THE SURFACE DECIDES, THE SLOT TUNES (surface_dictates) -----------
+    _sdh = {"surface": "a", "last_seen": 90.0}
+    _sdo = [{"surface": "b", "last_seen": 150.0}]
+    _sd = engine.surface_dictates
+    ck("dictates-when-newer-elsewhere-and-surfaces-differ",
+       _sd(_sdh, _sdo, 100.0, 1, 200.0) is True)
+    ck("dictates-over-a-slot-outside-every-surface",
+       _sd(dict(_sdh, surface=""), _sdo, 100.0, 1, 200.0) is True)
+    ck("not-when-the-surfaces-agree",
+       _sd(dict(_sdh, surface="b"), _sdo, 100.0, 1, 200.0) is False)
+    ck("not-when-the-other-desk-is-older",
+       _sd(_sdh, _sdo, 160.0, 1, 200.0) is False)
+    ck("not-when-learned-since-arriving",
+       _sd(dict(_sdh, last_seen=250.0), _sdo, 100.0, 1, 200.0) is False)
+    ck("not-when-the-identity-is-shared",
+       _sd(_sdh, _sdo, 100.0, 2, 200.0) is False)
+    ck("not-when-the-other-desk-names-no-surface",
+       _sd(_sdh, [dict(_sdo[0], surface="")], 100.0, 1, 200.0) is False)
+    ck("not-when-this-desks-last-use-is-unknown",
+       _sd(_sdh, _sdo, None, 1, 200.0) is False)
+    ck("not-without-an-entry-here-the-seed-decides-that",
+       _sd(None, _sdo, 100.0, 1, 200.0) is False
+       and _sd(_sdh, [], 100.0, 1, 200.0) is False)
     # NEWEST DESK WINS when several remember it, since `others` arrives
     # sorted and the first usable one is taken.
     ck("the-newest-other-desk-wins",
@@ -13373,6 +13403,50 @@ def _t_displays(ck):
             w.redisplay_ok = {42}
             w._place_view(_lv[0])
             ck("an-unreadable-map-seeds-nothing", _seeded == [])
+
+            # THE SURFACE DECIDES, THIS DESK'S SLOT ONLY TUNES IT: a slot
+            # here naming another surface than the one the window has held
+            # elsewhere since this desk was last used is replaced by the
+            # surface's placement. Driven through _place_view, because the
+            # pure rule says nothing about whether the placer asks it.
+            engine.surface_map = lambda fresh=False: (
+                {"ref": {"output": "eDP-1", "workspace": [0, 0],
+                         "pos": [0, 300], "size": [800, 300]}}, "")
+            _rdl, _rdld = engine.desk_left_at, engine.desk_loaded_at
+            try:
+                engine.desk_left_at = lambda p: 100.0
+                engine.desk_loaded_at = lambda p: 200.0
+                engine.other_profile_entries = lambda a, i, p=None, s="": [
+                    {"surface": "ref", "size": [400, 200],
+                     "last_seen": 150.0}]
+
+                def _dict_run(here):
+                    _seeded.clear()
+                    w.kb = {engine.kkey(_app, ""): here}
+                    w.slot_held = {}
+                    w.placed.clear()
+                    w.redisplay_ok = {42}
+                    w.deadline[42] = _time.time() + 100
+                    w._place_view(_lv[0])
+                    return list(_seeded)
+
+                _dh = dict(_slot, surface="elsewhere", last_seen=190.0)
+                ck("a-stale-slot-on-another-surface-yields-to-the-surface",
+                   _dict_run(_dh) == [(42, "ref", (0, 300))])
+                # CONTROLS: the same surface tunes; a slot learned since
+                # arriving is this session's truth; an older other desk
+                # does not decide.
+                ck("a-slot-on-the-same-surface-tunes-the-placement",
+                   _dict_run(dict(_dh, surface="ref"))
+                   == [(42, None, (100, 120))])
+                ck("a-slot-learned-since-arriving-is-not-overruled",
+                   _dict_run(dict(_dh, last_seen=250.0))
+                   == [(42, None, (100, 120))])
+                engine.desk_left_at = lambda p: 160.0
+                ck("an-older-desk-does-not-overrule-this-one",
+                   _dict_run(_dh) == [(42, None, (100, 120))])
+            finally:
+                engine.desk_left_at, engine.desk_loaded_at = _rdl, _rdld
 
             # ANOTHER ACCOUNT'S WINDOW WITH A PER-WINDOW KEY THIS DESK NEVER
             # LEARNED IS SEEDED, not handed the account's shared fallback.
@@ -14842,6 +14916,11 @@ def selftest():
                      _t_geometry, _t_placement, _t_snapshots, _t_undo,
                      _t_profiles,
                      _t_migration, _t_watcher, _t_displays, _t_contracts):
+            # WHEN A DESK WAS LAST USED is module state a store load
+            # records, so one area's fixture stores must not decide another
+            # area's surface_dictates.
+            engine._DESK_LEFT.clear()
+            engine._DESK_LOADED.clear()
             try:
                 with _quiet_log():
                     area(ck)

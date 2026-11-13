@@ -948,6 +948,66 @@ def other_profile_entries(app, ident, profile=None, source=""):
     return found
 
 
+def surface_dictates(here, others, left_at, shared=1, loaded_at=None):
+    """True when the SURFACE a window last sat in on another desk should
+    decide where it goes here, over this desk's own learned entry. PURE.
+
+    THE SURFACE MAP DOES THE WORK AND A DESK'S ENTRY ONLY TUNES IT. A desk
+    change moves most windows anyway (the grid changes under them), so a
+    learned slot that disagrees with where the window has been living since
+    is DRIFT: it describes how this desk was arranged the last time, not
+    what the window is for now. So the window goes to the surface it held on
+    the desk it came from, and this desk's slot is honoured only when it sits
+    in that SAME surface, where it is a finer answer than the surface's
+    proportion. A slot outside every surface counts as disagreeing, by the
+    user's decision (2026-11-13): add a surface for that spot to keep it.
+
+    `others` is newest first (other_profile_entries). The newest decides only
+    if it was seen AFTER this desk was last in use, `left_at`, which is the
+    store's newest last_seen BEFORE forgive_dormancy shifts it: after the
+    shift every entry here looks newer than anything elsewhere, so comparing
+    against the loaded values would answer "here" for ever.
+
+    FAIL-SAFE IN EVERY UNCERTAIN CELL, i.e. the old behaviour: no entry here
+    (the seed already decides that one), nothing elsewhere, an unknown
+    `left_at`, an other-desk entry with no surface, or a window SHARING its
+    identity with another live window, where other_profile_entries sees only
+    slot 0 of the family and would send every member to one surface, i.e. a
+    stack."""
+    if not here or not others or left_at is None or shared > 1:
+        return False
+    # AN ENTRY LEARNED SINCE THIS DESK WAS ADOPTED IS THIS SESSION'S TRUTH,
+    # not drift: you moved the window here, after arriving, so the other
+    # desk's surface must not drag it back on the next transpose.
+    if loaded_at is not None and float(here.get("last_seen") or 0) > \
+            float(loaded_at):
+        return False
+    newest = others[0]
+    if float(newest.get("last_seen") or 0) <= float(left_at):
+        return False
+    went = newest.get("surface") or ""
+    if not went:
+        return False
+    return (here.get("surface") or "") != went
+
+
+# WHEN EACH LOADED DESK WAS LAST IN USE, recorded at load BEFORE the dormancy
+# shift moves its clock (see surface_dictates). Mutated, never rebound.
+_DESK_LEFT = {}
+_DESK_LOADED = {}
+
+
+def desk_left_at(profile):
+    """When `profile`'s store last saw a window, as it stood on disk at its
+    last load, or None if it has not been loaded by this process."""
+    return _DESK_LEFT.get(profile)
+
+
+def desk_loaded_at(profile):
+    """When this process last loaded `profile`'s store, or None."""
+    return _DESK_LOADED.get(profile)
+
+
 def surface_seed(others, surfaces, default=None):
     """A starting slot for a window this desk has never learned, from the
     SURFACE it occupies on another desk. None when nothing can be derived.
@@ -4054,8 +4114,13 @@ def load_knowledge(profile=None):
     # and the only moment before that with the whole store in hand is the
     # load. There is nothing to save explicitly either, since the shifted
     # values go to disk with the next ordinary save.
+    _seen = [e.get("last_seen") for e in kb.values()
+             if isinstance(e.get("last_seen"), (int, float))
+             and not isinstance(e.get("last_seen"), bool)]
+    _DESK_LEFT[profile] = max(_seen) if _seen else None
     _now = time.time()
     _gap = forgive_dormancy(kb, _now)
+    _DESK_LOADED[profile] = _now
     # REPORTED ONLY WHEN IT SAVED SOMETHING, and counting what it saved
     # rather than the store SIZE. See dormancy_rescued: the first version
     # wrote nine lines in one day on a quiet box, every one of them
