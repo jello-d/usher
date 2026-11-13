@@ -1008,6 +1008,74 @@ def desk_loaded_at(profile):
     return _DESK_LOADED.get(profile)
 
 
+def _clock_num(x):
+    return (float(x) if isinstance(x, (int, float))
+            and not isinstance(x, bool) else None)
+
+
+def publish_desk_clock(profile, path=None):
+    """Write when the daemon's loaded desk was last used and when it was
+    adopted, for one-shot verbs. THE DAEMON CALLS THIS; nothing else should.
+
+    A ONE-SHOT CANNOT KNOW WHEN YOU ARRIVED AT A DESK: its own load is not
+    the arrival, and the daemon has been refreshing the store since, so its
+    own reading makes every other desk look older and `restore` would never
+    agree with what the daemon decided (see surface_dictates)."""
+    p = DESK_FILE if path is None else path
+    blob = json.dumps({"profile": profile,
+                       "left_at": _DESK_LEFT.get(profile),
+                       "loaded_at": _DESK_LOADED.get(profile)},
+                      sort_keys=True)
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        write_json(p, blob)
+    except OSError:
+        return False
+    return True
+
+
+def desk_clock(profile, path=None):
+    """(left_at, loaded_at) for `profile`: the DAEMON's, published, when it
+    has this desk loaded, else this process's own load. An unreadable or
+    other-desk file is no answer, so the local reading stands."""
+    p = DESK_FILE if path is None else path
+    # NOT `blob`: the roster contract check reads every `blob.get` in the
+    # engine as a roster field, and this is not one.
+    clock = json_object(p)
+    if clock and clock.get("profile") == profile:
+        return _clock_num(clock.get("left_at")), _clock_num(
+            clock.get("loaded_at"))
+    return desk_left_at(profile), desk_loaded_at(profile)
+
+
+def surface_target(app, ident, src, profile, outs):
+    """Where the SURFACE map puts this window at this desk, as (slot, why):
+    a slot, or None and a reason worth saying (an empty reason when there is
+    simply no map or no other desk to learn from). One definition for the
+    daemon's placer and for `restore`, so the two cannot place the same
+    window differently.
+
+    THE ACCOUNT GOES WITH THE QUESTION, or another account's window is
+    offered the OWNER's app-id-only key on the other desk. THE DEFAULT HAS NO
+    CELL, so it is brought inside this grid; any other surface's cell is
+    hwdp's passthrough and is CHECKED, since seeding into a cell the live
+    grid lacks puts a window where no workspace navigation reaches it."""
+    surfaces, _why = surface_map()
+    if not surfaces:
+        return None, ""
+    others = other_profile_entries(app, ident, profile, src)
+    seed = surface_seed(others, surfaces, surface_default())
+    if not seed:
+        return None, ""
+    if seed.get("seeded_default"):
+        seed = clamp_cell(seed, outs)
+    if not cell_fits(seed, outs):
+        return None, (f"surface `{seed['seeded_from']}` names cell "
+                      f"{tuple(seed['workspace'])}, which this grid does "
+                      f"not have")
+    return seed, ""
+
+
 def surface_seed(others, surfaces, default=None):
     """A starting slot for a window this desk has never learned, from the
     SURFACE it occupies on another desk. None when nothing can be derived.
@@ -9275,11 +9343,55 @@ def do_verify(against=None, tol=2):
     return 0 if (moved == 0 and miss == 0) else 1
 
 
+def restore_by_surface(pairs, unlive, live, outs, profile):
+    """`restore`'s half of the rule the daemon's placer applies: a paired
+    window whose slot here disagrees with the surface it held at the desk it
+    came from is given the surface's slot instead (surface_dictates), and a
+    live window with no slot here is given its surface's slot (the seed).
+    Returns (pairs, unlive). The clock is the DAEMON's (desk_clock), since a
+    one-shot's own load is not when you arrived at this desk."""
+    left, loaded = desk_clock(profile)
+    if not surface_map()[0]:
+        return pairs, unlive
+    seen = [(app_of(w), identity(w)) for w in live]
+
+    def _src(w):
+        return window_origin(w.get("pid"))[0] or ""
+
+    out = []
+    for lv, e in pairs:
+        app, ident = app_of(lv), identity(lv)
+        if left is not None and not e.get("sticky"):
+            src = _src(lv)
+            if surface_dictates(
+                    e, other_profile_entries(app, ident, profile, src),
+                    left, seen.count((app, ident)), loaded):
+                seed, _why = surface_target(app, ident, src, profile, outs)
+                if seed:
+                    e = seed
+        out.append((lv, e))
+    still = []
+    for lv in unlive:
+        # THE DAEMON'S GATES: a window nobody can identify is never placed
+        # from a guess, and one the user excluded is left alone.
+        if unidentified(lv) or is_transient(lv):
+            still.append(lv)
+            continue
+        seed, _why = surface_target(app_of(lv), identity(lv), _src(lv),
+                                    profile, outs)
+        if seed:
+            out.append((lv, seed))
+        else:
+            still.append(lv)
+    return out, still
+
+
 def do_restore(dry, only=None, source=None):
     sock = ipc()
+    prof = profile_id()
     if source is None:
-        entries = list(load_knowledge().values())
-        print(f"from the knowledge base (profile {profile_id()})")
+        entries = list(load_knowledge(prof).values())
+        print(f"from the knowledge base (profile {prof})")
     else:
         label, snap = source
         entries = entries_from_snapshot(snap)
@@ -9291,6 +9403,11 @@ def do_restore(dry, only=None, source=None):
     panels = panel_map()
 
     pairs, unlive, unlayout = match(live, entries)
+    # THE SURFACE DECIDES HERE TOO, as it does in the daemon, or `restore`
+    # and its dry run report and undo what the daemon chose. Only for the
+    # live store: a milestone is a deliberate replay of one moment.
+    if source is None:
+        pairs, unlive = restore_by_surface(pairs, unlive, live, outs, prof)
     acted = 0
     unplaceable = []
     for lv, e in pairs:
@@ -9330,7 +9447,9 @@ def do_restore(dry, only=None, source=None):
                  else f"ws{tuple(e['workspace'])}")
         label = f"{app_of(lv)[:18]:18} -> {o['name']} " \
             f"{_cell} pos{tuple(e['pos'])}" \
-            + (" [inv]" if e.get("inverted") else "")
+            + (" [inv]" if e.get("inverted") else "") \
+            + (f" (surface {e['seeded_from']})" if e.get("seeded_from")
+               else "")
         if dry:
             print(("  ok   " if same else "  MOVE ") + label)
             continue
@@ -9452,6 +9571,8 @@ CAPTURE_FILE = os.path.join(RUNTIME_DIR, "usher.capture")
 # AND THE PUBLISHED PER-WINDOW MAP, which is not a request but a FACT the
 # service holds and every presenter needs. See publish_sources.
 SOURCES_FILE = os.path.join(RUNTIME_DIR, "usher.sources")
+# AND WHEN THE DAEMON'S DESK WAS LAST USED AND ADOPTED. See desk_clock.
+DESK_FILE = os.path.join(RUNTIME_DIR, "usher.desk")
 
 
 LOG_CAP = 256 * 1024   # rotate watch.log past this; bounds it to ~2x LOG_CAP

@@ -488,6 +488,7 @@ class Watcher:
         # store to one desk and the file it landed in to another, so a single
         # capture after a display change overwrote the other desk's store.
         self.kb, self.kb_profile = kb_for_profile()
+        engine.publish_desk_clock(self.kb_profile)
         # WHEN THE DISPLAY TRANSITION ENDS. Nothing is learned before then:
         # see DOCK_HOLD.
         self.transition_until = 0.0
@@ -1097,44 +1098,25 @@ class Watcher:
 
     def _seed(self, app, v, src=""):
         """A starting slot from the SURFACE this window occupies at another
-        desk, or None. Logged, because silently placing from a guess is as bad
-        as silently not placing: watch.log is what settles "usher or the
-        human", so a seeded placement has to be distinguishable from a learned
-        one in it."""
+        desk, or None. engine.surface_target decides, the same definition
+        `restore` uses. Logged, because silently placing from a guess is as
+        bad as silently not placing: watch.log is what settles "usher or the
+        human", so a seeded placement has to be distinguishable from a
+        learned one in it."""
         # ONE TEST, because surface_map guarantees an empty map whenever it
-        # sets `why` and a check in engine pins that. Testing both here was
-        # unprovable: the planted regression dropping `why` was uncatchable.
-        surfaces, _why = engine.surface_map()
-        if not surfaces:
+        # sets `why` and a check in engine pins that. Asked before the output
+        # list so a desk with no map costs one cached call and no IPC.
+        if not engine.surface_map()[0]:
             return None
-        # Its own output list rather than the caller's, which is built
-        # further down: this runs only when a map EXISTS, so on a desk with
-        # none (every desk today) it costs one cached call and no IPC.
         try:
             outs = {o["name"]: o for o in self.place_sock.list_outputs()}
         except Exception:
             return None
-        # THE ACCOUNT GOES WITH THE QUESTION, or another account's window is
-        # offered the OWNER's app-id-only key on the other desk: a work Slack
-        # seeded from wherever the owner's Slack sat.
-        others = engine.other_profile_entries(app, identity(v),
-                                              self.kb_profile, src)
-        seed = engine.surface_seed(others, surfaces,
-                                   engine.surface_default())
+        seed, why = engine.surface_target(app, identity(v), src,
+                                          self.kb_profile, outs)
         if not seed:
-            return None
-        # THE DEFAULT HAS NO CELL, so the window kept its own, which this
-        # desk's grid may not have: brought inside it rather than refused,
-        # since the default exists so that every window has a destination.
-        if seed.get("seeded_default"):
-            seed = engine.clamp_cell(seed, outs)
-        # THE CELL IS hwdp's PASSTHROUGH, so it is ours to check: seeding into
-        # a cell the live grid does not have puts the window where no
-        # workspace navigation reaches it.
-        if not engine.cell_fits(seed, outs):
-            logline(f"surface `{seed['seeded_from']}` names cell "
-                    f"{tuple(seed['workspace'])}, which this grid does not "
-                    f"have: not seeding {app[:18]}")
+            if why:
+                logline(f"{why}: not seeding {app[:18]}")
             return None
         logline(f"seeded from surface `{seed['seeded_from']}`"
                 + (" (the default)" if seed.get("seeded_default") else "")
@@ -2022,6 +2004,7 @@ class Watcher:
                                  tag="desk")
             was, self.kb_profile = self.kb_profile, prof
             self.kb = load_knowledge(prof)
+            engine.publish_desk_clock(prof)
             self.profile_drift_at = 0.0
             self.st["dirty"] = True
             self.st["layout"] = True

@@ -4335,6 +4335,10 @@ def _t_slots(ck):
        engine.live_holder(None, 7, set()) == "free")
 
     w = Watcher(launch=False)
+    # A DAEMON THAT STARTS PUBLISHES THE DESK IT LOADED (see desk_clock).
+    ck("a-starting-daemon-publishes-the-desk-clock",
+       (engine.json_object(engine.DESK_FILE) or {}).get("profile")
+       == w.kb_profile)
     now = _t.time()
 
     # place, and inside the grace, so placement is actually attempted
@@ -11496,6 +11500,11 @@ def _t_undo(ck):
         ck("a-desk-change-snapshots-the-store-it-leaves",
            _snaps and _snaps[0][1:] == ("LEFT", "desk")
            and _snaps[0][0] == {K("signal", ""): {"pos": [7, 7]}})
+        # AND PUBLISHES WHEN IT ARRIVED, or a one-shot `restore` judges
+        # the surface rule by its own load and disagrees with the daemon.
+        ck("a-desk-change-publishes-the-desk-clock",
+           (engine.json_object(engine.DESK_FILE) or {}).get("profile")
+           == "NEXT")
 
         # THE PERIODIC LOOK, driven through the real poll, and never while
         # the displays are in flux.
@@ -12583,6 +12592,94 @@ def _t_displays(ck):
     # failure these three exist for, and checking each alone cannot see it.
     ck("the-restores-two-refusals-are-worded-apart",
        "not attached" not in _roff and "outside this desk's" not in _rgone)
+
+    # AND `restore` FOLLOWS THE SURFACE AS THE DAEMON DOES, or its dry run
+    # reports, and a real run undoes, what the placer chose. Driven, with the
+    # PRODUCT building the slot: a stale slot here yields to the surface, an
+    # agreeing one tunes, and a window with no slot here is seeded.
+    _sfm = {"ref": {"output": "DP-1", "workspace": [1, 0],
+                    "pos": [0, 400], "size": [1000, 400]}}
+
+    def _surf_restore(here_surface, last_seen=50.0, kb=True, clock=None):
+        _s = (engine.ipc, engine.load_knowledge, engine.panel_map,
+              engine.profile_id, engine.surface_map,
+              engine.surface_default, engine.other_profile_entries,
+              engine.desk_clock)
+        _b = io.StringIO()
+        try:
+            engine.ipc = lambda: _RSock()
+            engine.load_knowledge = lambda *_a, **_k: (
+                {kkey("zzz-unowned", ""): dict(
+                    _rent([0, 0]), surface=here_surface,
+                    last_seen=last_seen)} if kb else {})
+            engine.panel_map = lambda *_a, **_k: {}
+            engine.profile_id = lambda *_a, **_k: "rigprof"
+            engine.surface_map = lambda fresh=False: (_sfm, "")
+            engine.surface_default = lambda fresh=False: None
+            engine.other_profile_entries = lambda a, i, p=None, s="": [
+                {"surface": "ref", "size": [100, 100], "last_seen": 150.0}]
+            engine.desk_clock = lambda p, path=None: (
+                clock or (100.0, 200.0))
+            with contextlib.redirect_stdout(_b):
+                engine.do_restore(True)
+        except Exception as _e:                            # noqa: BLE001
+            return "RAISED %s" % _e
+        finally:
+            (engine.ipc, engine.load_knowledge, engine.panel_map,
+             engine.profile_id, engine.surface_map, engine.surface_default,
+             engine.other_profile_entries, engine.desk_clock) = _s
+        return _b.getvalue()
+
+    _rs = _surf_restore("elsewhere")
+    ck("restore-puts-a-stale-slot-on-its-surface",
+       "MOVE" in _rs and "ws(1, 0)" in _rs and "(surface ref)" in _rs)
+    _ra = _surf_restore("ref")
+    ck("restore-keeps-a-slot-on-the-same-surface",
+       "ws(0, 0)" in _ra and "(surface" not in _ra)
+    ck("restore-keeps-a-slot-learned-since-arriving",
+       "(surface" not in _surf_restore("elsewhere", last_seen=250.0))
+    ck("restore-uses-the-daemons-clock-and-without-one-keeps-the-slot",
+       "(surface" not in _surf_restore("elsewhere", clock=(None, None)))
+    _rn = _surf_restore("", kb=False)
+    ck("restore-seeds-a-window-with-no-slot-here",
+       "(surface ref)" in _rn and "matched 1/1" in _rn
+       and "unmatched-live 0" in _rn)
+    # BUT NEVER A WINDOW NOBODY CAN IDENTIFY, which the daemon's placer
+    # refuses too: a guess must not place what cannot be named.
+    _run0 = engine.unidentified
+    try:
+        engine.unidentified = lambda v: True
+        _ru = _surf_restore("", kb=False)
+    finally:
+        engine.unidentified = _run0
+    ck("restore-does-not-seed-an-unidentified-window",
+       "(surface" not in _ru and "unmatched-live 1" in _ru)
+
+    # THE CLOCK: the daemon's, published, for the desk it has loaded; this
+    # process's own reading for any other desk or with nothing published.
+    _dcd = tempfile.mkdtemp(prefix="usher-desk-", dir="/var/tmp")
+    _dcf = os.path.join(_dcd, "usher.desk")
+    try:
+        engine._DESK_LEFT["P"], engine._DESK_LOADED["P"] = 1.0, 2.0
+        ck("desk-clock-is-local-with-nothing-published",
+           engine.desk_clock("P", _dcf) == (1.0, 2.0))
+        engine._DESK_LEFT["Q"], engine._DESK_LOADED["Q"] = 7.0, 8.0
+        engine.publish_desk_clock("Q", _dcf)
+        ck("desk-clock-reads-the-daemons-for-its-desk",
+           engine.desk_clock("Q", _dcf) == (7.0, 8.0))
+        engine._DESK_LEFT["Q"], engine._DESK_LOADED["Q"] = 0.5, 0.6
+        ck("desk-clock-prefers-the-daemons-over-its-own",
+           engine.desk_clock("Q", _dcf) == (7.0, 8.0))
+        ck("desk-clock-ignores-another-desks-publication",
+           engine.desk_clock("P", _dcf) == (1.0, 2.0))
+        with open(_dcf, "w") as _f:
+            _f.write('{"profile": "Q", "left_at": true, "loaded_at": "x"}')
+        ck("desk-clock-refuses-a-malformed-number",
+           engine.desk_clock("Q", _dcf) == (None, None))
+    finally:
+        engine._DESK_LEFT.clear()
+        engine._DESK_LOADED.clear()
+        shutil.rmtree(_dcd, ignore_errors=True)
 
     # AND doctor's THREE STATES, which were a two-way branch over a three-way
     # question: a slot whose output is here but whose cell is not printed as
@@ -14858,7 +14955,9 @@ def selftest():
     # the host is a check on the host, and that class has cost this package
     # four green-on-one-box suites.
     _real_sources = engine.SOURCES_FILE
+    _real_desk = engine.DESK_FILE
     _scratch_sources = os.path.join(_scratch_root, "usher.sources")
+    _scratch_desk = os.path.join(_scratch_root, "usher.desk")
 
     def _wj_canary(path, blob):
         try:
@@ -14903,6 +15002,7 @@ def selftest():
     chrome._frame[0] = None
     engine.STATE = _scratch_state
     engine.SOURCES_FILE = _scratch_sources
+    engine.DESK_FILE = _scratch_desk
     engine._SOURCES_ADOPTED = False
     try:
         for area in (_t_registry, _t_resolution, _t_lock,
@@ -14937,6 +15037,7 @@ def selftest():
         chrome._size_cache["sig"] = None
         engine.STATE = _real_state
         engine.SOURCES_FILE = _real_sources
+        engine.DESK_FILE = _real_desk
         engine._SOURCES_ADOPTED = False
         shutil.rmtree(_scratch_root, ignore_errors=True)
     # NAMED, so a leak is a check rather than something a reader has to
