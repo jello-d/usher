@@ -1119,7 +1119,7 @@ def surface_target(app, ident, src, profile, outs, others=None):
     if others is None:
         others = other_profile_entries(app, ident, profile, src)
     seed = surface_seed(others, surfaces, surface_default(),
-                        frame_inset() if src else (0, 0, 0, 0))
+                        edge_margins(src))
     if not seed:
         return None, ""
     if seed.get("seeded_default"):
@@ -1191,6 +1191,71 @@ def frame_inset(sock=None):
 _FRAME = {"at": 0.0, "inset": (0, 0, 0, 0)}
 
 
+def deco_shadow(sock=None):
+    """The INVISIBLE shadow a server-side decoration draws outside every
+    window's visible edge, in logical pixels, or 0.
+
+    usher works in each view's `geometry`, which carries the decoration:
+    on dragonfly 22px a side around the client area (pixdecor, measured),
+    of which 6 is the visible border and 16 is shadow. So a window usher
+    put in a corner sat visibly 16px inset, where the user keeps them snug
+    (Signal, 2026-11-13: dragged 16px up under the bar). The shadow is not
+    a setting the plugin reports, so it is DERIVED: the compositor's own
+    geometry-to-client margin on the side, less the loaded decoration
+    plugin's `border_size`. Zeros when no decoration plugin is loaded or
+    nothing can be asked; a decoration with no shadow derives 0 on its own.
+    The THINNEST decorated window decides, so an odd client (a CSD app with
+    its own larger margin) cannot widen it for everyone."""
+    now = time.time()
+    if _DECO["at"] and now - _DECO["at"] < 60:
+        return _DECO["shadow"]
+    shadow = 0
+    try:
+        so = sock or ipc()
+
+        def opt(name):
+            r = so.get_option_value(name)
+            if not isinstance(r, dict) or r.get("result") != "ok":
+                raise ValueError(name)
+            return str(r.get("value"))
+        loaded = opt("core/plugins").split()
+        name = next((n for n in ("pixdecor", "decoration") if n in loaded),
+                    None)
+        if name:
+            border = int(opt(f"{name}/border_size"))
+            sides = []
+            for v in so.list_views(filter_mapped_toplevel=True):
+                g, b = v.get("geometry") or {}, v.get("base-geometry") or {}
+                if v.get("fullscreen") or "x" not in g or "x" not in b:
+                    continue
+                d = float(b["x"]) - float(g["x"])
+                if d > 0:
+                    sides.append(d)
+            if sides:
+                shadow = max(0, int(min(sides)) - border)
+    except Exception:                                      # noqa: BLE001
+        shadow = 0
+    _DECO.update(at=now, shadow=shadow)
+    return shadow
+
+
+_DECO = {"at": 0.0, "shadow": 0}
+
+
+def edge_margins(source=""):
+    """(left, top, right, bottom): how far a window's GEOMETRY must stay
+    inside a region's edges, negative where it may overhang. What counts is
+    the VISIBLE extent (the user, 2026-11-13: "including the enclave border
+    is good, but shadow should be excluded"): another account's window keeps
+    its frame clear (frame_inset, drawn outside the geometry); any other
+    window may overhang by its invisible shadow (deco_shadow), so its
+    visible edge sits snug."""
+    if source:
+        return frame_inset()
+    sh = deco_shadow()
+    return (-sh, -sh, -sh, -sh)
+
+
 def inset_pos(pos, size, start, span, before, after):
     """`pos` along one axis, kept `before`/`after` inside a region of `span`
     from `start` when the window fits between the two, else unchanged: a
@@ -1199,6 +1264,37 @@ def inset_pos(pos, size, start, span, before, after):
     if size > span - before - after:
         return pos
     return min(max(pos, start + before), start + span - after - size)
+
+
+# A WINDOW WITHIN THIS MANY PIXELS OF A REGION'S EDGE WHERE IT WAS LEARNED
+# WAS AT THAT EDGE, so its seed is put snug against the same edge.
+SNUG_EDGE = 24
+
+
+def _snug_axis(pos, size, own, start, span, before, after, f_off, f_ext):
+    """One axis of the snug rule (surface_seed): (pos, size). PURE.
+
+    `before`/`after` are the margins; only NEGATIVE ones (an overhang)
+    matter here. The size may grow to the window's own size up to the region
+    plus both overhangs; the position snaps to an edge the window was at
+    (within SNUG_EDGE of it, by its learned fraction `f_off`/`f_ext`), or to
+    the start when it has no learned place, and otherwise stays put, kept
+    within the overhang either way."""
+    lo, hi = max(0, -before), max(0, -after)
+    if not lo and not hi:
+        return pos, size
+    if own:
+        size = max(size, min(float(own), span + lo + hi))
+    if f_off is None:
+        at_start, at_end = True, False
+    else:
+        at_start = f_off * span <= SNUG_EDGE
+        at_end = (1.0 - f_off - (f_ext or 0)) * span <= SNUG_EDGE
+    if at_start:
+        pos = start - lo
+    elif at_end:
+        pos = start + span + hi - size
+    return min(max(pos, start - lo), start + span + hi - size), size
 
 
 def surface_seed(others, surfaces, default=None, inset=(0, 0, 0, 0)):
@@ -1271,10 +1367,25 @@ def surface_seed(others, surfaces, default=None, inset=(0, 0, 0, 0)):
             w = min(int(e.get("size", [0, 0])[0]) or sw, sw)
             h = min(int(e.get("size", [0, 0])[1]) or sh, sh)
             x, y = sx, sy
+        # SNUG WHERE IT MAY OVERHANG (a negative margin: the invisible
+        # shadow, edge_margins). The window may be that much larger than
+        # the region, and one that sat at an edge where it was learned, or
+        # had no learned place, sits with its VISIBLE edge on that edge.
+        ow2, oh2 = (e.get("size") or [0, 0])[:2]
+        x, w = _snug_axis(x, w, ow2, sx, sw, inset[0], inset[2],
+                          frac[0] if frac else None,
+                          frac[2] if frac else None)
+        y, h = _snug_axis(y, h, oh2, sy, sh, inset[1], inset[3],
+                          frac[1] if frac else None,
+                          frac[3] if frac else None)
         # CLEAR OF A FRAME DRAWN OUTSIDE THE WINDOW (frame_inset), on each
         # axis where it fits inside it
-        x = inset_pos(x, w, sx, sw, inset[0], inset[2])
-        y = inset_pos(y, h, sy, sh, inset[1], inset[3])
+        # (only where there IS a frame: a clamp with no margin would pull a
+        # snug window back inside the region)
+        if inset[0] > 0 or inset[2] > 0:
+            x = inset_pos(x, w, sx, sw, max(0, inset[0]), max(0, inset[2]))
+        if inset[1] > 0 or inset[3] > 0:
+            y = inset_pos(y, h, sy, sh, max(0, inset[1]), max(0, inset[3]))
         seed = dict(e)
         seed.update({"output": s["output"],
                      # THE DEFAULT HAS NO CELL (`* *`), so the window keeps
@@ -8411,7 +8522,7 @@ def rehome(e, o):
     return dict(e, workspace=[nx, ny], pos=[ax - nx * ow, ay - ny * oh])
 
 
-def fit_entry(e, o, strict=False):
+def fit_entry(e, o, strict=False, over=0):
     """`e` with its rect moved, and shrunk if it must be, to lie inside the
     WORK AREA of output `o`, in the cell that holds most of it. PURE; `e`
     itself when nothing changes.
@@ -8455,6 +8566,10 @@ def fit_entry(e, o, strict=False):
             e = dict(e, workspace=[kx, ky],
                      pos=[px0 + (cx - kx) * ow, py0 + (cy - ky) * oh])
     x, y, w, h = workarea(o)
+    # `over`: how far the geometry may overhang the work area (deco_shadow
+    # for a window whose shadow is invisible), so a window snug to an edge
+    # is not pulled inside it
+    x, y, w, h = x - over, y - over, w + 2 * over, h + 2 * over
     try:
         sw, sh = float(e["size"][0]), float(e["size"][1])
         px, py = float(e["pos"][0]), float(e["pos"][1])
@@ -8518,7 +8633,7 @@ def visibility(v, outputs):
 OVERSIZE_TOL = 8
 
 
-def oversize_fit(v, outputs, tol=OVERSIZE_TOL):
+def oversize_fit(v, outputs, tol=OVERSIZE_TOL, shadow=0):
     """Live view `v` refit to its panel's WORK AREA when it is larger than
     that, as an entry to place, or None. PURE.
 
@@ -8542,12 +8657,17 @@ def oversize_fit(v, outputs, tol=OVERSIZE_TOL):
         sw, sh = float(p["size"][0]), float(p["size"][1])
     except (KeyError, IndexError, TypeError, ValueError):
         return None
-    if ww <= 0 or wh <= 0 or (sw <= ww + tol and sh <= wh + tol):
+    # ITS INVISIBLE SHADOW MAY OVERHANG (`shadow`, deco_shadow): a window
+    # snugged edge to edge on purpose has a geometry that much wider than
+    # the work area, and without this the refit would shrink it every pass.
+    # The visible border does not get the same allowance.
+    if ww <= 0 or wh <= 0 or (sw <= ww + tol + 2 * shadow
+                              and sh <= wh + tol + 2 * shadow):
         return None
     e = {"output": o["name"], "workspace": list(p["workspace"]),
          "pos": list(p["pos"]), "size": [sw, sh],
          "sticky": bool(v.get("sticky")), "fullscreen": False}
-    f = fit_entry(e, o)
+    f = fit_entry(e, o, over=shadow)
     return f if (f["size"], f["pos"]) != (e["size"], e["pos"]) else None
 
 
@@ -9815,7 +9935,7 @@ def do_restore(dry, only=None, source=None):
                                 f"{_ws.get('grid_width')}x"
                                 f"{_ws.get('grid_height')} grid"))
             continue
-        e = fit_entry(e, o)
+        e = fit_entry(e, o, over=0 if e.get("source") else deco_shadow())
         geom = target_geometry(e, o)
         g = lv.get("geometry", {}) or {}
         same = (g.get("x") == geom["x"] and g.get("y") == geom["y"] and

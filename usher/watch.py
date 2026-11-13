@@ -1216,6 +1216,12 @@ class Watcher:
             if _in[2] >= float(e["size"][0]) and \
                     _in[3] >= float(e["size"][1]):
                 region = _in
+        else:
+            # ...and any other window may overhang by its invisible shadow,
+            # so a stack or a cascade sits snug, visible edge on the edge
+            _s = self._overhang("")
+            region = (region[0] - _s, region[1] - _s,
+                      region[2] + 2 * _s, region[3] + 2 * _s)
         mine = tuple(float(n) for n in tuple(e["pos"]) + tuple(e["size"]))
         r, moves = engine.lay_out_seed(
             mine, region, taken,
@@ -1249,6 +1255,12 @@ class Watcher:
         except Exception:                                  # noqa: BLE001
             return None
         return o["name"] if o else None
+
+    def _overhang(self, source):
+        """How far a window's geometry may overhang an edge: its invisible
+        decoration shadow (engine.deco_shadow), or 0 for another account's
+        window, whose frame is drawn outside it and must stay visible."""
+        return 0 if source else engine.deco_shadow()
 
     def _left_entry(self, vid, app, ident):
         """This window's OWN entry on the desk left at the last desk change,
@@ -1342,7 +1354,7 @@ class Watcher:
         # thinner bars still lands where it can be seen (engine.fit_entry).
         # Before everything below, so the "already there" test, the request
         # and the read-back all mean the same rect.
-        e = engine.fit_entry(e, o)
+        e = engine.fit_entry(e, o, over=self._overhang(e.get("source")))
         # Skip if already exactly there (init-place over an in-place session
         # would otherwise re-issue every window). The event view carries
         # geometry for init (list_views); a freshly-mapped view may not, and
@@ -1581,7 +1593,9 @@ class Watcher:
             # VISIBLE BUT LARGER THAN ITS PANEL is the other half of the
             # invariant: refit in place (engine.oversize_fit), under the
             # same seen-twice and per-window bound as a rescue
-            fit = None if why else engine.oversize_fit(v, outs)
+            fit = None if why else engine.oversize_fit(
+                v, outs, shadow=self._overhang(
+                    "marked" if v.get("security-context") else ""))
             if not why and not fit:
                 continue
             why = why or "larger than its panel's work area"

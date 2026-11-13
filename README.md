@@ -560,12 +560,17 @@ portrait panel), and if no gap fits it whole but the seeded windows in its way
 and it fit end to end, they are stacked from the surface's start; (3)
 otherwise it is cascaded, stepping down and right until it no longer sits
 exactly on another window, so every window keeps a visible edge. It is never
-made smaller than the surface requires. Another account's windows are kept
-clear of the frame the compositor draws around them (enclave-mark's border
-and name tab, read from its options), unless they fill the surface on that
-axis. Windows are read where they are now,
-so one you moved or closed meanwhile is not in the way. Learned slots are
-never moved by any of this; they are your arrangement.
+made smaller than the surface requires. What counts is a window's VISIBLE
+extent: its invisible decoration shadow may hang past an edge, so a window
+placed at an edge or a corner sits snug with its visible border on it (the
+shadow is derived from the compositor's own rects and the decoration's border
+size), while another account's windows keep the frame the compositor draws
+around them (enclave-mark's border and name tab, read from its options) clear
+of the edge, unless they fill the surface on that axis. A window larger than
+its panel is refit every few seconds, so a client that puts back an old size
+after being moved does not stay hanging off it. Windows are read where they
+are now, so one you moved or closed meanwhile is not in the way. Learned slots
+are never moved by any of this; they are your arrangement.
 
 **No window is left where it cannot be seen.** Whatever put it there (a
 parked window that lost a shared slot, a slot learned mostly off its panel, a

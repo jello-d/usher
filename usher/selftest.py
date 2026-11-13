@@ -88,6 +88,7 @@ _real_logline = engine.logline
 # for every area, so the cells testing the function itself need this one.
 _REAL_DESK_GRID = engine.desk_grid
 _REAL_FRAME_INSET = engine.frame_inset
+_REAL_DECO_SHADOW = engine.deco_shadow
 
 
 @contextlib.contextmanager
@@ -10901,6 +10902,15 @@ def _t_visible(ck):
     ck("a-few-pixels-over-is-within-the-tolerance",
        engine.oversize_fit(_v(geometry={"x": 0, "y": 48, "width": 2885,
                                         "height": 500}), _outs) is None)
+    # A WINDOW SNUGGED EDGE TO EDGE carries its invisible SHADOW past the
+    # work area (16px a side here), and must not be shrunk for it; the
+    # visible border gets no such allowance (the user: shadow excluded).
+    _snug = _v(geometry={"x": -16, "y": 100, "width": 2912,
+                         "height": 1000})
+    ck("a-window-snug-to-the-edges-is-not-refit",
+       engine.oversize_fit(_snug, _outs, shadow=16) is None)
+    ck("without-a-shadow-the-same-window-is-refit",
+       engine.oversize_fit(_snug, _outs, shadow=0) is not None)
     ck("a-fullscreen-window-is-not-refit",
        engine.oversize_fit(_v(fullscreen=True, geometry={
            "x": 0, "y": 0, "width": 2880, "height": 1800}), _outs) is None)
@@ -10941,6 +10951,56 @@ def _t_visible(ck):
     finally:
         (engine.surface_map, engine.surface_default,
          engine.other_profile_entries, _wm.logline) = _rs2
+    # AND THE SHADOW, IN BOTH PLACES THE DAEMON FITS A WINDOW: a slot snug
+    # in the corner (visible edge on it, shadow past it) is placed as it is,
+    # and a window snug edge to edge is not refit; another account's window
+    # gets no overhang, since its frame is drawn outside it.
+    _sent = []
+
+    class _S3:
+        def list_outputs(self):
+            return [_o]
+
+        def list_views(self, filter_mapped_toplevel=False):
+            return _views3
+
+        def send_json(self, msg):
+            _sent.append(msg["data"])
+    _snug_e = {"output": "eDP-1", "workspace": [1, 1], "pos": [-16, 32],
+               "size": [1325, 869], "sticky": False, "fullscreen": False}
+    _rds3, _rl3 = engine.deco_shadow, _wm.logline
+    try:
+        engine.deco_shadow = lambda sock=None: 16
+        _wm.logline = lambda m: None
+        w3 = Watcher(launch=False)
+        _views3 = []
+        w3.place_sock = _S3()
+        w3._seat_view(_v(id=31), dict(_snug_e), _o)
+        _want = target_geometry(_snug_e, _o)
+        ck("a-slot-snug-in-the-corner-is-placed-as-it-is",
+           bool(_sent) and _sent[-1].get("geometry", {}).get("x")
+           == _want["x"] and _sent[-1]["geometry"]["y"] == _want["y"])
+        # a slot as wide as the panel plus its shadow: kept for a window
+        # whose shadow is invisible, cut to the work area for one whose
+        # frame is drawn outside it
+        _wide = dict(_snug_e, pos=[-16, 32], size=[2912, 869])
+        _sent.clear()
+        w3._seat_view(_v(id=32), dict(_wide), _o)
+        w3._seat_view(_v(id=35), dict(_wide, source="titan"), _o)
+        ck("another-accounts-slot-gets-no-overhang",
+           [d["geometry"]["width"] for d in _sent] == [2912, 2880])
+        _views3 = [_v(id=33, geometry={"x": -16, "y": 100, "width": 2912,
+                                       "height": 1000}),
+                   _v(id=34, geometry={"x": -16, "y": 100, "width": 2912,
+                                       "height": 1000},
+                      **{"security-context": {"app-id": "titan"}})]
+        _sent.clear()
+        w3._ensure_visible()
+        w3._ensure_visible()
+        ck("the-refit-allows-a-shadow-but-not-for-a-framed-window",
+           [d["id"] for d in _sent] == [34])
+    finally:
+        engine.deco_shadow, _wm.logline = _rds3, _rl3
 
 
 def _t_sticky(ck):
@@ -12699,6 +12759,18 @@ def _t_displays(ck):
              engine.profile_id) = _s
         return _b.getvalue()
 
+    # RESTORE FITS WITH THE SAME OVERHANG AS THE DAEMON: the shadow for a
+    # window whose shadow is invisible (spied, since the report prints no
+    # sizes)
+    _overs, _rfe, _rds4 = [], engine.fit_entry, engine.deco_shadow
+    try:
+        engine.deco_shadow = lambda sock=None: 16
+        engine.fit_entry = lambda e, o, strict=False, over=0: (
+            _overs.append(over) or _rfe(e, o, strict, over))
+        _restore_text([1, 1])
+    finally:
+        engine.fit_entry, engine.deco_shadow = _rfe, _rds4
+    ck("restore-fits-with-the-shadow-overhang", _overs == [16])
     _rfit = _restore_text([1, 1])
     _roff = _restore_text([2, 2])
     _rgone = _restore_text([0, 0], out="DP-9")
@@ -13215,6 +13287,75 @@ def _t_displays(ck):
     finally:
         (engine.surface_map, engine.surface_default,
          engine.other_profile_entries, engine.frame_inset) = _rst
+    # SNUG: a window that may overhang by its invisible shadow (a negative
+    # margin) is put with its VISIBLE edge on the region's edge when it was
+    # at that edge where it was learned, or had no learned place (Signal,
+    # dragonfly 2026-11-13, kept snug in the corner by hand).
+    _ssurf = {"pm": {"output": "eDP-1", "workspace": [1, 0],
+                     "pos": [0, 48], "size": [2880, 1702]}}
+    _sh = (-16, -16, -16, -16)
+    _at_edge = {"surface": "pm", "size": [1325, 869],
+                "surface_frac": [0.0, 0.0, 0.46, 0.51]}
+    ck("a-seed-learned-at-an-edge-is-snug-at-it",
+       engine.surface_seed([_at_edge], _ssurf, inset=_sh)["pos"]
+       == [-16, 32])
+    ck("a-seed-learned-mid-region-is-not-moved-to-an-edge",
+       engine.surface_seed([dict(_at_edge, surface_frac=[
+           0.3, 0.3, 0.46, 0.51])], _ssurf, inset=_sh)["pos"]
+       == engine.surface_seed([dict(_at_edge, surface_frac=[
+           0.3, 0.3, 0.46, 0.51])], _ssurf)["pos"])
+    ck("a-seed-at-the-far-edge-is-snug-there",
+       engine.surface_seed([dict(_at_edge, surface_frac=[
+           0.54, 0.49, 0.46, 0.51])], _ssurf, inset=_sh)["pos"]
+       == [2880 + 16 - 1325, 48 + 1702 + 16 - 869])
+    ck("a-seed-may-grow-into-its-shadow-but-no-further",
+       engine.surface_seed([dict(_at_edge, size=[3000, 869])], _ssurf,
+                           inset=_sh)["size"] == [2912, 869])
+    ck("a-seed-with-no-overhang-is-unchanged-by-the-snug-rule",
+       engine.surface_seed([_at_edge], _ssurf)["pos"] == [0, 48])
+
+    class _DecoSock:
+        def __init__(self, plugins, views, border="6"):
+            self.p, self.v, self.b = plugins, views, border
+
+        def get_option_value(self, name):
+            val = {"core/plugins": self.p,
+                   "pixdecor/border_size": self.b,
+                   "decoration/border_size": self.b}.get(name)
+            return ({"result": "ok", "value": val} if val is not None
+                    else {"error": "no"})
+
+        def list_views(self, filter_mapped_toplevel=False):
+            return self.v
+
+    def _dv(inset):
+        return {"geometry": {"x": 0, "y": 0, "width": 100, "height": 100},
+                "base-geometry": {"x": inset, "y": 49, "width": 56,
+                                  "height": 29}}
+    _rds = engine._DECO.copy()
+    try:
+        _got = []
+        for _p, _vs in (("ipc pixdecor", [_dv(22), _dv(30)]),
+                        ("ipc decoration", [_dv(6)]),
+                        ("ipc", [_dv(22)]),
+                        ("ipc pixdecor", [])):
+            engine._DECO.update(at=0.0)
+            _got.append(_REAL_DECO_SHADOW(_DecoSock(_p, _vs)))
+        ck("deco-shadow-is-the-thinnest-margin-less-the-border",
+           _got[0] == 16)
+        ck("deco-shadow-is-zero-without-a-shadow-or-a-decoration",
+           _got[1:] == [0, 0, 0])
+    finally:
+        engine._DECO.update(_rds)
+    _rfm, _rds2 = engine.frame_inset, engine.deco_shadow
+    try:
+        engine.frame_inset = lambda sock=None: (4, 26, 4, 4)
+        engine.deco_shadow = lambda sock=None: 16
+        ck("edge-margins-keep-a-frame-clear-and-let-a-shadow-overhang",
+           engine.edge_margins("titan") == (4, 26, 4, 4)
+           and engine.edge_margins("") == (-16, -16, -16, -16))
+    finally:
+        engine.frame_inset, engine.deco_shadow = _rfm, _rds2
     # STEP 3: a seed EXACTLY on another, with no room beside it and no
     # repack, steps off it so the one under it keeps a visible edge
     ck("an-exact-stack-is-cascaded-off",
@@ -14311,6 +14452,41 @@ def _t_displays(ck):
                            sorted(_seeded)
                            == [(71, "tall", (4.0, 1026.0)),
                                (72, "tall", (4.0, 26.0))])
+                        # AND THE OWNER'S OWN WINDOWS STACK SNUG: the region
+                        # is widened by the invisible shadow, so the repack
+                        # starts with the visible edge on the region's edge
+                        _rwo2 = engine.window_origin
+                        engine.window_origin = lambda pid: ("", None)
+                        engine.frame_inset = lambda sock=None: (0, 0, 0, 0)
+                        _rds5 = engine.deco_shadow
+                        engine.deco_shadow = lambda sock=None: 16
+                        try:
+                            _seeded.clear()
+                            w.kb, w.slot_held = {}, {}
+                            _e = {"output": "eDP-1", "workspace": [0, 0],
+                                  "pos": [0, 800], "size": [790, 1500],
+                                  "seeded_from": "tall"}
+                            _bv[0]["geometry"] = target_geometry(_e, _mo)
+                            w.place_sock = _Sock(_bv, [_mo])
+                            w.sweep_rects = {(_mo["name"], (0, 0)): [
+                                {"rect": (0, 800, 790, 1500), "vid": 71,
+                                 "seed": True, "e": _e}]}
+                            w.placed.clear()
+                            w.redisplay_ok = {72}
+                            w.deadline[72] = _time.time() + 100
+                            engine.other_profile_entries = (
+                                lambda a, i, p=None, s="": [
+                                    {"surface": "tall",
+                                     "size": [790, 1000],
+                                     "last_seen": 1.0}])
+                            w._place_view(_bv[1])
+                            ck("the-owners-stack-starts-snug-at-the-edge",
+                               sorted(_seeded)
+                               == [(71, "tall", (0.0, 984.0)),
+                                   (72, "tall", (-16.0, -16.0))])
+                        finally:
+                            engine.window_origin = _rwo2
+                            engine.deco_shadow = _rds5
                     finally:
                         engine.frame_inset = _rfi2
                         engine.other_profile_entries = (
@@ -15725,6 +15901,9 @@ def selftest():
     # enclave-mark and not elsewhere. Its own cells drive the real one.
     _real_fi = engine.frame_inset
     engine.frame_inset = lambda sock=None: (0, 0, 0, 0)
+    # NOR THE LIVE DECORATION SHADOW, for the same reason
+    _real_ds = engine.deco_shadow
+    engine.deco_shadow = lambda sock=None: 0
     # NOR THIS BOX'S CHROME WINDOW SIZES: the size map (claim_by_size)
     # reads the real session files wherever a snapshot or an elimination
     # runs, so a fixture's Chrome views would otherwise be named from the
@@ -15765,6 +15944,7 @@ def selftest():
         engine.write_json = _real_wj
         engine.desk_grid = _real_dg
         engine.frame_inset = _real_fi
+        engine.deco_shadow = _real_ds
         chrome.chrome_session_sizes = _real_ss
         chrome._frame[0] = None
         chrome._live_sizes.clear()
