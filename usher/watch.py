@@ -1125,32 +1125,60 @@ class Watcher:
         o = entry_output(e, outs)
         if not o:
             return
-        # ONLY IN A SWEEP: outside one the rects would describe windows
-        # that have since moved, and nothing is being laid out together.
-        if seeded and dock_chance:
+        # ONLY WHILE WINDOWS ARE BEING LAID OUT TOGETHER: a desk change's
+        # sweep, or place mode (a login). Outside those nothing is placed
+        # beside anything, and a window opened mid-session stays where it
+        # opens.
+        laying = dock_chance or self._placing_now()
+        if seeded and laying:
             e = self._beside(e, o, app, title)
         moved = self._seat_view(v, e, o)
         if moved:
             with self.lock:
                 self.slot_held[skey] = vid
-                if dock_chance:
+                if laying:
                     self.sweep_rects.setdefault(
                         (o["name"], tuple(e.get("workspace") or ())),
                         []).append({"rect": tuple(e["pos"])
                                     + tuple(e["size"]),
-                                    "vid": vid if seeded else None,
-                                    "e": e})
+                                    "vid": vid, "seed": seeded, "e": e})
         return moved
 
     def _beside(self, e, o, app, title):
-        """A SEED moved off the windows this sweep already placed in its
-        region (engine.fit_beside), or `e` unchanged. The region is the
-        surface it was seeded from, or the whole output for the default."""
+        """A SEED laid out around the windows already placed in its cell in
+        this pass (engine.lay_out_seed: beside them, else a repack, else a
+        cascade), or `e` unchanged. The region is the surface it was seeded
+        from, or the whole output for the default.
+
+        WHERE EACH RECORDED WINDOW IS NOW, not where it was placed: at a
+        login windows arrive over seconds and you may move one in between,
+        so each is read back live, and one that has closed or left this
+        cell is dropped."""
+        cell = (o["name"], tuple(e.get("workspace") or ()))
         with self.lock:
-            here = list(self.sweep_rects.get(
-                (o["name"], tuple(e.get("workspace") or ())), ()))
+            here = list(self.sweep_rects.get(cell, ()))
         if not here:
             return e
+        try:
+            outs = {x["name"]: x for x in self.place_sock.list_outputs()}
+            live = {w.get("id"): w for w in self._live_views()}
+        except Exception:                                  # noqa: BLE001
+            outs, live = {}, {}
+        now = []
+        for t in here:
+            w = live.get(t["vid"])
+            if w is None or not outs:
+                continue
+            p = engine.place_of(w, outs)
+            if (p.get("output") or w.get("output-name")) != o["name"] or \
+                    tuple(p["workspace"]) != tuple(cell[1]):
+                continue
+            now.append(dict(t, rect=tuple(p["pos"]) + tuple(p["size"])))
+        with self.lock:
+            self.sweep_rects[cell] = now
+        if not now:
+            return e
+        here = now
         taken = [t["rect"] for t in here]
         name = e.get("seeded_from") or ""
         s = (engine.surface_default() if e.get("seeded_default")
@@ -1164,12 +1192,16 @@ class Watcher:
         # start, and a surface starting at the panel's edge would put the
         # first window under the top bar.
         region = engine.clip_rect(region, engine.workarea(o)) or region
+        mine = tuple(float(n) for n in tuple(e["pos"]) + tuple(e["size"]))
         r, moves = engine.lay_out_seed(
-            tuple(e["pos"]) + tuple(e["size"]), region, taken,
-            {i for i, t in enumerate(here) if t["vid"] is not None})
-        if not r:
+            mine, region, taken,
+            {i for i, t in enumerate(here) if t.get("seed")})
+        if r == mine and not moves:
             return e
-        logline(f"seeded beside {len(taken)} window(s) already in "
+        how = ("cascaded over" if not moves and (r[2], r[3]) == mine[2:]
+               and engine.fit_beside(mine, region, taken) is None
+               else "seeded beside")
+        logline(f"{how} {len(taken)} window(s) already in "
                 f"`{name}`: {app[:18]} | {title[:30]}"
                 + (f" (moving {len(moves)} up)" if moves else ""))
         for i, nr in moves.items():
@@ -1782,6 +1814,9 @@ class Watcher:
                         open(ARM_FILE).read().strip())
                 logline("place re-armed (kick)"
                         if self._placing_now() else "settled to settled")
+                # a new placing pass lays its windows out afresh
+                with self.lock:
+                    self.sweep_rects = {}
             except (OSError, ValueError):
                 pass
         # Treat a change to the invert store as a capture trigger, so

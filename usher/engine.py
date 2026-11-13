@@ -1200,10 +1200,31 @@ def surface_seed(others, surfaces, default=None):
     return None
 
 
+def clip_rect(a, b):
+    """The (x, y, w, h) where two rects overlap, or None. PURE."""
+    x0, y0 = max(a[0], b[0]), max(a[1], b[1])
+    x1 = min(a[0] + a[2], b[0] + b[2])
+    y1 = min(a[1] + a[3], b[1] + b[3])
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return (x0, y0, x1 - x0, y1 - y0)
+
+
+# THE LAYOUT RULE FOR A WINDOW PLACED FROM A SURFACE (a seed), in order:
+#   1. scale to fit            surface_seed
+#   2. avoid overlap           a gap that fits it whole, or a repack of the
+#                              seeds in its way (lay_out_seed)
+#   3. otherwise cascade       never exactly on top of another window
+# The user's rule (2026-11-13). An EXPLICIT placement, a learned slot, is
+# never moved by any of it: it is somebody's arrangement.
+
 # A SEED OVERLAPPING A PLACEMENT ALREADY MADE BY MORE THAN THIS SHARE OF THE
-# SMALLER OF THE TWO is moved beside it (fit_beside). Small enough to ignore
-# the few pixels two neighbours share at an edge.
+# SMALLER OF THE TWO is laid out around it. Small enough to ignore the few
+# pixels two neighbours share at an edge.
 SEED_OVERLAP = 0.10
+# ONE CASCADE STEP, down and right: a title bar's worth, so a cascaded
+# window always leaves the one under it a visible edge to grab.
+CASCADE_STEP = 48
 
 
 def _overlap_share(a, b):
@@ -1215,28 +1236,30 @@ def _overlap_share(a, b):
     return ix * iy / max(1.0, min(a[2] * a[3], b[2] * b[3]))
 
 
+def _in_the_way(rect, taken):
+    """The indices of `taken` that `rect` overlaps by more than SEED_OVERLAP."""
+    return [i for i, t in enumerate(taken)
+            if _overlap_share(rect, t) > SEED_OVERLAP]
+
+
 def fit_beside(rect, region, taken):
-    """Where a SEEDED window goes so it does not cover a window already
-    placed in its region, as an (x, y, w, h) rect, or None to leave it.
-    PURE.
+    """Where a SEEDED window goes, AT ITS OWN SIZE, so it covers no window
+    already placed in its region: an (x, y, w, h) rect, or None when it
+    overlaps nothing or no gap fits it. PURE.
 
     A seed is a guess with no arrangement behind it, so two windows seeded
     into one region from where they sat at another desk (both near the top
     of a laptop panel, say) land on each other. Measured at a dock on
     dragonfly 2026-11-13: two work browser windows in one portrait surface.
-    A LEARNED slot is never moved by this: it is somebody's arrangement.
 
     ALONG THE REGION'S LONG AXIS, keeping the other coordinate: a portrait
     region stacks windows top to bottom, a landscape one side by side. It
-    takes the gap nearest the seed's own position that fits the window; with
-    none, the LARGEST gap if that keeps at least half the window's length
-    along the axis, shrinking it to the gap; else None, and the overlap
-    stands, which is what happened before."""
+    takes the gap nearest the seed's own position. IT NEVER SHRINKS THE
+    WINDOW: scaling past what the region needs is not part of the rule, and
+    a window that fits no gap is cascaded instead (lay_out_seed)."""
     x, y, w, h = (float(n) for n in rect)
     rx, ry, rw, rh = (float(n) for n in region)
-    near = [t for t in taken if _overlap_share((x, y, w, h), t)
-            > SEED_OVERLAP]
-    if not near:
+    if not _in_the_way((x, y, w, h), taken):
         return None
     vert = rh >= rw
     lo, span = (ry, rh) if vert else (rx, rw)
@@ -1259,49 +1282,65 @@ def fit_beside(rect, region, taken):
     if lo + span > edge:
         gaps.append((edge, lo + span))
     fits = [(a, b) for a, b in gaps if b - a >= size]
-    if fits:
-        a, b = min(fits, key=lambda g: abs(min(max(at, g[0]), g[1] - size)
-                                           - at))
-        start, ext = min(max(at, a), b - size), size
-    else:
-        if not gaps:
-            return None
-        a, b = max(gaps, key=lambda g: g[1] - g[0])
-        if b - a < size / 2:
-            return None
-        start, ext = a, b - a
-    if vert:
-        return (x, start, w, ext)
-    return (start, y, ext, h)
-
-
-def clip_rect(a, b):
-    """The (x, y, w, h) where two rects overlap, or None. PURE."""
-    x0, y0 = max(a[0], b[0]), max(a[1], b[1])
-    x1 = min(a[0] + a[2], b[0] + b[2])
-    y1 = min(a[1] + a[3], b[1] + b[3])
-    if x1 <= x0 or y1 <= y0:
+    if not fits:
         return None
-    return (x0, y0, x1 - x0, y1 - y0)
+    a, b = min(fits, key=lambda g: abs(min(max(at, g[0]), g[1] - size)
+                                       - at))
+    start = min(max(at, a), b - size)
+    if vert:
+        return (x, start, w, h)
+    return (start, y, w, h)
+
+
+def cascade(rect, region, taken, step=CASCADE_STEP):
+    """`rect` moved down and right in steps until no window it overlaps has
+    its top-left corner within one step of its own, kept inside `region`.
+    PURE.
+
+    STEP 3 OF THE RULE: when there is no room to lay a window beside the
+    others, it may cover them, but never EXACTLY, so every window keeps a
+    visible edge. When the region runs out of room for further steps it
+    wraps back to its top-left; after a region's worth of tries the last
+    candidate stands, since every placement then shares a corner with
+    something and refusing to place helps nobody."""
+    x, y, w, h = (float(n) for n in rect)
+    rx, ry, rw, rh = (float(n) for n in region)
+    mx, my = max(rx, rx + rw - w), max(ry, ry + rh - h)
+    cx, cy = min(max(x, rx), mx), min(max(y, ry), my)
+    tries = int(max(rw, rh) // step) + 2
+    for _ in range(tries):
+        clash = [t for t in taken
+                 if _overlap_share((cx, cy, w, h), t) > SEED_OVERLAP
+                 and max(abs(cx - t[0]), abs(cy - t[1])) < step]
+        if not clash:
+            break
+        nx, ny = cx + step, cy + step
+        if nx > mx or ny > my:
+            nx, ny = (rx if nx > mx else nx), (ry if ny > my else ny)
+        cx, cy = nx, ny
+    return (cx, cy, w, h)
 
 
 def lay_out_seed(rect, region, taken, movable=()):
-    """fit_beside, plus REPACKING: (rect or None, {index into taken: rect}).
-    PURE.
+    """Steps 2 and 3 of the rule for a seed: (rect, {index into taken:
+    rect}), the rect unchanged when nothing is in its way. PURE.
 
-    fit_beside moves only the NEW seed, so a seed placed earlier in the
-    sweep can leave no gap that fits: a near-full window CENTRED on a tall
-    portrait panel leaves a third above and below, and the next window is
-    squeezed into one of them (dragonfly 2026-11-13, measured in the repair
-    dry run). When every window in its way along the axis is a SEED of this
-    sweep (`movable`, indices into `taken`) and they all fit end to end, they
-    are stacked from the region's start in the order they sit, and the
-    earlier ones are moved too. A learned slot in the way means no repack:
-    it is somebody's arrangement, so it falls back to fit_beside."""
+    FIRST fit_beside, which moves only the new seed. When no gap fits it,
+    REPACK: if every window in its way along the axis is a SEED of this pass
+    (`movable`, indices into `taken`) and they all fit end to end, they are
+    stacked from the region's start in the order they sit, and the earlier
+    ones are moved too. That is what stops a near-full window CENTRED on a
+    tall portrait panel from leaving no room for the next (dragonfly
+    2026-11-13, measured in a repair dry run). A learned slot in the way
+    means no repack. FAILING BOTH, cascade: covering the others is allowed,
+    covering one exactly is not."""
+    rect = tuple(float(n) for n in rect)
+    if not _in_the_way(rect, taken):
+        return rect, {}
     r = fit_beside(rect, region, taken)
-    if r is None or (r[2], r[3]) == (float(rect[2]), float(rect[3])):
+    if r is not None:
         return r, {}
-    x, y, w, h = (float(n) for n in rect)
+    x, y, w, h = rect
     rx, ry, rw, rh = (float(n) for n in region)
     vert = rh >= rw
     c0, c1 = (x, x + w) if vert else (y, y + h)
@@ -1309,25 +1348,24 @@ def lay_out_seed(rect, region, taken, movable=()):
     way = [i for i, t in enumerate(taken)
            if min(c1, (t[0] + t[2]) if vert else (t[1] + t[3]))
            > max(c0, t[0] if vert else t[1])]
-    if not way or any(i not in movable for i in way):
-        return r, {}
-    # (start along the axis, length, index or None for the new seed)
     seq = sorted([((t[1] if vert else t[0]), (t[3] if vert else t[2]), i)
                   for i, t in ((i, taken[i]) for i in way)]
                  + [((y if vert else x), (h if vert else w), None)],
                  key=lambda s: (s[0], s[2] is None))
-    if sum(s[1] for s in seq) > span:
-        return r, {}
-    at, out, moves = lo, None, {}
-    for _start, ln, i in seq:
-        t = tuple(float(n) for n in (taken[i] if i is not None else rect))
-        nr = (t[0], at, t[2], t[3]) if vert else (at, t[1], t[2], t[3])
-        if i is None:
-            out = nr
-        elif nr != t:
-            moves[i] = nr
-        at += ln
-    return out, moves
+    if (way and all(i in movable for i in way)
+            and sum(s[1] for s in seq) <= span):
+        at, out, moves = lo, None, {}
+        for _start, ln, i in seq:
+            t = tuple(float(n) for n in (taken[i] if i is not None
+                                         else rect))
+            nr = (t[0], at, t[2], t[3]) if vert else (at, t[1], t[2], t[3])
+            if i is None:
+                out = nr
+            elif nr != t:
+                moves[i] = nr
+            at += ln
+        return out, moves
+    return cascade(rect, region, taken), {}
 
 
 def entry_output(e, outputs, panels=None):

@@ -543,15 +543,18 @@ Two windows sharing one identity (two shells in one directory) each go to
 the surface its own slot held on the desk you came from. To keep a spot no
 surface covers, name it in the desk's map.
 
-**Seeded windows are laid out beside each other.** A window placed from a
-surface rather than from a learned slot is a guess, so two of them seeded into
-one surface at a desk change are not stacked on top of each other: the second
-goes beside the first along the surface's long axis (one under the other on a
-portrait panel). If no gap fits it but the seeds in its way and it fit end
-to end, they are stacked from the surface's start, moving the earlier ones;
-failing that it shrinks into the largest gap if that keeps at least half its
-length, and otherwise stays where the surface put it. Learned slots are
-never moved by this; they are your arrangement.
+**Seeded windows are laid out, in a fixed order.** A window placed from a
+surface rather than from a learned slot is a guess, and three rules apply in
+order: (1) it is scaled to fit the surface; (2) if that puts it over a window
+already placed in the same pass (a desk change, or place mode at login), it
+goes beside it along the surface's long axis (one under the other on a
+portrait panel), and if no gap fits it whole but the seeded windows in its way
+and it fit end to end, they are stacked from the surface's start; (3)
+otherwise it is cascaded, stepping down and right until it no longer sits
+exactly on another window, so every window keeps a visible edge. It is never
+made smaller than the surface requires. Windows are read where they are now,
+so one you moved or closed meanwhile is not in the way. Learned slots are
+never moved by any of this; they are your arrangement.
 
 **No window is left where it cannot be seen.** Whatever put it there (a
 parked window that lost a shared slot, a slot learned mostly off its panel, a

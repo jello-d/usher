@@ -13019,10 +13019,12 @@ def _t_displays(ck):
             [(0, 0, 1400, 1700)]) == (1400, 0, 1400, 1700))
     ck("fit-beside-leaves-a-seed-that-overlaps-nothing",
        _fb2((0, 2000, 2160, 1700), _port, [(0, 103, 2160, 1702)]) is None)
-    ck("fit-beside-shrinks-into-a-gap-of-at-least-half",
+    # IT NEVER SHRINKS: scaling past what the region needs is not part of
+    # the rule, so a window no gap fits is cascaded instead (lay_out_seed).
+    ck("fit-beside-never-shrinks-a-window-into-a-gap",
        _fb2((0, 50, 2160, 1702), (0, 0, 2160, 3000),
-            [(0, 0, 2160, 1700)]) == (0, 1700, 2160, 1300))
-    ck("fit-beside-leaves-it-when-no-gap-is-half-its-length",
+            [(0, 0, 2160, 1700)]) is None)
+    ck("fit-beside-leaves-it-when-no-gap-fits",
        _fb2((0, 50, 1000, 1700), (0, 0, 1000, 2000),
             [(0, 0, 1000, 1700)]) is None)
     # a window BESIDE it on the other axis is not in its way: with the left
@@ -13044,12 +13046,30 @@ def _t_displays(ck):
     ck("lay-out-repacks-earlier-seeds-to-fit",
        _lo2((0, 2066, 2160, 1702), _port, [(0, 1069, 2160, 1702)], {0})
        == ((0, 1702, 2160, 1702), {0: (0, 0, 2160, 1702)}))
+    # a learned slot in the way is never moved, so the seed is cascaded,
+    # and here it already leaves the slot's top edge 997px clear
     ck("lay-out-never-moves-a-learned-slot",
        _lo2((0, 2066, 2160, 1702), _port, [(0, 1069, 2160, 1702)], ())
-       == ((0, 0, 2160, 1069), {}))
+       == ((0, 2066, 2160, 1702), {}))
     ck("lay-out-does-not-repack-what-cannot-fit-end-to-end",
        _lo2((0, 1000, 2160, 2000), _port, [(0, 1069, 2160, 2000)], {0})
-       == ((0, 0, 2160, 1069), {}))
+       == ((0, 1000, 2160, 2000), {}))
+    # STEP 3: a seed EXACTLY on another, with no room beside it and no
+    # repack, steps off it so the one under it keeps a visible edge
+    ck("an-exact-stack-is-cascaded-off",
+       _lo2((0, 0, 800, 1000), (0, 0, 800, 1200), [(0, 0, 800, 1000)], ())
+       == ((0, 48, 800, 1000), {}))
+    ck("a-cascade-steps-past-every-corner-in-its-way",
+       engine.cascade((0, 0, 800, 1000), (0, 0, 2000, 2000),
+                      [(0, 0, 800, 1000), (48, 48, 800, 1000)])
+       == (96, 96, 800, 1000))
+    _cw = engine.cascade((0, 0, 100, 100), (0, 0, 140, 140),
+                         [(0, 0, 100, 100), (40, 40, 100, 100)])
+    ck("a-cascade-with-no-room-stays-inside-its-region",
+       0 <= _cw[0] <= 40 and 0 <= _cw[1] <= 40)
+    ck("a-seed-in-nobodys-way-is-left-as-it-is",
+       _lo2((0, 2000, 800, 500), _port, [(0, 0, 800, 500)], ())
+       == ((0, 2000, 800, 500), {}))
     ck("clip-rect-is-the-overlap-or-none",
        engine.clip_rect((0, 0, 2160, 3840), (0, 48, 2160, 3742))
        == (0, 48, 2160, 3742)
@@ -13418,6 +13438,9 @@ def _t_displays(ck):
         _lo = [{"name": "eDP-1", "id": 1,
                 "geometry": {"x": 0, "y": 0, "width": 800, "height": 600},
                 "workspace": {"x": 0, "y": 0}}]
+        # the shared view's own geometry, put back before a fixture copies
+        # it: the seat stubs below MOVE a view, as a real placement does
+        _lv0_geo = dict(_lv[0]["geometry"])
         _slot = {"app_id": _app, "title": "", "appid_only": True,
                  "label": "Settled", "output": "eDP-1", "panel": "",
                  "workspace": [0, 0], "pos": [100, 120], "size": [10, 10],
@@ -13588,9 +13611,16 @@ def _t_displays(ck):
         _rseat2 = Watcher._seat_view
         _rsm2, _rope = engine.surface_map, engine.other_profile_entries
         try:
-            Watcher._seat_view = lambda self, v, e, o: (
+            def _seat_moves(self, v, e, o):
+                # AS A PLACEMENT WOULD: the view is now where it was sent,
+                # which the layout's live read-back depends on
                 _seeded.append((v["id"], e.get("seeded_from"),
-                                tuple(e["pos"]))) or True)
+                                tuple(e["pos"])))
+                v["geometry"] = target_geometry(e, o)
+                v["output-name"] = o["name"]
+                return True
+
+            Watcher._seat_view = _seat_moves
             w.place_sock = _Sock(_lv, [dict(_lo[0], workspace={
                 "x": 0, "y": 0, "grid_width": 3, "grid_height": 3})])
             engine.surface_map = lambda fresh=False: (
@@ -13676,6 +13706,8 @@ def _t_displays(ck):
             # this desk has. The fallback is HELD here by another live
             # window, which is that measured state exactly.
             _fapp = "workapp"
+            _lv[0]["geometry"] = dict(_lv0_geo)
+            _lv[0]["output-name"] = "eDP-1"
             _fv = [dict(_lv[0], **{"id": 43, "app-id": _fapp, "pid": 777}),
                    dict(_lv[0], **{"id": 44, "app-id": _fapp, "pid": 777})]
             _fb = dict(_slot, app_id=_fapp, appid_only=False, title="titan",
@@ -13941,24 +13973,57 @@ def _t_displays(ck):
                     ck("a-seed-with-nothing-beside-it-is-not-moved",
                        _two(True) == [(71, "tall", (0, 0)),
                                       (72, "tall", (0, 0))])
-                    # ONLY IN A SWEEP: a seed placed in place mode with no
-                    # desk change is not moved by rects that, outside a
-                    # sweep, would describe windows that have since moved.
-                    _seeded.clear()
-                    w.kb, w.slot_held = {}, {}
-                    w.sweep_rects = {(_mo["name"], (0, 0)): [
-                        {"rect": (0, 0, 800, 1000), "vid": None,
-                         "e": {}}]}
-                    w.placed.clear()
-                    w.redisplay_ok = set()
-                    w._placing_now = lambda: True
-                    try:
-                        w.deadline[72] = _time.time() + 100
-                        w._place_view(_bv[1])
-                    finally:
-                        del w._placing_now
-                    ck("outside-a-sweep-a-seed-is-not-moved-beside",
-                       _seeded == [(72, "tall", (0, 0))])
+                    # IN PLACE MODE TOO (a login), not only at a desk
+                    # change: the rule is general. 71 is a LEARNED window
+                    # at the seed's rect, so 72 goes beside it.
+                    def _placing(rec_at, view_at, live=True):
+                        _seeded.clear()
+                        w.kb, w.slot_held = {}, {}
+                        _e = {"output": "eDP-1", "workspace": [0, 0],
+                              "pos": list(rec_at[:2]),
+                              "size": list(rec_at[2:])}
+                        _bv[0]["geometry"] = target_geometry(
+                            dict(_e, pos=list(view_at[:2]),
+                                 size=list(view_at[2:])), _mo)
+                        _bv[0]["output-name"] = "eDP-1"
+                        w.place_sock = _Sock(_bv if live else _bv[1:],
+                                             [_mo])
+                        w.sweep_rects = {(_mo["name"], (0, 0)): [
+                            {"rect": tuple(rec_at), "vid": 71,
+                             "seed": False, "e": _e}]}
+                        w.placed.clear()
+                        w.redisplay_ok = set()
+                        w._placing_now = lambda: True
+                        try:
+                            w.deadline[72] = _time.time() + 100
+                            w._place_view(_bv[1])
+                        finally:
+                            del w._placing_now
+                        return list(_seeded)
+
+                    ck("in-place-mode-a-seed-goes-beside-too",
+                       _placing((0, 0, 800, 1000), (0, 0, 800, 1000))
+                       == [(72, "tall", (0, 1000))])
+                    # WHERE THE WINDOW IS NOW, not where it was placed:
+                    # moved since, it is no longer in the way...
+                    ck("a-window-moved-since-is-read-where-it-is",
+                       _placing((0, 0, 800, 1000), (0, 2000, 800, 1000))
+                       == [(72, "tall", (0, 0))])
+                    # ...and one that has closed is not in the way at all
+                    ck("a-closed-window-is-not-in-the-way",
+                       _placing((0, 0, 800, 1000), (0, 0, 800, 1000),
+                                live=False)
+                       == [(72, "tall", (0, 0))])
+                    # A LEARNED WINDOW IS NEVER MOVED to make room: with 71
+                    # movable, 72 and 71 would be repacked (both seated);
+                    # learned, 72 cascades and only 72 is seated
+                    ck("the-placer-never-repacks-a-learned-window",
+                       _placing((0, 800, 800, 1500), (0, 800, 800, 1500))
+                       == [(72, "tall", (0, 0))])
+                    # A KICK STARTS A NEW PASS, laid out afresh
+                    ck("a-kick-clears-the-passes-rects",
+                       "self.sweep_rects = {}" in inspect.getsource(
+                           Watcher._poll_files))
                     # AND A SEED PLACED EARLIER IN THE SWEEP IS MOVED to
                     # make room: 71 sits at 800, leaving gaps of 800 and 700
                     # for 72's 1000, and the two fit end to end in 3000.
@@ -13966,11 +14031,15 @@ def _t_displays(ck):
                     w.kb, w.slot_held = {}, {}
                     w.placed.clear()
                     w.place_sock = _Sock(_bv, [_mo])
+                    _e71 = {"output": "eDP-1", "workspace": [0, 0],
+                            "pos": [0, 800], "size": [800, 1500],
+                            "seeded_from": "tall"}
+                    # where the record says 71 is, since it is read back
+                    _bv[0]["geometry"] = target_geometry(_e71, _mo)
+                    _bv[0]["output-name"] = "eDP-1"
                     w.sweep_rects = {(_mo["name"], (0, 0)): [
                         {"rect": (0, 800, 800, 1500), "vid": 71,
-                         "e": {"output": "eDP-1", "workspace": [0, 0],
-                               "pos": [0, 800], "size": [800, 1500],
-                               "seeded_from": "tall"}}]}
+                         "seed": True, "e": _e71}]}
                     w.redisplay_ok = {72}
                     w.deadline[72] = _time.time() + 100
                     w._place_view(_bv[1])
@@ -13988,11 +14057,15 @@ def _t_displays(ck):
                     w.kb, w.slot_held = {}, {}
                     w.placed.clear()
                     w.place_sock = _Sock(_bv, [_mo2])
+                    _e71 = {"output": "eDP-1", "workspace": [0, 0],
+                            "pos": [0, 800], "size": [800, 1500],
+                            "seeded_from": "tall"}
+                    # where the record says 71 is, since it is read back
+                    _bv[0]["geometry"] = target_geometry(_e71, _mo2)
+                    _bv[0]["output-name"] = "eDP-1"
                     w.sweep_rects = {(_mo["name"], (0, 0)): [
                         {"rect": (0, 800, 800, 1500), "vid": 71,
-                         "e": {"output": "eDP-1", "workspace": [0, 0],
-                               "pos": [0, 800], "size": [800, 1500],
-                               "seeded_from": "tall"}}]}
+                         "seed": True, "e": _e71}]}
                     w.redisplay_ok = {72}
                     w.deadline[72] = _time.time() + 100
                     w._place_view(_bv[1])
