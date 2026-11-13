@@ -1430,20 +1430,15 @@ class Watcher:
         if v is None:
             return             # the window is gone: nothing left to verify
         e, o = item["e"], item["o"]
+        if item.get("late"):
+            self._late_look(v, e, o)
+            return
         if placement_landed(v, e, o):
             # IT STUCK, which is the overwhelmingly common case and says
-            # nothing worth logging. ONE LATE LOOK follows, for a size an
-            # app puts back seconds later (PLACE_LATE): resized again if it
-            # was, which a second time sticks, and bounded by the same
-            # budget as every retry here, since re-seating counts a try.
-            if not item.get("late"):
-                with self.lock:
-                    self.verify[vid] = dict(
-                        item, late=True, due=time.time() + PLACE_LATE)
-            elif engine.size_put_back(v, e):
-                logline(f"size put back after it took, re-sizing: "
-                        f"{app_of(v)[:18]} | {engine.log_title(v)[:34]}")
-                self._seat_view(v, e, o)
+            # nothing worth logging. ONE LATE LOOK follows (_late_look).
+            with self.lock:
+                self.verify[vid] = dict(
+                    item, late=True, due=time.time() + PLACE_LATE)
             return
         app, title = app_of(v), engine.log_title(v)
         with self.lock:
@@ -1474,6 +1469,36 @@ class Watcher:
             # a retry can never place something a first attempt may not.
             self.placed.discard(vid)
             self.pending[vid] = {"v": v, "refetch": True, "due": time.time()}
+
+    def _late_look(self, v, e, o):
+        """PLACE_LATE after a placement landed: has the app PUT BACK an old
+        size? If so the size is given again, which a second time sticks,
+        bounded by the same budget as every retry, since re-seating counts.
+
+        IT ASKS ONLY ABOUT SIZE, and that is the whole difference from the
+        read-backs above. Those run within seconds, before anyone could have
+        moved the window or switched workspace; ten seconds later either may
+        have happened. Measured on dragonfly 2026-11-13: the first version
+        judged position too, against the output AS IT WAS when placed, and
+        after a workspace switch read every window on the desk as not having
+        landed and re-placed all 21. So the window is resized WHERE IT IS
+        NOW, on fresh outputs, and one moved to another output is left
+        alone: that was somebody."""
+        if v.get("output-name") != o.get("name") or \
+                not engine.size_put_back(v, e):
+            return
+        try:
+            outs = {x["name"]: x for x in self.place_sock.list_outputs()}
+        except Exception:                                  # noqa: BLE001
+            return
+        o2 = outs.get(o.get("name"))
+        if not o2:
+            return
+        cur = engine.place_of(v, outs)
+        e2 = dict(e, workspace=list(cur["workspace"]), pos=list(cur["pos"]))
+        logline(f"size put back after it took, re-sizing: "
+                f"{app_of(v)[:18]} | {engine.log_title(v)[:34]}")
+        self._seat_view(v, e2, o2)
 
     def _restate(self, vid, e):
         """Re-apply the window STATE a geometry move does not carry: the

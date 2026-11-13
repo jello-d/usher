@@ -5411,16 +5411,63 @@ def _t_verify(ck):
            engine.size_put_back(_v(0, 0, w=250, h=300), _eb)
            and engine.size_put_back(_v(0, 0, w=300, h=360), _eb)
            and not engine.size_put_back(_v(0, 0, w=290, h=310), _eb))
+        class _LSock:
+            def __init__(self, outs):
+                self.o = outs
+
+            def list_outputs(self):
+                return self.o
         logged[:] = []
         w = _wat(_v(110, 120, w=250, h=300))
+        w.place_sock = _LSock([_o])
         _reseat2 = []
+        w._seat_view = lambda v, e, o: _reseat2.append(
+            (v["id"], tuple(e["pos"]), tuple(e["size"])))
+        w._verify_one(7, {"e": _eb, "o": _o, "late": True})
+        _here = tuple(engine.place_of(_v(110, 120, w=250, h=300),
+                                      {"DP-1": _o})["pos"])
+        ck("the-late-look-resizes-a-size-put-back",
+           _reseat2 == [(7, _here, (300, 300))]
+           and any("size put back" in m for m in logged))
+        # IT ASKS ONLY ABOUT SIZE: ten seconds on, the workspace in view may
+        # have changed and the window may have been moved by hand. Measured:
+        # judging position against the output as it was when placed read all
+        # 21 windows as not landed after a workspace switch, and re-placed
+        # them. Neither is touched now; a moved window stays where it is.
+        _reseat2[:] = []
+        logged[:] = []
+        w = _wat(_v(900, 700, w=300, h=300))
+        w.place_sock = _LSock([dict(_o, workspace={
+            "x": 0, "y": 0, "grid_width": 2, "grid_height": 2})])
         w._seat_view = lambda v, e, o: _reseat2.append(v["id"])
         w._verify_one(7, {"e": _eb, "o": _o, "late": True})
-        ck("the-late-look-resizes-a-size-put-back",
-           _reseat2 == [7]
-           and any("size put back" in m for m in logged))
+        ck("the-late-look-ignores-a-moved-window-or-a-workspace-switch",
+           _reseat2 == [] and logged == [] and 7 not in w.pending)
+        w = _wat(_v(110, 120, w=250, h=300, out="DP-2"))
+        w.place_sock = _LSock([_o])
+        w._seat_view = lambda v, e, o: _reseat2.append(v["id"])
+        w._verify_one(7, {"e": _eb, "o": _o, "late": True})
+        ck("the-late-look-leaves-a-window-moved-to-another-output",
+           _reseat2 == [])
+        # AND WHEN THE SIZE WAS PUT BACK AND THE WINDOW HAS MOVED SINCE, it
+        # is resized WHERE IT IS NOW, read on fresh outputs: re-seating it
+        # at the slot would undo the move
+        _sw = dict(_o, workspace={"x": 0, "y": 0, "grid_width": 2,
+                                  "grid_height": 2})
+        _mv = _v(900, 700, w=250, h=300)
+        w = _wat(_mv)
+        w.place_sock = _LSock([_sw])
+        _reseat2[:] = []
+        w._seat_view = lambda v, e, o: _reseat2.append(
+            (tuple(e["workspace"]), tuple(e["pos"]), tuple(e["size"])))
+        w._verify_one(7, {"e": _eb, "o": _o, "late": True})
+        _now = engine.place_of(_mv, {"DP-1": _sw})
+        ck("a-size-put-back-is-resized-where-the-window-is-now",
+           _reseat2 == [(tuple(_now["workspace"]), tuple(_now["pos"]),
+                         (300, 300))])
         logged[:] = []
         w = _wat(_v(110, 120, w=300, h=300))
+        w.place_sock = _LSock([_o])
         _reseat2[:] = []
         w._seat_view = lambda v, e, o: _reseat2.append(v["id"])
         w._verify_one(7, {"e": _eb, "o": _o, "late": True})
