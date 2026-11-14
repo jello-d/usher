@@ -5651,6 +5651,18 @@ def _t_verify(ck):
         w.verify, w.sweep_wait = {}, {"until": _n + 15}
         ck("a-sweep-waiting-for-its-grid-is-settling",
            abs(w._fixing_until() - (_n + 15)) < 0.01)
+        # A DISPLAY CHANGE IS SETTLING FROM ITS FIRST OUTPUT EVENT, before
+        # any sweep exists, so the tray is blue for the whole transition;
+        # the sweep that ends it hands over to its own timers
+        w = Watcher(launch=False)
+        w.place_sock = object()
+        _n = time.time()
+        w._begin_transition("output-removed")
+        ck("a-display-change-is-settling-before-its-sweep",
+           w._fixing_until() >= _n + _w.DOCK_HOLD - 0.5)
+        w._sweep([])
+        ck("the-sweep-ends-the-display-changes-own-hold",
+           w.changing_until == 0 and w._fixing_until() == 0)
         # AND THE SWEEP IS WHAT TAGS: a read-back armed for a window the
         # sweep entitled carries `tp`, one for any other window does not
         w = Watcher(launch=False)

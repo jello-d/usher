@@ -527,6 +527,10 @@ class Watcher:
         # WHEN THE DISPLAY TRANSITION ENDS. Nothing is learned before then:
         # see DOCK_HOLD.
         self.transition_until = 0.0
+        # WHEN A DISPLAY CHANGE'S HOLD ENDS IF NO RE-PLACE COMES FIRST, or 0.
+        # The part of a transition BEFORE its sweep, which the tray shows as
+        # transposing (see _fixing_until); the sweep clears it.
+        self.changing_until = 0.0
         # A RE-PLACE WAITING FOR THE GRID hwdp declared (see
         # _adopt_profile): {vids, want, until, was, prof, why}, or None.
         self.sweep_wait = None
@@ -878,7 +882,9 @@ class Watcher:
         follows a placement that lands), a late watch to its `until`, and a
         sweep waiting for the grid to its own bound. Only items the SWEEP
         started (`tp`), so ordinary placements at a login do not read as a
-        transpose."""
+        transpose. A DISPLAY CHANGE COUNTS FROM ITS FIRST OUTPUT EVENT
+        (`changing_until`), before any sweep exists, so the tray is blue for
+        the whole transition rather than only from the re-place on."""
         end = 0.0
         with self.lock:
             for it in self.verify.values():
@@ -887,6 +893,7 @@ class Watcher:
                               else it.get("due", 0) + PLACE_LATE)
             if self.sweep_wait:
                 end = max(end, self.sweep_wait.get("until", 0))
+            end = max(end, self.changing_until)
         return end
 
     # --- placement -----------------------------------------------------------
@@ -2374,6 +2381,8 @@ class Watcher:
         `current.json` written mid-collapse would teach a brand-new desk the
         collapse as its starting layout, which is the one state that cannot be
         relearned by waiting."""
+        with self.lock:
+            self.changing_until = time.time() + DOCK_HOLD
         if self._in_transition():
             self.transition_until = time.time() + DOCK_HOLD
             return
@@ -2584,6 +2593,7 @@ class Watcher:
             self.late_ok.clear()
             self.redisplay_ok = {i for i in vids if i is not None}
             self.transpose_vids = set(self.redisplay_ok)
+            self.changing_until = 0.0
             for i in self.redisplay_ok:
                 self.deadline[i] = now + PLACE_GRACE
             # Runs on the PLACER thread, which is place_sock's one writer, so
