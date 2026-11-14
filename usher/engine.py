@@ -8841,6 +8841,63 @@ def live_holder(holder, vid, live_ids):
 SIZE_BACK = 32
 
 
+def size_returned_to(v, prev, e, tol=SIZE_BACK, match=SIZE_MATCH):
+    """Has live view `v` gone back to `prev`, the size it had before it was
+    re-placed onto slot `e`? PURE. True when its size is within `match` of
+    `prev` on both axes AND more than `tol` from the slot's, so a window
+    whose two sizes are near-equal can never trigger it.
+
+    THE PUT-BACK GUARD's test (watch.PUTBACK_GUARD). An app restoring the
+    size it last had on the other desk lands on it EXACTLY, where a resize by
+    hand almost never does, which is the whole of the signal. Position is NOT
+    part of it: a Wayland client cannot move its own window, so a window
+    that stayed put says nothing."""
+    g = v.get("geometry") or {}
+    try:
+        w, h = float(g["width"]), float(g["height"])
+        return (abs(w - float(prev[0])) <= match
+                and abs(h - float(prev[1])) <= match
+                and size_put_back(v, e, tol))
+    except (KeyError, IndexError, TypeError, ValueError):
+        return False
+
+
+def guard_line(v, rec, now, on, limit, mono=None):
+    """The put-back guard's LOUD line for live view `v` and its guard record
+    `rec` (watch._guard_record), at wall time `now`. PURE but for `mono`,
+    the monotonic clock in ns, which defaults to now's.
+
+    It carries what is needed to judge the heuristic from watch.log alone:
+    when the window was placed and when its late watch settled, how long
+    after each the app put the size back, the two sizes, the fix count, and
+    the signals that might explain it (whether it is focused, and how long
+    since it last was: wayfire's last-focus-timestamp is CLOCK_MONOTONIC)."""
+    if mono is None:
+        mono = time.monotonic_ns()
+    def hms(t):
+        return time.strftime("%H:%M:%S", time.localtime(t)) if t else "-"
+    g = v.get("geometry") or {}
+    pw, ph = rec["prev"]
+    sw, sh = rec["e"]["size"]
+    placed, settled = rec.get("placed_at", 0), rec.get("settled_at", 0)
+    since = f"{now - placed:.1f}s after it was placed at {hms(placed)}"
+    since += (f", {now - settled:.1f}s after it settled at {hms(settled)}"
+              if settled else ", before its late watch settled")
+    lf = v.get("last-focus-timestamp")
+    try:
+        focus = f"{(mono - int(lf)) / 1e9:.1f}s ago" if lf else "never"
+    except (TypeError, ValueError):
+        focus = "unknown"
+    act = ("restoring" if on else "would restore (guard OFF)")
+    head = "PUT-BACK GUARD" + ("" if on else " (off)")
+    return (f"{head}: {app_of(v)[:18]} | {log_title(v)[:28]} went back to "
+            f"{pw:.0f}x{ph:.0f} (its size before the re-place) {since}; "
+            f"{act} {sw:.0f}x{sh:.0f} (fix {rec['fixes']} of {limit}). "
+            f"signals: activated={'yes' if v.get('activated') else 'no'} "
+            f"focused={focus} output={v.get('output-name')} "
+            f"now={g.get('width', 0):.0f}x{g.get('height', 0):.0f}")
+
+
 def size_put_back(v, e, tol=SIZE_BACK):
     """Is live view `v` now a different size from the slot `e` it was
     placed into, larger OR smaller, by more than `tol`? PURE. The late

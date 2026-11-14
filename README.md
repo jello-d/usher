@@ -609,6 +609,10 @@ with `usher reload`.
 - **`USHER_DOCK_HOLD`** (`20`): seconds that a monitor arriving or leaving
   suppresses capture for, so an undock's collapse is not learned as the new
   truth. Ended early by hwdp's display-change hook.
+- **`USHER_PUTBACK_GUARD`** (`1`): set to `0` to stop usher correcting an
+  app that restores a window's size from the desk it left, long after the
+  window was placed. Every match is logged as a `PUT-BACK GUARD` line,
+  with its timing, whether the guard is on or off.
 - **`USHER_CHROME_FLAGS`**
   (`--restore-last-session --hide-crash-restore-bubble`): flags added to each
   Chrome launch, space separated. Empty passes none.

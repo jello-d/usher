@@ -119,6 +119,21 @@ LATE_CAP = 60.0
 # first correction and a position miss spent the shared budget, and the
 # second put-back stood (dragonfly 2026-11-13 19:52).
 LATE_FIXES = 3
+# THE PUT-BACK GUARD: after a re-place, an app may restore the size it had
+# on the desk it left MINUTES later, long past every watch above. Measured
+# on dragonfly 2026-11-13 20:44: a Chrome window landed at its laptop width
+# and about two minutes later went back to its exact docked width, which
+# the capture then learned. Until the next desk change, a resize that lands
+# within SIZE_MATCH of the window's size before the re-place is taken as the
+# app's and corrected, at most GUARD_FIXES times per window.
+#
+# A HEURISTIC, so it is ISOLATED AND LOUD (the user, 2026-11-14): `0` turns
+# the correction off and every match is still logged, with when the window
+# was placed, when it settled, how long after each it happened, and the
+# signals that might explain it (focus), so how often it happens and what
+# else it correlates with can be read off watch.log.
+PUTBACK_GUARD = os.environ.get("USHER_PUTBACK_GUARD", "1") != "0"
+GUARD_FIXES = 3
 # HOW LONG LEARNING WAITS after re-placing everything (a desk change, a map
 # edit, an undo): past every read-back, the late look included, or the
 # capture records a size an app has just put back.
@@ -633,6 +648,10 @@ class Watcher:
         # LATE_CAP from the landing, so a put-back after the watch went quiet
         # reopens it (_size_changed) instead of waiting for a 5s pass.
         self.watched = {}
+        # THE PUT-BACK GUARD's record per window a sweep re-placed: the slot,
+        # its size before the re-place, when it was placed and settled, and
+        # the fixes spent (see PUTBACK_GUARD). Until the next sweep.
+        self.guard = {}
         # vids the last sweep entitled: their read-backs and late watches are
         # the transpose's own settling, published as `fixing_until`.
         self.transpose_vids = set()
@@ -1448,6 +1467,7 @@ class Watcher:
                 # Super+N or F11.
                 self._restate(vid, e)
                 return
+        self._guard_record(vid, g, e, o)
         place(self.place_sock, vid, e, o)
         self.placed.add(vid)
         self._restate(vid, e)
@@ -1516,6 +1536,9 @@ class Watcher:
                     # only by the next 5s visibility pass, 21s on.
                     self.watched[vid] = dict(item, fixes=fixes)
                     self.transpose_vids.discard(vid)
+                    if vid in self.guard and \
+                            not self.guard[vid]["settled_at"]:
+                        self.guard[vid]["settled_at"] = time.time()
             return
         if placement_landed(v, e, o):
             # IT STUCK, which is the overwhelmingly common case and says
@@ -1573,6 +1596,7 @@ class Watcher:
         vid = v.get("id")
         now = time.time()
         self._oversize_soon(v, now)
+        said = None
         with self.lock:
             item = self.verify.get(vid)
             if not item:
@@ -1589,7 +1613,14 @@ class Watcher:
                     self.verify[vid] = dict(
                         rec, late=True, due=now + SIZE_SETTLE,
                         until=min(rec["cap"], now + LATE_QUIET))
-                return
+                    return
+                # PAST EVERY WATCH: the put-back guard (PUTBACK_GUARD)
+                said = self._guard_check(v, now)
+        if not item:
+            if said:
+                logline(said)
+            return
+        with self.lock:
             if not item.get("late"):
                 return
             # ANY change keeps the watch open until LATE_QUIET after it,
@@ -1598,6 +1629,44 @@ class Watcher:
                                 max(item.get("until", 0), now + LATE_QUIET))
             if engine.size_put_back(v, item["e"]):
                 item["due"] = min(item["due"], now + SIZE_SETTLE)
+
+    def _guard_record(self, vid, g, e, o):
+        """A SWEEP is re-placing `vid` from geometry `g` onto slot `e`:
+        remember the size it had (its size on the desk it left) for the
+        put-back guard. Only for a sweep's windows, only the first time in
+        that sweep, and only when the two sizes differ by more than
+        SIZE_BACK, since otherwise nothing could tell a put-back apart."""
+        if not g or "width" not in g or "height" not in g:
+            return
+        prev = (g["width"], g["height"])
+        if not engine.size_put_back({"geometry": g}, e):
+            return
+        with self.lock:
+            if vid in self.transpose_vids and vid not in self.guard:
+                self.guard[vid] = {"e": e, "o": o, "prev": prev,
+                                   "placed_at": time.time(),
+                                   "settled_at": 0.0, "fixes": 0}
+
+    def _guard_check(self, v, now):
+        """THE PUT-BACK GUARD, called with the lock held for a size change
+        no watch covers. If `v` went back to its size from before the
+        sweep, hand it to the late watch to restore its slot's size (or,
+        with the guard off, only say so), and return the LOUD line to log;
+        None when the guard has nothing to say."""
+        vid = v.get("id")
+        rec = self.guard.get(vid)
+        if not rec or rec["fixes"] >= GUARD_FIXES:
+            return None
+        if not engine.size_returned_to(v, rec["prev"], rec["e"]):
+            return None
+        rec["fixes"] += 1
+        if PUTBACK_GUARD:
+            self.verify[vid] = {"e": rec["e"], "o": rec["o"], "late": True,
+                                "due": now + SIZE_SETTLE,
+                                "until": now + LATE_QUIET,
+                                "cap": now + LATE_CAP, "fixes": 0,
+                                "tp": False}
+        return engine.guard_line(v, rec, now, PUTBACK_GUARD, GUARD_FIXES)
 
     def _oversize_soon(self, v, now):
         """A GEOMETRY EVENT that leaves a window larger than its panel's
@@ -2589,6 +2658,7 @@ class Watcher:
             self.sweep_rects = {}
             self.verify.clear()
             self.watched.clear()
+            self.guard.clear()
             self.place_tries.clear()
             self.late_ok.clear()
             self.redisplay_ok = {i for i in vids if i is not None}
@@ -2967,6 +3037,7 @@ class Watcher:
                     self.slot_held.pop(_k, None)
                 self.learned.pop(v["id"], None)
                 self.left_keys.pop(v["id"], None)
+                self.guard.pop(v["id"], None)
                 # and forget having SAID it was refused, or a new window
                 # reusing this vid would be refused silently. Same reason the
                 # rest of this block exists: a per-view set that only grows

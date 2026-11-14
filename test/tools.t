@@ -236,7 +236,8 @@ KNOBS = (("USHER_START_FLOOR", engine.START_FLOOR),
          ("USHER_PLACE_CAP", engine.PLACE_CAP),
          ("USHER_CHROME_STAGGER", chrome.CHROME_STAGGER),
          ("USHER_WIND_DOWN_TIMEOUT", engine.WIND_DOWN_TIMEOUT),
-         ("USHER_DOCK_HOLD", watch.DOCK_HOLD))
+         ("USHER_DOCK_HOLD", watch.DOCK_HOLD),
+         ("USHER_PUTBACK_GUARD", watch.PUTBACK_GUARD))
 # THE DEFINITION LINE, not "the number appears somewhere near the name".
 # Two holes closed, both met for real:
 #   `30 in "300"` is TRUE, so a containment test passed while the docs still

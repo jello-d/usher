@@ -5619,6 +5619,114 @@ def _t_verify(ck):
         ck("a-closed-watch-with-its-fixes-spent-stays-closed",
            _put_back(w, 250) is None)
 
+        # THE PUT-BACK GUARD (watch.PUTBACK_GUARD): past every watch, a
+        # window going back to EXACTLY its size from before the re-place is
+        # taken as the app's (dragonfly 2026-11-13 20:44: a Chrome window,
+        # about two minutes after landing) and corrected, loudly
+        ck("a-return-to-the-size-before-is-seen",
+           engine.size_returned_to(_v(0, 0, w=250, h=300), (250, 300), _eb)
+           and engine.size_returned_to(_v(0, 0, w=253, h=297), (250, 300),
+                                       _eb))
+        ck("a-resize-elsewhere-is-not-a-return",
+           not engine.size_returned_to(_v(0, 0, w=260, h=300), (250, 300),
+                                       _eb))
+        ck("a-before-size-near-the-slot-can-never-trigger",
+           not engine.size_returned_to(_v(0, 0, w=290, h=300), (290, 300),
+                                       _eb))
+
+        def _guarded(fixes=0, tp=True, prev=(250, 300)):
+            w = _wat(_v(110, 120, w=300, h=300))
+            w.place_sock = _LSock([_o])
+            if tp:
+                w.transpose_vids.add(7)
+            w._guard_record(7, {"x": 0, "y": 0, "width": prev[0],
+                                "height": prev[1]}, _eb, _o)
+            if 7 in w.guard:
+                w.guard[7]["fixes"] = fixes
+            return w
+        w = _guarded()
+        ck("a-sweep-records-the-size-a-window-had-before",
+           w.guard.get(7, {}).get("prev") == (250, 300)
+           and w.guard[7]["settled_at"] == 0)
+        ck("only-a-sweeps-placements-are-guarded",
+           7 not in _guarded(tp=False).guard)
+        ck("a-window-whose-sizes-match-is-not-guarded",
+           7 not in _guarded(prev=(300, 300)).guard)
+        # WIRED: a sweep's real placement records it
+        w = Watcher(launch=False)
+        w.place_sock = object()
+        w.transpose_vids.add(7)
+        _rp = _w.place
+        _w.place = lambda *a: None
+        w._restate = lambda *a: None
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                w._seat_view(dict(_v(0, 0, w=250, h=300), id=7), _eb, _o)
+        finally:
+            _w.place = _rp
+        ck("a-sweeps-placement-records-the-guard",
+           w.guard.get(7, {}).get("prev") == (250, 300))
+        # IT FIRES, hands the window to the late watch, and SAYS SO
+        logged[:] = []
+        w = _guarded()
+        _re = _put_back(w, 250)
+        ck("a-put-back-past-every-watch-is-restored",
+           bool(_re) and _re.get("late") is True
+           and _re["e"]["size"] == [300, 300] and _re.get("tp") is False
+           and w.guard[7]["fixes"] == 1)
+        ck("the-guard-logs-loudly-with-its-times",
+           len(logged) == 1 and logged[0].startswith("PUT-BACK GUARD: ")
+           and "after it was placed at" in logged[0]
+           and "restoring 300x300" in logged[0])
+        # OFF: nothing is corrected, and it is STILL logged, so how often it
+        # happens can be measured with the correction disabled
+        logged[:] = []
+        _was = _w.PUTBACK_GUARD
+        _w.PUTBACK_GUARD = False
+        try:
+            w = _guarded()
+            _re = _put_back(w, 250)
+        finally:
+            _w.PUTBACK_GUARD = _was
+        ck("with-the-guard-off-it-only-logs",
+           _re is None and len(logged) == 1
+           and logged[0].startswith("PUT-BACK GUARD (off): ")
+           and "would restore" in logged[0])
+        # THE CONTROLS: another size, the budget spent
+        logged[:] = []
+        w = _guarded()
+        ck("a-resize-to-another-size-is-left-alone",
+           _put_back(w, 260) is None and not logged)
+        w = _guarded(fixes=_w.GUARD_FIXES)
+        ck("the-guard-stops-at-its-budget",
+           _put_back(w, 250) is None and not logged)
+        # THE SETTLE IS STAMPED when the late watch closes
+        w = _guarded()
+        w._verify_one(7, {"e": _eb, "o": _o, "late": True, "tp": True,
+                          "until": time.time() + 0.5,
+                          "cap": time.time() + 30, "fixes": 0})
+        ck("the-guard-learns-when-the-window-settled",
+           w.guard[7]["settled_at"] > 0)
+        # AND IT LASTS ONE DESK VISIT: a sweep clears it, an unmap drops it
+        w = _guarded()
+        w._sweep([])
+        ck("a-new-sweep-clears-the-guard", not w.guard)
+        w = _guarded()
+        w._on_event({"event": "view-unmapped", "view": {"id": 7}})
+        ck("an-unmapped-window-leaves-the-guard", 7 not in w.guard)
+        # THE LINE: another account's title never, its signals always
+        _gl = engine.guard_line(
+            {"app-id": "kitty", "title": "SECRET", "source": "acct",
+             "geometry": {"width": 250, "height": 300}, "activated": True,
+             "last-focus-timestamp": 5 * 10**9, "output-name": "eDP-1"},
+            {"prev": (250, 300), "e": _eb, "placed_at": time.time() - 9,
+             "settled_at": time.time() - 4, "fixes": 1},
+            time.time(), True, 3, mono=7 * 10**9)
+        ck("the-guard-line-redacts-and-carries-its-signals",
+           "SECRET" not in _gl and "[acct]" in _gl
+           and "activated=yes" in _gl and "focused=2.0s ago" in _gl
+           and "settled at" in _gl and "(fix 1 of 3)" in _gl)
+
         # A WINDOW GROWN PAST ITS PANEL brings the visibility pass forward
         # to SIZE_SETTLE, so the refit follows the growth, not the next tick
         def _vis_due(width):

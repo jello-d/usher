@@ -766,6 +766,22 @@ learning that would overwrite the slots it just destroyed. Ended early by
 hwdp's display-change hook, so this bound only matters on a box without hwdp,
 or when the hook is slower than it.
 .TP
+.BI USHER_PUTBACK_GUARD " 1"
+Set to
+.B 0
+to stop usher correcting a put-back that no watch covers. After a desk
+change, an app may restore the size a window had on the desk it left, long
+after usher placed it (Chrome has done it about two minutes later). Until the
+next desk change, a window going back to within 3px of that size is taken as
+the app's doing and given its slot's size again, at most three times. Every
+match is logged as a
+.B PUT-BACK GUARD
+line in
+.IR watch.log ,
+with when the window was placed and settled and how long after each it
+happened, whether or not the guard is on, so how often it fires can be
+measured with the correction off.
+.TP
 .BI USHER_CHROME_FLAGS " --restore-last-session --hide-crash-restore-bubble"
 Flags added to each Chrome launch, space separated. Empty passes none, which
 leaves Chrome to its own startup preference.
