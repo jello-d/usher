@@ -3988,6 +3988,18 @@ def free_slot(kb, held, app, ident, src, vid, live, size=None, spare=(),
     is what the ledger's own rules needed (`live_holder` is pure for the same
     reason and this is its caller)."""
     cands = slot_keys(kb, app, ident, src)
+    # A STALE SIBLING GOES LAST, and never answers to a size. A family can
+    # hold more slots than it has windows (one closed this morning ages out
+    # only on the TTL), and a terminal is spawned at its config's DEFAULT
+    # size, which is the size its stale slot was learned at too: measured on
+    # dragonfly 2026-11-14, two work shells, three slots, and the size rule
+    # sent one to the slot unseen since 10:39 over a fresh one seen at the
+    # last capture. The same recency floor the spares use.
+    seen = [kb.get(k, {}).get("last_seen", 0) for k in cands if kb.get(k)]
+    floor = max(seen, default=0) - SPARE_SPAN
+    cands = ([k for k in cands if kb.get(k, {}).get("last_seen", 0) >= floor]
+             + [k for k in cands if kb.get(k, {}).get("last_seen", 0) < floor])
+    recent = {k for k in cands if kb.get(k, {}).get("last_seen", 0) >= floor}
     # A SLOT THIS WINDOW ALREADY HOLDS WINS. The writer assigns by view id and
     # the placer takes the first free one, so the two can land on different
     # keys for the same window; without this a re-place (a dock, an anchor, a
@@ -4008,6 +4020,7 @@ def free_slot(kb, held, app, ident, src, vid, live, size=None, spare=(),
     if size:
         fit = [k for k in list(cands) + [s for s in spare if s not in cands]
                if kb.get(k) and size_matches(kb[k], size)
+               and (k in recent or k in spare)
                and live_holder(held.get(k), vid, live) != "held"]
         if len(fit) == 1:
             return fit[0], kb[fit[0]]

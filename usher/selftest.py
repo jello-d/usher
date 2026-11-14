@@ -4286,6 +4286,30 @@ def _t_size_slots(ck):
        fs((2265, 1702), held={fam1: 1}) == fam0)
     ck("free-slot-keeps-a-spare-slot-it-already-holds",
        fs((1, 1), spare=[bg], held={bg: 9}) == bg)
+    # THE MEASURED CASE (dragonfly 2026-11-14): two shells, three slots,
+    # the stale one at the size a terminal is SPAWNED at.
+    _ki, _now = "titan:80a4", 10_000
+    _fresh0, _fresh1 = K("kitty", _ki), engine.slot_key("kitty", _ki, 1)
+    _stale = engine.slot_key("kitty", _ki, 2)
+    _tk = {_fresh0: {"size": [1072, 671], "last_seen": _now},
+           _fresh1: {"size": [1085, 666], "last_seen": _now},
+           _stale: {"size": [1085, 672], "last_seen": _now - 15_000}}
+
+    def _tfs(size, held=None, vid=9, kb=_tk):
+        return engine.free_slot(kb, held or {}, "kitty", _ki, src, vid,
+                                {9, 1, 2}, size=size)[0]
+    ck("free-slot-a-stale-sibling-does-not-answer-to-a-size",
+       _tfs((1085, 672)) == _fresh0)
+    # the stale one FIRST in key order, or this passes whatever the order
+    _tk2 = {_fresh0: _tk[_fresh0], _fresh1: dict(_tk[_stale]),
+            _stale: dict(_tk[_fresh1])}
+    ck("free-slot-a-stale-sibling-goes-last",
+       _tfs(None, held={_fresh0: 1}, kb=_tk2) == _stale)
+    ck("free-slot-control-a-recent-sibling-still-answers-to-a-size",
+       _tfs((1085, 672), kb=dict(_tk, **{_stale: dict(
+           _tk[_stale], last_seen=_now)})) == _stale)
+    ck("free-slot-a-stale-sibling-is-taken-when-it-is-all-that-is-free",
+       _tfs(None, held={_fresh0: 1, _fresh1: 2}) == _stale)
     h = engine.slot_hints(kb, (9, app, src, src, (2527, 1702)),
                           [(9, app, src, src, (2527, 1702)),
                            (1, app, src, src, (2498, 1702)),
