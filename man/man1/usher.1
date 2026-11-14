@@ -129,7 +129,7 @@ List the loaded window plugins (built-in + user).
 .B launch
 Respawn saved-but-absent windows now, without starting the daemon.
 .TP
-.B forget " SELECTOR... [--apply] [--purge]"
+.B forget " SELECTOR... [--app APP] [--apply] [--purge]"
 Drop remembered slots. A SELECTOR is a glob over the identity a window is
 remembered by, which is what
 .B doctor
@@ -142,7 +142,13 @@ or
 An entry keyed by its app-id alone has no identity, so there the glob matches
 the app-id, which is what
 .I "forget signal"
-means. PREVIEWS by default and needs
+means.
+.B --app
+narrows the selectors to entries of one app (a glob over the app-id), which
+is the only way to pick one when several apps share an identity: another
+account's single-window apps are all remembered by the account's name, so
+.I "forget work --app kitty"
+drops its terminal slot and leaves the rest. PREVIEWS by default and needs
 .B --apply
 to act, since this deletes learned data; a snapshot is taken first, so
 .B undo

@@ -5334,7 +5334,7 @@ def save_knowledge(kb, profile):
     write_json(kb_path(profile), json.dumps(kb, indent=2))
 
 
-def forget_matches(kb, selectors):
+def forget_matches(kb, selectors, app=None):
     """The store keys `selectors` select, as a sorted list.
 
     A SELECTOR IS A GLOB OVER THE IDENTITY, which is the half a reader has
@@ -5342,6 +5342,11 @@ def forget_matches(kb, selectors):
     what doctor and `restore --dry-run` print. An APP-ID-ONLY entry has no
     identity, so there the glob is matched against the app-id instead, which
     is what makes `usher forget signal` mean the obvious thing.
+
+    `app`, A GLOB OVER THE APP-ID, NARROWS IT. Several of an account's apps
+    share its name as their identity, so `forget titan` selects every one of
+    them and only `--app kitty` can say which (dragonfly 2026-11-14: a stale
+    terminal slot beside Slack's, two web apps' and Zoom's).
 
     A STORE KEY IS `app_id` NUL `identity` AND `term:` IS NOT A PREFIX OF IT.
     That exact confusion cost an investigation here: `startswith('term:')`
@@ -5355,8 +5360,10 @@ def forget_matches(kb, selectors):
         # `forget 'kitty:/src/x'` meaning only the first of them would be a
         # verb that silently did a quarter of what it said. The index is an
         # assignment and never something a reader has seen.
-        app, _, ident = slot_base(k).partition("\x00")
-        subject = ident or app
+        kapp, _, ident = slot_base(k).partition("\x00")
+        subject = ident or kapp
+        if app is not None and not fnmatch.fnmatchcase(kapp, app):
+            continue
         if any(fnmatch.fnmatchcase(subject, s) for s in selectors):
             out.append(k)
     return sorted(out)
@@ -5532,7 +5539,7 @@ def snapshot_merge(kb, snap, selectors=None):
     return merged, restored
 
 
-def snapshot_purge(profile, selectors):
+def snapshot_purge(profile, selectors, app=None):
     """Drop what `selectors` select from EVERY snapshot of a desk, and return
     how many entries went. A PRIVACY purge has to reach these: a snapshot is
     a backup by design, and a backup of a redaction is where the leak
@@ -5542,7 +5549,7 @@ def snapshot_purge(profile, selectors):
         kb = json_object(p)
         if kb is None:
             continue
-        hits = forget_matches(kb, selectors)
+        hits = forget_matches(kb, selectors, app)
         if hits:
             for k in hits:
                 del kb[k]
@@ -5676,7 +5683,7 @@ def translate_snapshot(snap, log, since):
     return out, n
 
 
-def forget_apply(kb, selectors, profile=None, purge=False):
+def forget_apply(kb, selectors, profile=None, purge=False, app=None):
     """Drop what `selectors` select from `kb` IN PLACE, save, and return the
     dropped keys. Each drop is logged, because the store is learned data and
     watch.log is what says who removed it.
@@ -5692,11 +5699,11 @@ def forget_apply(kb, selectors, profile=None, purge=False):
     store across display changes. None means resolve it now, which is right
     for the client path: it loads and saves within the same breath."""
     profile = profile or profile_id()
-    gone = forget_matches(kb, selectors)
+    gone = forget_matches(kb, selectors, app)
     if not gone:
         return []
     if purge:
-        n = snapshot_purge(profile, selectors)
+        n = snapshot_purge(profile, selectors, app)
         logline(f"forget: purged {n} entr(ies) from this desk's snapshots")
     else:
         snap = take_snapshot(kb, profile, tag="forget")
@@ -10532,7 +10539,7 @@ ADOPT_FLAG = "session-adopt"   # armed by resume/reload, consumed at init.
 MODES = ("restore", "adopt", "quiet")
 
 
-def do_forget(selectors, apply=False, purge=False):
+def do_forget(selectors, apply=False, purge=False, app=None):
     """Drop remembered slots the selectors name. Previews unless `apply`.
 
     WHY A VERB AND NOT A HAND EDIT. Five separate repair recipes in this
@@ -10556,18 +10563,20 @@ def do_forget(selectors, apply=False, purge=False):
               " 'chrome:win:*' or 'kitty:/src/*'", file=sys.stderr)
         return EXIT_FAIL
     kb = load_knowledge()
-    hits = forget_matches(kb, selectors)
+    hits = forget_matches(kb, selectors, app)
     if not hits:
-        print(f"nothing matches {' '.join(selectors)} in {len(kb)} entries")
+        print(f"nothing matches {' '.join(selectors)}"
+              f"{f' for app {app}' if app is not None else ''}"
+              f" in {len(kb)} entries")
         return EXIT_OK
     for k in hits:
         # THE PREVIEW SHOWS THE IDENTITY, not the identity plus an index: the
         # index is an ASSIGNMENT nobody has seen, so a row naming it reads as
         # a key the user wrote. Each member of a family still prints its own
         # row, which is what says how many are going.
-        app, _, ident = slot_base(k).partition("\x00")
+        kapp, _, ident = slot_base(k).partition("\x00")
         e = kb[k]
-        print(f"  {app[:20]:20} | {(ident or '(by app-id)')[:40]:40}"
+        print(f"  {kapp[:20]:20} | {(ident or '(by app-id)')[:40]:40}"
               f" ws{[int(x) for x in e['workspace']]}")
     if not apply:
         print(f"{len(hits)} of {len(kb)} entries would be dropped."
@@ -10579,11 +10588,12 @@ def do_forget(selectors, apply=False, purge=False):
             # A SELECTOR IS A GLOB OVER AN IDENTITY and none starts with
             # `!`, so the marker cannot be mistaken for one.
             f.write(("!purge\n" if purge else "")
+                    + (f"!app {app}\n" if app is not None else "")
                     + "\n".join(selectors) + "\n")
         print(f"asked the running daemon to drop {len(hits)}; it owns the"
               " store while it runs, so it makes the edit")
         return EXIT_OK
-    gone = forget_apply(kb, selectors, purge=purge)
+    gone = forget_apply(kb, selectors, purge=purge, app=app)
     print(f"dropped {len(gone)} (no daemon running, so applied here)")
     return EXIT_OK
 

@@ -2277,11 +2277,13 @@ class Watcher:
         except OSError:
             sel = []
         purge = "!purge" in sel
-        sel = [x for x in sel if x != "!purge"]
+        app = next((x[5:].strip() for x in sel if x.startswith("!app ")),
+                   None)
+        sel = [x for x in sel if not x.startswith("!")]
         if sel:
             with self.lock:
                 gone = engine.forget_apply(self.kb, sel, self.kb_profile,
-                                           purge=purge)
+                                           purge=purge, app=app)
             logline(f"forget: dropped {len(gone)} on request")
         try:
             os.remove(FORGET_FILE)

@@ -61,8 +61,8 @@ VERBS = {
     "reload":          ("both", "pick up new code, touch nothing else"),
     "stop":            ("both", "stop the daemon (SIGTERM, not pkill)"),
     "launch":          ("both", "respawn saved-but-absent windows"),
-    "forget":          ("both", "drop remembered slots [SEL...] [--apply]"
-                                " [--purge]"),
+    "forget":          ("both", "drop remembered slots [SEL...] [--app APP]"
+                                " [--apply] [--purge]"),
     "undo":            ("both", "list snapshots, or restore [N|NAME] [SEL...]"
                                 " [--apply]"),
     "wind-down":       ("both", "last capture, then let the apps go"),
@@ -554,9 +554,16 @@ def _dispatch(verb, args):
                                              else "list")
         engine.do_restore(dry="--dry-run" in args, only=only, source=source)
     elif verb == "forget":
-        sys.exit(engine.do_forget(
-            [a for a in args[1:] if a not in ("--apply", "--purge")],
-            apply="--apply" in args, purge="--purge" in args))
+        # --app GLOB narrows the selectors to one app's entries
+        k = args.index("--app") if "--app" in args else -1
+        if k >= 0 and k + 1 >= len(args):
+            engine.die_cannot("usher forget: --app needs an APP glob")
+        app = args[k + 1] if k >= 0 else None
+        sel = [a for i, a in enumerate(args)
+               if i > 0 and a not in ("--apply", "--purge")
+               and not (k >= 0 and i in (k, k + 1))]
+        sys.exit(engine.do_forget(sel, apply="--apply" in args,
+                                  purge="--purge" in args, app=app))
     elif verb == "undo":
         _ua = [a for a in args[1:] if a != "--apply"]
         sys.exit(engine.do_undo(_ua[0] if _ua else None, _ua[1:] or None,

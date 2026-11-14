@@ -7833,6 +7833,23 @@ def _t_cli_split(ck):
                 _prc.append(_x.code)
     finally:
         engine.do_predict = _rp
+    # forget's --app: its value is the app, never a selector
+    _fcalls = []
+    _rdf = engine.do_forget
+    try:
+        engine.do_forget = (lambda sel, apply=False, purge=False, app=None:
+                            _fcalls.append((sel, apply, app)) or 0)
+        for _args in (["forget", "acct", "--app", "kitty", "--apply"],
+                      ["forget", "acct"], ["forget", "acct", "--app"]):
+            try:
+                with _vctx.redirect_stderr(_vio.StringIO()):
+                    cli._dispatch("forget", _args)
+            except SystemExit:
+                pass
+    finally:
+        engine.do_forget = _rdf
+    ck("forget-cli-takes-app-apart-from-the-selectors",
+       _fcalls == [(["acct"], True, "kitty"), (["acct"], False, None)])
     ck("predict-takes-out-and-refuses-anything-else",
        _pcalls == [None, "/q.json"]
        and _prc == [0, 0, engine.EXIT_CANNOT, engine.EXIT_CANNOT]
@@ -11360,8 +11377,12 @@ def _t_visible(ck):
 
     w2.place_sock = _S2()
     try:
-        w2._seat_view(_v(id=5), dict(_e, sticky=False, inverted=False,
-                                     fullscreen=False, output="eDP-1"), _o)
+        # _seat_view PRINTS its `placed` line as well as logging it: kept
+        # out of the suite's own output, which a reader scans for FAILs
+        with contextlib.redirect_stdout(io.StringIO()):
+            w2._seat_view(_v(id=5), dict(_e, sticky=False, inverted=False,
+                                         fullscreen=False, output="eDP-1"),
+                          _o)
     except Exception as _e2:                               # noqa: BLE001
         _sent.append({"RAISED": str(_e2)})
     ck("placer-fits-a-slot-to-the-work-area",
@@ -11530,7 +11551,8 @@ def _t_visible(ck):
         w3 = Watcher(launch=False)
         _views3 = []
         w3.place_sock = _S3()
-        w3._seat_view(_v(id=31), dict(_snug_e), _o)
+        with contextlib.redirect_stdout(io.StringIO()):
+            w3._seat_view(_v(id=31), dict(_snug_e), _o)
         _want = target_geometry(_snug_e, _o)
         ck("a-slot-snug-in-the-corner-is-placed-as-it-is",
            bool(_sent) and _sent[-1].get("geometry", {}).get("x")
@@ -11540,8 +11562,9 @@ def _t_visible(ck):
         # frame is drawn outside it
         _wide = dict(_snug_e, pos=[-16, 32], size=[2912, 869])
         _sent.clear()
-        w3._seat_view(_v(id=32), dict(_wide), _o)
-        w3._seat_view(_v(id=35), dict(_wide, source="titan"), _o)
+        with contextlib.redirect_stdout(io.StringIO()):
+            w3._seat_view(_v(id=32), dict(_wide), _o)
+            w3._seat_view(_v(id=35), dict(_wide, source="titan"), _o)
         ck("another-accounts-slot-gets-no-overhang",
            [d["geometry"]["width"] for d in _sent] == [2912, 2880])
         _views3 = [_v(id=33, geometry={"x": -16, "y": 100, "width": 2912,
@@ -11905,6 +11928,39 @@ def _t_geometry(ck):
     _fm(_fkb, ["*"])
     ck("forget-matching-mutates-nothing", _fkb == _snap)
     ck("forget-star-selects-everything", len(_fm(_fkb, ["*"])) == len(_fkb))
+    # --app NARROWS: an account's single-window apps share its name as their
+    # identity, so the name alone selects them all
+    _fsk = {engine.kkey("kitty", "acct"): dict(_fe),
+            engine.kkey("slack", "acct"): dict(_fe),
+            engine.slot_key("kitty", "acct", 1): dict(_fe)}
+    ck("forget-app-narrows-a-shared-identity",
+       _fm(_fsk, ["acct"], "kitty") == sorted(
+           [engine.kkey("kitty", "acct"),
+            engine.slot_key("kitty", "acct", 1)])
+       and len(_fm(_fsk, ["acct"])) == 3)
+    ck("forget-app-is-a-glob", len(_fm(_fsk, ["acct"], "k*")) == 2
+       and _fm(_fsk, ["acct"], "zoom") == [])
+    # AND A PURGE STRIPS THE SNAPSHOTS ONLY OF THAT APP: the history is where
+    # a narrowed purge would otherwise over-reach, silently
+    _fsaved = (engine.snapshot_list, engine.save_knowledge, engine.logline,
+               engine.write_json)
+    _fpd = tempfile.mkdtemp(prefix="usher-fpurge.", dir="/var/tmp")
+    try:
+        _fsp = os.path.join(_fpd, "20261114-010000.json")
+        with open(_fsp, "w") as _f:
+            json.dump(_fsk, _f)
+        engine.snapshot_list = lambda prof: [(0.0, _fsp)]
+        engine.save_knowledge = lambda kb, prof: None
+        engine.logline = lambda m: None
+        engine.write_json = lambda p_, txt: open(p_, "w").write(txt)
+        engine.forget_apply(dict(_fsk), ["acct"], "P", purge=True,
+                            app="kitty")
+        ck("a-purge-with-app-strips-only-that-app-from-snapshots",
+           sorted(json.load(open(_fsp))) == [engine.kkey("slack", "acct")])
+    finally:
+        (engine.snapshot_list, engine.save_knowledge, engine.logline,
+         engine.write_json) = _fsaved
+        shutil.rmtree(_fpd, ignore_errors=True)
 
     # PREVIEW BY DEFAULT IS THE WHOLE SAFETY STORY, so it is asserted rather
     # than trusted: a planted regression that made the preview APPLY passed
@@ -11918,8 +11974,10 @@ def _t_geometry(ck):
         engine.load_knowledge = lambda: dict(_fkb)
         engine.FORGET_FILE = os.path.join(_fdir, "usher.forget")
         _applied = []
-        engine.forget_apply = (lambda kb, sel, prof=None, purge=False:
-                               _applied.append(sel) or sel)
+        _fapps = []
+        engine.forget_apply = (lambda kb, sel, prof=None, purge=False,
+                               app=None: _fapps.append(app)
+                               or _applied.append(sel) or sel)
         # 1. a preview must touch NOTHING, with or without a daemon
         for _who, _pid in (("no-daemon", None), ("daemon-up", 99)):
             _applied.clear()
@@ -11947,6 +12005,35 @@ def _t_geometry(ck):
         ck("forget-apply-with-a-daemon-does-not-edit-here", _applied == [])
         ck("forget-apply-with-a-daemon-writes-the-request",
            open(engine.FORGET_FILE).read().split() == ["chrome:win:*"])
+        # AND THE APP TRAVELS WITH IT, both ways
+        with contextlib.redirect_stdout(io.StringIO()):
+            engine.do_forget(["term:*"], apply=True, app="kitty")
+        ck("forget-request-carries-the-app",
+           open(engine.FORGET_FILE).read().splitlines()
+           == ["!app kitty", "term:*"])
+        _fapps.clear()
+        engine.watcher_pid = lambda: None
+        with contextlib.redirect_stdout(io.StringIO()):
+            engine.do_forget(["term:*"], apply=True, app="kitty")
+        ck("forget-here-passes-the-app", _fapps == ["kitty"])
+        # THE WORKER READS IT BACK: the marker line is the app, not a
+        # selector
+        _fapps.clear()
+        _applied.clear()
+        from . import watch as _fwm
+        _wff = _fwm.FORGET_FILE
+        _fwm.FORGET_FILE = engine.FORGET_FILE
+        try:
+            with open(engine.FORGET_FILE, "w") as _f:
+                _f.write("!app kitty\nacct\n")
+            # only what _take_forget reads: a whole Watcher would load a store
+            _fw = object.__new__(_fwm.Watcher)
+            _fw.lock, _fw.kb, _fw.kb_profile = threading.Lock(), {}, "P"
+            _fw._take_forget()
+        finally:
+            _fwm.FORGET_FILE = _wff
+        ck("forget-worker-takes-the-app-from-the-request",
+           _fapps == ["kitty"] and _applied == [["acct"]])
         # 4. and the degenerate inputs
         with contextlib.redirect_stdout(io.StringIO()), \
                 contextlib.redirect_stderr(io.StringIO()):
@@ -12285,7 +12372,8 @@ def _t_undo(ck):
         try:
             engine.FORGET_FILE = _wmod.FORGET_FILE = os.path.join(
                 _ud, "usher.forget")
-            engine.forget_apply = (lambda kb, sel, prof=None, purge=False:
+            engine.forget_apply = (lambda kb, sel, prof=None, purge=False,
+                                   app=None:
                                    _fa.append((sel, purge)) or [])
             with open(engine.FORGET_FILE, "w") as f:
                 f.write("!purge\ntitan\n")
