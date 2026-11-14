@@ -5360,6 +5360,17 @@ def _t_verify(ck):
        placement_landed(_big, _e, _o, size=False))
     ck("verify-a-smaller-size-is-landed",
        placement_landed(_v(110, 120, w=10, h=10), _e, _o))
+    # ...BUT NOT MUCH SMALLER: a client's rounding is a few px, a window
+    # that kept or put back a smaller size (Chrome undocking: 2154 for a
+    # 2666 slot, dragonfly 2026-11-13) did not take the placement
+    _eg = dict(_e, size=[600, 600])
+    ck("verify-rejects-a-window-much-smaller-than-asked",
+       not placement_landed(_v(110, 120, w=500, h=600), _eg, _o)
+       and placement_landed(_v(110, 120, w=500, h=600), _eg, _o,
+                            size=False))
+    ck("verify-allows-a-clients-rounding-down",
+       placement_landed(_v(110, 120, w=600 - engine.SIZE_BACK, h=600),
+                        _eg, _o))
     ck("verify-rejects-a-gone-window", not placement_landed(None, _e, _o))
     # A SNUG WINDOW OVERHANGS INTO THE CELL BEFORE IT by its shadow, so the
     # compositor reports it there at a far offset: the same place, which a
@@ -5508,17 +5519,21 @@ def _t_verify(ck):
            _again.get("late") is True
            and _again["due"] <= time.time() + _w.LATE_EVERY + 0.1
            and 7 not in w2.verify)
-        # BOUNDED: a look that RE-SEATED the window does not arm the next
-        # one itself (the re-seat arms its own read-backs, inside the retry
-        # budget), or a window that keeps putting its size back is resized
-        # every second regardless of the budget
-        w = _wat(_v(110, 120, w=250, h=300))
-        w.place_sock = _LSock([_o])
-        w._seat_view = lambda v, e, o: True     # budget spent: arms nothing
-        w._verify_one(7, {"e": _eb, "o": _o, "late": True,
-                          "until": time.time() + 5})
-        ck("a-late-look-that-resized-does-not-arm-the-next",
-           7 not in w.verify)
+        # ITS OWN BUDGET: a look that corrected the size keeps watching (an
+        # app may put it back again: Chrome did, twice, in one undock), but
+        # only LATE_FIXES times, so a window that keeps reverting is let go
+        def _fix(fixes):
+            w = _wat(_v(110, 120, w=250, h=300))
+            w.place_sock = _LSock([_o])
+            w._seat_view = lambda v, e, o: True   # its own read-back: none
+            w._verify_one(7, {"e": _eb, "o": _o, "late": True,
+                              "until": time.time() + 5, "fixes": fixes})
+            return w.verify.get(7)
+        _first = _fix(0)
+        ck("a-late-look-that-corrected-keeps-watching",
+           _first is not None and _first.get("fixes") == 1)
+        ck("the-late-watch-stops-after-its-budget-of-fixes",
+           _fix(_w.LATE_FIXES - 1) is None)
         # THE PUT-BACK IS ITSELF AN EVENT: a geometry change that takes a
         # just-placed window (its late look pending) away from the size it
         # was given brings the look forward to SIZE_SETTLE, instead of

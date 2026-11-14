@@ -8885,9 +8885,15 @@ def placement_landed(v, e, o, tol=PLACE_TOL, size=True):
         return False
     if not size:
         return True
+    # AND NOT MUCH SMALLER EITHER: a client may round down to whole cells
+    # (kitty, a few px), but an app that kept or put back a SMALLER size
+    # did not take the placement. Undocking grows windows, and a Chrome
+    # window that reverted to its docked 2154 for a 2666 slot read as
+    # landed, so nothing corrected it (dragonfly 2026-11-13 19:52).
     try:
-        return (got["size"][0] <= float(e["size"][0]) + SIZE_OVER
-                and got["size"][1] <= float(e["size"][1]) + SIZE_OVER)
+        w, h = float(e["size"][0]), float(e["size"][1])
+        return (w - SIZE_BACK <= got["size"][0] <= w + SIZE_OVER
+                and h - SIZE_BACK <= got["size"][1] <= h + SIZE_OVER)
     except (KeyError, IndexError, TypeError, ValueError):
         return True
 

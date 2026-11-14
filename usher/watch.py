@@ -114,6 +114,11 @@ LATE_EVERY = 1.0
 # bounds it whatever happens (the user, 2026-11-13).
 LATE_QUIET = 5.0
 LATE_CAP = 60.0
+# THE LATE WATCH'S OWN BUDGET of corrections, separate from the placement
+# retries (PLACE_VERIFY): Chrome put a size back twice in one undock, the
+# first correction and a position miss spent the shared budget, and the
+# second put-back stood (dragonfly 2026-11-13 19:52).
+LATE_FIXES = 3
 # HOW LONG LEARNING WAITS after re-placing everything (a desk change, a map
 # edit, an undo): past every read-back, the late look included, or the
 # capture records a size an app has just put back.
@@ -1451,13 +1456,16 @@ class Watcher:
             return             # the window is gone: nothing left to verify
         e, o = item["e"], item["o"]
         if item.get("late"):
-            # AGAIN EVERY LATE_EVERY until PLACE_LATE has passed, unless
-            # this look re-seated it (which arms its own read-backs)
-            if not self._late_look(v, e, o) and \
+            # AGAIN EVERY LATE_EVERY while the watch is open, counting the
+            # corrections against the watch's own budget (LATE_FIXES); a
+            # re-seat that armed its own read-back keeps that slot instead
+            fixes = item.get("fixes", 0) + (1 if self._late_look(v, e, o)
+                                            else 0)
+            if fixes < LATE_FIXES and \
                     time.time() + LATE_EVERY <= item.get("until", 0):
                 with self.lock:
                     self.verify.setdefault(vid, dict(
-                        item, due=time.time() + LATE_EVERY))
+                        item, fixes=fixes, due=time.time() + LATE_EVERY))
             return
         if placement_landed(v, e, o):
             # IT STUCK, which is the overwhelmingly common case and says
