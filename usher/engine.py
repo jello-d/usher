@@ -9924,7 +9924,11 @@ def _verify_deltas(w, row, tol):
         got = w.get(field)
         if exp is None or got is None:
             continue
-        if any(abs(float(a) - float(b)) > tol for a, b in zip(got, exp)):
+        # A WORKSPACE IS A CELL INDEX, NOT A MEASUREMENT: `tol` is pixels,
+        # and on a 3x3 grid no two cells differ by more than 2, so a
+        # tolerant compare read every wrong workspace as `ok`.
+        _t = 0.5 if field == "workspace" else tol
+        if any(abs(float(a) - float(b)) > _t for a, b in zip(got, exp)):
             bad.append(f"{field} {got} != {exp}")
     # AND EITHER SIDE DECLINING TO SAY CONCLUDES NOTHING, the same rule the
     # three numeric fields follow: `expect_output` is None when the entry's
