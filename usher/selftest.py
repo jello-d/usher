@@ -519,6 +519,17 @@ def _t_registry(ck):
        [b.split()[0] for b in _verify_deltas(
            {"workspace": [1, 0], "pos": [80, 10], "size": [100, 100]},
            _vexp, 2)] == ["pos"])
+    # A WORKSPACE IS AN INDEX, NOT PIXELS: with the pixel tolerance of 2 a
+    # window two cells over read as `ok`, and no two cells of a 3x3 grid are
+    # further apart than that (dragonfly 2026-11-14, ws(2,1) for ws(0,2)).
+    ck("verify-deltas-see-a-workspace-two-cells-over",
+       [b.split()[0] for b in _verify_deltas(
+           {"workspace": [2, 1], "pos": [10, 10], "size": [100, 100]},
+           dict(_vexp, expect_workspace=[0, 2]), 2)] == ["workspace"])
+    ck("verify-deltas-see-a-workspace-one-cell-over",
+       [b.split()[0] for b in _verify_deltas(
+           {"workspace": [0, 0], "pos": [10, 10], "size": [100, 100]},
+           _vexp, 2)] == ["workspace"])
 
     # AND THE OUTPUT IS THE FOURTH EXPECTATION, which it was not:
     # `expect_output` was written into every prediction row and read by
@@ -5072,6 +5083,67 @@ def _t_slots(ck):
         z.identified.add(9)                            # already had its look
         z._try_place(V(9))
         ck("late-chance-is-only-the-first-look", s3 == [])
+
+        # A SEED IS A GUESS, SO A NAME THE STORE KNOWS OVERRULES IT, ONCE.
+        # Another account's Chrome window was seeded before it could be
+        # named, named a minute later, and never re-placed because `placed`
+        # dedups (dragonfly 2026-11-14). Driven in SETTLED, which is where it
+        # happened: nothing else entitles the re-placement.
+        _ident9 = engine.identity(V(10))
+        s4 = []
+        r = _settled_watcher()
+        r._seat_view = lambda v, e, o: (s4.append(v["id"]) or True)
+        r.placed.add(10)
+        r.seeded_as[10] = "a-guess-under-another-name"
+        r.slot_held["held-by-the-seed"] = 10
+        r._try_place(V(10))
+        ck("a-seeded-window-named-later-is-re-placed", s4 == [10])
+        ck("the-re-placement-releases-the-seeds-ledger-key",
+           "held-by-the-seed" not in r.slot_held)
+        ck("the-re-placement-is-once-not-a-licence",
+           10 not in r.seeded_as)
+        s5 = []
+        r2 = _settled_watcher()
+        r2._seat_view = lambda v, e, o: (s5.append(v["id"]) or True)
+        r2.placed.add(11)
+        r2.seeded_as[11] = _ident9
+        r2._try_place(V(11))
+        ck("control-a-seeded-window-with-the-same-name-is-left", s5 == [])
+        s6 = []
+        r3 = _settled_watcher()
+        r3.kb = {}
+        r3._seat_view = lambda v, e, o: (s6.append(v["id"]) or True)
+        r3.placed.add(12)
+        r3.seeded_as[12] = "a-guess-under-another-name"
+        r3._try_place(V(12))
+        ck("a-new-name-the-store-does-not-know-moves-nothing",
+           s6 == [] and 12 in r3.placed and 12 not in r3.seeded_as)
+        # AND THE RECORD IS WRITTEN BY A SEEDED PLACEMENT and by nothing
+        # else, driven through _place_view: the cells above plant it by hand.
+        _sent = dict(w.kb[kkey("signal", "")])
+        def _seated(x):
+            def f(v, e, o):
+                x.placed.add(v["id"])
+                return True
+            return f
+        r4 = _settled_watcher()
+        r4.kb = {}
+        r4.st["armed_at"] = _t.time()       # a login: a seed needs place mode
+        r4._seed = lambda *_a, **_k: dict(_sent)
+        r4._seat_view = _seated(r4)
+        r4.deadline[13] = _t.time() + PLACE_GRACE
+        r4.late_ok.add(13)
+        r4._try_place(V(13))
+        ck("a-seeded-placement-records-the-name-it-was-guessed-under",
+           r4.seeded_as.get(13) == _ident9)
+        r5 = _settled_watcher()
+        r5._seat_view = _seated(r5)
+        r5.deadline[14] = _t.time() + PLACE_GRACE
+        r5.late_ok.add(14)
+        r5.seeded_as[14] = "stale"
+        r5._try_place(V(14))
+        ck("control-a-learned-placement-records-no-seed",
+           14 in r5.placed and 14 not in r5.seeded_as)
 
         # ---- THE LEARN GATE COVERS A WINDOW THE LEDGER REFUSED ---------
         # Several windows can share ONE store key. The ledger gives the slot
@@ -16394,6 +16466,19 @@ def _t_watcher(ck):
        w._held(_wins) == frozenset())
     w.deadline[7] = now + 60
     w.late_ok.clear()
+    # A SEEDED WINDOW SINCE NAMED IS HELD until the placer gives it its own
+    # slot, or the capture learns the seed's rect over that slot (dragonfly
+    # 2026-11-14). Settled and placed, so no other clause holds it.
+    w.placed.add(7)
+    w.seeded_as[7] = "titan"
+    ck("hold-keeps-a-seeded-window-once-it-is-named",
+       w._held([dict(_wins[0], key="titan:0123456789abcdef")]) == {7})
+    ck("control-hold-releases-a-seeded-window-still-under-its-seed-name",
+       w._held([dict(_wins[0], key="titan")]) == frozenset())
+    w.seeded_as.pop(7, None)
+    ck("hold-releases-once-the-seed-record-is-consumed",
+       w._held([dict(_wins[0], key="titan:0123456789abcdef")]) == frozenset())
+    w.placed.discard(7)
 
     # EVENT ROUTING. A map grants the grace and feeds the settle clock; a
     # place-event queues the view for the placer with the right settle; an

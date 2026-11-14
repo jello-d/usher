@@ -643,6 +643,10 @@ class Watcher:
         # problem, not a reason to leave it adrift. Distinct from a window
         # OPENED mid-session, which the settled mode deliberately leaves alone.
         self.late_ok = set()
+        # vid -> the identity a window had when it was placed from a SEED (a
+        # guess from the surface map). When it later resolves to an identity
+        # the store knows, the guess must give way: see _renamed_from_seed.
+        self.seeded_as = {}
         self.verify = {}
         # vid -> the slot of a late watch that has CLOSED, kept until
         # LATE_CAP from the landing, so a put-back after the watch went quiet
@@ -957,7 +961,10 @@ class Watcher:
         """Decide whether this view may be placed right now, and where. Returns
         True only if it was actually moved."""
         vid = v.get("id")
-        if vid is None or vid in self.placed:
+        if vid is None:
+            return
+        renamed = vid in self.placed and self._renamed_from_seed(v)
+        if vid in self.placed and not renamed:
             return
         if v.get("parent", -1) != -1:
             return   # a dialog / child view (a file picker, a "Save As" sheet):
@@ -1069,8 +1076,11 @@ class Watcher:
         # planted regression removing it was uncatchable, which is how a dead
         # condition announces itself. The re-grace owns the grace gate and the
         # entitlement owns the settled gate, one mechanism each.
-        dock_chance = vid in self.redisplay_ok
-        if dock_chance:
+        dock_chance = vid in self.redisplay_ok or renamed
+        if renamed:
+            logline(f"named after a seeded placement, re-placing: "
+                    f"{app[:18]} | {title[:30]}")
+        elif dock_chance:
             with self.lock:
                 self.redisplay_ok.discard(vid)
         if time.time() > self.deadline.get(vid, 0):
@@ -1095,7 +1105,7 @@ class Watcher:
         if (not self._placing_now() and not is_anchored(app, title)
                 and not late_chance and not dock_chance):
             return   # settled state: only usher/include anchors are (re)placed
-        if dock_chance and not self._placing_now():
+        if dock_chance and not renamed and not self._placing_now():
             logline(f"display changed, re-placing: {app[:18]} | "
                     f"{title[:30]}")
         if late_chance and not self._placing_now():
@@ -1242,6 +1252,12 @@ class Watcher:
         if seeded and laying:
             e = self._beside(e, o, app, title)
         moved = self._seat_view(v, e, o)
+        if vid in self.placed:
+            with self.lock:
+                if seeded:
+                    self.seeded_as[vid] = _ident
+                else:
+                    self.seeded_as.pop(vid, None)
         if moved:
             with self.lock:
                 self.slot_held[skey] = vid
@@ -1252,6 +1268,42 @@ class Watcher:
                                     + tuple(e["size"]),
                                     "vid": vid, "seed": seeded, "e": e})
         return moved
+
+    def _renamed_from_seed(self, v):
+        """Was this window placed from a SEED under an identity it no longer
+        has, and does the store know the new one? Then the seed was a guess
+        made before the window could be named, and its own slot wins.
+
+        MEASURED on dragonfly 2026-11-14: another account's Chrome window
+        mapped before Chrome had written its session file, so its account
+        answered `-`; it was seeded into a surface by the shared fallback,
+        named 62s later, and never re-placed because `placed` dedups. The
+        capture then learned the seed's rect over the slot the same pass had
+        re-keyed onto its new name, so its real home was lost too.
+
+        Consumes the record and releases the seed's ledger key, so this is
+        ONE re-placement per seed and never a standing licence."""
+        vid = v.get("id")
+        with self.lock:
+            was = self.seeded_as.get(vid)
+        if was is None:
+            return False
+        now = identity(v)
+        if now == was:
+            return False
+        _src = engine.source_of(v) or ""
+        app = app_of(v)
+        known = any(k in self.kb for k in engine.slot_keys(
+            self.kb, app, now, _src))
+        with self.lock:
+            self.seeded_as.pop(vid, None)
+            if not known:
+                return False
+            for _k in [k for k, _v in self.slot_held.items() if _v == vid]:
+                self.slot_held.pop(_k, None)
+            self.placed.discard(vid)
+            self.deadline[vid] = time.time() + PLACE_GRACE
+        return True
 
     def _beside(self, e, o, app, title):
         """A SEED laid out around the windows already placed in its cell in
@@ -2428,6 +2480,15 @@ class Watcher:
                  and w["id"] not in self.identified
                  and w["id"] not in self.placed
                  and now <= self.deadline.get(w["id"], 0)}
+        # AND A WINDOW PLACED FROM A SEED THAT HAS SINCE BEEN NAMED, until
+        # the placer has given it its own slot (_renamed_from_seed). Its rect
+        # is a guess made under its OLD identity, and learning it under the
+        # NEW one overwrites exactly the slot it is about to be placed into.
+        with self.lock:
+            _seeded = dict(self.seeded_as)
+        held |= {w["id"] for w in windows
+                 if w.get("id") in _seeded
+                 and (w.get("key") or "") != _seeded[w["id"]]}
         # A WINDOW THE LEDGER REFUSED IS NOT HELD ANY MORE. It was, because
         # learning it wrote its cascade into the holder's key (measured on
         # manifold 2026-11-06, one slot for ten windows). With a slot per
@@ -3038,6 +3099,7 @@ class Watcher:
                            if _vid == v["id"]]:
                     self.slot_held.pop(_k, None)
                 self.learned.pop(v["id"], None)
+                self.seeded_as.pop(v["id"], None)
                 self.left_keys.pop(v["id"], None)
                 self.guard.pop(v["id"], None)
                 # and forget having SAID it was refused, or a new window
