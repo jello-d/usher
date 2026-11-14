@@ -14513,6 +14513,98 @@ def _t_displays(ck):
         ck("redisplay-absent-request-is-a-no-op",
            w._take_redisplay() == "" and len(_asked) == _n)
 
+        # THE DESK ALREADY LOADED, WITH NOTHING CHANGING, IS NOT A DESK
+        # CHANGE: hwdp's first event of a boot asks for it, and sweeping it
+        # turned every login into a transpose (dragonfly 2026-11-14).
+        _w2 = Watcher(launch=False)
+        _w2.kb, _w2.kb_profile = {"desk\x00": {}}, "LAPTOP"
+        _w2.placed.add(9)
+        _w2.st["recheck"] = False
+        _w2.transition_until = _w2.changing_until = 0.0
+        _n2 = len(_asked)
+        with open(engine.REDISPLAY_FILE, "w") as f:
+            f.write("LAPTOP\n")
+        ck("redisplay-of-the-loaded-desk-is-a-no-op",
+           _w2._take_redisplay() == "" and len(_asked) == _n2
+           and 9 in _w2.placed and _w2.st["recheck"] is False)
+        ck("redisplay-of-the-loaded-desk-is-still-consumed",
+           not os.path.exists(engine.REDISPLAY_FILE))
+        # ...BUT AN OUTPUT CHANGE IN FORCE STILL SWEEPS: an undock and a
+        # redock landing back on the loaded desk moved windows.
+        _w2.changing_until = _time.time() + 30
+        with open(engine.REDISPLAY_FILE, "w") as f:
+            f.write("LAPTOP\n")
+        ck("redisplay-of-the-loaded-desk-mid-change-still-sweeps",
+           _w2._take_redisplay() == "LAPTOP" and not _w2.placed
+           and _w2.st["recheck"] is True)
+
+        # THE LOGIN RESTORE WAITS FOR THE DESK'S GRID, holding learning
+        # while it does and starting the place clock after it.
+        _rdg = engine.desk_grid
+        try:
+            class _GSock:
+                def __init__(self, seq):
+                    self.seq = list(seq)
+
+                def list_outputs(self):
+                    g = self.seq.pop(0) if len(self.seq) > 1 else self.seq[0]
+                    return [{"name": "eDP-1", "workspace": {
+                        "grid_width": g[0], "grid_height": g[1]}}]
+            _clk = [1000.0]
+            def _sl(s):
+                _clk[0] += s
+            _seen_hold = []
+            def _sl_hold(s):
+                _seen_hold.append(_w3.transition_until > 0)
+                _sl(s)
+            engine.desk_grid = lambda: None
+            _w3 = Watcher(launch=False)
+            _w3.place_sock = _GSock([(3, 3)])
+            ck("login-waits-for-nothing-when-no-grid-is-declared",
+               _w3._await_login_grid(_sl, lambda: _clk[0]) == 0.0
+               and _w3.transition_until == 0.0)
+            engine.desk_grid = lambda: (2, 2)
+            _w3 = Watcher(launch=False)
+            _w3.place_sock = _GSock([(3, 3), (3, 3), (2, 2)])
+            _w3.st["armed_at"] = 0.0
+            _waited = _w3._await_login_grid(_sl_hold, lambda: _clk[0])
+            ck("login-waits-until-the-declared-grid-arrives",
+               abs(_waited - 0.5) < 1e-6)
+            ck("login-holds-learning-while-it-waits",
+               _seen_hold and all(_seen_hold))
+            ck("login-ends-its-hold-and-starts-the-place-clock-after",
+               _w3.transition_until == 0.0
+               and _w3.st["armed_at"] == _clk[0])
+            _w3 = Watcher(launch=False)
+            _w3.place_sock = _GSock([(3, 3)])
+            _t0 = _clk[0]
+            _w3._await_login_grid(_sl, lambda: _clk[0])
+            ck("login-grid-wait-is-bounded",
+               _wmod.DOCK_HOLD <= _clk[0] - _t0 <= _wmod.DOCK_HOLD + 0.5)
+            _w3 = Watcher(launch=False)
+            _w3.place_sock = _GSock([(2, 2)])
+            _w3.st["armed_at"] = 5.0
+            ck("login-with-the-grid-already-there-changes-nothing",
+               _w3._await_login_grid(_sl, lambda: _clk[0]) == 0.0
+               and _w3.st["armed_at"] == 5.0)
+        finally:
+            engine.desk_grid = _rdg
+
+        # WIRED INTO THE LOGIN RESTORE, before its placement, and only there:
+        # a reload (quiet) must not wait or place.
+        _ord = []
+        _w4 = Watcher(launch=False)
+        _w4._await_login_grid = lambda: _ord.append("grid")
+        _w4._init_place = lambda: _ord.append("place")
+        _w4.mode = None
+        _w4._init_layout()
+        ck("login-restore-waits-for-the-grid-before-placing",
+           _ord == ["grid", "place"])
+        _ord[:] = []
+        _w4.mode = "quiet"
+        _w4._init_layout()
+        ck("control-a-reload-neither-waits-nor-places", _ord == [])
+
         # ---- A SETTLED WINDOW MUST BE PLACEABLE AFTER A DOCK --------------
         # The bug this pins shipped in the first version of _take_redisplay:
         # it voided `placed` and asked for a sweep, and the sweep placed

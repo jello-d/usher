@@ -800,7 +800,58 @@ class Watcher:
             except Exception as e:
                 logline(f"adopt capture error: {e}")
         else:
+            self._await_login_grid()
             self._init_place()
+
+    def _await_login_grid(self, sleep=time.sleep, clock=time.time):
+        """Hold the LOGIN restore until the grid is the one this desk declares.
+
+        A SESSION STARTS ON THE COMPOSITOR'S DEFAULT GRID and the integrator
+        sets the desk's own a few seconds later (tackup's runtime hook, from
+        hwdp's declaration). On a desk whose grid differs, a restore that runs
+        first places windows on cells the real grid lacks or re-maps. That
+        used to be repaired by ACCIDENT: hwdp's first display event of a boot
+        has no marker to compare against, so it asked for a full desk-change
+        sweep of the very desk being restored, the tray read transposing at
+        every login, and the ledgers were voided mid-restore (dragonfly
+        2026-11-14). With this wait that request is a no-op (_take_redisplay).
+
+        Learning is held for the wait, so the default grid is never taught to
+        the store, and the place clock starts when the wait ends, so a slow
+        grid does not eat the window a login restore is given. BOUNDED by
+        DOCK_HOLD, the same bound a dock's sweep waits under: a grid that never
+        arrives costs a restore against the one there is, never no restore.
+        Returns the seconds waited."""
+        want = engine.desk_grid()
+        if not want:
+            return 0.0
+        t0 = clock()
+        with self.lock:
+            self.transition_until = t0 + DOCK_HOLD
+        ok = False
+        while True:
+            try:
+                outs = self.place_sock.list_outputs()
+            except Exception:                              # noqa: BLE001
+                outs = []
+            ok = engine.grid_settled(outs, want)
+            if ok or clock() - t0 >= DOCK_HOLD:
+                break
+            sleep(0.25)
+        waited = clock() - t0
+        with self.lock:
+            # Only OUR hold: an output change that began during the wait has
+            # extended it, and that one is not ours to end.
+            if self.transition_until == t0 + DOCK_HOLD:
+                self.transition_until = 0.0
+            if waited > 0:
+                self.st["armed_at"] = clock()
+        if waited > 0:
+            logline(f"login: waited {waited:.1f}s for the {want[0]}x{want[1]}"
+                    f" grid" + ("" if ok else
+                                ", which never arrived; restoring against "
+                                "the one there is"))
+        return waited
 
     def _init_place(self):
         """Place anything already open when we start (the event loop handles
@@ -2547,6 +2598,22 @@ class Watcher:
         except OSError:
             pass
         if not prof:
+            return ""
+        # THE DESK ALREADY LOADED, WITH NOTHING CHANGING, IS NOT A DESK
+        # CHANGE. hwdp's first display event of a boot has no marker to
+        # compare against, so it asks for the desk the daemon loaded at
+        # start, five seconds into the login restore (dragonfly 2026-11-14:
+        # `6b8aa67c86e9 -> 6b8aa67c86e9 (on request) ... re-placing 14`, the
+        # tray blue at every login). The login restore waits for the grid
+        # itself now (_await_login_grid). An output change in force still
+        # sweeps: an undock and a redock that land back on the loaded desk
+        # moved windows nobody has put back.
+        with self.lock:
+            changing = self.changing_until > time.time()
+        if (prof == self.kb_profile and not self._in_transition()
+                and not changing):
+            logline(f"display profile {prof} is the one loaded and nothing "
+                    "is changing: nothing to re-place")
             return ""
         self._adopt_profile(prof, "on request")
         return prof

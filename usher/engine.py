@@ -9201,8 +9201,10 @@ def do_display_changed():
 
     So act only on a REAL profile change. The marker lives in the runtime dir,
     so it is per-boot: the first display event after login has nothing to
-    compare against and is treated as a change, which is what you want at
-    login anyway.
+    compare against and is treated as a change. The daemon reads a request
+    for the desk it already has loaded, with no output change in force, as
+    nothing to do (Watcher._take_redisplay), and its login restore waits
+    for the desk's grid itself (Watcher._await_login_grid).
     """
     now = profile_id(fresh=True)
     mark = os.path.join(runtime_dir(), PROFILE_MARK)
