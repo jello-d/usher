@@ -537,24 +537,10 @@ def _dispatch(verb, args):
         sys.exit(engine.do_lock(forced="--force" in args or "-f" in args))
 
     elif verb == "predict":
-        k = args.index("--out") if "--out" in args else -1
-        out = args[k + 1] if (k >= 0 and k + 1 < len(args)) else None
-        sys.exit(engine.do_predict(out=out))
+        sys.exit(engine.do_predict(out=file_opt(args, "--out")))
 
     elif verb == "verify":
-        k = args.index("--against") if "--against" in args else -1
-        ref = args[k + 1] if (k >= 0 and k + 1 < len(args)) else None
-        # AN ARGUMENT IT DOES NOT TAKE IS REFUSED, NOT DROPPED: a bare path
-        # was ignored and the DEFAULT prediction read in its place, so a
-        # check against one desk silently reported on another
-        # (dragonfly 2026-11-13).
-        extra = [a for i, a in enumerate(args)
-                 if i > 0 and not (k >= 0 and i in (k, k + 1))]
-        if extra or (k >= 0 and ref is None):
-            engine.die_cannot(
-                "usher verify takes only `--against FILE`; did not "
-                f"understand: {' '.join(extra) or '--against with no FILE'}")
-        sys.exit(engine.do_verify(against=ref))
+        sys.exit(engine.do_verify(against=file_opt(args, "--against")))
 
     elif verb == "restore":
         only = None
@@ -774,6 +760,23 @@ def _run(prog, audience):
             f"{prog}: `{verb}` belongs to {other}."
             f" Try: {other} {verb}")
     _dispatch(verb, args)
+
+
+def file_opt(args, flag):
+    """The FILE of `<verb> [flag FILE]`, or None for no flag. ANYTHING ELSE
+    IS REFUSED, NOT DROPPED: `verify PATH` read the default prediction in
+    PATH's place, so a check against one desk reported on another, and
+    `predict --to PATH` overwrote the default prediction, a reference the
+    user was keeping (dragonfly 2026-11-13). Both are the same silence."""
+    k = args.index(flag) if flag in args else -1
+    val = args[k + 1] if 0 <= k < len(args) - 1 else None
+    extra = [a for i, a in enumerate(args)
+             if i > 0 and not (k >= 0 and i in (k, k + 1))]
+    if extra or (k >= 0 and val is None):
+        engine.die_cannot(
+            f"usher {args[0]} takes only `{flag} FILE`; did not understand: "
+            f"{' '.join(extra) or flag + ' with no FILE'}")
+    return val
 
 
 def main():

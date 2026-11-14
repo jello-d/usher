@@ -44,6 +44,7 @@ from datetime import date
 # there is nothing here that can go stale. The engine's users of it are
 # ChromePlugin, chrome_profiles_for, and the selftest fixtures.
 from .chrome import (CHROME_FLAGS, CHROME_STAGGER, browser_pids,
+                     strip_counts,
                      claim_by_elimination, claim_by_size,
                      browser_started, chrome_bind_windows, chrome_profile_map,
                      chrome_slot, chrome_window_for, chrome_window_tabs,
@@ -5634,6 +5635,19 @@ def snapshot_time(path):
         return None
 
 
+def carry_identity(ident, log, since):
+    """`ident` carried through every move in the re-key `log` made AFTER
+    `since`, in order, so a chain (a restart, then another) lands on the id
+    the window has NOW: (identity now, how many moves it took). PURE. The
+    one definition, for a snapshot merged back (translate_snapshot) and a
+    prediction verified after a browser restart (do_verify)."""
+    cur, hops = ident, 0
+    for t, a, b in log:
+        if t > since and cur == a:
+            cur, hops = b, hops + 1
+    return cur, hops
+
+
 def translate_snapshot(snap, log, since):
     """The snapshot with each identity carried through every move logged
     AFTER `since`, in order, so a chain (a restart, then another) lands on
@@ -5643,17 +5657,13 @@ def translate_snapshot(snap, log, since):
     translation that would land on a key the snapshot already holds is
     skipped: the snapshot's own answer for that key wins, the same
     conservatism the live re-keys keep."""
-    moves = [(a, b) for t, a, b in log if t > since]
-    if not moves:
+    if not any(t > since for t, _a, _b in log):
         return dict(snap), 0
     out, n = {}, 0
     for k, e in snap.items():
         base = slot_base(k)
         app, _, ident = slot_base(k).partition("\x00")
-        cur = ident
-        for a, b in moves:
-            if cur == a:
-                cur = b
+        cur, _hops = carry_identity(ident, log, since)
         if cur == ident or not isinstance(e, dict):
             out.setdefault(k, e)
             continue
@@ -9838,7 +9848,9 @@ def verify_index(live):
         k = w.get("key")
         if k:
             by_pair.setdefault(((w.get("app_id") or ""), k), []).append(w)
-        lab = (w.get("title") or "").strip()
+        # THE LABEL WITHOUT ITS COUNTS: "Signal (1)" in a prediction is
+        # "Signal" once the message is read, and the window is the same one
+        lab = strip_counts(w.get("title"))
         if lab:
             by_label.setdefault(lab, []).append(w)
     return by_pair, by_label
@@ -9853,7 +9865,7 @@ def _verify_find(row, live_by_pair, live_by_label):
     group = live_by_pair.get(((row.get("app_id") or ""), k)) if k else None
     if group:
         return group, "key"
-    lab = (row.get("label") or "").strip()
+    lab = strip_counts(row.get("label"))
     if lab and lab in live_by_label:
         return live_by_label[lab], "label"
     return None, None
@@ -9959,6 +9971,15 @@ def do_verify(against=None, tol=2):
     rows = doc["windows"]
     live = snapshot(ipc())["windows"]
     by_pair, by_label = verify_index(live)
+    # A BROWSER RESTART RENAMES EVERY CHROME WINDOW (a SessionID is minted
+    # per run), so a prediction taken before a reboot named ids no window
+    # has now and every Chrome row read GONE however well the restore went.
+    # The re-key log records each move; a row's key is carried through the
+    # moves made after the prediction was recorded.
+    log = read_rekey_log()
+    since = doc.get("recorded", 0)
+    if not isinstance(since, (int, float)) or isinstance(since, bool):
+        since = 0
 
     age = (time.time() - doc.get("recorded", 0)) / 3600.0
     print(f"against {path} ({age:.1f}h old, host {doc.get('host')}, "
@@ -9979,7 +10000,13 @@ def do_verify(against=None, tol=2):
             noslot += 1
             print(f"  skip   {name}  (had no slot when predicted)")
             continue
+        hops = 0
+        if r.get("key"):
+            ck, hops = carry_identity(r["key"], log, since)
+            r = dict(r, key=ck)
         wins, how = _verify_find(r, by_pair, by_label)
+        if how == "key" and hops:
+            how = f"key, followed {hops} restart(s)"
         if not wins:
             miss += 1
             print(f"  GONE   {name}")

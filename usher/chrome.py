@@ -406,6 +406,15 @@ def chrome_session_titles():
 _COUNT_RE = re.compile(r"\(\d+\+?\)")
 
 
+def strip_counts(title):
+    """`title` with every parenthesised NUMBER removed and the spacing
+    closed up: "(2) Team Notes" and "Signal (1)" are a page and an app
+    with an UNREAD COUNT, which changes without the window changing. The
+    one definition, used by the Chrome title join and by verify's label
+    fallback."""
+    return " ".join(_COUNT_RE.sub("", title or "").split())
+
+
 def _chrome_page_title(title):
     """The page title as a JOIN KEY: the browser-name suffix stripped, and
     every parenthesised NUMBER removed.
@@ -422,7 +431,7 @@ def _chrome_page_title(title):
         if title.endswith(suf):
             title = title[:-len(suf)]
             break
-    return " ".join(_COUNT_RE.sub("", title).split())
+    return strip_counts(title)
 
 
 def chrome_window_for(title):

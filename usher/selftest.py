@@ -434,6 +434,81 @@ def _t_registry(ck):
            {"app_id": "kitty", "key": "kitty:/h", "label": ""},
            _dk, _dl)[0]) == 2)
 
+    # AN UNREAD COUNT IS NOT A DIFFERENT WINDOW: a prediction labelled
+    # "Signal (1)" read GONE once the message was read (dragonfly
+    # 2026-11-13). Counts are stripped on both sides, as the Chrome join does.
+    ck("strip-counts-drops-every-parenthesised-number",
+       engine.strip_counts("(2) Team Notes (10+) | x") == "Team Notes | x"
+       and engine.strip_counts("Signal (1)") == "Signal"
+       and engine.strip_counts(None) == "")
+    _ck_, _cl_ = verify_index([{"app_id": "signal", "key": "", "title":
+                                "Signal"}])
+    ck("verify-label-ignores-an-unread-count",
+       _verify_find({"app_id": "signal", "key": None, "label": "Signal (1)"},
+                    _ck_, _cl_)[1] == "label")
+    # AND THE OTHER WAY: the count on the LIVE window, gone from the row
+    _ck_, _cl_ = verify_index([{"app_id": "signal", "key": "", "title":
+                                "Signal (3)"}])
+    ck("verify-label-ignores-a-count-on-the-live-window",
+       _verify_find({"app_id": "signal", "key": None, "label": "Signal"},
+                    _ck_, _cl_)[1] == "label")
+    # A BROWSER RESTART RENAMES EVERY CHROME WINDOW, so a prediction's key is
+    # carried through the re-key log's moves made AFTER it was recorded
+    _rlog = [(50.0, "chrome:win:1", "chrome:win:9"),
+             (150.0, "chrome:win:1", "chrome:win:2"),
+             (160.0, "chrome:win:2", "chrome:win:3")]
+    ck("carry-identity-follows-a-chain-after-since",
+       engine.carry_identity("chrome:win:1", _rlog, 100) == ("chrome:win:3",
+                                                             2))
+    ck("carry-identity-ignores-moves-before-since",
+       engine.carry_identity("chrome:win:1", _rlog[:1], 100)
+       == ("chrome:win:1", 0))
+    ck("carry-identity-leaves-an-unmoved-key",
+       engine.carry_identity("term:resume", _rlog, 0) == ("term:resume", 0))
+    # DRIVEN THROUGH THE REAL VERB: a prediction recorded at 100 naming
+    # chrome:win:1, a restart logged at 150, the window live as win:2
+    _vtmp = tempfile.mkdtemp(prefix="usher-vrk.", dir="/var/tmp")
+    _vp = os.path.join(_vtmp, "p.json")
+    with open(_vp, "w") as _f:
+        json.dump({"recorded": 100.0, "host": "h", "profile": "P",
+                   "windows": [{"app_id": "google-chrome",
+                                "key": "chrome:win:1", "label": "",
+                                "expect_workspace": [0, 0],
+                                "expect_pos": [5, 5],
+                                "expect_size": [50, 50],
+                                "expect_output": "DP-1"}]}, _f)
+    _vsaved = (engine.snapshot, engine.ipc, engine.read_rekey_log,
+               engine.profile_id)
+
+    def _vrun(log):
+        engine.snapshot = lambda s: {"windows": [{
+            "app_id": "google-chrome", "key": "chrome:win:2", "title": "",
+            "workspace": [0, 0], "pos": [5, 5], "size": [50, 50],
+            "output": "DP-1"}]}
+        engine.ipc = lambda: None
+        engine.read_rekey_log = lambda: log
+        engine.profile_id = lambda: "P"
+        _o_ = io.StringIO()
+        with contextlib.redirect_stdout(_o_):
+            _rc_ = engine.do_verify(against=_vp)
+        return _rc_, _o_.getvalue()
+    try:
+        _vrc, _vout = _vrun([(150.0, "chrome:win:1", "chrome:win:2")])
+        ck("verify-follows-a-restart-through-the-rekey-log",
+           _vrc == 0 and "followed 1 restart" in _vout
+           and "1 ok, 0 wrong, 0 gone" in _vout)
+        # THE CONTROLS: no move, and a move made BEFORE the prediction
+        _vrc, _vout = _vrun([])
+        ck("verify-without-a-move-reads-gone",
+           _vrc == 1 and "GONE" in _vout)
+        _vrc, _vout = _vrun([(90.0, "chrome:win:1", "chrome:win:2")])
+        ck("verify-ignores-a-move-older-than-the-prediction",
+           _vrc == 1 and "GONE" in _vout)
+    finally:
+        (engine.snapshot, engine.ipc, engine.read_rekey_log,
+         engine.profile_id) = _vsaved
+        shutil.rmtree(_vtmp, ignore_errors=True)
+
     # The deltas, and the tolerance that makes a rounded size agreement.
     _vexp = {"expect_workspace": [1, 0], "expect_pos": [10, 10],
              "expect_size": [100, 100]}
@@ -7741,6 +7816,27 @@ def _t_cli_split(ck):
        _vcalls == [None, "/p.json"]
        and _vrc == [0, 0, engine.EXIT_CANNOT, engine.EXIT_CANNOT]
        and "did not understand: /p.json" in _verr.getvalue())
+    # AND predict THE SAME WAY: `predict --to PATH` was taken as a bare
+    # `predict` and overwrote the default prediction, a reference the user
+    # was keeping (dragonfly 2026-11-13)
+    _pcalls, _perr = [], _vio.StringIO()
+    _rp = engine.do_predict
+    try:
+        engine.do_predict = lambda out=None: _pcalls.append(out) or 0
+        _prc = []
+        for _args in (["predict"], ["predict", "--out", "/q.json"],
+                      ["predict", "--to", "/q.json"], ["predict", "--out"]):
+            try:
+                with _vctx.redirect_stderr(_perr):
+                    cli._dispatch("predict", _args)
+            except SystemExit as _x:
+                _prc.append(_x.code)
+    finally:
+        engine.do_predict = _rp
+    ck("predict-takes-out-and-refuses-anything-else",
+       _pcalls == [None, "/q.json"]
+       and _prc == [0, 0, engine.EXIT_CANNOT, engine.EXIT_CANNOT]
+       and "did not understand: --to /q.json" in _perr.getvalue())
     # AND THE ASK ITSELF: the accounts with windows here are each asked to
     # capture, with the live views relayed; none asked when there are none.
     _asked = []
