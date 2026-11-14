@@ -2687,6 +2687,7 @@ def _t_resolution(ck):
                 engine.chrome_profiles_for = lambda _s: ["Default"]
                 engine._announce = lambda *_a, **_k: None
                 engine.app_spawn = lambda *_a, **_k: None
+                engine._BROWSER_LAUNCHED_AT = 0.0
                 _both = _chp.relaunch_missing(
                     [{"app_id": "Google-chrome"},
                      {"app_id": "google-chrome"}], [])
@@ -2696,6 +2697,11 @@ def _t_resolution(ck):
                 engine.app_spawn = _r_sp
             ck("chrome-reports-both-spellings-it-claimed",
                _both == {"Google-chrome", "google-chrome"})
+            # AND IT SAYS WHEN, which is what holds an app window back until
+            # the browser is up (dragonfly 2026-11-14, two of each PWA).
+            ck("chrome-launch-records-when-the-browser-started",
+               engine._BROWSER_LAUNCHED_AT > 0)
+            engine._BROWSER_LAUNCHED_AT = 0.0
             engine._SOURCE_REKEY.clear()
 
             # ---- AND THE ENCLAVE SIDE PRODUCES THE PAIRS -----------------
@@ -3852,6 +3858,63 @@ def _t_desktop(ck):
         got = []
         n = desktop_relaunch_missing([W("nm-applet")], [], spawn=got.append)
         ck("desktop-pass-honours-a-refusal", n == set() and got == [])
+
+        # A CHROME APP WINDOW WAITS FOR THE BROWSER AND CARRIES THE PROMPT
+        # FLAG. Measured on dragonfly 2026-11-14: an app launch reached
+        # Chrome first, without usher's flags, offered "Restore?", and every
+        # app window came back twice. ONE wait per pass, not one per app.
+        _app = ["/opt/google/chrome/google-chrome",
+                "--profile-directory=Default"]
+        _rdl = engine.desktop_launch_for
+        try:
+            engine.desktop_launch_for = lambda a, e: (
+                (_app + [f"--app-id={a}"], "") if a.startswith("chrome-")
+                else (["calibre"], ""))
+            got, waits = [], []
+            n = desktop_relaunch_missing(
+                [W("chrome-aaa-Default"), W("chrome-bbb-Default"),
+                 W("calibre-gui")], [], spawn=got.append,
+                wait=lambda: waits.append(1))
+            ck("an-app-window-waits-for-the-browser-once-a-pass",
+               waits == [1] and len(got) == 3)
+            ck("an-app-window-launch-hides-the-restore-prompt",
+               all("--hide-crash-restore-bubble" in g for g in got
+                   if g[0].endswith("google-chrome")))
+            ck("an-app-window-launch-never-asks-for-the-session",
+               not any("--restore-last-session" in g for g in got))
+            got, waits = [], []
+            desktop_relaunch_missing([W("calibre-gui")], [],
+                                     spawn=got.append,
+                                     wait=lambda: waits.append(1))
+            ck("control-a-plain-app-waits-for-nothing",
+               waits == [] and got == [["calibre"]])
+            from .chrome import (is_app_window_argv as _iaw,
+                                 app_window_argv as _awa,
+                                 after_browser as _ab)
+            ck("app-window-argv-is-told-from-the-browser",
+               _iaw(_app + ["--app-id=x"])
+               and not _iaw(["google-chrome", "--restore-last-session"])
+               and not _iaw(["kitty", "--app-id=x"]) and not _iaw([]))
+            ck("app-window-argv-adds-the-flag-once",
+               _awa(_awa(["google-chrome", "--app-id=x"])).count(
+                   "--hide-crash-restore-bubble") == 1)
+            _clk, _slept = [100.0], []
+            def _sl(s):
+                _slept.append(s)
+                _clk[0] += s
+            ck("after-browser-waits-for-nothing-without-a-launch",
+               _ab(0, lambda: [], _sl, lambda: _clk[0], 4) == 0
+               and _slept == [])
+            _seen = iter([[], [], [7]])
+            _ab(99.0, lambda: next(_seen, [7]), _sl, lambda: _clk[0], 4)
+            ck("after-browser-polls-until-the-browser-runs-then-staggers",
+               _slept[:2] == [0.25, 0.25] and _clk[0] >= 103.0)
+            _clk[0], _slept[:] = 100.0, []
+            _ab(99.0, lambda: [], _sl, lambda: _clk[0], 4)
+            ck("after-browser-is-bounded-when-no-browser-appears",
+               108.0 <= _clk[0] <= 108.5)
+        finally:
+            engine.desktop_launch_for = _rdl
     finally:
         engine.desktop_entries = _re
         engine.logline = _rl

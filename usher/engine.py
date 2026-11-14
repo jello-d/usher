@@ -44,7 +44,8 @@ from datetime import date
 # there is nothing here that can go stale. The engine's users of it are
 # ChromePlugin, chrome_profiles_for, and the selftest fixtures.
 from .chrome import (CHROME_FLAGS, CHROME_STAGGER, browser_pids,
-                     strip_counts,
+                     strip_counts, after_browser, app_window_argv,
+                     is_app_window_argv,
                      claim_by_elimination, claim_by_size,
                      browser_started, chrome_bind_windows, chrome_profile_map,
                      chrome_slot, chrome_window_for, chrome_window_tabs,
@@ -3408,6 +3409,11 @@ class ChromePlugin(WindowPlugin):
                 [os.path.basename(exe)] + argv[1:]))
             app_spawn(argv, _SPAWN_WATCH)
             n += 1
+        if n:
+            # WHEN, so an app window started after this waits for the
+            # browser instead of racing it (chrome.after_browser).
+            global _BROWSER_LAUNCHED_AT
+            _BROWSER_LAUNCHED_AT = time.time()
         # THE APP-IDS AS THE SAVED ROWS SPELL THEM, not a literal: XWayland
         # reports `Google-chrome` where native Wayland reports
         # `google-chrome` and BOTH are in a real store, so returning one
@@ -6483,7 +6489,14 @@ def desktop_launch_for(app, entries):
     return argv, None
 
 
-def desktop_relaunch_missing(saved, live, spawn=None, claimed=None):
+# When ChromePlugin last started a browser in this process, or 0. Read by
+# the registry default, which starts Chrome's APP windows (see chrome.py,
+# after_browser): they must not reach Chrome before the browser does.
+_BROWSER_LAUNCHED_AT = 0.0
+
+
+def desktop_relaunch_missing(saved, live, spawn=None, claimed=None,
+                             wait=None):
     """Start any saved app that no plugin claims and that is not running.
 
     PER APP, NOT PER WINDOW, which falls out of the measurement rather than
@@ -6527,6 +6540,7 @@ def desktop_relaunch_missing(saved, live, spawn=None, claimed=None):
     have = {app_of(v) for v in our_views(live)}
     entries = desktop_entries()
     started = set()
+    waited = False
     for app, w in sorted(want.items()):
         if app in have:
             continue            # already running; its windows are its own
@@ -6534,6 +6548,13 @@ def desktop_relaunch_missing(saved, live, spawn=None, claimed=None):
         if argv is None:
             logline(f"no relaunch for {app}: {why}")
             continue
+        if is_app_window_argv(argv):
+            argv = app_window_argv(argv)
+            if not waited:
+                waited = True
+                (wait or (lambda: after_browser(
+                    _BROWSER_LAUNCHED_AT, browser_pids, time.sleep,
+                    time.time)))()
         _announce(f"launch  {' '.join(argv)}")
         if spawn is None:
             app_spawn(argv, _SPAWN_WATCH)

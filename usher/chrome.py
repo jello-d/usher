@@ -102,6 +102,64 @@ CHROME_STAGGER = float(os.environ.get("USHER_CHROME_STAGGER", 4))
 _CHROME_FLAGS_DEFAULT = "--restore-last-session --hide-crash-restore-bubble"
 CHROME_FLAGS = shlex.split(
     os.environ.get("USHER_CHROME_FLAGS", _CHROME_FLAGS_DEFAULT))
+
+
+# A CHROME APP WINDOW (a PWA) IS STARTED BY ITS OWN DESKTOP ENTRY, as
+# `google-chrome --profile-directory=P --app-id=X`, beside the browser's own
+# launch. Two hazards meet in that, measured on dragonfly 2026-11-14:
+#
+#   ORDER   if an app launch reaches Chrome first it becomes the browser
+#           process, without usher's flags. The browser's own launch then
+#           hands its request to it, and the session restore it carries
+#           reopens the app windows a second time: two of each.
+#   PROMPT  without --hide-crash-restore-bubble that first process offers
+#           "Chrome didn't shut down correctly. Restore?", and taking it
+#           reopens the last session on top of what usher started.
+#
+# At two earlier unclean logins the browser happened to start first and
+# nothing doubled, so the fix is to make that order certain (the engine waits
+# for the browser it started) and to suppress the prompt either way.
+APP_FLAG = "--app-id="
+APP_FLAGS = ["--hide-crash-restore-bubble"]
+
+
+def is_app_window_argv(argv):
+    """Is this a launch of a Chrome APP window rather than the browser? PURE.
+
+    By the program and an `--app-id=` argument, which is what a PWA's own
+    desktop entry runs; the browser's launch never carries one."""
+    if not argv:
+        return False
+    return (is_chrome(os.path.basename(argv[0]))
+            and any(str(a).startswith(APP_FLAG) for a in argv[1:]))
+
+
+def app_window_argv(argv):
+    """`argv` with the flags an app window's launch needs added, once. PURE.
+
+    NOT CHROME_FLAGS: --restore-last-session on an app launch is a second
+    request to reopen the whole session, which is the duplication itself."""
+    return list(argv) + [f for f in APP_FLAGS if f not in argv]
+
+
+def after_browser(launched_at, pids, sleep, now, stagger=None):
+    """Hold an app window's launch until the browser usher started this pass
+    is running and has had CHROME_STAGGER to open its singleton socket, the
+    same interval two profiles are staggered by. Returns the seconds waited.
+
+    Bounded: it polls for a browser process for at most two staggers, then
+    lets the launch go anyway, since a missing app window is worse than the
+    race. Nothing waits when usher started no browser (launched_at is 0)."""
+    stagger = CHROME_STAGGER if stagger is None else stagger
+    if not launched_at:
+        return 0.0
+    t0 = now()
+    while not pids() and now() - t0 < 2 * stagger:
+        sleep(0.25)
+    left = launched_at + stagger - now()
+    if left > 0:
+        sleep(left)
+    return now() - t0
 # Wayland titles Chrome sets are "<page title> - Google Chrome"; strip that
 # browser suffix to recover the page title the session file stores.
 CHROME_SUFFIXES = (" - Google Chrome", " - Chromium")
