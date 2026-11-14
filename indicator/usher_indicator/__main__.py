@@ -3,7 +3,8 @@ drawn in the same owned-glyph language as mux-indicator / comms-indicator (a
 near-black rounded tile, frame colour = state) so the tray reads as one system.
 
 It is a thin PRESENTER: the state machine lives in the usher daemon, which
-publishes {mode, seconds_left, arc, transposed_at, recording} each tick. This
+publishes {mode, seconds_left, arc, transposed_at, fixing_until,
+recording} each tick. This
 reads that to draw. A left-click shells `usher toggle` (settled <-> place), a
 middle-click `usher transpose`. Nothing here duplicates the placement logic.
 
@@ -18,7 +19,9 @@ may be true while the other is:
 
   the SCREEN                 a TRANSPOSE just happened
     near-black   nothing recent
-    royal blue   a sweep landed within DWELL seconds
+    royal blue   a sweep landed within DWELL seconds, OR usher is still
+                 settling it (fixing_until: a read-back or late watch the
+                 sweep started can still act). Only then back to near-black.
 
 Keeping them apart is the whole design: a transpose arriving inside a place
 window must not disturb the countdown, and dropping the ring to show the
@@ -78,6 +81,9 @@ _BLUE = (0x1B, 0x22, 0x55)
 # NO COUNTDOWN AND NO FADE. This is a flash saying "that just happened"; a
 # timer on it would make it look load-bearing, and the sweep is already over.
 DWELL = 10.0
+# The longest settling the tray will believe: usher's late watch is capped
+# at a minute, so anything far beyond that is a bad clock or a bad value.
+_FIXING_MAX = 600.0
 
 
 def _lift(base, f):
@@ -266,12 +272,21 @@ def read_status():
     mode = s.get("mode")
     if age > _STALE or mode not in ("place", "settled"):
         return ("down", 0.0, None, False)
+    now = time.time()
     try:
-        since = time.time() - float(s.get("transposed_at") or 0)
+        since = now - float(s.get("transposed_at") or 0)
     except (TypeError, ValueError):
         since = DWELL + 1
+    # STILL SETTLING holds the transpose until the daemon's own timers are
+    # done, so the screen never reads settled while usher is correcting.
+    # BOUNDED, as the dwell's `0 <=` is: a clock step or a garbage value
+    # must not pin the tray blue, and no settling runs anywhere near an hour.
+    try:
+        left = float(s.get("fixing_until") or 0) - now
+    except (TypeError, ValueError):
+        left = 0.0
     return (mode, float(s.get("arc", 0.0)), s.get("seconds_left"),
-            0 <= since < DWELL)
+            0 <= since < DWELL or 0 < left < _FIXING_MAX)
 
 
 def _render_test(outdir):
@@ -405,6 +420,20 @@ def _status_test():
             ck("a-future-transpose-does-not", read_status()[3] is False)
             plant(dict(live, transposed_at="nonsense"))
             ck("a-garbage-transpose-does-not", read_status()[3] is False)
+            # STILL SETTLING KEEPS IT: an old sweep whose timers are still
+            # running reads as transposing until they end, and not after.
+            _old = time.time() - DWELL - 1
+            plant(dict(live, transposed_at=_old,
+                       fixing_until=time.time() + 20))
+            ck("a-transpose-still-settling-stays", read_status()[3] is True)
+            plant(dict(live, transposed_at=_old,
+                       fixing_until=time.time() - 1))
+            ck("a-transpose-done-settling-ends", read_status()[3] is False)
+            plant(dict(live, transposed_at=_old,
+                       fixing_until=time.time() + 86400))
+            ck("a-far-future-settling-does-not-pin", read_status()[3] is False)
+            plant(dict(live, transposed_at=_old, fixing_until="nonsense"))
+            ck("a-garbage-settling-does-not", read_status()[3] is False)
             # AND A DAEMON WITH NO SUCH FIELD AT ALL (an older one) is read,
             # not refused: the field was added additively.
             plant({"mode": "place", "seconds_left": 1, "arc": 0.1})

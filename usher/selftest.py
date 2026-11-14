@@ -5579,6 +5579,100 @@ def _t_verify(ck):
            w.verify[7]["until"] - time.time() > _w.PLACE_LATE - 1
            and w.verify[7].get("cap", 0) - time.time() > _w.LATE_CAP - 1)
 
+        # A CLOSED WATCH REOPENS ON A PUT-BACK within its cap. Measured on
+        # dragonfly 2026-11-13 20:16: three Chrome windows put back their
+        # laptop widths after the watch went quiet and were corrected only
+        # by the next 5s visibility pass, 21s after placing.
+        def _closed(fixes=0, cap_in=30.0):
+            w = _wat(_v(110, 120, w=300, h=300))
+            w.place_sock = _LSock([_o])
+            w.transpose_vids.add(7)
+            cap = time.time() + cap_in
+            w._verify_one(7, {"e": _eb, "o": _o, "late": True, "tp": True,
+                              "until": time.time() + 0.5, "cap": cap,
+                              "fixes": fixes})
+            return w, cap
+        w, _cap = _closed()
+        ck("a-closed-late-watch-is-remembered",
+           7 not in w.verify and w.watched.get(7, {}).get("cap") == _cap
+           and 7 not in w.transpose_vids)
+
+        def _put_back(w, width):
+            w._on_event({"event": "view-geometry-changed",
+                         "view": dict(_v(110, 120, w=width, h=300), id=7)})
+            return w.verify.get(7)
+        _re = _put_back(w, 250)
+        ck("a-put-back-after-the-watch-closed-reopens-it",
+           bool(_re) and _re.get("late") is True
+           and _re["due"] <= time.time() + _w.SIZE_SETTLE + 0.5
+           and _re["until"] <= _cap and 7 not in w.watched)
+        ck("a-reopened-watch-still-counts-as-the-transposes",
+           bool(_re) and _re.get("tp") is True and 7 in w.transpose_vids)
+        # THE CONTROLS: the size held, the cap passed, the budget spent
+        w, _ = _closed()
+        ck("a-closed-watch-ignores-a-change-at-the-given-size",
+           _put_back(w, 300) is None and 7 in w.watched)
+        w, _ = _closed(cap_in=-1)
+        ck("a-closed-watch-past-its-cap-stays-closed",
+           _put_back(w, 250) is None)
+        w, _ = _closed(fixes=_w.LATE_FIXES)
+        ck("a-closed-watch-with-its-fixes-spent-stays-closed",
+           _put_back(w, 250) is None)
+
+        # A WINDOW GROWN PAST ITS PANEL brings the visibility pass forward
+        # to SIZE_SETTLE, so the refit follows the growth, not the next tick
+        def _vis_due(width):
+            w = _wat(_v(110, 120))
+            w.vis_outs = {_o["name"]: _o}
+            w.visible_due = time.time() + 60
+            w._on_event({"event": "view-geometry-changed",
+                         "view": dict(_v(0, 0, w=width, h=30), id=9)})
+            return w.visible_due - time.time()
+        _ow = _o["geometry"]["width"]
+        ck("a-window-grown-past-its-panel-is-refit-soon",
+           _vis_due(_ow + 400) <= _w.SIZE_SETTLE + 0.5)
+        ck("a-window-within-its-panel-changes-nothing",
+           _vis_due(50) > 50)
+
+        # WHEN THE TRANSPOSE'S SETTLING ENDS, published for the tray: the
+        # latest a sweep-started read-back or late watch can act, and only
+        # those, so ordinary placements at a login do not read as one
+        w = Watcher(launch=False)
+        _n = time.time()
+        ck("nothing-settling-is-zero", w._fixing_until() == 0)
+        w.verify = {1: {"tp": True, "late": True, "until": _n + 30},
+                    2: {"tp": False, "late": True, "until": _n + 90},
+                    3: {"tp": True, "due": _n + 1}}
+        ck("settling-ends-with-the-sweeps-last-timer",
+           abs(w._fixing_until() - (_n + 30)) < 0.01)
+        w.verify = {3: {"tp": True, "due": _n + 1}}
+        ck("a-read-back-counts-its-late-watch-too",
+           abs(w._fixing_until() - (_n + 1 + _w.PLACE_LATE)) < 0.01)
+        w.verify, w.sweep_wait = {}, {"until": _n + 15}
+        ck("a-sweep-waiting-for-its-grid-is-settling",
+           abs(w._fixing_until() - (_n + 15)) < 0.01)
+        # AND THE SWEEP IS WHAT TAGS: a read-back armed for a window the
+        # sweep entitled carries `tp`, one for any other window does not
+        w = Watcher(launch=False)
+        w.place_sock = object()
+        w._sweep([5, 6])
+        w._verify_later(5, _e, _o, 0)
+        w._verify_later(9, _e, _o, 0)
+        # THE OCCUPANCY PASS IS WIRED: restore and doctor hand match the
+        # outputs, or it never runs and the dry run reads crosswise MOVEs
+        import ast as _ast
+        _calls = []
+        for _mod in (engine, sys.modules["usher.doctor"]):
+            for _nd in _ast.walk(_ast.parse(open(_mod.__file__).read())):
+                if (isinstance(_nd, _ast.Call)
+                        and getattr(_nd.func, "id", None) == "match"):
+                    _calls.append(len(_nd.args))
+        ck("restore-and-doctor-hand-match-the-outputs",
+           len(_calls) >= 2 and all(n == 3 for n in _calls))
+        ck("a-sweep-tags-the-read-backs-of-its-windows",
+           w.transpose_vids == {5, 6} and w.verify[5].get("tp") is True
+           and w.verify[9].get("tp") is False)
+
         # BOUNDED: at the end of the budget the window is left where it is
         # rather than fought over for the whole 120s grace.
         logged[:] = []
@@ -10434,6 +10528,41 @@ def _t_placement(ck):
     ck("match-consumes-an-entry-once",
        len(_pairs3) == 1 and len(_unlive3) == 1)
 
+    # A WINDOW ALREADY ON ONE OF ITS CANDIDATE SLOTS TAKES THAT ONE. Two
+    # interchangeable windows (one identity, a family of slots), each sitting
+    # exactly on a slot, in the order that walk-order pairs CROSSWISE: the
+    # dry run read two MOVEs over a correct desk (dragonfly 2026-11-13).
+    # the output a read-back compares against, which is NAMED
+    _fo = {"DP-1": dict(_o["DP-1"], name="DP-1")}
+    _fam = [{"app_id": "zzz-fam", "title": "", "appid_only": True,
+             "output": "DP-1", "workspace": [0, 0], "pos": [p, 100],
+             "size": [400, 300], "sticky": False} for p in (40, 500)]
+
+    def _on(e, vid):
+        _v = _trv("zzz-fam", "x", vid=vid)
+        _g = target_geometry(e, _fo["DP-1"])
+        _v["output-name"] = "DP-1"
+        _v["geometry"] = dict(_g, width=e["size"][0], height=e["size"][1])
+        return _v
+    _cross = [_on(_fam[1], 1), _on(_fam[0], 2)]
+    _po, _, _ = match(_cross, _fam, _fo)
+    ck("match-pairs-a-window-with-the-slot-it-sits-on",
+       len(_po) == 2 and all(e["pos"][0] == (500 if lv["id"] == 1 else 40)
+                             for lv, e in _po))
+    # THE CONTROL: without the outputs the walk order decides, crosswise,
+    # or the cell above would pass over a matcher that ignored occupancy
+    _pw, _, _ = match(_cross, _fam)
+    ck("match-without-outputs-keeps-walk-order",
+       [e["pos"][0] for _l, e in _pw] == [40, 500])
+    # AND A WINDOW ON NO SLOT still gets one, from the walk
+    _off = _trv("zzz-fam", "x", vid=3)
+    _off["output-name"], _off["geometry"] = "DP-1", {
+        "x": 1500, "y": 700, "width": 400, "height": 300}
+    _pf, _ul, _ = match([_off, _on(_fam[0], 2)], _fam, _fo)
+    ck("match-gives-a-window-on-no-slot-the-one-left",
+       len(_pf) == 2 and not _ul
+       and {lv["id"]: e["pos"][0] for lv, e in _pf} == {3: 500, 2: 40})
+
     # A PER-WINDOW ENTRY BEATS THE SOURCE-ALONE FALLBACK, in any entry order.
     # PRODUCT, measured live on dragonfly: `kitty\0titan` sorts before
     # `kitty\0titan:<digest>` and claims any window of its account, so a walk
@@ -10878,6 +11007,10 @@ def _t_visible(ck):
         _wm.logline = _said.append
         w._ensure_visible()
         ck("daemon-waits-for-a-second-sighting", _moved == [])
+        # AND IT KEEPS THE OUTPUTS IT READ, which a geometry event uses to
+        # bring a refit forward without IPC of its own (_oversize_soon)
+        ck("the-visibility-pass-keeps-the-outputs-it-read",
+           set(w.vis_outs) == {_o["name"]})
         w._ensure_visible()
         ck("daemon-rescues-only-the-invisible-window", _moved == [2])
         ck("daemon-says-why", any("rescued" in m and "no attached output"

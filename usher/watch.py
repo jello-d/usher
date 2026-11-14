@@ -625,6 +625,16 @@ class Watcher:
         # OPENED mid-session, which the settled mode deliberately leaves alone.
         self.late_ok = set()
         self.verify = {}
+        # vid -> the slot of a late watch that has CLOSED, kept until
+        # LATE_CAP from the landing, so a put-back after the watch went quiet
+        # reopens it (_size_changed) instead of waiting for a 5s pass.
+        self.watched = {}
+        # vids the last sweep entitled: their read-backs and late watches are
+        # the transpose's own settling, published as `fixing_until`.
+        self.transpose_vids = set()
+        # the outputs the last visibility pass read (name -> output), so a
+        # geometry event can ask "is this now larger than its panel" cheaply
+        self.vis_outs = {}
         self.place_tries = {}  # vid -> placements ISSUED for it this map, so
         #                        the retry budget survives the re-place that
         #                        clears it from `placed`
@@ -846,6 +856,12 @@ class Watcher:
                      # reader: at no point does it claim a transpose is
                      # happening when one is not.
                      "transposed_at": round(self.st.get("transposed_at", 0), 3),
+                     # AND WHEN ITS SETTLING ENDS, also an instant: the
+                     # latest a read-back, late watch or grid wait the sweep
+                     # started can still act. The tray stays on the
+                     # transpose until this has passed, so it never shows
+                     # settled while usher is still correcting windows.
+                     "fixing_until": round(self._fixing_until(), 3),
                      # RECORDING IS THE CONSTANT, with exactly one exception:
                      # a display change in flux, where believing the geometry
                      # would teach the store a collapse. Published because the
@@ -855,6 +871,23 @@ class Watcher:
             os.replace(tmp, STATUS_FILE)
         except OSError:
             pass
+
+    def _fixing_until(self):
+        """The latest instant the last transpose's settling can still act,
+        or 0. A read-back counts to PLACE_LATE past its due (a late watch
+        follows a placement that lands), a late watch to its `until`, and a
+        sweep waiting for the grid to its own bound. Only items the SWEEP
+        started (`tp`), so ordinary placements at a login do not read as a
+        transpose."""
+        end = 0.0
+        with self.lock:
+            for it in self.verify.values():
+                if it.get("tp"):
+                    end = max(end, it.get("until", 0) if it.get("late")
+                              else it.get("due", 0) + PLACE_LATE)
+            if self.sweep_wait:
+                end = max(end, self.sweep_wait.get("until", 0))
+        return end
 
     # --- placement -----------------------------------------------------------
 
@@ -1441,7 +1474,8 @@ class Watcher:
             return
         with self.lock:
             self.verify[vid] = {"e": e, "o": o,
-                                "due": time.time() + PLACE_VERIFY[n]}
+                                "due": time.time() + PLACE_VERIFY[n],
+                                "tp": vid in self.transpose_vids}
 
     def _verify_one(self, vid, item):
         """Read one issued placement back, and re-place it if it did not land.
@@ -1461,11 +1495,20 @@ class Watcher:
             # re-seat that armed its own read-back keeps that slot instead
             fixes = item.get("fixes", 0) + (1 if self._late_look(v, e, o)
                                             else 0)
-            if fixes < LATE_FIXES and \
-                    time.time() + LATE_EVERY <= item.get("until", 0):
-                with self.lock:
+            with self.lock:
+                if fixes < LATE_FIXES and \
+                        time.time() + LATE_EVERY <= item.get("until", 0):
                     self.verify.setdefault(vid, dict(
                         item, fixes=fixes, due=time.time() + LATE_EVERY))
+                elif vid not in self.verify:
+                    # THE WATCH CLOSES, but its slot is kept until LATE_CAP
+                    # from the landing: a put-back that comes after it went
+                    # quiet reopens it (_size_changed). Measured on dragonfly
+                    # 2026-11-13 20:16: three Chrome windows put back their
+                    # laptop widths after the 10s floor and were corrected
+                    # only by the next 5s visibility pass, 21s on.
+                    self.watched[vid] = dict(item, fixes=fixes)
+                    self.transpose_vids.discard(vid)
             return
         if placement_landed(v, e, o):
             # IT STUCK, which is the overwhelmingly common case and says
@@ -1486,6 +1529,8 @@ class Watcher:
             # is this passing for success, which is the whole bug.
             logline(f"place did not take after {n} tries, left where it is: "
                     f"{app[:18]} | {title[:28]}")
+            with self.lock:
+                self.transpose_vids.discard(vid)
             return
         # ONLY THE SIZE MISSED: the window is where we put it and kept a
         # larger size of its own (a Chrome window moved to another monitor
@@ -1520,9 +1565,25 @@ class Watcher:
         event: one dict lookup unless a late look is pending."""
         vid = v.get("id")
         now = time.time()
+        self._oversize_soon(v, now)
         with self.lock:
             item = self.verify.get(vid)
-            if not item or not item.get("late"):
+            if not item:
+                # A CLOSED WATCH REOPENS on a put-back within LATE_CAP of the
+                # landing, with its fixes so far, so the budget still bounds
+                # a window that keeps putting its size back.
+                rec = self.watched.get(vid)
+                if (rec and now < rec.get("cap", 0)
+                        and rec.get("fixes", 0) < LATE_FIXES
+                        and engine.size_put_back(v, rec["e"])):
+                    self.watched.pop(vid, None)
+                    if rec.get("tp"):
+                        self.transpose_vids.add(vid)
+                    self.verify[vid] = dict(
+                        rec, late=True, due=now + SIZE_SETTLE,
+                        until=min(rec["cap"], now + LATE_QUIET))
+                return
+            if not item.get("late"):
                 return
             # ANY change keeps the watch open until LATE_QUIET after it,
             # within LATE_CAP of the landing
@@ -1530,6 +1591,23 @@ class Watcher:
                                 max(item.get("until", 0), now + LATE_QUIET))
             if engine.size_put_back(v, item["e"]):
                 item["due"] = min(item["due"], now + SIZE_SETTLE)
+
+    def _oversize_soon(self, v, now):
+        """A GEOMETRY EVENT that leaves a window larger than its panel's
+        work area brings the visibility pass forward to SIZE_SETTLE, so the
+        refit follows the growth rather than the next VISIBLE_EVERY tick.
+        Against the outputs the last pass read, so it costs no IPC here
+        (this runs on the event thread; place_sock is the placer's)."""
+        outs = self.vis_outs
+        if not outs:
+            return
+        try:
+            fit = engine.oversize_fit(v, outs, shadow=self._overhang(
+                "marked" if v.get("security-context") else ""))
+        except Exception:                                  # noqa: BLE001
+            fit = None
+        if fit:
+            self.visible_due = min(self.visible_due, now + SIZE_SETTLE)
 
     def _late_look(self, v, e, o):
         """PLACE_LATE after a placement landed: has the app PUT BACK an old
@@ -1686,6 +1764,7 @@ class Watcher:
         if not stable:
             return        # the viewport moved while we looked; next pass
         outs = {o["name"]: o for o in _outs}
+        self.vis_outs = outs
         surfaces, _why = engine.surface_map()
         dflt = engine.surface_default()
         # SEEN TWICE BEFORE IT IS MOVED: a window genuinely out of sight stays
@@ -2500,9 +2579,11 @@ class Watcher:
             self.slot_held.clear()
             self.sweep_rects = {}
             self.verify.clear()
+            self.watched.clear()
             self.place_tries.clear()
             self.late_ok.clear()
             self.redisplay_ok = {i for i in vids if i is not None}
+            self.transpose_vids = set(self.redisplay_ok)
             for i in self.redisplay_ok:
                 self.deadline[i] = now + PLACE_GRACE
             # Runs on the PLACER thread, which is place_sock's one writer, so
@@ -2902,6 +2983,8 @@ class Watcher:
                 self.pending.pop(v["id"], None)
                 # The retry budget is PER MAP, so it goes with the window.
                 self.verify.pop(v["id"], None)
+                self.watched.pop(v["id"], None)
+                self.transpose_vids.discard(v["id"])
                 self.place_tries.pop(v["id"], None)
                 self.late_ok.discard(v["id"])
         if ev in KNOWLEDGE_TRIGGERS:

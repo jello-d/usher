@@ -677,7 +677,7 @@ def _doctor_placement(out, kb, live, outs):
     """Per live window: does it match a remembered slot, and is that slot's
     output actually attached."""
     out("== live windows -> placement ==")
-    pairs, unlive, _ = match(live, list(kb.values()))
+    pairs, unlive, _ = match(live, list(kb.values()), outs)
     for lv, e in pairs:
         where = f"{e['output']} ws{tuple(e['workspace'])}"
         # A slot deliberately does not encode what the window is SHOWING, so

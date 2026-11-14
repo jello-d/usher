@@ -8422,7 +8422,7 @@ def resolve_snapshot(spec):
     return label, snap
 
 
-def match(live, entries):
+def match(live, entries, outputs=None):
     """Greedily match each live window to a knowledge entry, consume-once. An
     app_id-keyed entry matches on app_id alone (unique-app_id apps whose title
     drifts); the rest need an exact identity too (raw title, or, for Chrome,
@@ -8436,13 +8436,30 @@ def match(live, entries):
     `restore` then reported as a MOVE onto the fallback's rect. match_keys has
     always ordered them the other way; this is the same rule for the scan
     form. TWO PASSES, so a fallback is taken only by a window no exact entry
-    claimed, and never ahead of one that would have."""
+    claimed, and never ahead of one that would have.
+
+    AND A WINDOW ALREADY ON ONE OF ITS CANDIDATE SLOTS TAKES THAT ONE, when
+    `outputs` (name -> output) is given. Interchangeable windows (a family
+    of slots under one identity) were paired in walk order, so two
+    terminals each sitting exactly on a slot were paired the other way
+    round: the dry run read two MOVEs over a correct desk, and a real
+    restore would have swapped them (dragonfly 2026-11-13 20:16). This
+    pass runs FIRST, so occupancy decides before order does; a window on
+    no candidate slot falls through to the passes below unchanged."""
     rem = list(entries)
     got = {}
     seen = []
     for i, lv in enumerate(live):
         src = window_origin(lv.get("pid"))[0] if isinstance(lv, dict) else ""
         seen.append((app_of(lv), identity(lv), src or ""))
+    if outputs:
+        for i, (app, key, src) in enumerate(seen):
+            idx = next((j for j, e in enumerate(rem)
+                        if entry_matches(e, app, key, src)
+                        and not is_fallback_entry(e, key, src)
+                        and _sits_on(live[i], e, outputs)), None)
+            if idx is not None:
+                got[i] = rem.pop(idx)
     for loose in (False, True):
         for i, (app, key, src) in enumerate(seen):
             if i in got:
@@ -8456,6 +8473,17 @@ def match(live, entries):
     pairs = [(lv, got[i]) for i, lv in enumerate(live) if i in got]
     unlive = [lv for i, lv in enumerate(live) if i not in got]
     return pairs, unlive, rem
+
+
+def _sits_on(v, e, outputs):
+    """Is live view v already on slot e (match's occupancy pass)? The same
+    question a placement's read-back asks, so the two cannot disagree; any
+    shape it cannot read answers no, which leaves match's order to decide."""
+    try:
+        o = entry_output(e, outputs)
+        return bool(o) and placement_landed(v, e, o)
+    except Exception:                                      # noqa: BLE001
+        return False
 
 
 def target_geometry(e, o):
@@ -9983,7 +10011,7 @@ def do_restore(dry, only=None, source=None):
     # same answer rather than re-asking per entry.
     panels = panel_map()
 
-    pairs, unlive, unlayout = match(live, entries)
+    pairs, unlive, unlayout = match(live, entries, outs)
     # THE SURFACE DECIDES HERE TOO, as it does in the daemon, or `restore`
     # and its dry run report and undo what the daemon chose. Only for the
     # live store: a milestone is a deliberate replay of one moment.
