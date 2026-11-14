@@ -17,11 +17,13 @@ may be true while the other is:
               counts the seconds until it settles (arc drains clockwise)
     down      grey: usher not running (STATUS_FILE absent or stale)
 
-  the SCREEN                 a TRANSPOSE just happened
-    near-black   nothing recent
-    royal blue   a sweep landed within DWELL seconds, OR usher is still
-                 settling it (fixing_until: a read-back or late watch the
-                 sweep started can still act). Only then back to near-black.
+  the GLYPH                  a TRANSPOSE is happening
+    still        the top-left window lit: nothing recent
+    moving       the lit window walks the 2x2 grid, a little brighter, one
+                 step every TRANSPOSE_STEP, while a sweep landed within DWELL
+                 seconds OR usher is still settling it (fixing_until: a
+                 read-back or late watch the sweep started can still act).
+                 Only then back to still.
 
 Keeping them apart is the whole design: a transpose arriving inside a place
 window must not disturb the countdown, and dropping the ring to show the
@@ -59,7 +61,7 @@ FRAME = {
 }
 _DULL = FRAME["down"]                   # the receded (elapsed) border grey
 
-# TRANSPOSE: the SCREEN goes royal blue for a few seconds after a sweep.
+# TRANSPOSE: the lit window WALKS the 2x2 grid, windows being moved.
 #
 # A SEPARATE CHANNEL FROM THE RING, deliberately. The ring is the place
 # countdown, so a transpose landing inside a place window must not disturb it:
@@ -67,10 +69,33 @@ _DULL = FRAME["down"]                   # the receded (elapsed) border grey
 # other any information. (Dropping the ring during a dwell was considered and
 # is worse: it destroys a live countdown to show an event that has passed.)
 #
-# DARK royal blue rather than the pure hue, because the window glyphs are
-# LIFTED off the screen colour. A bright screen would make them darker than
-# their own background and the icon would read inverted.
-_BLUE = (0x1B, 0x22, 0x55)
+# NOT A SCREEN COLOUR, which is what this was first: the screen went a DARK
+# royal blue, kept dark so the lifted glyphs stayed lighter than it, and at
+# 22px in a dark bar that was indistinguishable from near-black (measured:
+# RGB 27,34,85 against 28,36,32). Motion reads at any size.
+#
+# THE ORDER is (column, row) per step: TL, BR, TR, BL, then TL again. It
+# starts and ends on the top-left, where the still glyph is lit, so the walk
+# leaves from and returns to the resting picture; the crossings read as
+# windows being moved rather than a spinner.
+TRANSPOSE_ORDER = ((0, 0), (1, 1), (1, 0), (0, 1))
+TRANSPOSE_STEP = 0.5            # seconds the lit window holds each position
+_HI, _HI_MOVING = 0.64, 0.80    # the lit window's lift: still, moving
+
+
+def next_look(transposing, now):
+    """Seconds until the tray should look again. PURE. Once a second at
+    rest; while transposing, just past the next step boundary, so each
+    position is drawn on time rather than up to a second late."""
+    if not transposing:
+        return 1.0
+    return TRANSPOSE_STEP - (now % TRANSPOSE_STEP) + 0.02
+
+
+def transpose_phase(now):
+    """Which step of TRANSPOSE_ORDER the walk is on at `now`. PURE. Off the
+    wall clock, so the walk never jumps when a refresh runs late."""
+    return int(now / TRANSPOSE_STEP) % len(TRANSPOSE_ORDER)
 
 # HOW LONG THE TRAY DWELLS on a transpose. The daemon publishes the INSTANT
 # and nothing else: a sweep is a blip, so a state field could be missed
@@ -98,25 +123,18 @@ def _lift(base, f):
 
 
 def _screen(state, base=_BASE):
-    # THE STATE TINT IS SKIPPED ON THE BLUE SCREEN. Bleeding 14% of the frame
-    # colour into it turned royal blue muddy purple under `place`, so the one
-    # signal the screen carries read differently in each mode for no reason.
-    # The FRAME still says place-or-settled, so nothing is lost by letting the
-    # screen say only the one thing it is there to say.
-    if base is _BLUE:
-        return base + (0xFF,)
     col = FRAME.get(state, FRAME["down"])
     mix = tuple(int(base[i] * (1 - _TINT) + col[i] * _TINT) for i in range(3))
     return mix + (0xFF,)
 
 
-def _grid(d, s, base=_BASE):
-    # A 2x2 grid of window-rects; the top-left one is focused (brighter).
+def _grid(d, s, base=_BASE, lit=(0, 0), moving=False):
+    # A 2x2 grid of window-rects; one is focused (brighter): the top-left at
+    # rest, the walking one during a transpose (see TRANSPOSE_ORDER).
     # LIFTED OFF THE SCREEN'S OWN BASE, not off a constant, so the glyphs keep
-    # the same contrast on the blue screen as on the near-black one. That is
-    # the invariant the module docstring claims and it would quietly break the
-    # moment the base stopped being near-black.
-    win, win_hi = _lift(base, 0.34), _lift(base, 0.64)
+    # their contrast whatever the screen colour becomes.
+    win = _lift(base, 0.34)
+    win_hi = _lift(base, _HI_MOVING if moving else _HI)
     g0, g1 = s * 0.28, s * 0.72         # glyph bounding box, inset from frame
     gap = s * 0.08
     cw = (g1 - g0 - gap) / 2
@@ -124,7 +142,7 @@ def _grid(d, s, base=_BASE):
     for cx, cy in ((0, 0), (1, 0), (0, 1), (1, 1)):
         x0 = g0 + cx * (cw + gap)
         y0 = g0 + cy * (cw + gap)
-        fill = win_hi if (cx, cy) == (0, 0) else win
+        fill = win_hi if (cx, cy) == lit else win
         d.rounded_rectangle([x0, y0, x0 + cw, y0 + cw], rad, fill=fill)
 
 
@@ -186,9 +204,9 @@ def _border(img, s, arc_frac):
                joint="curve")
 
 
-def _tile(state, arc, size, transposing=False):
+def _tile(state, arc, size, transposing=False, phase=0):
     s = size
-    base = _BLUE if transposing else _BASE
+    base = _BASE
     img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     r = max(2, s // 7)
@@ -202,7 +220,9 @@ def _tile(state, arc, size, transposing=False):
         d.rounded_rectangle([0, 0, s - 1, s - 1], r,
                             fill=_screen(state, base), outline=frame,
                             width=fw)
-    _grid(d, s, base)                   # glyph on top
+    lit = TRANSPOSE_ORDER[phase % len(TRANSPOSE_ORDER)] if transposing \
+        else (0, 0)
+    _grid(d, s, base, lit, transposing)  # glyph on top
     return img
 
 
@@ -217,10 +237,11 @@ def _to_argb(img):
     return bytes(out)
 
 
-def icon_pixmap(state, arc, sizes=(22, 32, 48), transposing=False):
+def icon_pixmap(state, arc, sizes=(22, 32, 48), transposing=False,
+                phase=0):
     out = []
     for s in sizes:
-        t = _tile(state, arc, s, transposing)
+        t = _tile(state, arc, s, transposing, phase)
         # Match the sibling gadgets' bounding box so the tray places us level:
         # mux's badge reaches the top edge, so stamp one invisible (alpha=1)
         # pixel at the top-right corner (see comms-indicator for the rationale).
@@ -280,7 +301,7 @@ def read_status():
     # STILL SETTLING holds the transpose until the daemon's own timers are
     # done, so the screen never reads settled while usher is correcting.
     # BOUNDED, as the dwell's `0 <=` is: a clock step or a garbage value
-    # must not pin the tray blue, and no settling runs anywhere near an hour.
+    # must not pin the walk on, and no settling runs anywhere near an hour.
     try:
         left = float(s.get("fixing_until") or 0) - now
     except (TypeError, ValueError):
@@ -291,25 +312,23 @@ def read_status():
 
 def _render_test(outdir):
     os.makedirs(outdir, exist_ok=True)
-    # The transposing variants are here so the BLUE screen is checkable by
-    # eye: it has to read as blue at 22px and still leave the window glyphs
-    # lighter than their own background, which is the whole reason the base
-    # is a dark royal blue rather than the pure hue.
-    rows = [("settled", 0.0, False), ("settled", 0.0, True),
-            ("place", 1.0, False), ("place", 1.0, True),
-            ("place", 0.33, False), ("place", 0.33, True),
-            ("down", 0.0, False)]
+    # One row per step of the transpose walk, so the moving glyph is
+    # checkable by eye at 22px beside the still one.
+    rows = [("settled", 0.0, False, 0)]
+    rows += [("settled", 0.0, True, i) for i in range(len(TRANSPOSE_ORDER))]
+    rows += [("place", 1.0, False, 0), ("place", 0.33, False, 0),
+             ("place", 0.33, True, 2), ("down", 0.0, False, 0)]
     sizes = (22, 32, 48, 96)
     gap = 8
     w = sum(sizes) + gap * (len(sizes) + 1)
     h = len(rows) * (96 + gap) + gap
     sheet = Image.new("RGBA", (w, h), (30, 30, 34, 255))
-    for r, (st, arc, tp) in enumerate(rows):
+    for r, (st, arc, tp, ph) in enumerate(rows):
         x = gap
         y = gap + r * (96 + gap)
         for z in sizes:
             off = (96 - z) // 2
-            sheet.paste(_tile(st, arc, z, tp), (x + off, y + off))
+            sheet.paste(_tile(st, arc, z, tp, ph), (x + off, y + off))
             x += z + gap
     p = os.path.join(outdir, "usher-indicator.png")
     sheet.save(p)
@@ -414,8 +433,8 @@ def _status_test():
             plant(dict(live, transposed_at=time.time() - DWELL - 1))
             ck("an-old-transpose-does-not", read_status()[3] is False)
             # A FUTURE INSTANT IS NOT A TRANSPOSE, which is what the `0 <=`
-            # half of the window is for: a clock step must not pin the tray
-            # blue for ever.
+            # half of the window is for: a clock step must not pin the
+            # transpose on for ever.
             plant(dict(live, transposed_at=time.time() + 3600))
             ck("a-future-transpose-does-not", read_status()[3] is False)
             plant(dict(live, transposed_at="nonsense"))
@@ -434,6 +453,32 @@ def _status_test():
             ck("a-far-future-settling-does-not-pin", read_status()[3] is False)
             plant(dict(live, transposed_at=_old, fixing_until="nonsense"))
             ck("a-garbage-settling-does-not", read_status()[3] is False)
+            # THE WALK: it starts on the resting top-left, visits every window
+            # once per cycle, one step per TRANSPOSE_STEP, and comes back
+            _st = TRANSPOSE_STEP
+            _walk = [TRANSPOSE_ORDER[transpose_phase(1000 * _st + i * _st
+                                                     + _st / 2)]
+                     for i in range(len(TRANSPOSE_ORDER) + 1)]
+            ck("the-walk-starts-and-ends-on-the-resting-window",
+               _walk[0] == (0, 0) and _walk[-1] == (0, 0))
+            ck("the-walk-visits-every-window-once",
+               sorted(_walk[:-1]) == [(0, 0), (0, 1), (1, 0), (1, 1)])
+            ck("the-walk-is-tl-br-tr-bl",
+               _walk[:-1] == [(0, 0), (1, 1), (1, 0), (0, 1)])
+            # AND THE LOOP WAKES FOR EACH STEP while transposing, once a
+            # second at rest, or the walk stutters at the poll's rate
+            ck("a-transpose-wakes-for-each-step",
+               0 < next_look(True, 1000 * _st + 0.1) <= _st)
+            ck("at-rest-the-tray-looks-once-a-second",
+               next_look(False, 1000 * _st + 0.1) == 1.0)
+            # AND THE PICTURES DIFFER: the walk is invisible otherwise, which
+            # is how the blue screen this replaced shipped (it differed by a
+            # few levels of navy and read as the resting icon at 22px)
+            _pix = [icon_pixmap("settled", 0.0, (22,), True, i)[0][2]
+                    for i in range(len(TRANSPOSE_ORDER))]
+            ck("each-step-of-the-walk-is-a-different-picture",
+               len(set(_pix)) == len(TRANSPOSE_ORDER)
+               and icon_pixmap("settled", 0.0, (22,))[0][2] not in _pix)
             # AND A DAEMON WITH NO SUCH FIELD AT ALL (an older one) is read,
             # not refused: the field was added additively.
             plant({"mode": "place", "seconds_left": 1, "arc": 0.1})
@@ -481,31 +526,35 @@ def _run():
             return f"Window placement: SETTLED, click to kick place{kick}"
         return "usher not running"
 
-    def _sig(state, arc, transposing=False):
+    def _sig(state, arc, transposing=False, phase=0):
         # Redraw signature: state + a coarse arc bucket, so the depleting ring
         # advances (~24 steps over the window) without a redraw every second.
-        # The dwell is in it so the blue screen arrives and leaves on its own
-        # edges rather than waiting for the ring to move, which in `settled`
-        # never does.
-        return (state, round(arc * 24), transposing)
+        # The transpose and its STEP are in it so the walk arrives, moves and
+        # leaves on its own edges rather than waiting for the ring to move,
+        # which in `settled` never does.
+        return (state, round(arc * 24), transposing,
+                phase if transposing else 0)
 
     class Indicator(ServiceInterface):
         def __init__(self):
             super().__init__("org.kde.StatusNotifierItem")
             (self._state, self._arc, self._sec,
              self._tp) = read_status()
-            self._key = _sig(self._state, self._arc, self._tp)
+            ph = transpose_phase(time.time())
+            self._key = _sig(self._state, self._arc, self._tp, ph)
             self._pixmap = icon_pixmap(self._state, self._arc,
-                                       transposing=self._tp)
+                                       transposing=self._tp, phase=ph)
 
         def refresh(self):
             state, arc, sec, tp = read_status()
             self._sec = sec
-            key = _sig(state, arc, tp)
+            ph = transpose_phase(time.time())
+            key = _sig(state, arc, tp, ph)
             if key != self._key:
                 self._state, self._arc, self._key = state, arc, key
                 self._tp = tp
-                self._pixmap = icon_pixmap(state, arc, transposing=tp)
+                self._pixmap = icon_pixmap(state, arc, transposing=tp,
+                                           phase=ph)
                 self.NewIcon()
 
         @dbus_property(access=PropertyAccess.READ)
@@ -564,7 +613,7 @@ def _run():
             # windows that exist and is not a place to be, so cycling through
             # it to get back would be wrong.
             #
-            # AND IT PAINTS NOTHING OPTIMISTICALLY. The blue screen comes from
+            # AND IT PAINTS NOTHING OPTIMISTICALLY. The transpose comes from
             # the daemon's own `transposed_at`, so a kick nothing heard shows
             # nothing: usher's mode verbs once printed success with no daemon
             # listening, and latching on our own click would reinvent exactly
@@ -606,7 +655,7 @@ def _run():
     async def watch(item):
         while True:
             item.refresh()
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(next_look(item._tp, time.time()))
 
     async def go():
         bus = await MessageBus(bus_type=BusType.SESSION).connect()
