@@ -8425,11 +8425,18 @@ def launch_missing(snap=None, force=False):
 # saves is the damaged one, so a login on a laptop that has not joined a
 # network yet costs the tabs rather than a minute.
 #
-# THE DESKTOP ENTRY SAYS SO, not a plugin: `X-Usher-Needs-Network=true`.
-# Restoring an app already needs its entry, so that is where a fact about how
-# to start it belongs, and it keeps the hold orthogonal to identity. An entry
-# a user copies into ~/.local/share/applications overrides the system one by
-# name, which is how the key is added to an entry the user does not own.
+# TWO WAYS TO SAY SO, neither a plugin, so the hold stays orthogonal to
+# identity:
+#
+#   ~/.config/usher/needs-network   one app-id per line. THE ONE TO USE for an
+#                                   app whose entry a PACKAGE owns: Chrome's
+#                                   is 223 lines from google-chrome-stable,
+#                                   and a copy carrying one key would shadow
+#                                   its menu entry, its default-browser
+#                                   lookup and its actions, then go stale at
+#                                   the next Chrome update.
+#   X-Usher-Needs-Network=true      in a desktop entry YOU author, where the
+#                                   fact can sit beside the Exec it is about.
 #
 # THE WITNESS IS NetworkManager's own verdict (the Connectivity property,
 # readable unprivileged on the system bus), which is what tackup's portal
@@ -8444,6 +8451,21 @@ def launch_missing(snap=None, force=False):
 NM_CONNECTIVITY = {0: "unknown", 1: "none", 2: "portal", 3: "limited",
                    4: "full"}
 NEEDS_NETWORK_KEY = "x-usher-needs-network"   # configparser lowercases keys
+NEEDS_NETWORK_FILE = config_path("needs-network")
+
+
+def load_needs_network(path=None):
+    """The app-ids listed in usher/needs-network, lowercased. `#` comments
+    and blank lines ignored; a missing file lists nothing. Read fresh: it is
+    asked once per relaunch, so there is nothing to cache."""
+    try:
+        with open(path or NEEDS_NETWORK_FILE, encoding="utf-8",
+                  errors="replace") as f:
+            return frozenset(
+                w.lower() for raw in f
+                for w in raw.split("#", 1)[0].split()[:1])
+    except OSError:
+        return frozenset()
 
 
 def connectivity(run=None):
@@ -8476,14 +8498,17 @@ def network_ready(value):
     return value is None or value in (0, 4)
 
 
-def needs_network(app, entries):
-    """Does this app's one desktop entry say it needs the network?"""
+def needs_network(app, entries, listed=frozenset()):
+    """Does this app need the network: listed by its app-id in
+    usher/needs-network, or so marked in its one desktop entry?"""
+    if (app or "").lower() in listed:
+        return True
     _n, e, _why = desktop_entry_for(app, entries)
     return bool(e) and (e.get(NEEDS_NETWORK_KEY) or "").strip().lower() in (
         "true", "1", "yes")
 
 
-def network_split(saved, entries):
+def network_split(saved, entries, listed=frozenset()):
     """(keep, held): the saved rows to start now, and those to hold until
     the network arrives. PURE over the rows and the registry.
 
@@ -8501,7 +8526,7 @@ def network_split(saved, entries):
         return not w.get("source") and w.get("owner") is None
 
     apps = {w.get("app_id") or "" for w in saved if _owned_row(w)} - {""}
-    held_apps = {a for a in apps if needs_network(a, entries)}
+    held_apps = {a for a in apps if needs_network(a, entries, listed)}
     if any(is_chrome(a) for a in held_apps):
         for a in apps - held_apps:
             argv, _why = desktop_launch_for(a, entries)
@@ -8509,7 +8534,7 @@ def network_split(saved, entries):
                 held_apps.add(a)
     held_src = {w["source"] for w in saved
                 if w.get("source") and needs_network(w.get("app_id"),
-                                                     entries)}
+                                                     entries, listed)}
     keep, held = [], []
     for w in saved:
         src = w.get("source") or ""
@@ -8522,7 +8547,8 @@ def network_split(saved, entries):
 _UNASKED = object()
 
 
-def hold_for_network(saved, state=_UNASKED, entries=None, now=None):
+def hold_for_network(saved, state=_UNASKED, entries=None, now=None,
+                     listed=None):
     """The saved rows to start NOW. Rows that need the network while there
     is none are written to HELD_FILE for a release, and logged.
 
@@ -8531,7 +8557,8 @@ def hold_for_network(saved, state=_UNASKED, entries=None, now=None):
     if not saved:
         return saved
     entries = desktop_entries() if entries is None else entries
-    keep, held = network_split(saved, entries)
+    listed = load_needs_network() if listed is None else listed
+    keep, held = network_split(saved, entries, listed)
     if not held:
         return saved
     if state is _UNASKED:

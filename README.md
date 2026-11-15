@@ -195,10 +195,12 @@ NoDisplay means "do not show this in menus" and says nothing about launching:
 it is read as a refusal only for an entry you did not author. `Hidden=true` is
 a deletion in the spec's own words, so that is honoured everywhere.
 
-**An app that needs the network can wait for it.** Add
-`X-Usher-Needs-Network=true` to its desktop entry (copy the entry into
-`~/.local/share/applications/` to override a system one) and usher does not
-start it at login until NetworkManager reports full connectivity. Chrome
+**An app that needs the network can wait for it.** List its app-id in
+`~/.config/usher/needs-network` (one per line), or put
+`X-Usher-Needs-Network=true` in a desktop entry you author, and usher does not
+start it at login until NetworkManager reports full connectivity. Use the list
+for an app whose entry a package owns: copying Chrome's entry to add one key
+would shadow its menu entry and default-browser lookup, then go stale. Chrome
 started offline marks every restored tab as failed, which is what this is
 for. There is no timeout: the tray shows a warning triangle while anything is
 held, and `usher release` (or a click on the tray) starts it now. A held

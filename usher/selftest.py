@@ -6726,6 +6726,21 @@ def _t_network_hold(ck):
            not engine.needs_network("kitty", ent))
         ck("hold-needs-network-no-entry-is-false",
            not engine.needs_network("nothing-here", ent))
+        # THE LIST, for an app whose entry a package owns: by app-id, any
+        # case, comments and blanks ignored, a missing file lists nothing
+        _nl = os.path.join(tmp, "needs-network")
+        with open(_nl, "w") as f:
+            f.write("# a comment\n\nGoogle-Chrome  # trailing\nkitty\n")
+        _lst = engine.load_needs_network(_nl)
+        ck("hold-list-reads-app-ids", _lst == {"google-chrome", "kitty"})
+        ck("hold-list-missing-is-empty",
+           engine.load_needs_network(os.path.join(tmp, "absent"))
+           == frozenset())
+        ck("hold-list-marks-an-unmarked-entry",
+           engine.needs_network("kitty", ent, _lst)
+           and not engine.needs_network("kitty", ent))
+        ck("hold-list-marks-an-app-with-no-entry",
+           engine.needs_network("nothing-here", {}, _lst | {"nothing-here"}))
 
         def row(app, src=None, owner=None, key=""):
             w = {"app_id": app, "key": key, "pid": 4242}
@@ -6752,6 +6767,16 @@ def _t_network_hold(ck):
             [row("google-chrome"), row("chrome-abc-Default")], ent2)
         ck("hold-split-an-app-window-follows-only-a-held-browser",
            _h2 == [])
+        # AND hold_for_network READS IT when not told, which is the wiring
+        engine.NEEDS_NETWORK_FILE = _nl
+        _kl = engine.hold_for_network([row("kitty"), row("foot")], state=1,
+                                      entries={}, now=1.0)
+        ck("hold-reads-the-list-file",
+           [w["app_id"] for w in _kl] == ["foot"]
+           and engine.load_held() is not None)
+        if os.path.exists(engine.HELD_FILE):
+            os.remove(engine.HELD_FILE)
+        engine.NEEDS_NETWORK_FILE = os.path.join(tmp, "absent")
         # THE HOLD: offline writes the file and returns what to start now
         engine.HELD_FILE = os.path.join(tmp, "usher.held")
         engine.RELEASE_FILE = os.path.join(tmp, "usher.release")
@@ -17132,7 +17157,9 @@ def selftest():
     # AND THE NETWORK HOLD's two runtime files and its witness: a real hold
     # on this box would otherwise be carried into every fixture's persist,
     # and a marked entry in this box's registry would ask NetworkManager.
-    _real_held = (engine.HELD_FILE, engine.RELEASE_FILE, engine.connectivity)
+    _real_held = (engine.HELD_FILE, engine.RELEASE_FILE, engine.connectivity,
+                  engine.NEEDS_NETWORK_FILE)
+    engine.NEEDS_NETWORK_FILE = os.path.join(_scratch_root, "needs-network")
     engine.HELD_FILE = os.path.join(_scratch_root, "usher.held")
     engine.RELEASE_FILE = os.path.join(_scratch_root, "usher.release")
     engine.connectivity = lambda run=None: 4
@@ -17173,8 +17200,8 @@ def selftest():
         engine.SOURCES_FILE = _real_sources
         engine.DESK_FILE = _real_desk
         engine._SOURCES_ADOPTED = False
-        (engine.HELD_FILE, engine.RELEASE_FILE,
-         engine.connectivity) = _real_held
+        (engine.HELD_FILE, engine.RELEASE_FILE, engine.connectivity,
+         engine.NEEDS_NETWORK_FILE) = _real_held
         shutil.rmtree(_scratch_root, ignore_errors=True)
     # NAMED, so a leak is a check rather than something a reader has to
     # notice. It runs after every area, because any of them could be the one.

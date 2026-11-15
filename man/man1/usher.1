@@ -454,8 +454,10 @@ so it is read as a refusal only for an entry you did NOT author.
 .I Hidden=true
 is a deletion in the spec's own words and is honoured everywhere.
 .SS Waiting for the network
-An app whose desktop entry carries
-.I X-Usher-Needs-Network=true
+An app listed by its app-id in
+.IR ~/.config/usher/needs-network ,
+or whose desktop entry carries
+.IR X-Usher-Needs-Network=true ,
 is not started at login until NetworkManager reports full connectivity:
 Chrome started with no network marks every restored tab as failed, and the
 session it then saves is the damaged one. The rest of the desk starts as
@@ -473,9 +475,9 @@ names what is held;
 or a click on the tray starts it at once. Otherwise the daemon starts it the
 moment the network is full, and places it.
 .PP
-To mark an app, copy its entry into
-.I ~/.local/share/applications
-(an entry there overrides a system one of the same name) and add the key.
+Use the list for an app whose entry a package owns: copying Chrome's entry to
+add one key would shadow its menu entry, its default-browser lookup and its
+actions, and go stale at the next update. The key is for an entry you author.
 A held Chrome holds its app windows with it, and another account is held
 whole, since its desk is one request. What is held is carried into the saved
 layout, so a logout during a hold does not forget it.
@@ -674,6 +676,15 @@ that was doing its job.
 .TP
 .I ~/.config/usher/{exclude,include}
 never-place rules and settled-state anchors.
+.TP
+.I ~/.config/usher/needs-network
+app-ids whose launch waits for NetworkManager to report full connectivity,
+one per line; see
+.IR "Waiting for the network" .
+A missing file holds nothing.
+.TP
+.I $XDG_RUNTIME_DIR/usher.held
+what a network hold is holding; present only while one is in force.
 .TP
 .I ~/.config/usher/plugins/*.py
 user window plugins.
