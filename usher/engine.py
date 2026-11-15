@@ -5744,8 +5744,11 @@ def persist(snap, roll=True):
     """Write the snapshot to current.json always. Roll the history ring and the
     daily milestone only for layout-significant changes (roll=True); tab-switch
     captures pass roll=False so the 20-deep recent-layout ring is not flooded
-    with title churn. Knowledge is updated separately."""
-    blob = json.dumps(snap, indent=2)
+    with title churn. Knowledge is updated separately.
+
+    What the network hold is holding is CARRIED into what is written (see
+    carry_held), so a capture during a hold cannot forget those apps."""
+    blob = json.dumps(carry_held(snap), indent=2)
     write_json(os.path.join(STATE, "current.json"), blob)
     if not roll:
         return
@@ -6419,6 +6422,29 @@ def strip_field_codes(ex):
     return [a for a in argv if a not in _FIELD_CODES]
 
 
+def desktop_entry_for(app, entries):
+    """(name, entry, why-not): the ONE desktop entry for an app-id, or why
+    there is not exactly one. The lookup both the launch and the network
+    hold read, so the entry that says how to start an app is the same entry
+    that says whether it needs the network."""
+    low = (app or "").lower()
+    if not low:
+        return None, None, "the window has no app-id"
+    hits = [(n, e) for n, e in entries.items() if n.lower() == low]
+    if not hits:
+        # StartupWMClass is the sanctioned reverse join and it is not
+        # cosmetic: Signal's app-id is `signal` and its entry is
+        # `signal-desktop`, so without this the clearest case fails.
+        hits = [(n, e) for n, e in entries.items()
+                if (e.get("startupwmclass") or "").lower() == low]
+    if not hits:
+        return None, None, "no desktop entry names this app"
+    if len(hits) > 1:
+        return None, None, (f"{len(hits)} desktop entries match "
+                            f"({', '.join(sorted(n for n, _ in hits))})")
+    return hits[0][0], hits[0][1], None
+
+
 def desktop_launch_for(app, entries):
     """(argv, why-not) for an app-id: the command that starts it, or why not.
 
@@ -6438,22 +6464,9 @@ def desktop_launch_for(app, entries):
                               different launch than this one
       argv0 unresolvable      a stale entry pointing at something uninstalled
     """
-    low = (app or "").lower()
-    if not low:
-        return None, "the window has no app-id"
-    hits = [(n, e) for n, e in entries.items() if n.lower() == low]
-    if not hits:
-        # StartupWMClass is the sanctioned reverse join and it is not
-        # cosmetic: Signal's app-id is `signal` and its entry is
-        # `signal-desktop`, so without this the clearest case fails.
-        hits = [(n, e) for n, e in entries.items()
-                if (e.get("startupwmclass") or "").lower() == low]
-    if not hits:
-        return None, "no desktop entry names this app"
-    if len(hits) > 1:
-        return None, (f"{len(hits)} desktop entries match "
-                      f"({', '.join(sorted(n for n, _ in hits))})")
-    name, e = hits[0]
+    name, e, why = desktop_entry_for(app, entries)
+    if e is None:
+        return None, why
     if e.get("type", "Application") != "Application":
         return None, f"{name}.desktop is Type={e.get('type')}, not Application"
     # HIDDEN IS A TOMBSTONE AND IS ALWAYS HONOURED. The spec's words: it
@@ -7570,6 +7583,17 @@ def source_trigger(sources, action, run=None, hook=None, windows=None,
         raise ValueError(f"source_trigger: no such action {action!r}")
     if not sources:
         return 0
+    # AN ACCOUNT HELD FOR THE NETWORK IS NOT ASKED TO CAPTURE: nothing of it
+    # was started, so what it has open is not its desk, and a roster written
+    # now would make the release (or the next login) start less.
+    if action == "capture":
+        _hs = held_sources()
+        for src in sorted(set(sources) & _hs):
+            logline(f"not asking {src} to capture: it is held for the "
+                    "network, so what it has open is not its desk")
+        sources = set(sources) - _hs
+        if not sources:
+            return 0
     path = SOURCE_TRIGGER_HOOK if hook is None else hook
     if not path or not os.access(path, os.X_OK):
         for src in sorted(sources):
@@ -8296,7 +8320,7 @@ def do_source_resume():
     return EXIT_OK if n else EXIT_FAIL
 
 
-def launch_missing(snap=None):
+def launch_missing(snap=None, force=False):
     """Ask every plugin to respawn any of its saved-but-absent windows. Takes
     the last snapshot + the live views ONCE and hands both to each plugin's
     relaunch_missing; sums the counts. Chrome self-restores (its plugin returns
@@ -8307,9 +8331,14 @@ def launch_missing(snap=None):
     written a snapshot of a session where nothing has mapped yet, so this read
     zero saved windows and relaunched nothing. The caller holds the one taken
     before any of that started. Falling back to a read keeps the one-shot verbs
-    working, where nothing else is running to clobber it."""
+    working, where nothing else is running to clobber it.
+
+    `force` skips the network hold, which is how a release replays what it
+    held: see hold_for_network."""
     saved = ((snap if snap is not None else load_snapshot()) or {}).get(
         "windows", [])
+    if not force:
+        saved = hold_for_network(saved)
     # A FAILED LIVE READ DOES NOT DEGRADE THIS, IT INVERTS IT. Every
     # owner-side path below asks "is mine already up?" and an empty live set
     # answers "no" for everything, so the one error that must not be
@@ -8388,6 +8417,230 @@ def launch_missing(snap=None):
     except Exception as e:
         logline(f"relaunch (source) error: {e}")
     return n
+
+
+# --- the network hold -------------------------------------------------------
+# AN APP THAT NEEDS THE NETWORK IS NOT STARTED WITHOUT ONE. Chrome started
+# with no network marks every restored tab as failed, and the session it then
+# saves is the damaged one, so a login on a laptop that has not joined a
+# network yet costs the tabs rather than a minute.
+#
+# THE DESKTOP ENTRY SAYS SO, not a plugin: `X-Usher-Needs-Network=true`.
+# Restoring an app already needs its entry, so that is where a fact about how
+# to start it belongs, and it keeps the hold orthogonal to identity. An entry
+# a user copies into ~/.local/share/applications overrides the system one by
+# name, which is how the key is added to an entry the user does not own.
+#
+# THE WITNESS IS NetworkManager's own verdict (the Connectivity property,
+# readable unprivileged on the system bus), which is what tackup's portal
+# detector reads too, so the two cannot disagree about whether there is a
+# network.
+#
+# NO TIMEOUT, deliberately: a laptop can sit offline for an hour and starting
+# Chrome at minute two is exactly the damage this exists to prevent. The
+# person can always say "now" (`usher release`, or the tray click), and an
+# unknown verdict is never a reason to hold: see network_ready.
+
+NM_CONNECTIVITY = {0: "unknown", 1: "none", 2: "portal", 3: "limited",
+                   4: "full"}
+NEEDS_NETWORK_KEY = "x-usher-needs-network"   # configparser lowercases keys
+
+
+def connectivity(run=None):
+    """NetworkManager's Connectivity as an int, or None if it cannot be
+    asked (no NetworkManager, no bus, a reply in a shape we do not know)."""
+    try:
+        r = (run or subprocess.run)(
+            ["busctl", "get-property", "org.freedesktop.NetworkManager",
+             "/org/freedesktop/NetworkManager",
+             "org.freedesktop.NetworkManager", "Connectivity"],
+            capture_output=True, text=True, timeout=3,
+            stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    parts = (r.stdout or "").split() if r.returncode == 0 else []
+    if len(parts) == 2 and parts[0] == "u" and parts[1].isdigit():
+        return int(parts[1])
+    return None
+
+
+def network_ready(value):
+    """Is this verdict a reason to start an app that needs the network?
+
+    ONLY A VERDICT OF NO NETWORK HOLDS. None (NetworkManager cannot be asked)
+    and 0 (NetworkManager does not know, which is what it says when its own
+    check is switched off) both read as ready, because with no timeout a
+    verdict nobody can get would hold the desk for ever. Portal and limited
+    hold: a captive portal is precisely the network a browser must not
+    restore its tabs into."""
+    return value is None or value in (0, 4)
+
+
+def needs_network(app, entries):
+    """Does this app's one desktop entry say it needs the network?"""
+    _n, e, _why = desktop_entry_for(app, entries)
+    return bool(e) and (e.get(NEEDS_NETWORK_KEY) or "").strip().lower() in (
+        "true", "1", "yes")
+
+
+def network_split(saved, entries):
+    """(keep, held): the saved rows to start now, and those to hold until
+    the network arrives. PURE over the rows and the registry.
+
+    ANOTHER ACCOUNT IS HELD WHOLE, because its resume is one request for its
+    whole desk: the owner cannot ask it to start some apps and not others,
+    and must not, since what to start is that account's question. So if any
+    of its saved apps needs the network by the owner's registry (the same
+    system entries, overridden only in the owner's own home), all of it waits.
+
+    AND A CHROME APP WINDOW FOLLOWS ITS BROWSER. One reaching Chrome before
+    the browser is what opened a restore prompt and doubled the windows (see
+    chrome.after_browser), so holding the browser and not its app windows
+    would bring that back for exactly the logins this exists for."""
+    def _owned_row(w):
+        return not w.get("source") and w.get("owner") is None
+
+    apps = {w.get("app_id") or "" for w in saved if _owned_row(w)} - {""}
+    held_apps = {a for a in apps if needs_network(a, entries)}
+    if any(is_chrome(a) for a in held_apps):
+        for a in apps - held_apps:
+            argv, _why = desktop_launch_for(a, entries)
+            if argv and is_app_window_argv(argv):
+                held_apps.add(a)
+    held_src = {w["source"] for w in saved
+                if w.get("source") and needs_network(w.get("app_id"),
+                                                     entries)}
+    keep, held = [], []
+    for w in saved:
+        src = w.get("source") or ""
+        hit = (src in held_src if src else
+               _owned_row(w) and (w.get("app_id") or "") in held_apps)
+        (held if hit else keep).append(w)
+    return keep, held
+
+
+_UNASKED = object()
+
+
+def hold_for_network(saved, state=_UNASKED, entries=None, now=None):
+    """The saved rows to start NOW. Rows that need the network while there
+    is none are written to HELD_FILE for a release, and logged.
+
+    THE NETWORK IS ASKED ONLY IF SOMETHING NEEDS IT, so a desk with no
+    marked app costs no subprocess and behaves exactly as before."""
+    if not saved:
+        return saved
+    entries = desktop_entries() if entries is None else entries
+    keep, held = network_split(saved, entries)
+    if not held:
+        return saved
+    if state is _UNASKED:
+        state = connectivity()
+    if network_ready(state):
+        return saved
+    blob = {"when": time.time() if now is None else now,
+            "connectivity": state, "rows": held}
+    try:
+        os.makedirs(os.path.dirname(HELD_FILE), exist_ok=True)
+        write_json(HELD_FILE, json.dumps(blob))
+    except OSError as e:
+        # A HOLD NOBODY CAN RELEASE IS A DESK THAT NEVER COMES BACK, so a
+        # hold that cannot be recorded is not taken: the apps start now.
+        logline(f"network hold could not be recorded ({e}): starting "
+                "everything now")
+        return saved
+    logline(f"network {NM_CONNECTIVITY.get(state, state)}: holding "
+            f"{', '.join(held_names(blob))} until it is full; "
+            "`usher release` starts them now")
+    return keep
+
+
+def load_held():
+    """The recorded hold, or None. Shape-checked like every reader here."""
+    h = json_object(HELD_FILE)
+    if not h or not isinstance(h.get("rows"), list):
+        return None
+    return dict(h, rows=[r for r in h["rows"] if isinstance(r, dict)])
+
+
+def held_names(h):
+    """What a hold is holding, for a person: the owner's app-ids, and each
+    other account by its source name ONLY, since which of its apps those are
+    is that account's own business."""
+    if not h:
+        return []
+    own = {r.get("app_id") for r in h["rows"]
+           if not r.get("source") and r.get("app_id")}
+    src = {r["source"] for r in h["rows"] if r.get("source")}
+    return sorted(own) + [f"{s} (account)" for s in sorted(src)]
+
+
+def held_sources(h=None):
+    """The accounts a hold is holding."""
+    h = load_held() if h is None else h
+    return {r["source"] for r in (h or {}).get("rows", [])
+            if r.get("source")}
+
+
+def carry_held(snap, h=None):
+    """The snapshot with the held rows carried, for any held app (or
+    account) that has no live window in it. A COPY: what the capture LEARNS
+    from is the live snapshot, untouched.
+
+    WITHOUT THIS A HOLD ERASES ITS OWN APPS. current.json is what the next
+    login restores from, and a capture taken while Chrome is held names no
+    Chrome, so a logout during a hold would come back with no browser. That
+    is the browser-less-capture trap wind-down's ordering exists to avoid,
+    arriving by another road."""
+    h = load_held() if h is None else h
+    if not h or not h["rows"]:
+        return snap
+    have = {(w.get("source") or "", w.get("app_id"))
+            for w in snap.get("windows", [])}
+    extra = [dict(r, pid=-1) for r in h["rows"]
+             if (r.get("source") or "", r.get("app_id")) not in have]
+    if not extra:
+        return snap
+    return dict(snap, windows=list(snap.get("windows", [])) + extra)
+
+
+def release_held(launch=None):
+    """Start what the network hold is holding, now. The number started, or
+    None if nothing is held.
+
+    THE FILE GOES AFTER THE LAUNCH, so a process that dies mid-release
+    leaves the hold to be released again, which is safe: every relauncher
+    skips what is already up."""
+    h = load_held()
+    if h is None:
+        return None
+    n = (launch or launch_missing)({"windows": h["rows"]}, force=True)
+    try:
+        os.remove(HELD_FILE)
+    except OSError:
+        pass
+    return n
+
+
+def do_release():
+    """`usher release`: start what is held for the network, now. The daemon
+    does it if one runs, since it also arms place mode for the windows that
+    arrive; with none, it is done here."""
+    h = load_held()
+    if h is None:
+        print("usher: nothing is held for the network")
+        return EXIT_OK
+    names = ", ".join(held_names(h))
+    if watcher_pid():
+        try:
+            write_json(RELEASE_FILE, json.dumps({"when": time.time()}))
+        except OSError as e:
+            die_cannot(f"usher: cannot ask the daemon to release: {e}")
+        print(f"usher: asked the daemon to start {names} now")
+        return EXIT_OK
+    n = release_held()
+    print(f"usher: started {n} app(s) held for the network ({names})")
+    return EXIT_OK
 
 
 # --- restoring from a stored snapshot ---------------------------------------
@@ -10313,6 +10566,11 @@ CAPTURE_FILE = os.path.join(RUNTIME_DIR, "usher.capture")
 SOURCES_FILE = os.path.join(RUNTIME_DIR, "usher.sources")
 # AND WHEN THE DAEMON'S DESK WAS LAST USED AND ADOPTED. See desk_clock.
 DESK_FILE = os.path.join(RUNTIME_DIR, "usher.desk")
+# THE NETWORK HOLD: what is waiting for the network (a fact, written by
+# whoever relaunched), and a request to start it now (consumed by the
+# daemon). Runtime state, so a hold is about this boot and no other.
+HELD_FILE = os.path.join(RUNTIME_DIR, "usher.held")
+RELEASE_FILE = os.path.join(RUNTIME_DIR, "usher.release")
 
 
 LOG_CAP = 256 * 1024   # rotate watch.log past this; bounds it to ~2x LOG_CAP

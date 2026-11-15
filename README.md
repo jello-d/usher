@@ -195,6 +195,15 @@ NoDisplay means "do not show this in menus" and says nothing about launching:
 it is read as a refusal only for an entry you did not author. `Hidden=true` is
 a deletion in the spec's own words, so that is honoured everywhere.
 
+**An app that needs the network can wait for it.** Add
+`X-Usher-Needs-Network=true` to its desktop entry (copy the entry into
+`~/.local/share/applications/` to override a system one) and usher does not
+start it at login until NetworkManager reports full connectivity. Chrome
+started offline marks every restored tab as failed, which is what this is
+for. There is no timeout: the tray shows a warning triangle while anything is
+held, and `usher release` (or a click on the tray) starts it now. A held
+Chrome holds its app windows too, and another account is held whole.
+
 `resolve` answers one question in three ways, and the third is the point:
 `("ready", key)` when the window is definitively that key, `("pending", why)`
 when it will be knowable shortly, `("never", why)` when it never will. usher
@@ -290,6 +299,7 @@ usher status                 # every fact the daemon publishes
 usher place             # place every window that maps, for a while
 usher settle                 # go settled now: leave new windows where they open
 usher transpose              # sweep OPEN windows onto where they now belong
+usher release                # start what waits for the network, now
 usher toggle                 # flip between those two (what the tray click does)
 usher cleanly reboot         # wind down, keeping the layout, then reboot
 usher cleanly login          # start the console session from a remote shell

@@ -72,6 +72,7 @@ VERBS = {
     "settle":          ("both", "settle now: leave new windows alone"),
     "toggle":          ("both", "flip place/settled (the tray click)"),
     "transpose":       ("both", "sweep open windows onto where they now go"),
+    "release":         ("both", "start what waits for the network, now"),
     "exclude":         ("both", "show the never-place rules as loaded"),
     "include":         ("both", "show the anchor rules as loaded"),
     "plugins":         ("both", "list loaded plugins"),
@@ -642,6 +643,8 @@ def _dispatch(verb, args):
         sys.exit(_selftest.selftest())
     elif verb == "transpose":     # sweep the open windows, via the daemon
         sys.exit(engine.do_transpose())
+    elif verb == "release":       # start what the network hold holds
+        sys.exit(engine.do_release())
     elif verb in ("place", "settle", "toggle"):
         sys.exit(_do_arm(verb))
     elif verb == "status":        # everything the daemon publishes
@@ -683,6 +686,10 @@ def _dispatch(verb, args):
         print("last transpose: "
               + ("never" if not _ta or _ago is None
                  else f"{_ago:.0f}s ago"))
+        _held = s.get("held") or []
+        if _held:
+            print("held for the network: " + ", ".join(map(str, _held))
+                  + "   (`usher release` starts them now)")
 
 
 def arm_plan(act, running, mode):
@@ -724,6 +731,11 @@ def _do_arm(act):
     """Placement-mode controls (tray + CLI). Both ends drive the ONE armed_at
     seam the watcher adopts from ARM_FILE: place arms NOW (place for
     START_FLOOR) and settle arms in the PAST (settled at once, past the CAP)."""
+    # THE TRAY CLICK DURING A NETWORK HOLD MEANS "START THEM NOW". The
+    # triangle replaces the mode in the icon, so a click on it is a click on
+    # the hold, and a release arms place mode itself.
+    if act == "toggle" and engine.load_held() is not None:
+        return engine.do_release()
     act, msg = arm_plan(act, engine.watcher_pid(), _live_mode())
     if act == "none":
         print(f"{PROG}: {msg}", file=sys.stderr)

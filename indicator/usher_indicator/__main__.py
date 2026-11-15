@@ -204,7 +204,26 @@ def _border(img, s, arc_frac):
                joint="curve")
 
 
-def _tile(state, arc, size, transposing=False, phase=0):
+# THE NETWORK HOLD: a warning triangle IN PLACE OF the window glyph, so the
+# frame still carries the mode and the glyph says "your windows are waiting".
+_WARN = (0xF2, 0xC0, 0x2C)
+
+
+def _triangle(d, s, base=_BASE):
+    # A rounded-ish amber-yellow triangle with a dark "!" cut into it,
+    # inside the same box the window glyph uses.
+    g0, g1 = s * 0.24, s * 0.76
+    cx = s / 2.0
+    d.polygon([(cx, g0), (g1, g1), (g0, g1)], fill=_WARN + (0xFF,))
+    ink = tuple(base[:3]) + (0xFF,)
+    w = max(1.0, s * 0.07)
+    d.rectangle([cx - w / 2, g0 + (g1 - g0) * 0.34,
+                 cx + w / 2, g0 + (g1 - g0) * 0.70], fill=ink)
+    d.rectangle([cx - w / 2, g0 + (g1 - g0) * 0.78,
+                 cx + w / 2, g0 + (g1 - g0) * 0.78 + w], fill=ink)
+
+
+def _tile(state, arc, size, transposing=False, phase=0, held=False):
     s = size
     base = _BASE
     img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
@@ -220,6 +239,9 @@ def _tile(state, arc, size, transposing=False, phase=0):
         d.rounded_rectangle([0, 0, s - 1, s - 1], r,
                             fill=_screen(state, base), outline=frame,
                             width=fw)
+    if held:
+        _triangle(d, s, base)
+        return img
     lit = TRANSPOSE_ORDER[phase % len(TRANSPOSE_ORDER)] if transposing \
         else (0, 0)
     _grid(d, s, base, lit, transposing)  # glyph on top
@@ -238,10 +260,10 @@ def _to_argb(img):
 
 
 def icon_pixmap(state, arc, sizes=(22, 32, 48), transposing=False,
-                phase=0):
+                phase=0, held=False):
     out = []
     for s in sizes:
-        t = _tile(state, arc, s, transposing, phase)
+        t = _tile(state, arc, s, transposing, phase, held)
         # Match the sibling gadgets' bounding box so the tray places us level:
         # mux's badge reaches the top edge, so stamp one invisible (alpha=1)
         # pixel at the top-right corner (see comms-indicator for the rationale).
@@ -310,6 +332,21 @@ def read_status():
             0 <= since < DWELL or 0 < left < _FIXING_MAX)
 
 
+def read_held():
+    """Is anything waiting for the network? The daemon's `held` list, from
+    the same status file, judged by the same staleness: a stale file is a
+    daemon that is not running, and a hold nobody can release is not shown
+    as one somebody can."""
+    try:
+        if time.time() - os.stat(STATUS_FILE).st_mtime > _STALE:
+            return False
+        s = json.load(open(STATUS_FILE))
+    except (OSError, ValueError):
+        return False
+    return isinstance(s, dict) and isinstance(s.get("held"), list) \
+        and bool(s.get("held"))
+
+
 def _render_test(outdir):
     os.makedirs(outdir, exist_ok=True)
     # One row per step of the transpose walk, so the moving glyph is
@@ -318,17 +355,20 @@ def _render_test(outdir):
     rows += [("settled", 0.0, True, i) for i in range(len(TRANSPOSE_ORDER))]
     rows += [("place", 1.0, False, 0), ("place", 0.33, False, 0),
              ("place", 0.33, True, 2), ("down", 0.0, False, 0)]
+    rows = [r + (False,) for r in rows]
+    # AND THE NETWORK HOLD, over both modes.
+    rows += [("settled", 0.0, False, 0, True), ("place", 0.6, False, 0, True)]
     sizes = (22, 32, 48, 96)
     gap = 8
     w = sum(sizes) + gap * (len(sizes) + 1)
     h = len(rows) * (96 + gap) + gap
     sheet = Image.new("RGBA", (w, h), (30, 30, 34, 255))
-    for r, (st, arc, tp, ph) in enumerate(rows):
+    for r, (st, arc, tp, ph, hd) in enumerate(rows):
         x = gap
         y = gap + r * (96 + gap)
         for z in sizes:
             off = (96 - z) // 2
-            sheet.paste(_tile(st, arc, z, tp, ph), (x + off, y + off))
+            sheet.paste(_tile(st, arc, z, tp, ph, hd), (x + off, y + off))
             x += z + gap
     p = os.path.join(outdir, "usher-indicator.png")
     sheet.save(p)
@@ -484,6 +524,24 @@ def _status_test():
             plant({"mode": "place", "seconds_left": 1, "arc": 0.1})
             ck("an-older-daemon-without-the-field-is-read",
                read_status() == ("place", 0.1, 1, False))
+            # THE NETWORK HOLD: a non-empty `held` is the triangle; an
+            # empty one, none, garbage or a STALE file is not, since a hold
+            # nobody is running cannot be released by a click.
+            plant(dict(live, held=["google-chrome"]))
+            ck("a-hold-is-read", read_held() is True)
+            plant(dict(live, held=[]))
+            ck("an-empty-hold-is-not", read_held() is False)
+            plant(live)
+            ck("no-hold-field-is-not", read_held() is False)
+            plant(dict(live, held="google-chrome"))
+            ck("a-garbage-hold-is-not", read_held() is False)
+            plant(dict(live, held=["x"]), age=_STALE + 1)
+            ck("a-stale-hold-is-not", read_held() is False)
+            # AND THE TRIANGLE IS A DIFFERENT PICTURE from every mode's glyph
+            _hp = icon_pixmap("settled", 0.0, (22,), held=True)[0][2]
+            ck("the-hold-is-a-different-picture",
+               _hp != icon_pixmap("settled", 0.0, (22,))[0][2]
+               and _hp != icon_pixmap("place", 0.0, (22,))[0][2])
     finally:
         STATUS_FILE = real
     if fails:
@@ -513,9 +571,12 @@ def _run():
     WATCHER_PATH = "/StatusNotifierWatcher"
     ITEM_PATH = "/StatusNotifierItem"
 
-    def _tip(state, sec, transposing=False):
+    def _tip(state, sec, transposing=False, held=False):
         # The middle-click is invisible otherwise, so the tooltip is the only
         # place it can be discovered.
+        if held and state != "down":
+            return ("Window placement: apps are WAITING FOR THE NETWORK, "
+                    "click to start them now")
         kick = "; middle-click to transpose"
         if transposing:
             kick = " (just transposed)" + kick
@@ -526,35 +587,39 @@ def _run():
             return f"Window placement: SETTLED, click to kick place{kick}"
         return "usher not running"
 
-    def _sig(state, arc, transposing=False, phase=0):
+    def _sig(state, arc, transposing=False, phase=0, held=False):
         # Redraw signature: state + a coarse arc bucket, so the depleting ring
         # advances (~24 steps over the window) without a redraw every second.
         # The transpose and its STEP are in it so the walk arrives, moves and
         # leaves on its own edges rather than waiting for the ring to move,
         # which in `settled` never does.
         return (state, round(arc * 24), transposing,
-                phase if transposing else 0)
+                phase if transposing else 0, held)
 
     class Indicator(ServiceInterface):
         def __init__(self):
             super().__init__("org.kde.StatusNotifierItem")
             (self._state, self._arc, self._sec,
              self._tp) = read_status()
+            self._held = read_held()
             ph = transpose_phase(time.time())
-            self._key = _sig(self._state, self._arc, self._tp, ph)
+            self._key = _sig(self._state, self._arc, self._tp, ph,
+                             self._held)
             self._pixmap = icon_pixmap(self._state, self._arc,
-                                       transposing=self._tp, phase=ph)
+                                       transposing=self._tp, phase=ph,
+                                       held=self._held)
 
         def refresh(self):
             state, arc, sec, tp = read_status()
+            held = read_held()
             self._sec = sec
             ph = transpose_phase(time.time())
-            key = _sig(state, arc, tp, ph)
+            key = _sig(state, arc, tp, ph, held)
             if key != self._key:
                 self._state, self._arc, self._key = state, arc, key
-                self._tp = tp
+                self._tp, self._held = tp, held
                 self._pixmap = icon_pixmap(state, arc, transposing=tp,
-                                           phase=ph)
+                                           phase=ph, held=held)
                 self.NewIcon()
 
         @dbus_property(access=PropertyAccess.READ)
@@ -596,7 +661,7 @@ def _run():
         @dbus_property(access=PropertyAccess.READ)
         def ToolTip(self) -> "(sa(iiay)ss)":
             return ["", [], "window placement",
-                    _tip(self._state, self._sec, self._tp)]
+                    _tip(self._state, self._sec, self._tp, self._held)]
 
         @dbus_property(access=PropertyAccess.READ)
         def ItemIsMenu(self) -> "b":

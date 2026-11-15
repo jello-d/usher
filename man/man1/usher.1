@@ -271,6 +271,15 @@ windows are left alone, or flip between the two. These
 govern what happens to a window as it MAPS; they say nothing about windows
 already open.
 .TP
+.B release
+Start, now, the apps a network hold is holding (see
+.I Waiting for the network
+under SUPPORTING AN APP),
+and place what they open: the daemon arms place mode first, since those
+windows arrive long after the login's own place window. With no daemon it
+starts them itself. Saying nothing is held is not an error. The tray click
+does this while the warning triangle is shown.
+.TP
 .B transpose
 Sweep the windows that are ALREADY OPEN onto where they belong now. This is
 what a display change triggers by itself, and the verb asks for another pass
@@ -444,6 +453,32 @@ NoDisplay means "do not show this in menus" and says nothing about launching,
 so it is read as a refusal only for an entry you did NOT author.
 .I Hidden=true
 is a deletion in the spec's own words and is honoured everywhere.
+.SS Waiting for the network
+An app whose desktop entry carries
+.I X-Usher-Needs-Network=true
+is not started at login until NetworkManager reports full connectivity:
+Chrome started with no network marks every restored tab as failed, and the
+session it then saves is the damaged one. The rest of the desk starts as
+usual. The verdict is NetworkManager's
+.I Connectivity
+property, read unprivileged on the system bus; a captive portal or limited
+connectivity holds, and a verdict nobody can get (no NetworkManager, or its
+check switched off) never does.
+.PP
+There is NO TIMEOUT. While anything is held the tray shows a warning triangle
+in place of the window glyph and
+.B usher status
+names what is held;
+.B usher release
+or a click on the tray starts it at once. Otherwise the daemon starts it the
+moment the network is full, and places it.
+.PP
+To mark an app, copy its entry into
+.I ~/.local/share/applications
+(an entry there overrides a system one of the same name) and add the key.
+A held Chrome holds its app windows with it, and another account is held
+whole, since its desk is one request. What is held is carried into the saved
+layout, so a logout during a hold does not forget it.
 .SH ANOTHER ACCOUNT'S WINDOWS
 A window on this desk may belong to a different system account: a sandboxed
 enclave running its own browser inside the session user's compositor. usher

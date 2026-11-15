@@ -50,6 +50,9 @@ from collections import Counter
 from datetime import date
 
 from . import chrome, engine, toplevels
+# The REAL NetworkManager reader, kept before the area loop stubs it so the
+# network-hold cells can drive its parse.
+_CONNECTIVITY = engine.connectivity
 # FROM chrome ITSELF, not through the engine, which merely re-exports them.
 # Importing a name through whoever happened to use it first is how a module's
 # real dependency stops being visible in its own header.
@@ -6657,6 +6660,275 @@ def _fake_compositor(path, offer=True, rows=(), stop_after_bind=False):
     t = threading.Thread(target=serve, daemon=True)
     t.start()
     return srv, t
+
+
+def _t_network_hold(ck):
+    """The network hold: an app whose desktop entry says it needs the
+    network waits for NetworkManager's verdict, is carried through every
+    capture while it waits, and is started (and placed) on release."""
+    from . import cli
+    from .watch import Watcher
+    real = (engine.connectivity, engine.logline, engine.watcher_pid,
+            engine.release_held, engine.load_held, engine.do_release,
+            engine.hold_for_network, engine.ipc)
+    tmp = tempfile.mkdtemp(prefix="usher-hold-")
+    logs = []
+    try:
+        engine.logline = logs.append
+        # THE VERDICT: only a verdict of NO network holds.
+        ck("hold-ready-table",
+           [engine.network_ready(v) for v in (None, 0, 1, 2, 3, 4)]
+           == [True, True, False, False, False, True])
+
+        class _R:
+            def __init__(self, out, rc=0):
+                self.stdout, self.returncode = out, rc
+
+        def _run(out, rc=0, exc=None):
+            def f(*a, **k):
+                if exc:
+                    raise exc
+                return _R(out, rc)
+            return f
+        ck("hold-connectivity-parses-full",
+           _CONNECTIVITY(_run("u 4\n")) == 4)
+        ck("hold-connectivity-parses-portal",
+           _CONNECTIVITY(_run("u 2\n")) == 2)
+        ck("hold-connectivity-a-failed-ask-is-none",
+           _CONNECTIVITY(_run("", 1)) is None)
+        ck("hold-connectivity-no-busctl-is-none",
+           _CONNECTIVITY(_run("", exc=FileNotFoundError())) is None)
+        ck("hold-connectivity-garbage-is-none",
+           _CONNECTIVITY(_run("s \"full\"\n")) is None)
+        # THE REGISTRY: a real executable named like the browser, because
+        # desktop_launch_for resolves argv0 and is_app_window_argv reads it.
+        gc = os.path.join(tmp, "google-chrome")
+        with open(gc, "w") as f:
+            f.write("#!/bin/sh\n")
+        os.chmod(gc, 0o755)
+        ent = {"google-chrome": {"exec": gc, "x-usher-needs-network": "true"},
+               "chrome-abc-Default": {"exec": f"{gc} --app-id=abc"},
+               "signal-desktop": {"exec": "/bin/true",
+                                  "startupwmclass": "signal",
+                                  "x-usher-needs-network": "1"},
+               "foot": {"exec": "/bin/true",
+                        "x-usher-needs-network": "false"},
+               "slack": {"exec": "/bin/true",
+                         "x-usher-needs-network": "yes"},
+               "kitty": {"exec": "/bin/true"}}
+        ck("hold-needs-network-reads-the-key",
+           engine.needs_network("google-chrome", ent))
+        ck("hold-needs-network-joins-startupwmclass",
+           engine.needs_network("signal", ent))
+        ck("hold-needs-network-false-is-false",
+           not engine.needs_network("foot", ent))
+        ck("hold-needs-network-absent-is-false",
+           not engine.needs_network("kitty", ent))
+        ck("hold-needs-network-no-entry-is-false",
+           not engine.needs_network("nothing-here", ent))
+
+        def row(app, src=None, owner=None, key=""):
+            w = {"app_id": app, "key": key, "pid": 4242}
+            if src:
+                w["source"], w["owner"] = src, 997
+            elif owner is not None:
+                w["owner"] = owner
+            return w
+        saved = [row("google-chrome"), row("chrome-abc-Default"),
+                 row("foot"), row("kitty"),
+                 row("slack", "titan"), row("kitty", "titan"),
+                 row("kitty", owner=998)]
+        keep, held = engine.network_split(saved, ent)
+        _h = sorted((w.get("source") or "", w["app_id"]) for w in held)
+        ck("hold-split-holds-the-marked-app-its-app-windows-and-the-account",
+           _h == [("", "chrome-abc-Default"), ("", "google-chrome"),
+                  ("titan", "kitty"), ("titan", "slack")])
+        ck("hold-split-keeps-the-rest",
+           sorted(w["app_id"] for w in keep) == ["foot", "kitty", "kitty"])
+        # THE CONTROL for the app-window rule: with the browser not held,
+        # its app windows are not either.
+        ent2 = dict(ent, **{"google-chrome": {"exec": gc}})
+        _k2, _h2 = engine.network_split(
+            [row("google-chrome"), row("chrome-abc-Default")], ent2)
+        ck("hold-split-an-app-window-follows-only-a-held-browser",
+           _h2 == [])
+        # THE HOLD: offline writes the file and returns what to start now
+        engine.HELD_FILE = os.path.join(tmp, "usher.held")
+        engine.RELEASE_FILE = os.path.join(tmp, "usher.release")
+        asked = []
+        engine.connectivity = lambda run=None: asked.append(1) or 1
+        now_rows = engine.hold_for_network(saved, entries=ent, now=100.0)
+        ck("hold-offline-starts-only-the-rest",
+           sorted(w["app_id"] for w in now_rows) == ["foot", "kitty",
+                                                     "kitty"])
+        h = engine.load_held()
+        ck("hold-offline-records-the-hold",
+           h is not None and len(h["rows"]) == 4 and h["connectivity"] == 1)
+        ck("hold-is-logged",
+           any("holding" in m and "titan (account)" in m for m in logs))
+        ck("hold-names-the-account-not-its-apps",
+           engine.held_names(h) == ["chrome-abc-Default", "google-chrome",
+                                    "titan (account)"])
+        os.remove(engine.HELD_FILE)
+        ck("hold-online-starts-everything",
+           engine.hold_for_network(saved, state=4, entries=ent) == saved
+           and not os.path.exists(engine.HELD_FILE))
+        # NOTHING MARKED, NOTHING ASKED: no subprocess for a desk that does
+        # not use the hold.
+        asked.clear()
+        _plain = [row("foot"), row("kitty")]
+        ck("hold-nothing-marked-asks-no-network",
+           engine.hold_for_network(_plain, entries=ent) == _plain
+           and asked == [])
+        ck("hold-an-unknown-verdict-holds-nothing",
+           engine.hold_for_network(saved, state=None, entries=ent) == saved)
+        # A HOLD THAT CANNOT BE RECORDED IS NOT TAKEN
+        engine.HELD_FILE = os.path.join(gc, "under-a-file", "usher.held")
+        ck("hold-unrecordable-starts-everything",
+           engine.hold_for_network(saved, state=1, entries=ent) == saved)
+        engine.HELD_FILE = os.path.join(tmp, "usher.held")
+        # THE READER
+        with open(engine.HELD_FILE, "w") as f:
+            f.write("[1, 2]")
+        ck("hold-a-garbage-file-is-no-hold", engine.load_held() is None)
+        engine.hold_for_network(saved, state=1, entries=ent, now=100.0)
+        # THE CARRY: a held app absent from the capture is written into it
+        snap = {"time": 1, "windows": [row("foot"), row("slack", "titan")]}
+        out = engine.carry_held(snap)
+        _c = sorted((w.get("source") or "", w["app_id"])
+                    for w in out["windows"])
+        ck("hold-carry-writes-the-absent-held-apps",
+           _c == [("", "chrome-abc-Default"), ("", "foot"),
+                  ("", "google-chrome"), ("titan", "kitty"),
+                  ("titan", "slack")])
+        ck("hold-carry-skips-an-app-that-is-live",
+           sum(1 for w in out["windows"]
+               if w["app_id"] == "slack") == 1)
+        ck("hold-carried-rows-have-no-pid",
+           all(w["pid"] == -1 for w in out["windows"][2:]))
+        ck("hold-carry-leaves-the-live-snapshot-alone",
+           len(snap["windows"]) == 2)
+        # AND persist WRITES THE CARRY, which is the wiring
+        engine.persist(snap, roll=False)
+        _cur = json.load(open(os.path.join(engine.STATE, "current.json")))
+        ck("hold-persist-carries-the-hold",
+           any(w["app_id"] == "google-chrome" for w in _cur["windows"]))
+        # A HELD ACCOUNT IS NOT ASKED TO CAPTURE
+        logs.clear()
+        _n = engine.source_trigger({"titan"}, "capture",
+                                   hook=os.path.join(tmp, "absent"))
+        ck("hold-a-held-account-is-not-asked-to-capture",
+           _n == 0 and any("not asking titan to capture" in m
+                           for m in logs)
+           and not any("cannot ask" in m for m in logs))
+        # THE CONTROL: it is still asked to RESUME (the hook is absent
+        # here, so asking reads as "cannot ask")
+        logs.clear()
+        engine.source_trigger({"titan"}, "resume",
+                              hook=os.path.join(tmp, "absent"))
+        ck("hold-a-held-account-is-still-asked-to-resume",
+           any("cannot ask titan to resume" in m for m in logs))
+        # THE RELEASE: the held rows, forced, then the file goes
+        got = []
+        _rn = engine.release_held(
+            launch=lambda snap, force=False: got.append((snap, force)) or 3)
+        ck("hold-release-replays-the-held-rows-forced",
+           _rn == 3 and len(got) == 1 and got[0][1] is True
+           and len(got[0][0]["windows"]) == 4)
+        ck("hold-release-removes-the-hold",
+           not os.path.exists(engine.HELD_FILE))
+        ck("hold-release-with-nothing-held-is-none",
+           engine.release_held(launch=lambda *a, **k: 1) is None)
+        # launch_missing WIRING: it holds unless forced
+        calls = []
+        engine.hold_for_network = lambda s: calls.append(len(s)) or []
+
+        def _blind():
+            raise OSError("no compositor here")
+        engine.ipc = _blind
+        engine.launch_missing({"windows": [row("foot")]})
+        engine.launch_missing({"windows": [row("foot")]}, force=True)
+        ck("hold-launch-missing-holds-unless-forced", calls == [1])
+        engine.hold_for_network = real[6]
+        engine.ipc = real[7]
+        # THE DAEMON: released when the network is full, or on request
+        engine.hold_for_network(saved, state=1, entries=ent)
+        w = Watcher(launch=False)
+        w.st["armed_at"] = 0.0
+        started = []
+        st = lambda f: started.append(f)           # noqa: E731
+        ck("hold-daemon-waits-while-offline",
+           w._poll_held(now=10.0, state_fn=lambda: 1, start=st) is False
+           and started == [])
+        ck("hold-daemon-asks-at-most-every-poll",
+           w._poll_held(now=10.5, state_fn=lambda: 4, start=st) is False)
+        ck("hold-daemon-releases-when-full",
+           w._poll_held(now=20.0, state_fn=lambda: 4, start=st) is True
+           and len(started) == 1)
+        ck("hold-daemon-release-arms-place",
+           w.st["armed_at"] > 1000)
+        ck("hold-daemon-does-not-release-twice",
+           w._poll_held(now=30.0, state_fn=lambda: 4, start=st) is False)
+        engine.release_held = lambda launch=None: 2
+        from . import watch as _wm
+        _wlog, _wm.logline = _wm.logline, logs.append   # imported by name
+        try:
+            started[0]()
+        finally:
+            _wm.logline = _wlog
+        ck("hold-daemon-release-thread-clears-the-flag",
+           w.releasing is False
+           and any("started 2 app(s)" in m for m in logs))
+        engine.release_held = real[3]
+        w.releasing = False
+        with open(engine.RELEASE_FILE, "w") as f:
+            f.write("{}")
+        started.clear()
+        ck("hold-daemon-releases-on-request-offline",
+           w._poll_held(now=40.0, state_fn=lambda: 1, start=st) is True
+           and not os.path.exists(engine.RELEASE_FILE))
+        os.remove(engine.HELD_FILE)
+        w.releasing = False
+        with open(engine.RELEASE_FILE, "w") as f:
+            f.write("{}")
+        ck("hold-a-request-with-nothing-held-is-spent",
+           w._poll_held(now=50.0, state_fn=lambda: 4, start=st) is False
+           and not os.path.exists(engine.RELEASE_FILE))
+        # THE CLI: the tray click during a hold releases
+        engine.load_held = lambda: {"rows": []}
+        engine.do_release = lambda: "released"
+        ck("hold-toggle-during-a-hold-releases",
+           cli._do_arm("toggle") == "released")
+        engine.load_held, engine.do_release = real[4], real[5]
+        # `usher release` with no daemon starts them here
+        engine.hold_for_network(saved, state=1, entries=ent)
+        engine.watcher_pid = lambda: None
+        engine.release_held = lambda launch=None: 4
+        _o = io.StringIO()
+        with contextlib.redirect_stdout(_o):
+            _rc = engine.do_release()
+        ck("hold-release-with-no-daemon-starts-them-here",
+           _rc == engine.EXIT_OK and "started 4 app(s)" in _o.getvalue())
+        engine.release_held = real[3]
+        # ...and with one, it asks
+        engine.watcher_pid = lambda: 4242
+        _o = io.StringIO()
+        with contextlib.redirect_stdout(_o):
+            engine.do_release()
+        ck("hold-release-with-a-daemon-asks-it",
+           os.path.exists(engine.RELEASE_FILE)
+           and "asked the daemon" in _o.getvalue())
+        os.remove(engine.HELD_FILE)
+        _o = io.StringIO()
+        with contextlib.redirect_stdout(_o):
+            _rc = engine.do_release()
+        ck("hold-release-with-nothing-held-says-so",
+           _rc == engine.EXIT_OK and "nothing is held" in _o.getvalue())
+    finally:
+        (engine.connectivity, engine.logline, engine.watcher_pid,
+         engine.release_held, engine.load_held, engine.do_release,
+         engine.hold_for_network, engine.ipc) = real
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _t_toplevels(ck):
@@ -16857,6 +17129,13 @@ def selftest():
     engine.SOURCES_FILE = _scratch_sources
     engine.DESK_FILE = _scratch_desk
     engine._SOURCES_ADOPTED = False
+    # AND THE NETWORK HOLD's two runtime files and its witness: a real hold
+    # on this box would otherwise be carried into every fixture's persist,
+    # and a marked entry in this box's registry would ask NetworkManager.
+    _real_held = (engine.HELD_FILE, engine.RELEASE_FILE, engine.connectivity)
+    engine.HELD_FILE = os.path.join(_scratch_root, "usher.held")
+    engine.RELEASE_FILE = os.path.join(_scratch_root, "usher.release")
+    engine.connectivity = lambda run=None: 4
     try:
         for area in (_t_registry, _t_resolution, _t_lock,
                      _t_toplevels, _t_roster,
@@ -16864,7 +17143,7 @@ def selftest():
                      _t_sticky, _t_visible, _t_unique_sizes, _t_verify,
                      _t_size_slots,
                      _t_terminals, _t_cli_split,
-                     _t_launch_source,
+                     _t_launch_source, _t_network_hold,
                      _t_relaunch, _t_chrome, _t_chrome_sizes, _t_learn,
                      _t_geometry, _t_placement, _t_snapshots, _t_undo,
                      _t_profiles,
@@ -16894,6 +17173,8 @@ def selftest():
         engine.SOURCES_FILE = _real_sources
         engine.DESK_FILE = _real_desk
         engine._SOURCES_ADOPTED = False
+        (engine.HELD_FILE, engine.RELEASE_FILE,
+         engine.connectivity) = _real_held
         shutil.rmtree(_scratch_root, ignore_errors=True)
     # NAMED, so a leak is a check rather than something a reader has to
     # notice. It runs after every area, because any of them could be the one.

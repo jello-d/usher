@@ -186,6 +186,9 @@ REKEY_TRIES = 2
 # one real dock's kanshi-plus-hook latency, which no amount of rehearsal here
 # can tell us.
 DOCK_HOLD = float(os.environ.get("USHER_DOCK_HOLD", 20))
+# How often a network hold asks NetworkManager whether the network is full.
+# One bounded subprocess per tick, and only while something is held.
+NET_POLL = 2.0
 
 
 # THE WORKER RESPAWN BOUNDS. Named because they govern how the daemon
@@ -647,6 +650,11 @@ class Watcher:
         # guess from the surface map). When it later resolves to an identity
         # the store knows, the guess must give way: see _renamed_from_seed.
         self.seeded_as = {}
+        # THE NETWORK HOLD: when to ask NetworkManager next, and whether a
+        # release is running (it launches apps, which can take seconds, so it
+        # runs on its own thread and must not start twice).
+        self.net_next = 0.0
+        self.releasing = False
         self.verify = {}
         # vid -> the slot of a late watch that has CLOSED, kept until
         # LATE_CAP from the landing, so a put-back after the watch went quiet
@@ -945,7 +953,11 @@ class Watcher:
                      # would teach the store a collapse. Published because the
                      # exception is worth seeing, not because it is a mode.
                      "recording": not (self._in_transition()
-                                       or bool(self.profile_drift_at))}, f)
+                                       or bool(self.profile_drift_at)),
+                     # WHAT IS WAITING FOR THE NETWORK: the owner's app-ids
+                     # and each other account by name. Non-empty is the
+                     # tray's warning triangle; see engine.hold_for_network.
+                     "held": engine.held_names(engine.load_held())}, f)
             os.replace(tmp, STATUS_FILE)
         except OSError:
             pass
@@ -2129,6 +2141,7 @@ class Watcher:
             # and it is the half whose loss costs the layout.
             try:
                 self._poll_files(seen)
+                self._poll_held()
                 self._poll_sweep_wait(cap)
                 cap = self._poll_outputs(cap)
                 # AND THE PROFILE, not just the output NAMES that poll
@@ -2258,6 +2271,58 @@ class Watcher:
             "-" + "/".join(gone) if gone else ""]))
         self._begin_transition(f"outputs polled: {what}")
         return cap
+
+    def _poll_held(self, now=None, state_fn=None, start=None):
+        """Release the network hold once the network is full, or at once when
+        `usher release` (or the tray click) asks. Returns whether it did.
+
+        ASKED OF A FILE, NOT OF MEMORY, so a hold survives a reload: the
+        worker that held the apps need not be the one that releases them."""
+        held = os.path.exists(engine.HELD_FILE)
+        asked = os.path.exists(engine.RELEASE_FILE)
+        if asked:
+            try:
+                os.remove(engine.RELEASE_FILE)
+            except OSError:
+                pass
+        if not held or self.releasing:
+            return False        # a request with nothing held is spent
+        now = time.time() if now is None else now
+        if not asked:
+            if now < self.net_next:
+                return False
+            self.net_next = now + NET_POLL
+            if not engine.network_ready(
+                    (state_fn or engine.connectivity)()):
+                return False
+        self._release_hold("on request" if asked else "the network is full",
+                           start)
+        return True
+
+    def _release_hold(self, why, start=None):
+        """Arm place mode, then start what was held, on a thread of its own.
+
+        PLACE MODE FIRST, so the windows that arrive are placed: a held app
+        maps long after the login's own place window has closed, and in
+        settled mode it would be left wherever it opened."""
+        self.releasing = True
+        with self.lock:
+            self.st["armed_at"] = time.time()
+        logline(f"network hold released ({why}): placing what it starts")
+        if start is None:
+            threading.Thread(target=self._release_go, daemon=True).start()
+        else:
+            start(self._release_go)
+
+    def _release_go(self):
+        """The release's own thread: start what was held, and say so."""
+        try:
+            n = engine.release_held()
+            logline(f"network hold: started {n} app(s)")
+        except Exception as e:                           # noqa: BLE001
+            logline(f"network hold release error: {e}")
+        finally:
+            self.releasing = False
 
     def _poll_files(self, seen):
         """Adopt edits to the files that steer us, by mtime. Auto-incorporating
