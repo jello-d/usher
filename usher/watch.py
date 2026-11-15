@@ -2560,6 +2560,51 @@ class Watcher:
                     f"stores too")
         return True
 
+    def _adopt_unheard(self, windows, now=None):
+        """A window the capture can see and the placer never heard map.
+
+        THE HOLD BELOW AND THE PLACER BOTH START FROM `view-mapped`: it is
+        what sets a window's grace deadline and queues its first look. The
+        capture reads its own socket, so when the EVENT stream stalls the
+        capture still sees every window and the placer sees none, and
+        nothing holds them. Measured on dragonfly's 2026-11-14 20:43 login:
+        the compositor was busy, the event socket delivered nothing for the
+        worker's 5s life ("Failed to read anything from the socket"), and the
+        capture at 20:43:52 learned all seven of the owner's relaunched
+        windows at the apps' cascade. The respawned worker then found each
+        one already "at its slot" and placed nothing.
+
+        So while placing, a window with no deadline that is not placed is
+        treated as the map we missed: graced, owed its late chance, fed to
+        the settle clock and queued for a fresh look, exactly what
+        `_on_event` does for a map it does hear. Settled, a missed map is a
+        window opened mid-session, which stays where it opens anyway.
+        Windows present at a worker's start are _init_place's, which sets
+        their deadlines, so this only ever catches a map after it. Returns
+        the ids adopted."""
+        if not self._placing_now():
+            return []
+        now = time.time() if now is None else now
+        got = []
+        for w in windows:
+            vid = w.get("id")
+            if (vid is None or vid in self.deadline or vid in self.placed
+                    or w.get("parent", -1) != -1):
+                continue
+            self.deadline[vid] = now + PLACE_GRACE
+            self.late_ok.add(vid)
+            got.append(vid)
+        if got:
+            with self.lock:
+                self.st["last_map"] = now
+                for vid in got:
+                    self.pending.setdefault(vid, {"v": {"id": vid},
+                                                  "refetch": True,
+                                                  "due": now})
+            logline(f"never heard {len(got)} window(s) map; graced and "
+                    f"queued for placement")
+        return got
+
     def _held(self, windows):
         """The view ids whose CURRENT position must not be believed yet.
 
@@ -3028,6 +3073,7 @@ class Watcher:
         # store stays dirty, so the next tick takes another.
         if snap.get("unstable"):
             return
+        self._adopt_unheard(snap["windows"])
         hold = self._held(snap["windows"])
         # WHEN THE HOLD LIFTS, COME BACK. Capture is event-driven, so a window
         # held through the pass that recorded it gets no second look until

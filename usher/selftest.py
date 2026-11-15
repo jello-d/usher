@@ -2857,6 +2857,9 @@ def _t_resolution(ck):
                                                  "width": 10, "height": 10}})]
 
             _wo = _word.Watcher(launch=False)
+            # SETTLED: these cells are about LEARNING, and a placing
+            # worker holds a window it never heard map (_adopt_unheard).
+            _wo.st["armed_at"] = time.time() - PLACE_CAP - 1
             _wo.place_sock = _OrdSock()
             _wo.kb, _wo.groups = {}, {}
             _wo.saved = {"windows": []}
@@ -2942,6 +2945,9 @@ def _t_resolution(ck):
             # still unplaced 45s after login. The account here answers
             # nothing, so the window stays pending.
             _wo2 = _word.Watcher(launch=False)
+            # SETTLED: these cells are about LEARNING, and a placing
+            # worker holds a window it never heard map (_adopt_unheard).
+            _wo2.st["armed_at"] = time.time() - PLACE_CAP - 1
             _wo2.place_sock = _OrdSock()
             _wo2.kb, _wo2.groups, _wo2.saved = {}, {}, {"windows": []}
             _wo2.src_asked = {}
@@ -5051,6 +5057,9 @@ def _t_slots(ck):
             # drives its placements against: the first version set `w.kb = {}`
             # and the area died on a KeyError twelve checks later.
             _wc = Watcher(launch=False)
+            # SETTLED: these cells are about LEARNING, and a placing
+            # worker holds a window it never heard map (_adopt_unheard).
+            _wc.st["armed_at"] = time.time() - PLACE_CAP - 1
             _r_sk2, _r_pe2 = _wslot.save_knowledge, _wslot.persist
             try:
                 _wslot.save_knowledge = lambda *_a, **_k: None
@@ -5082,6 +5091,9 @@ def _t_slots(ck):
                                                      "height": 10}})
                                 for vid, x in ((1, 50), (2, 10))]
                 _wl = Watcher(launch=False)
+                # SETTLED: these cells are about LEARNING, and a placing
+                # worker holds a window it never heard map (_adopt_unheard).
+                _wl.st["armed_at"] = time.time() - PLACE_CAP - 1
                 _wl._profile_drift = lambda: False
                 _wl.transition_until = 0
                 _wl.kb, _wl.groups = {}, {}
@@ -5090,6 +5102,66 @@ def _t_slots(ck):
                 _wl._capture_once(_LedSock())
                 ck("the-capture-pass-hands-learn-its-ledger",
                    (_wl.kb.get(_lk) or {}).get("pos", [None])[0] == 10)
+
+                # A MAP THE PLACER NEVER HEARD IS NOT LEARNED WHILE PLACING.
+                # dragonfly 2026-11-14 20:43: the event socket was dead, so
+                # no window had a deadline, the hold covered none, and the
+                # capture taught the store every relaunched window's
+                # cascade. Driven through the real pass: the slot says 50,
+                # the window sits at 10 and was never heard to map.
+                class _UnSock(_RefSock):
+                    @staticmethod
+                    def list_views(**_kw):
+                        return [dict(_trv("zzz-unowned", "a",
+                                          pid=os.getpid(), vid=31),
+                                     **{"output-name": "DP-1",
+                                        "geometry": {"x": 10, "y": 10,
+                                                     "width": 10,
+                                                     "height": 10}})]
+
+                def _un_watcher(placing):
+                    u = Watcher(launch=False)
+                    u._profile_drift = lambda: False
+                    u.transition_until = 0
+                    u.groups = {}
+                    u.kb = {_lk: {"app_id": "zzz-unowned", "title": "",
+                                  "appid_only": True, "label": "a",
+                                  "output": "DP-1",
+                                  "workspace": [0.0, 0.0],
+                                  "pos": [50.0, 50.0],
+                                  "size": [10.0, 10.0],
+                                  "last_seen": time.time()}}
+                    if not placing:
+                        u.st["armed_at"] = time.time() - PLACE_CAP - 1
+                    return u
+                _u = _un_watcher(True)
+                _slog[:] = []
+                _u._capture_once(_UnSock())
+                ck("an-unheard-map-is-not-learned-while-placing",
+                   _u.kb[_lk]["pos"][0] == 50)
+                ck("an-unheard-map-is-queued-for-a-fresh-look",
+                   (_u.pending.get(31) or {}).get("refetch") is True
+                   and 31 in _u.late_ok
+                   and _u.deadline.get(31, 0) > time.time())
+                ck("an-unheard-map-is-said",
+                   any("never heard 1 window(s) map" in m for m in _slog))
+                # THE CONTROL: settled, the same window is learned where it
+                # sits, or the two cells above pass over a pass that learns
+                # nothing at all.
+                _u2 = _un_watcher(False)
+                _u2._capture_once(_UnSock())
+                ck("settled-an-unheard-window-is-learned-where-it-sits",
+                   _u2.kb[_lk]["pos"][0] == 10 and not _u2.pending)
+                # AND ONLY THE UNHEARD: a heard, a placed, and a dialog are
+                # each left to the paths that already own them.
+                _u3 = _un_watcher(True)
+                _u3.deadline[41] = time.time() + 5
+                _u3.placed.add(42)
+                ck("adopt-takes-only-the-unheard",
+                   _u3._adopt_unheard([{"id": 40}, {"id": 41}, {"id": 42},
+                                       {"id": 43, "parent": 40},
+                                       {"id": None}]) == [40]
+                   and set(_u3.pending) == {40})
             finally:
                 _wslot.save_knowledge, _wslot.persist = _r_sk2, _r_pe2
         finally:
