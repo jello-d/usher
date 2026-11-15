@@ -11561,6 +11561,20 @@ def _t_unique_sizes(ck):
        nudges(e, _stable(e), set()) == [])
     f = [_v(1, 2498, 1702), _v(2, 2498, 1702, parent=1)]
     ck("unique-ignores-a-dialog", nudges(f, _stable(f), set()) == [])
+    # THE RATCHET, measured on dragonfly: Chrome opens a new window at the
+    # size of the last one, and while that newcomer was still settling it
+    # CLAIMED its size, so the settled window it copied was shrunk instead,
+    # once per new window. A settling window takes no part; once it has
+    # held, the newer one is the one that moves.
+    h = [_v(1, 2423, 1678), _v(9, 2423, 1678)]
+    ck("unique-a-settling-newcomer-does-not-push-the-settled-window",
+       nudges(h, {1: (2423, 1678)}, set()) == [])
+    ck("unique-the-newcomer-moves-once-it-has-held",
+       nudges(h, _stable(h), set()) == [(9, (2417, 1678))])
+    ck("unique-a-window-is-nudged-at-most-once",
+       nudges(h, _stable(h), {(9, (2500, 1678))}) == [(1, (2417, 1678))]
+       and nudges(h, _stable(h), {(1, (2429, 1678))})
+       == [(9, (2417, 1678))])
     g = [_v(i, 1085, 672, app="kitty") for i in range(1, 7)]
     _p = nudges(g, _stable(g), set())
     _sizes = [(1085, 672)] + [s for _i, s in _p]

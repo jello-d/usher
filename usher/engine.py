@@ -3877,12 +3877,20 @@ def size_nudges(views, prev, tried):
     `views` are raw compositor views of ONE desk; `prev` is {vid: (w, h)}
     from the last pass, so only a window whose size has HELD across a pass is
     touched (one being dragged or still restoring is not); `tried` is the set
-    of (vid, (w, h)) already nudged, so an app that refuses a size is asked
-    once and never fought.
+    of (vid, (w, h)) already nudged, so a window is asked once, whether its
+    app took the size or refused it, and is never fought.
 
     THE OLDEST WINDOW KEEPS ITS SIZE (lowest view id), and a window that
-    cannot be nudged (fullscreen, tiled, sticky, minimized, a dialog, not
-    yet stable) still claims its size, so the movable one gives way."""
+    cannot be nudged (fullscreen, tiled, sticky, minimized, or ALREADY
+    NUDGED once) still claims its size, so the movable one gives way.
+
+    A WINDOW WHOSE SIZE HAS NOT HELD TAKES NO PART AT ALL: it neither moves
+    nor claims. Chrome opens a new window at the size of the last one, and
+    when a still-settling newcomer CLAIMED, the settled window it copied was
+    the one nudged: measured on dragonfly 2026-11-14/15, one Gmail window
+    walked 2429 -> 2399 in five steps, one per new window. Waiting a pass
+    lets the newcomer be the one that moves, and ONE NUDGE PER WINDOW bounds
+    whatever is left: no window is ever shrunk twice."""
     groups = {}
     for v in views:
         if (v.get("parent", -1) or -1) != -1:
@@ -3891,10 +3899,11 @@ def size_nudges(views, prev, tried):
         if not g.get("width") or not g.get("height"):
             continue
         size = (int(round(g["width"])), int(round(g["height"])))
+        if prev.get(v.get("id")) != size:
+            continue
         movable = not (v.get("fullscreen") or v.get("sticky")
                        or v.get("minimized") or v.get("tiled-edges")
-                       or prev.get(v.get("id")) != size
-                       or (v.get("id"), size) in tried)
+                       or any(t[0] == v.get("id") for t in tried))
         groups.setdefault((v.get("app-id") or "").lower(), []).append(
             (v.get("id"), size, movable))
     out = []
