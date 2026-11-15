@@ -9205,6 +9205,37 @@ def _t_cli_split(ck):
     # the assertion over an empty list.
     ck("the-thread-targets-were-found", len(_tgts) >= 2)
 
+    # NOTHING SLOW BETWEEN SUBSCRIBING AND READING. wayfire writes events to
+    # a subscribed socket non-blocking and HANGS UP on a client whose buffer
+    # fills, so once `subscribe` returns, everything before `_event_loop`
+    # must be quick. The relaunch ran inline there and the worker died 5s
+    # into two logins (dragonfly 2026-11-14). Derived from the body, so a
+    # future slow step added there fails here the day it is written: only
+    # a log line, a print or starting a thread is allowed in between.
+    _wrun = None
+    for _n in _ast.walk(_wtree):
+        if isinstance(_n, _ast.ClassDef) and _n.name == "Watcher":
+            _wrun = next((f for f in _n.body if isinstance(f, _ast.FunctionDef)
+                          and f.name == "run"), None)
+    _between, _seen_sub, _seen_loop = [], False, False
+    for _s in (_wrun.body if _wrun else []):
+        _txt = _ast.unparse(_s)
+        if not _seen_sub:
+            _seen_sub = _txt.startswith("subscribe(")
+            continue
+        if _txt.startswith("self._event_loop("):
+            _seen_loop = True
+            break
+        if not (_txt.startswith(("logline(", "print("))
+                or re.match(r"threading\.Thread\(.*\)\.start\(\)$", _txt,
+                             re.S)):
+            _between.append(_txt.splitlines()[0][:60])
+    if _between:
+        print("selftest: slow steps between subscribing and reading events: "
+              f"{_between}", file=sys.stderr)
+    ck("nothing-runs-inline-between-subscribe-and-the-event-loop",
+       _seen_sub and _seen_loop and not _between)
+
     # THE DESK MUST BE POLLED BY THE LOOP THAT ALWAYS RUNS, not only by the
     # capture step. `_poll_outputs` compares output NAMES, so a desk change
     # that keeps them is invisible to it: same connector, same resolution, a

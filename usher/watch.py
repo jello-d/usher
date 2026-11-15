@@ -763,7 +763,15 @@ class Watcher:
         print(f"usher-mgr: {len(self.kb)} known windows; watching",
               flush=True)
         logline(f"watching, {len(self.kb)} known windows")
-        self._init_launch()
+        # THE RELAUNCH RUNS BESIDE THE EVENT LOOP, NEVER BEFORE IT. Once
+        # subscribed, wayfire writes every event to this socket non-blocking
+        # and HANGS UP on a client whose buffer fills (ipc.cpp: "Error
+        # sending json to client!", then shutdown). The relaunch takes
+        # seconds (spawns, the Chrome stagger, another account's sudo
+        # resume) during the biggest event burst a session has, so run
+        # inline it left the socket unread and the worker died 5s into two
+        # logins in a row (dragonfly 2026-11-14 20:43 and 21:00).
+        threading.Thread(target=self._init_launch, daemon=True).start()
         threading.Thread(target=self._placer_loop, daemon=True).start()
         self._event_loop(watch)
 
