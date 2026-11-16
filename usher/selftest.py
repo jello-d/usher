@@ -14717,6 +14717,17 @@ def _t_displays(ck):
                          [(0, 0, 100, 100), (40, 40, 100, 100)])
     ck("a-cascade-with-no-room-stays-inside-its-region",
        0 <= _cw[0] <= 40 and 0 <= _cw[1] <= 40)
+    # NO CORNER CLASH, NO MOVE, even when the slot overhangs its region: the
+    # clamp is for the steps. Measured: two big windows overlapping with
+    # corners 49px apart, the second 7px past the bottom of its surface,
+    # was moved up 7px and logged as a cascade (dragonfly 2026-11-15).
+    _ov = (109, 79, 2677, 1678)
+    ck("a-cascade-with-no-corner-clash-moves-nothing",
+       engine.cascade(_ov, (0, 0, 2880, 1750), [(60, 45, 2666, 1702)])
+       == tuple(float(n) for n in _ov))
+    ck("lay-out-leaves-an-overhanging-slot-with-no-clash-alone",
+       _lo2(_ov, (0, 0, 2880, 1750), [(60, 45, 2666, 1702)], ())
+       == (tuple(float(n) for n in _ov), {}))
     ck("a-seed-in-nobodys-way-is-left-as-it-is",
        _lo2((0, 2000, 800, 500), _port, [(0, 0, 800, 500)], ())
        == ((0, 2000, 800, 500), {}))

@@ -1548,6 +1548,15 @@ def fit_beside(rect, region, taken):
     return (start, y, w, h)
 
 
+def _corner_clash(rect, taken, step):
+    """Whether `rect` overlaps a window of `taken` by more than SEED_OVERLAP
+    with its top-left corner within `step` of that window's: the one thing
+    a cascade exists to undo."""
+    x, y = rect[0], rect[1]
+    return any(_overlap_share(rect, t) > SEED_OVERLAP
+               and max(abs(x - t[0]), abs(y - t[1])) < step for t in taken)
+
+
 def cascade(rect, region, taken, step=CASCADE_STEP):
     """`rect` moved down and right in steps until no window it overlaps has
     its top-left corner within one step of its own, kept inside `region`.
@@ -1560,15 +1569,18 @@ def cascade(rect, region, taken, step=CASCADE_STEP):
     candidate stands, since every placement then shares a corner with
     something and refusing to place helps nobody."""
     x, y, w, h = (float(n) for n in rect)
+    # NO CLASH WHERE IT IS, NO MOVE: the region clamp below is for the
+    # steps, and applied to a window nothing is in the way of it nudged a
+    # learned slot that merely overhung its surface (7px on dragonfly
+    # 2026-11-15, logged as a cascade). Only a collision overrides a slot.
+    if not _corner_clash((x, y, w, h), taken, step):
+        return (x, y, w, h)
     rx, ry, rw, rh = (float(n) for n in region)
     mx, my = max(rx, rx + rw - w), max(ry, ry + rh - h)
     cx, cy = min(max(x, rx), mx), min(max(y, ry), my)
     tries = int(max(rw, rh) // step) + 2
     for _ in range(tries):
-        clash = [t for t in taken
-                 if _overlap_share((cx, cy, w, h), t) > SEED_OVERLAP
-                 and max(abs(cx - t[0]), abs(cy - t[1])) < step]
-        if not clash:
+        if not _corner_clash((cx, cy, w, h), taken, step):
             break
         nx, ny = cx + step, cy + step
         if nx > mx or ny > my:
