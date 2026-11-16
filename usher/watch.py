@@ -628,6 +628,13 @@ class Watcher:
         self.user_placed = set()
         self.grabbing = set()
         self.focused = None
+        # THE WINDOW A DRAG HOLDS: the focused view at the moment `move` or
+        # `resize` switched on. Focus itself cannot answer during the drag,
+        # since the grab CLEARS it (a `view-focused` with no view follows the
+        # activation, measured on dragonfly 2026-11-15) and only returns it
+        # on release, so every geometry change of the drag arrives with
+        # nothing focused.
+        self.grab_vid = None
         # VIEWS WE HAVE ALREADY SAID ARE STICKY and so never moved. A third
         # set for the same reason as the one above: it is a property of the
         # window, and a browser renames constantly.
@@ -3310,15 +3317,20 @@ class Watcher:
         if ev == "plugin-activation-state-changed":
             name = msg.get("plugin") or ""
             if msg.get("state"):
+                if name in USER_PLACE_PLUGINS and \
+                        not self.grabbing & USER_PLACE_PLUGINS:
+                    self.grab_vid = self.focused
                 self.grabbing.add(name)
             else:
                 self.grabbing.discard(name)
+                if not self.grabbing & USER_PLACE_PLUGINS:
+                    self.grab_vid = None
         if ev == "view-focused":
             self.focused = v.get("id")
         if v.get("id") is not None and (
                 (ev == "view-geometry-changed"
                  and self.grabbing & USER_PLACE_PLUGINS
-                 and v["id"] == self.focused)
+                 and v["id"] == self.grab_vid)
                 or ev == "view-tiled"):
             self._note_user_placement(v, snapped=(ev == "view-tiled"))
         if ev in OUTPUT_EVENTS:

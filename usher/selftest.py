@@ -11645,6 +11645,33 @@ def _t_pins(ck):
         w._on_event({"event": "view-tiled", "view": {"id": 4}})
         ck("pin-a-snap-is-the-user-unless-we-just-placed-it",
            4 in w.user_placed and 6 not in w.user_placed)
+        # THE GRAB CLEARS FOCUS, and the whole drag arrives with nothing
+        # focused: the measured sequence on dragonfly 2026-11-15, which the
+        # first detector (comparing against the focus NOW) never matched.
+        w2 = Watcher(launch=False)
+        w2._on_event({"event": "view-focused", "view": {"id": 12}})
+        w2._on_event({"event": "plugin-activation-state-changed",
+                      "plugin": "resize", "state": True})
+        w2._on_event({"event": "view-focused", "view": None})
+        w2._on_event({"event": "view-geometry-changed",
+                      "view": {"id": 3, "app-id": "x"}})
+        w2._on_event({"event": "view-geometry-changed",
+                      "view": {"id": 12, "app-id": "signal"}})
+        ck("pin-a-drag-with-focus-cleared-pins-the-grabbed-window",
+           12 in w2.user_placed and 3 not in w2.user_placed)
+        w2._on_event({"event": "view-focused", "view": {"id": 12}})
+        w2._on_event({"event": "plugin-activation-state-changed",
+                      "plugin": "resize", "state": False})
+        w2._on_event({"event": "view-focused", "view": {"id": 5}})
+        w2._on_event({"event": "plugin-activation-state-changed",
+                      "plugin": "move", "state": True})
+        w2._on_event({"event": "view-focused", "view": None})
+        w2._on_event({"event": "view-geometry-changed",
+                      "view": {"id": 12, "app-id": "signal"}})
+        w2._on_event({"event": "view-geometry-changed",
+                      "view": {"id": 5, "app-id": "y"}})
+        ck("pin-each-grab-holds-the-window-focused-when-it-began",
+           5 in w2.user_placed and w2.grab_vid == 5)
         _src = inspect.getsource(Watcher._capture_once)
         ck("the-capture-pins-what-the-user-placed",
            "pin=set(self.user_placed)" in _src)
