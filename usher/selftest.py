@@ -8365,8 +8365,8 @@ def _t_cli_split(ck):
     _fcalls = []
     _rdf = engine.do_forget
     try:
-        engine.do_forget = (lambda sel, apply=False, purge=False, app=None:
-                            _fcalls.append((sel, apply, app)) or 0)
+        engine.do_forget = (lambda sel, apply=False, purge=False, app=None,
+                            unpin=False: _fcalls.append((sel, apply, app)) or 0)
         for _args in (["forget", "acct", "--app", "kitty", "--apply"],
                       ["forget", "acct"], ["forget", "acct", "--app"]):
             try:
@@ -11519,6 +11519,139 @@ def _t_placement(ck):
         _gw._on_event({"event": "view-unmapped", "view": {"id": 9}})
     ck("the-refusal-is-forgotten-on-unmap", 9 not in _gw.cell_said)
 
+def _t_pins(ck):
+    """A PIN IS WHERE THE USER PUT A WINDOW; the rest of a slot is only
+    where it was last seen. Placement honours a pin exactly and lays out
+    everything else (watch._place_view), so the pin must be recorded only
+    for the user's own move, resize or snap, carried across the captures
+    that rewrite every entry, and never overridden by the surface rules."""
+    from .watch import Watcher
+    _w = {"id": 5, "app_id": "x", "title": "x", "output": "eDP-1",
+          "workspace": [1, 0], "pos": [10, 20], "size": [300, 200],
+          "pid": os.getpid()}
+    _e = engine.kb_entry(_w, "", True, 100.0)
+    _p = engine.pin_record(_e, 100.0)
+    ck("pin-records-the-rect-and-when",
+       _p["pos"] == [10, 20] and _p["size"] == [300, 200]
+       and _p["workspace"] == [1, 0] and _p["when"] == 100.0)
+    ck("pin-of-a-plain-entry-is-none", engine.pin_of(_e) is None)
+    ck("pin-of-garbage-is-none",
+       engine.pin_of(dict(_e, pinned={"pos": 3})) is None
+       and engine.pin_of(dict(_e, pinned="x")) is None)
+    _pe = dict(_e, pos=[900, 900], pinned=_p)
+    ck("placement-entry-uses-the-pin", engine.placement_entry(_pe)["pos"]
+       == [10, 20] and engine.placement_entry(_e) is _e)
+    _new = engine.kb_entry(dict(_w, pos=[50, 50]), "", True, 200.0)
+    ck("carry-pin-keeps-an-old-pin",
+       engine.carry_pin(dict(_new), _pe, False, 200.0)["pinned"] == _p)
+    ck("carry-pin-pins-now-at-the-new-rect",
+       engine.carry_pin(dict(_new), _pe, True, 200.0)["pinned"]["pos"]
+       == [50, 50])
+    ck("carry-pin-leaves-an-unpinned-entry-unpinned",
+       "pinned" not in engine.carry_pin(dict(_new), _e, False, 200.0))
+    # THE SURFACE RULES DO NOT OVERRIDE A PIN, in either direction
+    _sm = {"s": {"output": "eDP-1", "workspace": [1, 0], "pos": [500, 0],
+                 "size": [100, 100]}}
+    ck("a-pinned-slot-never-drifts",
+       not engine.slot_drifted(dict(_pe, surface="s"), _sm, "eDP-1"))
+    ck("a-pinned-slot-is-never-dictated",
+       not engine.surface_dictates(dict(_pe, surface="s"),
+                                   [{"surface": "t", "last_seen": 1e12}],
+                                   0.0))
+
+    # THE WRITERS: learn pins what the user placed and carries the rest;
+    # upsert (a one-shot capture, which saw no drag) only carries.
+    _rw = engine.window_origin
+    try:
+        engine.window_origin = lambda pid: (None, None)
+        _app = "zzz-pin"
+        _row = dict(_w, app_id=_app, id=5)
+        kb = {}
+        engine.learn(kb, {}, [_row], 100.0, pin={5})
+        _k = engine.kkey(_app, "")
+        ck("learn-pins-a-window-the-user-placed",
+           engine.pin_of(kb.get(_k)) is not None)
+        engine.learn(kb, {}, [dict(_row, pos=[70, 70])], 101.0)
+        ck("learn-carries-the-pin-and-updates-last-seen",
+           kb[_k]["pos"] == [70, 70]
+           and (kb[_k].get("pinned") or {}).get("pos") == [10, 20])
+        engine.upsert(kb, [dict(_row, pos=[80, 80])], 102.0)
+        ck("upsert-carries-the-pin",
+           (kb[_k].get("pinned") or {}).get("pos") == [10, 20])
+        kb2 = {}
+        engine.learn(kb2, {}, [_row], 100.0)
+        ck("learn-pins-nothing-unasked", "pinned" not in kb2[_k])
+        # UNPIN keeps the slot and drops the pin
+        _rs, _rsv = engine.take_snapshot, engine.save_knowledge
+        _rlog = engine.logline
+        try:
+            engine.take_snapshot = lambda *a, **k: None
+            engine.save_knowledge = lambda *a, **k: None
+            engine.logline = lambda *a: None
+            _g = engine.forget_apply(kb, ["*"], "P", app=_app, unpin=True)
+            ck("unpin-keeps-the-slot-and-drops-the-pin",
+               _g == [_k] and _k in kb and "pinned" not in kb[_k])
+            ck("unpin-of-nothing-pinned-is-a-no-op",
+               engine.forget_apply(kb, ["*"], "P", app=_app,
+                                   unpin=True) == [] and _k in kb)
+        finally:
+            engine.take_snapshot, engine.save_knowledge = _rs, _rsv
+            engine.logline = _rlog
+    finally:
+        engine.window_origin = _rw
+
+    # THE DETECTOR: a geometry change on the FOCUSED window while `move` or
+    # `resize` is active is the user; anything else is not.
+    w = Watcher(launch=False)
+    _wm = sys.modules[Watcher.__module__]
+    _rl = _wm.logline
+    try:
+        _wm.logline = lambda *a: None
+        _v = {"id": 9, "app-id": "a", "title": "t"}
+        w._on_event({"event": "view-focused", "view": _v})
+        w._on_event({"event": "view-geometry-changed", "view": _v})
+        ck("pin-a-change-with-no-grab-is-not-the-user",
+           9 not in w.user_placed)
+        w._on_event({"event": "plugin-activation-state-changed",
+                     "plugin": "vswitch", "state": True})
+        w._on_event({"event": "view-geometry-changed", "view": _v})
+        ck("pin-a-workspace-switch-is-not-the-user", 9 not in w.user_placed)
+        w._on_event({"event": "plugin-activation-state-changed",
+                     "plugin": "move", "state": True})
+        w._on_event({"event": "view-geometry-changed",
+                     "view": {"id": 8, "app-id": "b"}})
+        ck("pin-an-unfocused-window-is-not-the-one-dragged",
+           8 not in w.user_placed)
+        with w.lock:
+            w.verify[9] = {"due": 0}
+            w.pending[9] = {"v": _v, "due": 0}
+        w._on_event({"event": "view-geometry-changed", "view": _v})
+        ck("pin-a-drag-of-the-focused-window-is-the-user",
+           9 in w.user_placed)
+        ck("pin-a-drag-ends-our-placement-of-it",
+           9 not in w.verify and 9 not in w.pending and 9 in w.placed)
+        w._on_event({"event": "plugin-activation-state-changed",
+                     "plugin": "move", "state": False})
+        w._on_event({"event": "view-geometry-changed",
+                     "view": {"id": 7, "app-id": "c"}})
+        w._on_event({"event": "view-focused", "view": {"id": 7}})
+        w._on_event({"event": "view-geometry-changed",
+                     "view": {"id": 7, "app-id": "c"}})
+        ck("pin-after-the-grab-ends-nothing-is-the-user",
+           7 not in w.user_placed)
+        with w.lock:
+            w.verify[6] = {"due": 0}
+        w._on_event({"event": "view-tiled", "view": {"id": 6}})
+        w._on_event({"event": "view-tiled", "view": {"id": 4}})
+        ck("pin-a-snap-is-the-user-unless-we-just-placed-it",
+           4 in w.user_placed and 6 not in w.user_placed)
+        _src = inspect.getsource(Watcher._capture_once)
+        ck("the-capture-pins-what-the-user-placed",
+           "pin=set(self.user_placed)" in _src)
+    finally:
+        _wm.logline = _rl
+
+
 def _t_unique_sizes(ck):
     """EVERY WINDOW OF AN APP HAS A SIZE OF ITS OWN (engine.size_nudges).
 
@@ -12549,7 +12682,7 @@ def _t_geometry(ck):
         _applied = []
         _fapps = []
         engine.forget_apply = (lambda kb, sel, prof=None, purge=False,
-                               app=None: _fapps.append(app)
+                               app=None, unpin=False: _fapps.append(app)
                                or _applied.append(sel) or sel)
         # 1. a preview must touch NOTHING, with or without a daemon
         for _who, _pid in (("no-daemon", None), ("daemon-up", 99)):
@@ -12946,7 +13079,7 @@ def _t_undo(ck):
             engine.FORGET_FILE = _wmod.FORGET_FILE = os.path.join(
                 _ud, "usher.forget")
             engine.forget_apply = (lambda kb, sel, prof=None, purge=False,
-                                   app=None:
+                                   app=None, unpin=False:
                                    _fa.append((sel, purge)) or [])
             with open(engine.FORGET_FILE, "w") as f:
                 f.write("!purge\ntitan\n")
@@ -15764,6 +15897,47 @@ def _t_displays(ck):
                     ck("the-placer-never-repacks-a-learned-window",
                        _placing((0, 800, 800, 1500), (0, 800, 800, 1500))
                        == [(72, "tall", (0, 0))])
+                    # A LEARNED SLOT NOBODY PINNED IS LAID OUT TOO, and a
+                    # PINNED one is placed exactly, overlap and all: the user
+                    # decided that one. 71 already sits at 72's learned rect.
+                    def _learned(pin):
+                        _seeded.clear()
+                        _k = engine.kkey(_fapp, "titan:w72")
+                        _le = {"app_id": _fapp, "title": "titan:w72",
+                               "output": "eDP-1", "panel": "",
+                               "workspace": [0, 0], "pos": [0, 0],
+                               "size": [800, 1000], "surface": "tall",
+                               "source": "titan",
+                               "last_seen": _time.time()}
+                        if pin:
+                            _le["pinned"] = engine.pin_record(_le, 1.0)
+                            _le["pos"] = [0, 2000]   # last seen elsewhere
+                        w.kb, w.slot_held = {_k: _le}, {}
+                        _e = {"output": "eDP-1", "workspace": [0, 0],
+                              "pos": [0, 0], "size": [800, 1000]}
+                        _bv[0]["geometry"] = target_geometry(_e, _mo)
+                        _bv[0]["output-name"] = "eDP-1"
+                        w.place_sock = _Sock(_bv, [_mo])
+                        w.sweep_rects = {(_mo["name"], (0, 0)): [
+                            {"rect": (0, 0, 800, 1000), "vid": 71,
+                             "seed": False, "e": _e}]}
+                        w.placed.clear()
+                        w.redisplay_ok = set()
+                        w._placing_now = lambda: True
+                        try:
+                            w.deadline[72] = _time.time() + 100
+                            w._place_view(_bv[1])
+                        finally:
+                            del w._placing_now
+                        return list(_seeded)
+
+                    ck("an-unpinned-learned-slot-is-laid-out-beside",
+                       _learned(False) == [(72, None, (0, 1000))])
+                    ck("a-pinned-slot-is-placed-exactly-from-its-pin",
+                       _learned(True) == [(72, None, (0, 0))])
+                    ck("the-sweep-records-a-pinned-window-as-fixed",
+                       [t["seed"] for t in w.sweep_rects.get(
+                           (_mo["name"], (0, 0)), [])] == [False, False])
                     # AND ANOTHER ACCOUNT'S WINDOW IS LAID OUT CLEAR OF ITS
                     # FRAME: the stack under 71 starts below the tab
                     _rfi2 = engine.frame_inset
@@ -17284,7 +17458,7 @@ def selftest():
         for area in (_t_registry, _t_resolution, _t_lock,
                      _t_toplevels, _t_roster,
                      _t_lifecycle, _t_desktop, _t_loupe, _t_slots,
-                     _t_sticky, _t_visible, _t_unique_sizes, _t_verify,
+                     _t_sticky, _t_visible, _t_unique_sizes, _t_pins, _t_verify,
                      _t_size_slots,
                      _t_terminals, _t_cli_split,
                      _t_launch_source, _t_network_hold,

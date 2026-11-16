@@ -855,6 +855,9 @@ def slot_drifted(e, surfaces, output=None):
     follows the PANEL), when the caller knows it: a slot names its monitor
     by panel, and a connector renamed under it (another dock port) is the
     same monitor, not a drift."""
+    # A PIN is where the user put the window, wherever the map has moved.
+    if pin_of(e):
+        return False
     name = (e or {}).get("surface") or ""
     if not name or name not in (surfaces or {}):
         return False
@@ -1074,6 +1077,10 @@ def surface_dictates(here, others, left_at, shared=1, loaded_at=None):
     stack. The daemon passes shared=1 when `others` is the window's OWN
     entry (left_entry), since then there is no family to confuse."""
     if not here or not others or left_at is None or shared > 1:
+        return False
+    # A PINNED SLOT IS THE USER'S DECISION at this desk, and only an
+    # explicit placement overrides the layout: never the other way round.
+    if pin_of(here):
         return False
     # AN ENTRY LEARNED SINCE THIS DESK WAS ADOPTED IS THIS SESSION'S TRUTH,
     # not drift: you moved the window here, after arriving, so the other
@@ -4769,6 +4776,62 @@ def kb_entry(w, title, appid_only, when):
     }
 
 
+PIN_FIELDS = ("output", "panel", "workspace", "pos", "size", "surface",
+              "surface_frac")
+
+
+def pin_record(e, when):
+    """The PINNED half of an entry: where the user put this window, taken
+    from the entry learned at that moment. PURE.
+
+    TWO FACTS, NOT ONE. A slot used to be a single rect, last seen, and
+    every rect looked the same whatever had put the window there: the
+    user's drag, the app's own cascade, a Chrome size put-back, or usher's
+    layout. So usher could only replay it. A pin is the part the USER
+    decided, recorded only when the compositor says they were moving,
+    resizing or snapping that window, and it is what placement honours
+    exactly. The rest of the entry stays last-seen, which is evidence of
+    the window's surface and size and nothing more."""
+    return dict({k: e[k] for k in PIN_FIELDS if k in e}, when=when)
+
+
+def pin_of(e):
+    """The entry's pin, or None. An unreadable one is no pin: placement
+    then falls back to the layout, the cheap direction."""
+    p = (e or {}).get("pinned")
+    if not isinstance(p, dict):
+        return None
+    try:
+        if len(p["pos"]) == 2 and len(p["size"]) == 2 and p.get("output"):
+            return p
+    except (KeyError, TypeError):
+        pass
+    return None
+
+
+def placement_entry(e):
+    """The entry to PLACE from: its pin over its last-seen rect, or the
+    entry itself when nothing is pinned. PURE. One definition, so the
+    daemon, `restore` and `predict` cannot disagree about where a pinned
+    window goes."""
+    p = pin_of(e)
+    if not p:
+        return e
+    return dict(e, **{k: p[k] for k in PIN_FIELDS if k in p})
+
+
+def carry_pin(new, old, pin_now, when):
+    """Give a freshly learned entry its pin: a new one when the user just
+    placed this window (`pin_now`), else the one its key already had. PURE
+    apart from `new`, which it fills. A capture REWRITES every entry from
+    the live window, so without this every pin would last one pass."""
+    if pin_now:
+        new["pinned"] = pin_record(new, when)
+    elif pin_of(old):
+        new["pinned"] = old["pinned"]
+    return new
+
+
 def prune_kb(kb, when):
     """Drop aged-out entries, work-tagged entries, and stale per-title entries
     for an app now keyed by app_id (an app_id-only key ends in NUL).
@@ -5020,7 +5083,8 @@ def upsert(kb, windows, when, outputs=None, refused=None):
             _i, _kt, _only = decided
             _k = next_slot_key(app, _i, used)
             used.add(_k)
-            kb[_k] = kb_entry(w, _kt, _only, when)
+            kb[_k] = carry_pin(kb_entry(w, _kt, _only, when), kb.get(_k),
+                               False, when)
         # NO TITLE FALLBACK, because there is no longer a shape that
         # reaches one. `is_appid_keyed` answers True for every unowned app and
         # `resolution` answers NEVER for a window with no app-id, so a window
@@ -5031,7 +5095,7 @@ def upsert(kb, windows, when, outputs=None, refused=None):
 
 
 def _learn_stamp(kb, groups, windows, counts, when, hold=(), refused=None,
-                 ledger=None, assigned=None):
+                 ledger=None, assigned=None, pin=()):
     """Write each live view's placement under the right key. `hold` is the set
     of view ids whose CURRENT position must not be believed yet: see the
     watcher's _held: a window the placer has not got to is sitting where its
@@ -5112,7 +5176,8 @@ def _learn_stamp(kb, groups, windows, counts, when, hold=(), refused=None,
             if _k is None or _k in used:
                 _k, _ht = next_slot_key(app, _i, used | reserved), None
             used.add(_k)
-            kb[_k] = kb_entry(w, _ht or _kt, _only, when)
+            kb[_k] = carry_pin(kb_entry(w, _ht or _kt, _only, when),
+                               kb.get(_k), vid in pin, when)
             if assigned is not None and vid is not None:
                 assigned[vid] = _k
             # A WINDOW NAMED SINCE IT WAS PLACED INTO ITS ACCOUNT'S SHARED
@@ -5273,7 +5338,7 @@ def _refuse(refused, w, r):
 
 
 def learn(kb, groups, windows, when, hold=(), seen=None, outputs=None,
-          refused=None, ledger=None, assigned=None):
+          refused=None, ledger=None, assigned=None, pin=()):
     """Watch-time knowledge update: each live view's placement, under the key
     its identity and slot index give it.
 
@@ -5286,7 +5351,12 @@ def learn(kb, groups, windows, when, hold=(), seen=None, outputs=None,
 
     `assigned`, when given, is filled with view id -> the key each window
     was written under, so the daemon can find a window's OWN entry on this
-    desk after it has left it (see left_entry)."""
+    desk after it has left it (see left_entry).
+
+    `pin` is the view ids the USER placed since the last pass (the daemon
+    sees the compositor's move, resize and snap): their entries are PINNED
+    at the rect learned now, and every other entry keeps the pin its key
+    already had (carry_pin)."""
     counts = own_app_counts(windows)
     live = {w["id"] for w in windows if w.get("id") is not None}
     # A WINDOW ON AN OUTPUT NOBODY HAS JOINS THE HOLD, which is the right
@@ -5315,7 +5385,7 @@ def learn(kb, groups, windows, when, hold=(), seen=None, outputs=None,
     # discriminator") is answered at the source now: a title is not a key at
     # all, so there is nothing for two windows to share.
     _learn_stamp(kb, groups, windows, counts, when, hold, refused, ledger,
-                 assigned)
+                 assigned, pin)
     # `hold` deliberately does NOT reach the terminal purge: that asks "is
     # this window still HERE", which a held window plainly is. Hiding it
     # would drop the very entry we are protecting.
@@ -5711,7 +5781,8 @@ def translate_snapshot(snap, log, since):
     return out, n
 
 
-def forget_apply(kb, selectors, profile=None, purge=False, app=None):
+def forget_apply(kb, selectors, profile=None, purge=False, app=None,
+                 unpin=False):
     """Drop what `selectors` select from `kb` IN PLACE, save, and return the
     dropped keys. Each drop is logged, because the store is learned data and
     watch.log is what says who removed it.
@@ -5728,6 +5799,19 @@ def forget_apply(kb, selectors, profile=None, purge=False, app=None):
     for the client path: it loads and saves within the same breath."""
     profile = profile or profile_id()
     gone = forget_matches(kb, selectors, app)
+    if unpin:
+        # UNPIN KEEPS THE SLOT and drops only what the user decided, so the
+        # window goes back to the layout. Snapshot first like any edit.
+        gone = [k for k in gone if pin_of(kb[k])]
+        if not gone:
+            return []
+        take_snapshot(kb, profile, tag="unpin")
+        for k in gone:
+            kb[k].pop("pinned", None)
+            app_, _, ident = slot_base(k).partition("\x00")
+            logline(f"unpin: {app_} | {ident or '(by app-id)'}")
+        save_knowledge(kb, profile)
+        return gone
     if not gone:
         return []
     if purge:
@@ -10114,7 +10198,9 @@ def _prediction_rows():
         # An app_id-ONLY key ends in NUL (see kkey / appid_only), which is how
         # a uniquely-identified app like Signal is stored, so both shapes have
         # to be tried or those windows read as having no slot.
-        e = kb.get(taken.get(id(w)))
+        # WHERE IT WILL GO: a pinned slot's pin, else its last-seen rect.
+        _e = kb.get(taken.get(id(w)))
+        e = placement_entry(_e) if _e else None
         # THE RESOLVED output, not the stored name. Those differ exactly when
         # a panel has moved connector, and a prediction quoting the stale name
         # would report every such window as WRONG on the next verify.
@@ -10443,6 +10529,7 @@ def do_restore(dry, only=None, source=None):
         if only and (only not in (lv.get("title") or "")) \
                 and (only not in app_of(lv)):
             continue
+        e = placement_entry(e)
         o = entry_output(e, outs, panels)
         if not o:
             # The window matched a remembered slot on an output that is NOT
@@ -10873,7 +10960,7 @@ ADOPT_FLAG = "session-adopt"   # armed by resume/reload, consumed at init.
 MODES = ("restore", "adopt", "quiet")
 
 
-def do_forget(selectors, apply=False, purge=False, app=None):
+def do_forget(selectors, apply=False, purge=False, app=None, unpin=False):
     """Drop remembered slots the selectors name. Previews unless `apply`.
 
     WHY A VERB AND NOT A HAND EDIT. Five separate repair recipes in this
@@ -10891,15 +10978,23 @@ def do_forget(selectors, apply=False, purge=False, app=None):
 
     PREVIEWS BY DEFAULT, since this deletes learned data: a slot can be
     relearned only by putting that window back by hand. `--apply` is the
-    explicit act, and the store is copied aside first either way."""
+    explicit act, and the store is copied aside first either way.
+
+    `unpin` is the same path for `usher unpin`: it selects the same way and
+    drops only the PIN, so the slot stays and the window goes back to the
+    layout."""
+    verb = "unpin" if unpin else "forget"
     if not selectors:
-        print("usher: forget needs a selector, e.g."
+        print(f"usher: {verb} needs a selector, e.g."
               " 'chrome:win:*' or 'kitty:/src/*'", file=sys.stderr)
         return EXIT_FAIL
     kb = load_knowledge()
     hits = forget_matches(kb, selectors, app)
+    if unpin:
+        hits = [k for k in hits if pin_of(kb[k])]
     if not hits:
-        print(f"nothing matches {' '.join(selectors)}"
+        print(f"nothing {'pinned ' if unpin else ''}matches "
+              f"{' '.join(selectors)}"
               f"{f' for app {app}' if app is not None else ''}"
               f" in {len(kb)} entries")
         return EXIT_OK
@@ -10913,7 +11008,8 @@ def do_forget(selectors, apply=False, purge=False, app=None):
         print(f"  {kapp[:20]:20} | {(ident or '(by app-id)')[:40]:40}"
               f" ws{[int(x) for x in e['workspace']]}")
     if not apply:
-        print(f"{len(hits)} of {len(kb)} entries would be dropped."
+        print(f"{len(hits)} of {len(kb)} entries would be "
+              f"{'unpinned' if unpin else 'dropped'}."
               " Re-run with --apply to do it.")
         return EXIT_OK
     if watcher_pid():
@@ -10921,14 +11017,17 @@ def do_forget(selectors, apply=False, purge=False, app=None):
         with open(FORGET_FILE, "w") as f:
             # A SELECTOR IS A GLOB OVER AN IDENTITY and none starts with
             # `!`, so the marker cannot be mistaken for one.
-            f.write(("!purge\n" if purge else "")
+            f.write(("!unpin\n" if unpin else "")
+                    + ("!purge\n" if purge else "")
                     + (f"!app {app}\n" if app is not None else "")
                     + "\n".join(selectors) + "\n")
-        print(f"asked the running daemon to drop {len(hits)}; it owns the"
-              " store while it runs, so it makes the edit")
+        print(f"asked the running daemon to {'unpin' if unpin else 'drop'}"
+              f" {len(hits)}; it owns the store while it runs, so it makes"
+              " the edit")
         return EXIT_OK
-    gone = forget_apply(kb, selectors, purge=purge, app=app)
-    print(f"dropped {len(gone)} (no daemon running, so applied here)")
+    gone = forget_apply(kb, selectors, purge=purge, app=app, unpin=unpin)
+    print(f"{'unpinned' if unpin else 'dropped'} {len(gone)}"
+          " (no daemon running, so applied here)")
     return EXIT_OK
 
 

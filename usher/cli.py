@@ -63,6 +63,8 @@ VERBS = {
     "launch":          ("both", "respawn saved-but-absent windows"),
     "forget":          ("both", "drop remembered slots [SEL...] [--app APP]"
                                 " [--apply] [--purge]"),
+    "unpin":           ("both", "hand pinned slots back to the layout"
+                                " [SEL...] [--app APP] [--apply]"),
     "undo":            ("both", "list snapshots, or restore [N|NAME] [SEL...]"
                                 " [--apply]"),
     "wind-down":       ("both", "last capture, then let the apps go"),
@@ -554,7 +556,7 @@ def _dispatch(verb, args):
             source = engine.resolve_snapshot(args[k + 1] if k + 1 < len(args)
                                              else "list")
         engine.do_restore(dry="--dry-run" in args, only=only, source=source)
-    elif verb == "forget":
+    elif verb in ("forget", "unpin"):
         # --app GLOB narrows the selectors to one app's entries
         k = args.index("--app") if "--app" in args else -1
         if k >= 0 and k + 1 >= len(args):
@@ -564,7 +566,8 @@ def _dispatch(verb, args):
                if i > 0 and a not in ("--apply", "--purge")
                and not (k >= 0 and i in (k, k + 1))]
         sys.exit(engine.do_forget(sel, apply="--apply" in args,
-                                  purge="--purge" in args, app=app))
+                                  purge="--purge" in args, app=app,
+                                  unpin=verb == "unpin"))
     elif verb == "undo":
         _ua = [a for a in args[1:] if a != "--apply"]
         sys.exit(engine.do_undo(_ua[0] if _ua else None, _ua[1:] or None,

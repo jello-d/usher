@@ -161,6 +161,30 @@ is for removing something that must not be kept: no snapshot is taken, and
 what the selectors name is stripped from every existing snapshot of this desk
 as well.
 .TP
+.B unpin " SELECTOR... [--app APP] [--apply]"
+Hand pinned slots back to the layout. A slot is PINNED when you move,
+resize or snap its window yourself (the compositor's
+.B move
+and
+.B resize
+plugins, or a
+.B grid
+snap); a pinned slot is placed exactly where you put it. Every other slot
+is only where the window was last seen, and when windows are laid out
+together (a login, a display change,
+.BR transpose )
+usher arranges those within their surface: it keeps each window's size,
+moves it clear of the others, and cascades only when nothing fits. Pinned
+windows are fixed obstacles the rest move round.
+.B unpin
+keeps the slot and drops only the pin. SELECTORs and
+.B --app
+are as for
+.BR forget ;
+it previews unless
+.BR --apply ,
+and the store is snapshotted first.
+.TP
 .B undo " [N|NAME] [SELECTOR...] [--apply]"
 Merge a snapshot of this desk's store back in and put the windows where it
 says. With nothing named, LIST the snapshots, newest first, numbered from 1.

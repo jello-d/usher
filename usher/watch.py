@@ -64,6 +64,15 @@ OUTPUT_EVENTS = {"output-added", "output-removed"}
 # floods with tab-flips. So the knowledge trigger set is broader than layout.
 KNOWLEDGE_TRIGGERS = LAYOUT_TRIGGERS | {
     "view-title-changed", "view-app-id-changed"}
+# THE USER PLACING A WINDOW, which is what a PIN records (engine.pin_record).
+# The compositor announces its interactive `move` and `resize` plugins when
+# they start and stop, and a geometry change on the FOCUSED window while one
+# is active is that window being dragged or resized. `grid` announces
+# nothing, but a snap fires `view-tiled` on the window. Other plugins are
+# deliberately absent: switching workspaces activates `vswitch` and shifts
+# every window's coordinates at once, which is nobody placing anything.
+USER_PLACE_PLUGINS = {"move", "resize"}
+PIN_EVENTS = {"plugin-activation-state-changed", "view-focused"}
 # Events that mean "a window appeared or renamed": try to place it.
 PLACE_EVENTS = {"view-mapped", "view-title-changed", "view-app-id-changed"}
 DEBOUNCE = 2.0        # seconds of quiet before a capture is written
@@ -613,6 +622,12 @@ class Watcher:
         # nudged from, so an app refusing a size is asked once.
         self.size_prev = {}
         self.size_tried = set()
+        # THE USER'S OWN PLACEMENTS since the last learn: view ids whose next
+        # learned entry is PINNED. Fed by _note_user_placement from the
+        # active plugins and the focused view, both tracked from events.
+        self.user_placed = set()
+        self.grabbing = set()
+        self.focused = None
         # VIEWS WE HAVE ALREADY SAID ARE STICKY and so never moved. A third
         # set for the same reason as the one above: it is a property of the
         # window, and a browser renames constantly.
@@ -759,7 +774,8 @@ class Watcher:
         engine.lock_summoned_session()
         self._init_layout()
         watch = connect()
-        subscribe(watch, sorted(KNOWLEDGE_TRIGGERS | PLACE_EVENTS))
+        subscribe(watch, sorted(KNOWLEDGE_TRIGGERS | PLACE_EVENTS
+                                | PIN_EVENTS))
         print(f"usher-mgr: {len(self.kb)} known windows; watching",
               flush=True)
         logline(f"watching, {len(self.kb)} known windows")
@@ -1131,6 +1147,12 @@ class Watcher:
         # workspace (see engine.sticky_entry): the slot is marked sticky when
         # the live window is, so the arithmetic and the read-back both skip
         # the workspace and `place()` keeps it sticky.
+        # A PIN IS WHERE THE USER PUT IT and is placed exactly; anything
+        # else is only where the window was last seen, which the layout
+        # below may improve on (engine.placement_entry, pin_of).
+        pinned = engine.pin_of(e) is not None
+        if e is not None:
+            e = engine.placement_entry(e)
         e = engine.sticky_entry(v, e)
         # CAPTURED BEFORE _recognise, which is what records the identification:
         # read it afterwards and this is always False.
@@ -1320,7 +1342,12 @@ class Watcher:
         # beside anything, and a window opened mid-session stays where it
         # opens.
         laying = dock_chance or self._placing_now()
-        if seeded and laying:
+        # USHER ARRANGES WHAT NOBODY PINNED: a seed, and a learned slot the
+        # user never placed by hand, are laid out around what is already in
+        # their surface (gap, repack, cascade). A pinned slot is exact, and
+        # is an obstacle the others move round.
+        movable = seeded or not pinned
+        if movable and laying and not e.get("sticky"):
             e = self._beside(e, o, app, title)
         moved = self._seat_view(v, e, o)
         if vid in self.placed:
@@ -1337,8 +1364,33 @@ class Watcher:
                         (o["name"], tuple(e.get("workspace") or ())),
                         []).append({"rect": tuple(e["pos"])
                                     + tuple(e["size"]),
-                                    "vid": vid, "seed": seeded, "e": e})
+                                    "vid": vid, "seed": movable,
+                                    "e": e})
         return moved
+
+    def _note_user_placement(self, v, snapped=False):
+        """The user moved, resized or snapped this window: PIN it at the
+        next learn, and stop every placement of ours that could still act
+        on it (a read-back retry, a late look, a queued placement), or usher
+        would drag it back to the rect it chose while the user is still
+        holding it.
+
+        A `view-tiled` that OUR OWN placement caused is not the user: such a
+        window has a read-back pending, and is skipped. A drag is never ours,
+        so it is not."""
+        vid = v["id"]
+        with self.lock:
+            if snapped and vid in self.verify:
+                return
+            first = vid not in self.user_placed
+            self.user_placed.add(vid)
+            self.verify.pop(vid, None)
+            self.watched.pop(vid, None)
+            self.pending.pop(vid, None)
+            self.placed.add(vid)
+        if first:
+            logline(f"you placed it, pinning at the next capture: "
+                    f"{app_of(v)[:18]} | {engine.log_title(v)[:30]}")
 
     def _renamed_from_seed(self, v):
         """Was this window placed from a SEED under an identity it no longer
@@ -1412,7 +1464,7 @@ class Watcher:
             return e
         here = now
         taken = [t["rect"] for t in here]
-        name = e.get("seeded_from") or ""
+        name = e.get("seeded_from") or e.get("surface") or ""
         s = (engine.surface_default() if e.get("seeded_default")
              else engine.surface_map()[0].get(name))
         if s and s.get("output") == o["name"]:
@@ -2453,14 +2505,17 @@ class Watcher:
         except OSError:
             sel = []
         purge = "!purge" in sel
+        unpin = "!unpin" in sel
         app = next((x[5:].strip() for x in sel if x.startswith("!app ")),
                    None)
         sel = [x for x in sel if not x.startswith("!")]
         if sel:
             with self.lock:
                 gone = engine.forget_apply(self.kb, sel, self.kb_profile,
-                                           purge=purge, app=app)
-            logline(f"forget: dropped {len(gone)} on request")
+                                           purge=purge, app=app, unpin=unpin)
+            logline(f"{'unpin' if unpin else 'forget'}: "
+                    f"{'unpinned' if unpin else 'dropped'} {len(gone)}"
+                    " on request")
         try:
             os.remove(FORGET_FILE)
         except OSError:
@@ -3102,7 +3157,10 @@ class Watcher:
             learn(self.kb, self.groups, snap["windows"], snap["time"], hold,
                   seen=self.seen_terms, outputs=snap["outputs"],
                   refused=refused, ledger=dict(self.slot_held),
-                  assigned=assigned)
+                  assigned=assigned, pin=set(self.user_placed))
+            # PINNED ONLY ONCE WRITTEN: a held window keeps its claim on the
+            # pin until a pass actually learns it.
+            self.user_placed -= set(assigned)
             # MERGED, NOT REPLACED: a window held out of this pass keeps the
             # key it was learned under before. Dropped only on unmap and at a
             # desk change, which is when the map is handed to left_keys.
@@ -3249,6 +3307,20 @@ class Watcher:
     def _on_event(self, msg):
         ev = msg.get("event", "")
         v = msg.get("view", {}) or {}
+        if ev == "plugin-activation-state-changed":
+            name = msg.get("plugin") or ""
+            if msg.get("state"):
+                self.grabbing.add(name)
+            else:
+                self.grabbing.discard(name)
+        if ev == "view-focused":
+            self.focused = v.get("id")
+        if v.get("id") is not None and (
+                (ev == "view-geometry-changed"
+                 and self.grabbing & USER_PLACE_PLUGINS
+                 and v["id"] == self.focused)
+                or ev == "view-tiled"):
+            self._note_user_placement(v, snapped=(ev == "view-tiled"))
         if ev in OUTPUT_EVENTS:
             # THE COMPOSITOR IS THE FIRST TO KNOW, and it is the only signal
             # that arrives before the windows move. hwdp's hook follows with
