@@ -14444,6 +14444,21 @@ def _t_displays(ck):
     ck("a-surface-on-an-unattached-output-does-not-fit",
        not engine.cell_fits(
            {"output": "HDMI-9", "workspace": [0, 0]}, _g))
+    # A SNUG WINDOW AT THE LEFT EDGE OF THE LEFTMOST COLUMN overhangs it by
+    # its shadow, so its ORIGIN reads cell -1 while its centre is in cell 0.
+    # Measured on dragonfly: learned at ws(-1,0) x=2144 on a 2160 panel and
+    # then refused as off-grid. The control is a window really out there.
+    _gg = {"DP-7": {"name": "DP-7",
+                    "geometry": {"x": 0, "y": 0, "width": 2160,
+                                 "height": 3840},
+                    "workspace": {"x": 0, "y": 0, "grid_width": 2,
+                                  "grid_height": 2}}}
+    ck("a-snug-overhang-at-the-grid-edge-fits",
+       engine.cell_fits({"output": "DP-7", "workspace": [-1, 0],
+                         "pos": [2144, 968], "size": [1079, 666]}, _gg))
+    ck("a-window-whose-centre-is-off-the-grid-does-not-fit",
+       not engine.cell_fits({"output": "DP-7", "workspace": [-1, 0],
+                             "pos": [100, 968], "size": [1079, 666]}, _gg))
     # NO GRID REPORTED CONCLUDES NOTHING, the fail-safe direction this file
     # takes everywhere else (recorded_window_ids, seen_terms, panel_map).
     ck("no-grid-reported-concludes-nothing",

@@ -786,8 +786,16 @@ def cell_fits(slot, outputs):
     gh = int(ws.get("grid_height") or 0)
     if gw <= 0 or gh <= 0:
         return True     # no grid reported: conclude nothing, as ever
-    x, y = slot.get("workspace", [0, 0])
-    return 0 <= int(x) < gw and 0 <= int(y) < gh
+    # THE ORIGIN CELL OR THE CENTRE CELL: either on the grid means the
+    # window can be shown there (fit_entry rehomes and pulls it in). The
+    # centre half is for a window snug at the left edge of the leftmost
+    # column: it overhangs by its shadow, so its ORIGIN is in cell -1 while
+    # all of it is on screen (dragonfly 2026-11-16: ws(-1,0) x=2144 on a
+    # 2160 panel, learned and then refused as off-grid at the next restore).
+    def _in(c):
+        return 0 <= int(c[0]) < gw and 0 <= int(c[1]) < gh
+    return (_in(slot.get("workspace", [0, 0]))
+            or _in(rehome(slot, o).get("workspace", [0, 0])))
 
 
 def clamp_cell(slot, outputs):
