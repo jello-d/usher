@@ -8972,7 +8972,48 @@ def _t_cli_split(ck):
        _tv([_ok, {"id": 2}, {"mapped": True, "id": 3}, "junk"], True)
        == [_ok, {"mapped": True, "id": 3}][:1]
        and _tv([_ok, {"id": 2}], False) == [_ok, {"id": 2}]
-       and _tv(None, True) == [] and _tv({"error": "x"}, True) == [])
+       and str(_tv(None, True)).startswith("RAISED")
+       and str(_tv({"result": "ok"}, True)).startswith("RAISED"))
+    # A REPLY THAT IS NOT A LIST IS ANOTHER REQUEST'S ANSWER, not an empty
+    # desk (dragonfly 2026-11-17: "re-placing 0" over 24 windows)
+    ck("a-reply-that-is-not-a-list-raises-rather-than-reading-empty",
+       str(_tv({"result": "ok"})).startswith("RAISED"))
+    def _to(x):
+        try:
+            return engine.tolerant_outputs(x)
+        except Exception as _x:                            # noqa: BLE001
+            return f"RAISED {_x!r}"
+    ck("an-output-reply-that-is-not-a-list-raises",
+       str(_to({"result": "ok"})).startswith("RAISED"))
+    # ONE REQUEST AND ITS REPLY AT A TIME on a socket: the capture thread's
+    # desk change and the placer shared one and swapped replies (dragonfly
+    # 2026-11-17). Driven with two threads through the real send_json, the
+    # base class's own stood in by a slow recorder; announced when pywayfire
+    # is absent (the system python), never passed vacuously.
+    if engine.UsherSocket is None:
+        ck("usher-socket-serialises-requests (no pywayfire: skipped)", True)
+    else:
+        import threading as _thr
+        _base = engine.WayfireSocket.send_json
+        _st = {"in": 0, "max": 0}
+        def _slow(self, msg):
+            _st["in"] += 1
+            _st["max"] = max(_st["max"], _st["in"])
+            time.sleep(0.05)
+            _st["in"] -= 1
+            return []
+        try:
+            engine.WayfireSocket.send_json = _slow
+            _us = engine.UsherSocket.__new__(engine.UsherSocket)
+            _ts = [_thr.Thread(target=_us.send_json,
+                               args=({"method": "x"},)) for _ in range(4)]
+            for _t in _ts:
+                _t.start()
+            for _t in _ts:
+                _t.join(5)
+        finally:
+            engine.WayfireSocket.send_json = _base
+        ck("usher-socket-serialises-requests", _st["max"] == 1)
     ck("an-output-missing-its-name-is-left-out",
        engine.tolerant_outputs([{"name": "A", "geometry": {}}, {"id": 2},
                                 {"name": "B"}])
@@ -15274,6 +15315,23 @@ def _t_displays(ck):
             # ONE chance, not a standing licence: the entitlement is consumed,
             # so a later stray title change does not yank the window again.
             ck("the-dock-entitlement-is-consumed", 42 not in w.redisplay_ok)
+            # AN EMPTY FIRST LISTING IS NOT AN EMPTY DESK: the sweep lists
+            # again (dragonfly 2026-11-17 12:01, "re-placing 0" over 24
+            # windows). The control is the listing that answers at once.
+            class _EmptyFirst(_Sock):
+                def list_views(self, **kw):
+                    self._n = getattr(self, "_n", 0) + 1
+                    return [] if self._n == 1 else self._v
+            w.place_sock = _EmptyFirst(_lv, _lo)
+            w.redisplay_ok.clear()
+            try:
+                _wmod.load_knowledge = lambda p=None: {engine.kkey(_app, ""):
+                                                       _slot}
+                w._adopt_profile("DESK3", "test")
+            finally:
+                _wmod.load_knowledge = _rload
+            ck("an-empty-listing-at-a-desk-change-is-listed-again",
+               w.redisplay_ok == {42} and w.place_sock._n == 2)
         finally:
             Watcher._seat_view = _rseat
             w.place_sock = None

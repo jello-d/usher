@@ -2834,6 +2834,12 @@ class Watcher:
             logline(f"redisplay: cannot list views yet ({e}); the sweep "
                     f"will list them")
             vids = None
+        if not vids:
+            # AN EMPTY LISTING AT A DESK CHANGE IS NOT EVIDENCE OF AN EMPTY
+            # DESK: let the sweep list again once the outputs have settled.
+            # Reading it as "no windows" re-placed nothing twice (dragonfly
+            # 2026-11-13 17:14 and 2026-11-17 12:01).
+            vids = None
         now = time.time()
         with self.lock:
             # THE STORE BEING LEFT, as it stood: a desk change is the riskiest

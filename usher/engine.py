@@ -33,6 +33,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections import Counter
 from datetime import date
@@ -77,9 +78,16 @@ def tolerant_views(views, mapped_toplevel=False):
     listing raised, the re-place that follows a desk change ran over NO
     windows ("re-placing 0"), and seventeen of 21 were left where the
     undock put them (dragonfly 2026-11-13 17:14:42). A view caught half
-    torn down is simply left out of that one listing."""
+    torn down is simply left out of that one listing.
+
+    A REPLY THAT IS NOT A LIST IS NOT "NO VIEWS", it is the answer to some
+    other request: read off a socket two threads were sharing, it was
+    another call's `{"result": "ok"}`, and reading it as an empty desk made
+    a dock re-place nothing (dragonfly 2026-11-17 12:01:30, "re-placing 0"
+    over 24 windows). So it RAISES, and every caller already treats a
+    listing that raises as "cannot tell yet"."""
     if not isinstance(views, list):
-        return []
+        raise ValueError(f"not a view list: {str(views)[:80]}")
     out = [v for v in views if isinstance(v, dict)]
     if mapped_toplevel:
         out = [v for v in out if v.get("mapped") is True
@@ -91,9 +99,10 @@ def tolerant_views(views, mapped_toplevel=False):
 def tolerant_outputs(outputs):
     """The output list, keeping only outputs that carry a name and a
     geometry. PURE. An output being removed was answered without its
-    `name` in the same undock, and every `{o["name"]: o ...}` raised."""
+    `name` in the same undock, and every `{o["name"]: o ...}` raised.
+    A reply that is not a list RAISES, for tolerant_views' reason."""
     if not isinstance(outputs, list):
-        return []
+        raise ValueError(f"not an output list: {str(outputs)[:80]}")
     return [o for o in outputs if isinstance(o, dict) and o.get("name")
             and isinstance(o.get("geometry"), dict)]
 
@@ -103,6 +112,24 @@ if WayfireSocket is not None:
         """pywayfire's socket, with the two listings usher reads made
         tolerant of a half-torn-down view or output (tolerant_views,
         tolerant_outputs). Built only by ipc() and connect()."""
+
+        def send_json(self, msg):
+            # ONE REQUEST AND ITS REPLY AT A TIME. pywayfire sends the
+            # header and the body in two writes and then reads "the next
+            # reply", with no lock, so two threads on one socket swap
+            # replies: the capture thread's desk change listed views on the
+            # placer's socket and was handed a placement's answer
+            # (dragonfly 2026-11-17 12:01, "re-placing 0" over 24 windows).
+            with self._usher_lock:
+                return super().send_json(msg)
+
+        @property
+        def _usher_lock(self):
+            lk = self.__dict__.get("_usher_lk")
+            if lk is None:
+                lk = self.__dict__.setdefault("_usher_lk",
+                                              threading.RLock())
+            return lk
 
         def list_views(self, filter_mapped_toplevel=False):
             return tolerant_views(super().list_views(False),
