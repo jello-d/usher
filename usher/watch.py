@@ -2955,18 +2955,25 @@ class Watcher:
             # MOMENT'S TEARDOWN, so it is retried briefly before giving up;
             # giving up still voids the ledgers and asks for a re-check
             # below, rather than returning with nothing done.
+            # AN EMPTY ANSWER IS RETRIED TOO: a desk with windows on it
+            # listing none is the compositor mid-change or a reply out of
+            # step, and believing it re-placed nothing (dragonfly
+            # 2026-11-18 15:26:34). A desk that really is empty costs
+            # SWEEP_LIST_TRIES pauses and then the same empty sweep.
             for _try in range(SWEEP_LIST_TRIES):
+                last = _try + 1 == SWEEP_LIST_TRIES
                 try:
                     vids = [v.get("id") for v in self.place_sock.list_views(
                         filter_mapped_toplevel=True)]
-                    break
+                    if vids or last:
+                        break
                 except Exception as e:                     # noqa: BLE001
-                    if _try + 1 == SWEEP_LIST_TRIES:
+                    if last:
                         logline(f"sweep: cannot list views after "
                                 f"{SWEEP_LIST_TRIES} tries: {e}")
                         vids = []
-                    else:
-                        time.sleep(SWEEP_LIST_PAUSE)
+                        break
+                time.sleep(SWEEP_LIST_PAUSE)
         now = time.time()
         with self.lock:
             self.placed.clear()

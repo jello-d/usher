@@ -89,6 +89,13 @@ def tolerant_views(views, mapped_toplevel=False):
     if not isinstance(views, list):
         raise ValueError(f"not a view list: {str(views)[:80]}")
     out = [v for v in views if isinstance(v, dict)]
+    # A LIST OF SOMETHING ELSE IS NOT A VIEW LIST EITHER. A socket one
+    # reply out of step hands back the previous request's answer, and an
+    # output list is a list: filtered, it is no views at all, which is how
+    # a dock re-placed nothing with the lock in place (dragonfly 2026-11-18
+    # 15:26:34). Every view the compositor describes carries a role.
+    if out and not any("role" in v for v in out):
+        raise ValueError("not a view list: its items carry no role")
     if mapped_toplevel:
         out = [v for v in out if v.get("mapped") is True
                and v.get("role") != "desktop-environment"
@@ -103,8 +110,24 @@ def tolerant_outputs(outputs):
     A reply that is not a list RAISES, for tolerant_views' reason."""
     if not isinstance(outputs, list):
         raise ValueError(f"not an output list: {str(outputs)[:80]}")
+    if any(isinstance(o, dict) and "role" in o for o in outputs):
+        raise ValueError("not an output list: its items are views")
     return [o for o in outputs if isinstance(o, dict) and o.get("name")
             and isinstance(o.get("geometry"), dict)]
+
+
+def out_of_step(e):
+    """True if a request failed without its reply being read whole, so a
+    late reply may still arrive and be taken for the next one's. PURE.
+    pywayfire raises plain Exceptions, so this reads the message: a
+    timeout, a short or failed read, an undecodable reply, a dead socket.
+    A clean error reply ("view is not toplevel") is none of these."""
+    if isinstance(e, OSError):
+        return True
+    m = str(e).lower()
+    return any(s in m for s in ("timeout", "failed to read",
+                                "error reading message: json",
+                                "empty response", "not connected"))
 
 
 if WayfireSocket is not None:
@@ -120,8 +143,36 @@ if WayfireSocket is not None:
             # replies: the capture thread's desk change listed views on the
             # placer's socket and was handed a placement's answer
             # (dragonfly 2026-11-17 12:01, "re-placing 0" over 24 windows).
+            #
+            # AND A REQUEST THAT DID NOT GET ITS REPLY RECONNECTS, here,
+            # for every caller. A timed-out reply still arrives, late, and
+            # is read as the answer to the NEXT request, so the socket is
+            # one out of step for good. Four call sites logged a timeout
+            # and carried on, and a dock read an output list as its view
+            # list (dragonfly 2026-11-18 15:26:21, then "re-placing 0").
+            # A clean error REPLY was read whole and leaves it in step.
             with self._usher_lock:
-                return super().send_json(msg)
+                try:
+                    return super().send_json(msg)
+                except Exception as e:
+                    if out_of_step(e):
+                        self.resync()
+                    raise
+
+        def resync(self):
+            """Drop the connection and open a fresh one to the same
+            socket, so nothing left unread on the old one can be taken
+            for a reply. A failure to reopen leaves it closed, which
+            the next request reports as not connected."""
+            with self._usher_lock:
+                try:
+                    self.client.close()
+                except Exception:                         # noqa: BLE001
+                    pass
+                try:
+                    self.connect_client(self.socket_name)
+                except Exception:                         # noqa: BLE001
+                    pass
 
         @property
         def _usher_lock(self):
@@ -132,11 +183,20 @@ if WayfireSocket is not None:
             return lk
 
         def list_views(self, filter_mapped_toplevel=False):
-            return tolerant_views(super().list_views(False),
-                                  filter_mapped_toplevel)
+            try:
+                return tolerant_views(super().list_views(False),
+                                      filter_mapped_toplevel)
+            except ValueError:
+                # handed some other request's answer: out of step
+                self.resync()
+                raise
 
         def list_outputs(self):
-            return tolerant_outputs(super().list_outputs())
+            try:
+                return tolerant_outputs(super().list_outputs())
+            except ValueError:
+                self.resync()
+                raise
 else:
     UsherSocket = None
 

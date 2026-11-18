@@ -9014,6 +9014,66 @@ def _t_cli_split(ck):
         finally:
             engine.WayfireSocket.send_json = _base
         ck("usher-socket-serialises-requests", _st["max"] == 1)
+        # A REQUEST THAT LOST ITS REPLY RECONNECTS, or the late reply is
+        # read as the next request's (dragonfly 2026-11-18 15:26, a dock
+        # handed an output list for its view list). A clean error reply
+        # leaves the socket in step and must NOT reconnect.
+        _rs = []
+        def _raise_with(msg):
+            def _f(self, m):
+                raise Exception(msg)
+            return _f
+        _rsync = engine.UsherSocket.resync
+        try:
+            engine.UsherSocket.resync = lambda self: _rs.append(1)
+            for _msg in ("Response timeout",
+                         "Error reading message: view is not toplevel"):
+                engine.WayfireSocket.send_json = _raise_with(_msg)
+                try:
+                    _us.send_json({"method": "x"})
+                except Exception:                          # noqa: BLE001
+                    pass
+            _after_err = len(_rs)
+            engine.WayfireSocket.send_json = (
+                lambda self, m: {"ok": True, "info": [
+                    {"name": "A", "geometry": {}}]})
+            _lv_base = engine.WayfireSocket.list_views
+            engine.WayfireSocket.list_views = (
+                lambda self, f=False: [{"name": "A", "geometry": {}}])
+            try:
+                _us.list_views(True)
+                _lvr = "no raise"
+            except ValueError:
+                _lvr = "raised"
+            engine.WayfireSocket.list_views = _lv_base
+        finally:
+            engine.WayfireSocket.send_json = _base
+            engine.UsherSocket.resync = _rsync
+        ck("a-timed-out-request-resyncs-and-an-error-reply-does-not",
+           _after_err == 1)
+        ck("a-listing-handed-another-reply-resyncs-and-raises",
+           _lvr == "raised" and len(_rs) == 2)
+    ck("out-of-step-is-told-from-a-clean-error-reply",
+       engine.out_of_step(Exception("Response timeout"))
+       and engine.out_of_step(OSError("broken pipe"))
+       and engine.out_of_step(Exception(
+           "Error reading message: Failed to read anything from the "
+           "socket!"))
+       and engine.out_of_step(Exception(
+           "Error reading message: JSON decoding error: x"))
+       and not engine.out_of_step(Exception(
+           "Error reading message: view is not toplevel")))
+    # A LIST OF SOMETHING ELSE is the previous request's answer too: an
+    # output list filtered as views is no views (2026-11-18 15:26:34).
+    _outl = [{"id": 1, "name": "eDP-1", "geometry": {}, "workarea": {}}]
+    _viewl = [dict(_ok)]
+    ck("an-output-list-read-as-views-raises",
+       str(_tv(_outl, True)).startswith("RAISED")
+       and str(_tv(_outl, False)).startswith("RAISED"))
+    ck("a-view-list-read-as-outputs-raises",
+       str(_to(_viewl)).startswith("RAISED"))
+    ck("an-empty-list-is-still-no-views-and-no-outputs",
+       _tv([], True) == [] and _to([]) == [])
     ck("an-output-missing-its-name-is-left-out",
        engine.tolerant_outputs([{"name": "A", "geometry": {}}, {"id": 2},
                                 {"name": "B"}])
@@ -15332,6 +15392,25 @@ def _t_displays(ck):
                 _wmod.load_knowledge = _rload
             ck("an-empty-listing-at-a-desk-change-is-listed-again",
                w.redisplay_ok == {42} and w.place_sock._n == 2)
+            # AND THE SWEEP'S OWN EMPTY LISTING IS RETRIED: the desk change
+            # and the sweep both read none (2026-11-18 15:26:34).
+            class _EmptyTwice(_Sock):
+                def list_views(self, **kw):
+                    self._n = getattr(self, "_n", 0) + 1
+                    return [] if self._n <= 2 else self._v
+            w.place_sock = _EmptyTwice(_lv, _lo)
+            w.redisplay_ok.clear()
+            _rpause = _wmod.SWEEP_LIST_PAUSE
+            try:
+                _wmod.SWEEP_LIST_PAUSE = 0
+                _wmod.load_knowledge = lambda p=None: {engine.kkey(_app, ""):
+                                                       _slot}
+                w._adopt_profile("DESK4", "test")
+            finally:
+                _wmod.load_knowledge = _rload
+                _wmod.SWEEP_LIST_PAUSE = _rpause
+            ck("an-empty-sweep-listing-is-listed-again",
+               w.redisplay_ok == {42} and w.place_sock._n == 3)
         finally:
             Watcher._seat_view = _rseat
             w.place_sock = None
