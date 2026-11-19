@@ -58,9 +58,8 @@ _CONNECTIVITY = engine.connectivity
 # real dependency stops being visible in its own header.
 from .chrome import (
     CHROME_FLAGS, chrome_bind_windows, chrome_profile_map,
-    chrome_session_titles, chrome_window_for, chrome_window_tabs,
-    forget_window, is_browser_cmdline, is_chrome, parse_snss, session_files,
-    snss_build, window_slot)
+    chrome_window_tabs, forget_window, is_browser_cmdline, is_chrome,
+    session_files, snss_build, window_slot)
 from .engine import (
     PLACE_CAP, CONFIG_DIR, EXCLUDE_FILE, IDLE_SETTLE, INCLUDE_FILE,
     KB_SCHEMA, MUX_BIN, MUX_RESUME, PLACE_TOL, PLUGIN_DIR, Resolution,
@@ -2715,11 +2714,27 @@ def _t_resolution(ck):
                                   92: frozenset({"u3", "u4"})},
                           "prev": {11: frozenset({"u1", "u2"}),
                                    22: frozenset({"u3", "u4"})}}
+            # rec AND save chosen, so no tab record is read or written
+            _nos = lambda _r: None
             _lines_rk = engine.source_rekey_lines(
-                hist=lambda: _fake_hist, tabs=lambda f: _fake_tabs[f])
+                hist=lambda: _fake_hist, tabs=lambda f: _fake_tabs[f],
+                rec={}, save=_nos)
             ck("source-rekey-lines-pair-old-to-new",
                engine.parse_source_rekey("\n".join(_lines_rk))
                == {_D11: _D91, _D22: _D92})
+            # AND THE ACCOUNT COMMITS ITS OWN TAB RECORD, after the lines
+            # are built, so its next restart can be bridged from it.
+            # REAL files, since the record keeps a window by its file's
+            # mtime and a made-up path has none.
+            _saved_rk = []
+            with _tsnss([(91, 1, "u1", "A"), (91, 2, "u2", "B")]) as _rc1, \
+                    _tsnss([(11, 1, "u1", "A"), (11, 2, "u2", "B")]) as _rp1:
+                engine.source_rekey_lines(
+                    hist=lambda: {"P": [_rc1, _rp1]}, rec={},
+                    save=_saved_rk.append)
+            ck("source-rekey-lines-commit-the-tab-record",
+               len(_saved_rk) == 1 and "91" in _saved_rk[0]
+               and _saved_rk[0].get("11", {}).get("bound") == "91")
             # AND THE IDENTITY NEVER CROSSES IN THE CLEAR, which is the
             # whole reason the pairs are digests: a chrome slot is harmless
             # and a terminal's identity names a work host and session, so
@@ -2735,10 +2750,11 @@ def _t_resolution(ck):
             ck("source-rekey-lines-need-a-previous-session",
                engine.source_rekey_lines(
                    hist=lambda: {"P": ["cur"]},
-                   tabs=lambda f: _fake_tabs[f]) == [])
+                   tabs=lambda f: _fake_tabs[f], rec={}, save=_nos) == [])
             ck("source-rekey-lines-tolerate-an-empty-history",
                engine.source_rekey_lines(hist=lambda: {},
-                                         tabs=lambda _f: {}) == [])
+                                         tabs=lambda _f: {}, rec={},
+                                         save=_nos) == [])
             # AND NOTHING BINDS WHEN THE TAB SETS DISAGREE, which is
             # chrome_bind_windows own rule and the reason a wrong pair does
             # not quietly move somebody's slot.
@@ -2809,7 +2825,8 @@ def _t_resolution(ck):
                engine.source_rekey_lines(
                    hist=lambda: {"P": ["cur", "prev"]},
                    tabs=lambda f: {"cur": {91: frozenset({"x"})},
-                                   "prev": {11: frozenset({"y"})}}[f]) == [])
+                                   "prev": {11: frozenset({"y"})}}[f],
+                   rec={}, save=_nos) == [])
 
             # ---- THE ORDERING, which only a whole PASS can show ----------
             # `snapshot` STAMPS each window's key, so a refresh that runs
@@ -4100,7 +4117,6 @@ def _t_chrome_sizes(ck):
     apart)."""
     import tempfile
     _rss = chrome.chrome_session_sizes
-    _rtt = chrome.chrome_session_titles
     _rwo = engine.window_origin
     _rsi = engine._single_id
     try:
@@ -4208,7 +4224,6 @@ def _t_chrome_sizes(ck):
 
         def _fresh():
             chrome.chrome_session_sizes = lambda: R
-            chrome.chrome_session_titles = lambda: {}
             chrome._slot_cache.clear()
             chrome._frame[0] = None
 
@@ -4239,37 +4254,19 @@ def _t_chrome_sizes(ck):
         ck("the-placer-names-a-chrome-window-by-size-first",
            chrome._slot_cache.get(36) == "chrome:win:1")
 
-        # A TITLE JOIN THE SIZE CONTRADICTS IS REFUSED, and one it agrees
-        # with, or cannot judge, is not.
-        chrome.chrome_session_sizes = lambda: R
-        chrome._frame[0] = (44, 71)
+        # AND NOTHING ELSE NAMES A WINDOW: window_slot answers only what a
+        # size claim or the published snapshot cached, whatever the window
+        # is titled. The title join and elimination are retired (they named
+        # the wrong window or none often enough to cost placements).
         chrome._slot_cache.clear()
-        chrome._live_sizes.clear()
-        chrome._live_sizes.update({36: (2527, 1702), 30: (2498, 1702)})
-        chrome.chrome_session_titles = lambda: {
-            "Dash": ("2", "u"), "Other": ("1", "u")}
-        ck("title-join-contradicted-by-size-is-refused",
-           chrome.window_slot(36, "Dash - Google Chrome") is None
-           and 36 not in chrome._slot_cache)
-        ck("title-join-the-size-agrees-with-stands",
-           chrome.window_slot(30, "Dash - Google Chrome")
-           == "chrome:win:2")
-        ck("title-join-with-no-size-evidence-stands",
-           chrome.window_slot(77, "Other - Google Chrome")
-           == "chrome:win:1")
-
-        # ELIMINATION SEES AN ID WHOSE TITLE IS SHARED, which the title map
-        # drops: with the other window of that title named, the last is
-        # forced.
-        chrome.chrome_session_titles = lambda: {"Solo": ("3", "u")}
-        chrome.chrome_session_sizes = lambda: {"1": (1, 1), "2": (2, 2),
-                                               "3": (3, 3)}
-        chrome._slot_cache.clear()
-        chrome._slot_cache[36] = "chrome:win:1"
-        ck("elimination-reaches-an-id-with-a-shared-title",
-           chrome.claim_by_elimination(
-               [(36, "Dash"), (30, "Dash"), (38, "Solo")]) == 30
-           and chrome._slot_cache.get(30) == "chrome:win:2")
+        chrome._slot_cache[30] = "chrome:win:2"
+        ck("window-slot-answers-only-a-cached-name",
+           chrome.window_slot(30) == "chrome:win:2"
+           and chrome.window_slot(36) is None
+           and chrome.window_slot(None) is None)
+        ck("window-slot-takes-no-title",
+           "title" not in __import__("inspect").signature(
+               chrome.window_slot).parameters)
 
         # THE RELAY: the owner sends each window's size beside its pid, and
         # the account names its windows by it.
@@ -4287,7 +4284,6 @@ def _t_chrome_sizes(ck):
                "size %s 0 5" % _TLb, "size nope 1 2", "pid x 1"]))
            == {_TLa: (2527, 1702)})
         chrome.chrome_session_sizes = lambda: R
-        chrome.chrome_session_titles = lambda: {}
         chrome._slot_cache.clear()
         chrome._frame[0] = None
         rows = [{"identifier": _TLa, "app_id": "google-chrome",
@@ -4311,7 +4307,6 @@ def _t_chrome_sizes(ck):
            and len(set(_dig)) == 3)
     finally:
         chrome.chrome_session_sizes = _rss
-        chrome.chrome_session_titles = _rtt
         engine.window_origin = _rwo
         engine._single_id = _rsi
         chrome._slot_cache.clear()
@@ -4320,12 +4315,12 @@ def _t_chrome_sizes(ck):
 
 
 def _t_size_slots(ck):
-    """A window with no identity of its own takes the slot that remembers
-    its SIZE. Measured on dragonfly 2026-11-12: after a reboot two work
-    Chrome windows shared one title, so the account could
-    name neither; one took the other's shared slot and the other was left at
-    the cascade, while Chrome had restored each at its exact remembered size
-    (2527x1702, 2498x1702, 2265x1702)."""
+    """Within ITS OWN FAMILY a window takes the slot that remembers its
+    size: the slots of one identity are interchangeable, so the size is a
+    preference among them and never a claim on another identity's slot (the
+    spare slots that once allowed that were a guess, and are retired).
+    Measured on dragonfly 2026-11-12: Chrome restores each window at its
+    exact remembered size (2498x1702, 2265x1702)."""
     import time as _t
     K = engine.kkey
     app, src = "google-chrome", "titan"
@@ -4342,22 +4337,18 @@ def _t_size_slots(ck):
        engine.size_matches({"size": [2500, 1700]}, (2502, 1702))
        and not engine.size_matches({"size": [2500, 1700]}, (2504, 1700))
        and not engine.size_matches({}, (1, 1)))
-    ck("spare-slots-are-the-accounts-own-unclaimed-per-window-keys",
-       engine.spare_source_slots(kb, app, src, {"titan:held"}) == [bg]
-       and engine.spare_source_slots(kb, app, "", set()) == [])
-
-    def fs(size, spare=(), rivals=(), held=None, vid=9):
+    def fs(size, rivals=(), held=None, vid=9):
         return engine.free_slot(kb, held or {}, app, src, src, vid,
-                                {9, 1, 2, 3}, size=size, spare=spare,
+                                {9, 1, 2, 3}, size=size,
                                 rivals=rivals)[0]
     ck("free-slot-takes-the-slot-of-its-size", fs((2265, 1702)) == fam1)
     ck("free-slot-control-no-size-keeps-the-old-order", fs(None) == fam0)
     ck("free-slot-a-size-nobody-remembers-keeps-the-old-order",
        fs((1000, 1000)) == fam0)
-    ck("free-slot-takes-its-accounts-spare-slot-on-a-size-match",
-       fs((2527, 1702), spare=[bg]) == bg)
-    ck("free-slot-never-takes-a-spare-slot-without-a-size-match",
-       fs((1000, 1000), spare=[bg]) == fam0)
+    # NEVER ANOTHER IDENTITY'S SLOT, however exactly its size matches:
+    # `bg` is another window of the same account, at this window's size.
+    ck("free-slot-never-takes-another-identitys-slot-by-size",
+       fs((2527, 1702)) == fam0)
     ck("free-slot-leaves-the-rect-a-rival-will-match",
        fs((1000, 1000), rivals=[(2498, 1702)]) == fam1)
     ck("free-slot-rivals-on-every-slot-keep-the-old-order",
@@ -4367,8 +4358,6 @@ def _t_size_slots(ck):
                         src, src, 9, {9}, size=(2498, 1702))[0] == fam0)
     ck("free-slot-a-held-size-match-is-not-taken",
        fs((2265, 1702), held={fam1: 1}) == fam0)
-    ck("free-slot-keeps-a-spare-slot-it-already-holds",
-       fs((1, 1), spare=[bg], held={bg: 9}) == bg)
     # THE MEASURED CASE (dragonfly 2026-11-14): two shells, three slots,
     # the stale one at the size a terminal is SPAWNED at.
     _ki, _now = "titan:80a4", 10_000
@@ -4398,17 +4387,13 @@ def _t_size_slots(ck):
                            (1, app, src, src, (2498, 1702)),
                            (2, app, src, "titan:held", (2318, 1633)),
                            (3, "slack", src, src, (5, 5))])
-    ck("slot-hints-spare-rivals-and-size",
-       h == {"size": (2527, 1702), "spare": [bg],
-             "rivals": [(2498, 1702)]})
-    ck("slot-hints-no-spare-for-a-window-that-has-its-own-identity",
-       engine.slot_hints(kb, (9, app, src, "titan:x", (1, 1)), [])["spare"]
-       == [])
+    ck("slot-hints-rivals-and-size",
+       h == {"size": (2527, 1702), "rivals": [(2498, 1702)]})
     # THE MEASURED CASE, IN EVERY ORDER: each window must land on its own
     # rect whichever the compositor maps first.
     import itertools
-    wins = {36: (2527, 1702), 30: (2498, 1702), 38: (2265, 1702)}
-    want = {36: bg, 30: fam0, 38: fam1}
+    wins = {30: (2498, 1702), 38: (2265, 1702)}
+    want = {30: fam0, 38: fam1}
     ok = True
     for order in itertools.permutations(wins):
         held = {}
@@ -4421,48 +4406,16 @@ def _t_size_slots(ck):
             held[k] = vid
         ok = ok and all(held.get(want[v]) == v for v in wins)
     ck("the-measured-reboot-lands-every-window-in-every-order", ok)
-    # AND THE LEARNER WRITES A WINDOW BACK INTO THE SPARE IT WAS PLACED
-    # INTO, under that slot's OWN identity: `entry_matches` reads the
-    # entry's title, so the family's title under a per-window key would
-    # make the slot unmatchable, and writing the window into a NEW family
-    # sibling instead would leave it two slots at the next login.
-    def _row(vid, size, pos):
-        return {"id": vid, "app_id": app, "source": src, "key": src,
-                "owner": 997, "title": "", "output": "eDP-1",
-                "workspace": [1.0, 2.0], "pos": pos, "size": size}
-    _kbl = {fam0: dict(kb[fam0]), bg: dict(kb[bg])}
-    try:
-        engine.learn(_kbl, {}, [_row(36, [2527.0, 1702.0], [7.0, 8.0]),
-                                _row(30, [2498.0, 1702.0], [900.0, 9.0])],
-                     _t.time(), ledger={bg: 36, fam0: 30})
-    except Exception as _e:                                # noqa: BLE001
-        _kbl = {"RAISED %s" % _e: {}}
-    ck("the-learner-writes-a-spare-back-under-its-own-identity",
-       (_kbl.get(bg) or {}).get("pos") == [7.0, 8.0]
-       and (_kbl.get(bg) or {}).get("title") == bg.partition("\x00")[2])
-    ck("and-the-window-takes-no-family-slot-as-well",
-       sorted(k for k in _kbl if engine.slot_base(k) == fam0) == [fam0]
-       and (_kbl.get(fam0) or {}).get("pos") == [900.0, 9.0])
     # held_slot, pure
     ck("held-slot-own-family",
        engine.held_slot([fam1], app, src, src) == (fam1, src))
-    ck("held-slot-a-spare-carries-its-own-identity",
-       engine.held_slot([bg], app, src, src)
-       == (bg, bg.partition("\x00")[2]))
+    ck("held-slot-not-another-window-of-its-own-account",
+       engine.held_slot([bg], app, src, src) == (None, None))
     ck("held-slot-not-another-identitys-key",
        engine.held_slot([bg], app, "kitty:/x", src) == (None, None))
-    ck("held-slot-no-spare-for-a-named-window",
+    ck("held-slot-no-other-identity-for-a-named-window",
        engine.held_slot([bg], app, "titan:other", src) == (None, None))
-    # AND ONLY A RECENT SLOT IS A SPARE: a per-window slot an hour behind
-    # the account's newest belongs to a window that was closed.
     _now = _t.time()
-    _old = engine.kkey(app, src + ":deadbeefdeadbeef")
-    _kbs = {fam0: dict(kb[fam0], last_seen=_now),
-            bg: dict(kb[bg], last_seen=_now - 120),
-            _old: dict(kb[bg], last_seen=_now - 3600)}
-    _sp = engine.spare_source_slots(_kbs, app, src, set())
-    ck("a-recent-per-window-slot-is-a-spare", bg in _sp)
-    ck("a-stale-per-window-slot-is-not", _old not in _sp)
 
     # A WINDOW NAMED SINCE IT WAS PLACED INTO THE SHARED SLOT releases it:
     # the shared slot holds its rect, and an unnamed window would land on
@@ -7195,26 +7148,21 @@ def _t_roster(ck):
     account in its own home. Everything here pins the cases where getting it
     wrong would either lose a desk or let the owner start something.
     """
-    # ELIMINATION'S POOL IS THE OWNER'S VIEWS ONLY.
-    #
-    # PRODUCT, LIVE: the call site filtered on `is_chrome` alone, so a work
-    # account's Chrome view was a candidate for an id out of the OWNER's
-    # session files, and one second after a capture the owner's store held
-    # `chrome:win:<owner id>` labelled with the WORK window's title and no
-    # `source` field. `window_slot` caches that for the view's life, so it is
-    # a sticky wrong slot and a disclosure at once.
-    _ours = _trv("google-chrome", "mine", pid=os.getpid())
-    _theirs = dict(_trv("google-chrome", "theirs", pid=os.getpid()))
-    _theirs["source"] = "titan"
-    _pool = engine.chrome_elimination_pool([_ours, _theirs])
-    ck("elimination-pool-keeps-our-own-chrome-view",
-       any(t == "mine" for _v, t in _pool))
-    ck("elimination-pool-excludes-a-foreign-chrome-view",
-       not any(t == "theirs" for _v, t in _pool))
-    # AND IT STILL EXCLUDES NON-CHROME, or the pool would offer owner session
-    # ids to windows that were never in a session file at all.
-    ck("elimination-pool-excludes-non-chrome",
-       engine.chrome_elimination_pool([_trv("kitty", "term")]) == [])
+    # THE SIZE POOL IS THE OWNER'S CHROME VIEWS ONLY, and the reason is a
+    # live one: an earlier pool filtered on `is_chrome` alone, so a work
+    # account's Chrome view was offered an id out of the OWNER's session
+    # files, and the owner's store held a work window under a personal id.
+    # `window_slot` caches a name for the view's life, so that is a sticky
+    # wrong slot and a disclosure at once.
+    _gm = {"geometry": {"width": 9, "height": 9}}
+    _ours = dict(_trv("google-chrome", "mine", pid=os.getpid()), **_gm)
+    _theirs = dict(_trv("google-chrome", "theirs", pid=os.getpid()),
+                   source="titan", **_gm)
+    _pool = engine.chrome_size_pool([_ours, _theirs])
+    ck("size-pool-keeps-our-own-chrome-view",
+       [vid for vid, _sz in _pool] == [_ours.get("id")])
+    ck("size-pool-excludes-non-chrome",
+       engine.chrome_size_pool([dict(_trv("kitty", "term"), **_gm)]) == [])
 
     # A SOURCE NAME IS HALF A KEY, and needs the app-id as the other half.
     #
@@ -7586,15 +7534,13 @@ def _t_roster(ck):
            dict(_ft, pid=os.getpid()))))
     ck("doctor-does-not-parse-a-raw-live-title",
        'lv.get("title") or ""' not in _doc)
-    # AND THE ELIMINATION POOL IS ACTUALLY USED, because the pool function's
-    # own checks say nothing about whether the caller consults it: a planted
-    # bypass restoring the old inline expression passed every one of them.
-    # Same lesson `entry_output` already carries, matched against the exact
-    # pre-fix pattern with a vacuity guard so an emptied scan cannot pass.
-    ck("elimination-is-fed-from-the-pool",
-       "engine.chrome_elimination_pool(" in _watch)
-    ck("elimination-does-not-build-its-own-list",
-       "if chrome.is_chrome(app_of(v))]" not in _watch)
+    # AND THE RECHECK NAMES BY SIZE AND BY NOTHING ELSE: the pool's own
+    # checks say nothing about whether the caller consults it, and the
+    # retired elimination must not come back by another door.
+    ck("the-recheck-names-from-the-size-pool",
+       "engine.note_chrome_sizes(" in _watch)
+    ck("nothing-eliminates",
+       "elimination(" not in _watch and "_by_size(" not in _watch)
     # AND THE WIND-DOWN REPORT MUST REACH THE LOG, not only stdout. The power
     # menu runs `usher cleanly <verb>; systemctl <verb>` through /bin/sh, so
     # this process's stdout goes NOWHERE: on that path the log is the only
@@ -10148,17 +10094,15 @@ def _t_relaunch(ck):
                    [{"app_id": "spotify", "title": "Some Song",
                      "identifier": _TL1}])
                == [f"window {_TL1} -"])
-            # THE ACCOUNT ELIMINATES TOO: two Chrome windows, one whose
-            # title joins and one whose does not, against two recorded ids,
-            # and the second is FORCED. Before this the account answered `-`
-            # for it, as the daemon would for the owner's own without its
-            # elimination pass.
+            # THE ACCOUNT DOES NOT GUESS EITHER: two Chrome windows with no
+            # size relayed and no name cached are both `-`, where the
+            # retired elimination would have FORCED the second onto the one
+            # recorded id left free (and misbound whenever a window Chrome
+            # never records was in the pool).
             _TL9 = "9" * 32
-            _ssn = chrome.chrome_session_titles
             _scache = dict(chrome._slot_cache)
             try:
-                chrome.chrome_session_titles = lambda: {
-                    "Known Page": (501, "u"), "Old Title": (502, "u")}
+                chrome._slot_cache.clear()
                 _elim = engine.source_window_lines(
                     [{"app_id": "google-chrome",
                       "title": "Known Page - Google Chrome",
@@ -10168,12 +10112,11 @@ def _t_relaunch(ck):
                       "identifier": _TL9}],
                     {_TL1: os.getpid(), _TL9: os.getpid()})
             finally:
-                chrome.chrome_session_titles = _ssn
                 chrome._slot_cache.clear()
                 chrome._slot_cache.update(_scache)
-            ck("source-window-lines-eliminate-the-last-chrome-window",
-               f"window {_TL9} "
-               f"{engine.identity_digest(chrome.chrome_slot(502))}" in _elim)
+            ck("source-window-lines-never-force-a-chrome-window",
+               sorted(_elim) == sorted([f"window {_TL1} -",
+                                        f"window {_TL9} -"]))
             # AND THE TRIGGER SENDS THEM ON STDIN, not in the argv: the
             # arity is exactly three words, which is what lets the
             # integrator's sudoers rule name a FIXED command with no
@@ -10246,77 +10189,17 @@ def _t_relaunch(ck):
 def _t_chrome(ck):
     """chrome identity, profiles, and the restore flags."""
     ps = {getattr(p, "name", "?"): p for p in engine.plugins()}
-    # chrome identity is the WINDOW, not the tab. These run against the real
-    # session files when present, which is the only place the join can be
-    # tested honestly.
-    _wins = {w for w, _u in chrome_session_titles().values()}
-    ck("chrome-slots-are-windows",
-       all((chrome_window_for(t + " - Google Chrome") or "")
-           .startswith("chrome:win:")
-           for t in list(chrome_session_titles())[:5]))
-    ck("chrome-slot-count-matches-windows",
-       len({chrome_window_for(t + " - Google Chrome")
-            for t in chrome_session_titles()}) == len(_wins))
-    ck("chrome-unknown-title", chrome_window_for("nothing like this") is None)
-
-    # AN UNREAD COUNT IS NOT PART OF THE JOIN KEY: Chrome records a title at
-    # navigation, a web app rewrites its count without navigating, and the
-    # Team Notes window was unidentified for exactly that.
-    _pt = chrome._chrome_page_title
-    ck("chrome-title-key-drops-a-leading-count",
-       _pt("(2) Team Notes | Notion - Google Chrome")
-       == _pt("Team Notes | Notion - Google Chrome")
-       == "Team Notes | Notion")
-    ck("chrome-title-key-drops-an-inner-count",
-       _pt("Inbox (5) - a@b - Gmail") == _pt("Inbox (12) - a@b - Gmail"))
-    ck("chrome-title-key-keeps-other-text", _pt("Plan (draft)") ==
-       "Plan (draft)")
-    # BOTH SIDES, and two windows differing ONLY by a count are ambiguous,
-    # so neither is joined rather than one being paired wrongly.
-    _sf = (chrome.session_files, chrome.session_sig, chrome.parse_snss)
-    _sc = dict(chrome._snss_cache)
-    try:
-        chrome.session_files = lambda: ["/x"]
-        chrome.session_sig = lambda: ("fixture",)
-        chrome.parse_snss = lambda f: {"(2) Team Notes": (11, "u"),
-                                       "Roadmap (3)": (12, "u"),
-                                       "Roadmap (4)": (13, "u")}
-        chrome._snss_cache.update({"sig": None, "map": {}})
-        _m = chrome.chrome_session_titles()
-        ck("chrome-session-titles-are-normalised",
-           _m.get("Team Notes", (None,))[0] == 11)
-        ck("chrome-titles-differing-only-by-a-count-are-dropped",
-           "Roadmap" not in _m)
-        ck("chrome-a-live-title-with-a-count-joins",
-           chrome.chrome_window_for("(9) Team Notes - Google Chrome")
-           == chrome.chrome_slot(11))
-    finally:
-        chrome.session_files, chrome.session_sig, chrome.parse_snss = _sf
-        chrome._snss_cache.clear()
-        chrome._snss_cache.update(_sc)
-
-    # THE TITLE IS A BOOTSTRAP, NOT AN IDENTITY: resolve once, then remember
-    # for the life of the view. A Gmail window is `Inbox (1)` in the session
-    # file and `Inbox (2)` on screen the moment mail arrives, so re-deriving
-    # every time made it flicker between known and stranger for its whole life.
-    _t0 = next(iter(chrome_session_titles()), None)
-    if _t0:
-        _want = chrome_window_for(_t0 + " - Google Chrome")
-        ck("slot-resolves-for-a-view",
-           window_slot(90001, _t0 + " - Google Chrome") == _want)
-        # ...and now survives the title changing under it, which is the bug
-        ck("slot-survives-a-title-change",
-           window_slot(90001, "Inbox (99) - nothing like this") == _want)
-        # a DIFFERENT view is not given the first one's answer
-        ck("slot-is-per-view",
-           window_slot(90002, "Inbox (99) - nothing like this") is None)
-        # a stored entry (no live view) never caches and never reads the cache
-        ck("slot-uncached-without-a-view",
-           window_slot(None, "Inbox (99) - nothing like this") is None)
-        forget_window(90001)
-        ck("slot-forgotten-on-unmap",
-           window_slot(90001, "Inbox (99) - nothing like this") is None)
-        forget_window(90002)
+    # A NAME LASTS THE VIEW'S LIFE, and comes only from the cache: a size
+    # claim or the published snapshot. No title is asked at all.
+    chrome._slot_cache.clear()
+    chrome._slot_cache[90001] = "chrome:win:77"
+    ck("slot-resolves-for-a-view", window_slot(90001) == "chrome:win:77")
+    # a DIFFERENT view is not given the first one's answer
+    ck("slot-is-per-view", window_slot(90002) is None)
+    # a stored entry (no live view) never caches and never reads the cache
+    ck("slot-uncached-without-a-view", window_slot(None) is None)
+    forget_window(90001)
+    ck("slot-forgotten-on-unmap", window_slot(90001) is None)
 
     # A ONE-SHOT VERB IS BLIND WHERE THE DAEMON IS NOT, which is the sources
     # map's shape one app over: the cache is per PROCESS, and because Chrome
@@ -10331,12 +10214,12 @@ def _t_chrome(ck):
     chrome._slot_cache.clear()
     ck("seed-takes-a-slot-for-a-view",
        chrome.seed_slots([(70001, _SEED)]) == 1
-       and window_slot(70001, "a title no session file names") == _SEED)
+       and window_slot(70001) == _SEED)
     # NEVER OVERWRITES: an answer this process resolved itself came from the
     # live session file and is at least as good as somebody else's.
     ck("seed-never-overwrites",
        chrome.seed_slots([(70001, "chrome:win:999")]) == 0
-       and window_slot(70001, "another title") == _SEED)
+       and window_slot(70001) == _SEED)
     # AND IT VALIDATES THE SHAPE, or a hand-edited or half-written snapshot
     # puts a RAW TITLE into the cache `identity` reads, which is precisely
     # the fallback the slot key replaced.
@@ -10415,17 +10298,6 @@ def _t_chrome(ck):
     chrome._slot_cache.clear()
     engine._SNAP_SLOTS_ADOPTED = False
 
-    # A TITLE TWO WINDOWS SHARE IS NOT A DISCRIMINATOR, and it matters more
-    # now that the answer STICKS: two "New Tab" windows would otherwise both
-    # be handed the same slot, permanently. Same rule learn() applies to its
-    # title groups.
-    with _tsnss([(31, 1, "https://a/", "Same Title"),
-                 (32, 2, "https://b/", "Same Title"),
-                 (33, 3, "https://c/", "Unique Title")]) as _dupf:
-        _d = parse_snss(_dupf)
-        ck("chrome-drops-ambiguous-titles", "Same Title" not in _d)
-        ck("chrome-keeps-unambiguous-titles",
-           _d.get("Unique Title", (None,))[0] == 33)
     # the profile map is keyed by slot now, so a saved window still resolves
     ck("chrome-profile-map-by-slot",
        all(k.startswith("chrome:win:") for k in chrome_profile_map()))
@@ -10447,6 +10319,43 @@ def _t_chrome(ck):
                     8: frozenset({"https://c.example/"})})
         ck("chrome-bind-across-restart",
            chrome_bind_windows(_new, _old) == {7: 91, 8: 92})
+        # THE RULE, tier by tier. EXACT is the same set and no twin on
+        # either side; a one-tab window binds on it, since an exact match
+        # needs no threshold.
+        _u = [f"https://t{i}/" for i in range(10)]
+        _f = frozenset
+        ck("chrome-bind-exact-needs-no-threshold",
+           chrome_bind_windows({2: _f(_u[:1])}, {1: _f(_u[:1])}) == {1: 2})
+        ck("chrome-bind-exact-twins-bind-nothing",
+           chrome_bind_windows({3: _f(_u[:4]), 4: _f(_u[:4])},
+                               {1: _f(_u[:4])}) == {}
+           and chrome_bind_windows({3: _f(_u[:4])},
+                                   {1: _f(_u[:4]), 2: _f(_u[:4])}) == {})
+        # PARTIAL: at least three shared AND more than half the OLD window.
+        ck("chrome-bind-partial-three-and-over-half",
+           chrome_bind_windows({2: _f(_u[:3] + _u[8:9])},
+                               {1: _f(_u[:5])}) == {1: 2})
+        ck("chrome-bind-partial-two-shared-is-not-enough",
+           chrome_bind_windows({2: _f(_u[:2] + _u[8:9])},
+                               {1: _f(_u[:3])}) == {})
+        ck("chrome-bind-partial-exactly-half-is-not-enough",
+           chrome_bind_windows({2: _f(_u[:3])}, {1: _f(_u[:6])}) == {})
+        # A TIE BINDS NOTHING, on either side: it used to be broken by id
+        # order, which is a guess wearing a sort key.
+        ck("chrome-bind-partial-tie-on-the-new-side",
+           chrome_bind_windows({2: _f(_u[:3] + _u[8:9]),
+                                3: _f(_u[:3] + _u[9:10])},
+                               {1: _f(_u[:4])}) == {})
+        ck("chrome-bind-partial-tie-on-the-old-side",
+           chrome_bind_windows({3: _f(_u[:4])},
+                               {1: _f(_u[:3] + _u[8:9]),
+                                2: _f(_u[:3] + _u[9:10])}) == {})
+        # AND EXACT IS SETTLED FIRST, so a partial candidate cannot steal a
+        # window that has its exact match.
+        ck("chrome-bind-exact-before-partial",
+           chrome_bind_windows({3: _f(_u[:4]), 4: _f(_u[:5])},
+                               {1: _f(_u[:4]), 2: _f(_u[:5])})
+           == {1: 3, 2: 4})
         # a window sharing ONE page with a big one is not that window
         ck("chrome-bind-declines-a-coincidence",
            chrome_bind_windows(
@@ -10465,6 +10374,8 @@ def _t_chrome(ck):
                kkey("google-chrome", "chrome:win:8"):
                {"title": "chrome:win:8", "pos": [3, 4]},
                kkey("kitty", "kitty:/tmp"): {"title": "kitty:/tmp"}}
+        _rlt = engine.load_chrome_tabs
+        engine.load_chrome_tabs = lambda *a, **k: {}
         with _tsession(_newf, _oldf):
             _n1 = rekey_chrome(_kb)
             _n2 = rekey_chrome(_kb)
@@ -10491,6 +10402,7 @@ def _t_chrome(ck):
                 {"title": "chrome:win:7", "pos": [n, n]} for n in range(3)}
         with _tsession(_newf, _oldf):
             _nf = rekey_chrome(_kbf)
+        engine.load_chrome_tabs = _rlt
         ck("chrome-rekey-moves-an-indexed-family", _nf == 3)
         ck("chrome-rekey-keeps-the-family-indices-and-rects",
            sorted(engine.slot_keys(_kbf, "google-chrome", "chrome:win:91"))
@@ -10501,6 +10413,92 @@ def _t_chrome(ck):
            not [k for k in _kbf if "chrome:win:7" in k])
         ck("chrome-rekey-leaves-others",
            kkey("kitty", "kitty:/tmp") in _kb and len(_kb) == 3)
+
+    # THE TAB RECORD, which bridges more than one restart: every window's
+    # tabs, kept after its session file is gone. All seams chosen, so no
+    # session file and no state dir are touched.
+    _X = frozenset({"https://x1/", "https://x2/", "https://x3/"})
+    _Y = frozenset({"https://y1/", "https://y2/", "https://y3/"})
+    _crb = engine.chrome_restart_binding
+
+    def _rb(files, rec=None, now=1000.0):
+        return _crb(hist={"P": list(files)},
+                    tabs=lambda f: _gen[f], rec=rec or {}, now=now)
+    # TWO RESTARTS BEFORE ANYTHING LOOKED: one window, three ids. Collapsing
+    # the older files into one "previous" set would tie A and B against C.
+    _gen = {"c": {3: _X}, "b": {2: _X}, "a": {1: _X}}
+    _cur, _bnd, _rec = _rb(["c", "b", "a"])
+    ck("restart-binding-follows-a-chain-of-restarts",
+       _bnd == {1: 3, 2: 3} and set(_cur) == {3})
+    ck("restart-binding-is-idempotent",
+       _rb(["c", "b", "a"], rec=_rec)[1] == _bnd)
+    # THE RECORD ALONE: the file naming the old id is gone.
+    _gen = {"c": {9: _X, 8: _Y}}
+    _r0 = {"5": {"tabs": sorted(_X), "seen": 900.0, "profile": "P"}}
+    _cur, _bnd, _rec = _rb(["c"], rec=_r0)
+    ck("restart-binding-bridges-from-the-record-alone", _bnd == {5: 9})
+    ck("the-record-learns-the-current-windows",
+       sorted(_rec.get("9", {}).get("tabs", [])) == sorted(_X)
+       and _rec.get("5", {}).get("bound") == "9")
+    # A BOUND ID IS NOT A CANDIDATE AGAIN, it is reached through its link:
+    # the next restart moves 9 to 12, and 5 follows the chain rather than
+    # tying with 9 against 12.
+    _gen = {"d": {12: _X}, "c": {9: _X}}
+    ck("a-bound-id-follows-its-link",
+       _rb(["d", "c"], rec=_rec)[1] == {5: 12, 9: 12})
+    # ...and when BOTH are dead and only the record holds them, the bound
+    # one must still be left out, or it ties with its own successor.
+    _gen = {"d": {12: _X}}
+    ck("a-bound-id-does-not-tie-with-its-successor",
+       _rb(["d"], rec=_rec)[1] == {5: 12, 9: 12})
+    # AND EVERY TIE IS A REFUSAL: two dead windows of the same tabs.
+    _gen = {"c": {9: _X}}
+    _rt = {"5": {"tabs": sorted(_X), "seen": 900.0, "profile": "P"},
+           "6": {"tabs": sorted(_X), "seen": 900.0, "profile": "P"}}
+    ck("restart-binding-refuses-a-record-tie", _rb(["c"], rec=_rt)[1] == {})
+    # ANOTHER PROFILE'S RECORD IS NOT THIS PROFILE'S HISTORY.
+    _rq = {"5": {"tabs": sorted(_X), "seen": 900.0, "profile": "Q"}}
+    ck("restart-binding-keeps-to-the-profile",
+       _rb(["c"], rec=_rq)[1] == {})
+    # A PARTIAL MATCH FROM THE RECORD, by the rule: three shared, over half.
+    _gen = {"c": {9: frozenset(sorted(_X) + ["https://new/"])}}
+    _rp = {"5": {"tabs": sorted(_X) + ["https://gone/"], "seen": 900.0,
+                 "profile": "P"}}
+    ck("restart-binding-takes-a-partial-match-by-the-rule",
+       _rb(["c"], rec=_rp)[1] == {5: 9})
+    # PRUNED AT THE TTL: an id unseen that long names a window no store
+    # can still hold a slot for.
+    _now = 10.0 * engine.KNOWLEDGE_TTL
+    _gen = {"c": {9: _Y}}
+    _ro = {"5": {"tabs": sorted(_X), "seen": 1.0, "profile": "P"}}
+    ck("the-record-forgets-an-id-past-the-ttl",
+       "5" not in _rb(["c"], rec=_ro, now=_now)[2])
+    # THE RECORD ROUND-TRIPS THROUGH ITS FILE, and a non-object is none.
+    import tempfile as _tfr
+    _rd = _tfr.mkdtemp(prefix="usher-tabs-")
+    try:
+        _rp2 = os.path.join(_rd, "chrome-tabs.json")
+        engine.save_chrome_tabs(_rec, _rp2)
+        ck("the-record-round-trips", engine.load_chrome_tabs(_rp2) == _rec)
+        with open(_rp2, "w") as f:
+            f.write("[1, 2]")
+        ck("a-record-that-is-not-an-object-is-empty",
+           engine.load_chrome_tabs(_rp2) == {})
+    finally:
+        shutil.rmtree(_rd, ignore_errors=True)
+    # AND THE DRY RUN COUNTS AN ID THE RECORD HOLDS AS REACHABLE, or it
+    # would collapse a slot the binding can still move.
+    _rlt3, _rrw = engine.load_chrome_tabs, engine.recorded_window_ids
+    try:
+        engine.load_chrome_tabs = lambda *a, **k: {"5": {"tabs": ["u"]}}
+        engine.recorded_window_ids = lambda: {9}
+        _ls, _gs = engine._unlayout_split(
+            [{"title": "chrome:win:5"}, {"title": "chrome:win:4"}])
+    finally:
+        engine.load_chrome_tabs, engine.recorded_window_ids = _rlt3, _rrw
+    ck("an-id-the-record-holds-is-reachable",
+       [e["title"] for e in _ls] == ["chrome:win:5"]
+       and [e["title"] for e in _gs] == ["chrome:win:4"])
 
     # chrome is started with the flags that make it RESTORE: naming the right
     # profile is not enough, since "On startup" is unset on these profiles and
@@ -10778,45 +10776,23 @@ def _t_chrome(ck):
     finally:
         chrome.session_history = _rsh2
 
-    # END TO END, through the title map and elimination, which is where the
-    # live fault actually showed: a dormant profile's window is one the file
-    # records and nothing can be, so leaving it in the set is what forced the
-    # refusal. Two REAL session files, since both halves read bytes.
+    # END TO END over two REAL session files: a dormant profile's file is
+    # dropped while a browser runs, so its phantom window is not in the set
+    # the size claim names from, and it comes back when none runs.
     with _tsnss([(41, 1, "https://live/", "Live Window")]) as _lf, \
             _tsnss([(42, 2, "https://dead/", "Dead Window")]) as _df:
         _rbp, _rsh = chrome.browser_pids, chrome.session_history
-        _rsig = dict(chrome._snss_cache)
         try:
             os.utime(_df, (1, 1))
             chrome.session_history = lambda: {"live": [_lf], "dormant": [_df]}
             chrome.browser_pids = lambda: [os.getpid()]
-            chrome._snss_cache["sig"] = None
-            _tm = chrome.chrome_session_titles()
-            ck("titles-exclude-a-dormant-profile",
-               "Live Window" in _tm and "Dead Window" not in _tm)
-            # the view whose title the file cannot match is now FORCED, where
-            # the phantom id made this refuse
-            chrome._slot_cache.clear()
-            ck("elim-claims-once-the-phantom-id-is-gone",
-               chrome.claim_by_elimination(
-                   [(1, "something the file never recorded - Google Chrome")])
-               == 1)
-            ck("elim-claimed-the-live-window",
-               chrome._slot_cache.get(1) == "chrome:win:41")
-            # and WITH the dormant profile back in, it refuses: the fixture
-            # proves the exclusion is what decides, not the fixture's shape
+            ck("files-exclude-a-dormant-profile",
+               chrome.session_files() == [_lf])
             chrome.browser_pids = lambda: []
-            chrome._snss_cache["sig"] = None
-            chrome._slot_cache.clear()
-            ck("elim-refuses-while-the-phantom-id-remains",
-               chrome.claim_by_elimination(
-                   [(1, "something the file never recorded - Google Chrome")])
-               is None)
+            ck("files-control-no-browser-keeps-both",
+               sorted(chrome.session_files()) == sorted([_lf, _df]))
         finally:
             chrome.browser_pids, chrome.session_history = _rbp, _rsh
-            chrome._snss_cache.update(_rsig)
-            chrome._snss_cache["sig"] = None
-            chrome._slot_cache.clear()
 
 def _t_learn(ck):
     """what a learn pass keeps, replaces and purges."""
@@ -13220,22 +13196,41 @@ def _t_undo(ck):
             engine.FORGET_FILE = _wmod.FORGET_FILE = _rff
         ck("a-purge-request-reaches-the-daemon-as-a-purge",
            _fa == [(["titan"], True)])
-        # A BROWSER RESTART WRITES ITS WHOLE BINDING TO THE LOG.
-        _rcb, _rrr2 = engine.chrome_session_binding, engine.record_rekeys
+        # A BROWSER RESTART WRITES ITS WHOLE BINDING TO THE LOG, applies it
+        # to every store, and only THEN commits the tab record, so a pass
+        # that raised is repeated with the record as it was.
+        _rcb, _rrr2 = engine.chrome_restart_binding, engine.record_rekeys
         _rrc, _ros = _wmod.rekey_chrome, engine.rekey_other_stores
-        _rec2 = []
+        _rsct = engine.save_chrome_tabs
+        _rec2, _order = [], []
+        _REC = {"2": {"tabs": ["u"], "seen": 1.0}}
         try:
-            engine.chrome_session_binding = lambda: {1: 2}
-            engine.record_rekeys = lambda pairs, now=None: _rec2.extend(pairs)
-            _wmod.rekey_chrome = lambda kb: 0
-            engine.rekey_other_stores = lambda *a, **k: 0
+            engine.chrome_restart_binding = lambda: (
+                {2: frozenset({"u"})}, {1: 2}, _REC)
+            engine.record_rekeys = lambda pairs, now=None: (
+                _order.append("log") or _rec2.extend(pairs))
+            _wmod.rekey_chrome = lambda kb, *a: _order.append("store") or 0
+            engine.rekey_other_stores = lambda *a, **k: (
+                _order.append("others") or 0)
+            engine.save_chrome_tabs = lambda rec, *a: _order.append(
+                "record" if rec is _REC else "WRONG RECORD")
+            w._rekey_chrome()
+            # AND A PASS THAT RAISES COMMITS NOTHING
+            _order2 = list(_order)
+            _order.clear()
+            _wmod.rekey_chrome = lambda kb, *a: 1 / 0
             w._rekey_chrome()
         finally:
-            engine.chrome_session_binding = _rcb
+            engine.chrome_restart_binding = _rcb
             engine.record_rekeys = _rrr2
             _wmod.rekey_chrome, engine.rekey_other_stores = _rrc, _ros
+            engine.save_chrome_tabs = _rsct
         ck("a-browser-restart-logs-its-binding",
-           _rec2 == [("chrome:win:1", "chrome:win:2")])
+           _rec2[:1] == [("chrome:win:1", "chrome:win:2")])
+        ck("the-tab-record-is-committed-after-the-binding-is-applied",
+           _order2 == ["log", "store", "others", "record"])
+        ck("a-failed-re-key-commits-no-tab-record",
+           "record" not in _order)
     finally:
         engine.UNDO_FILE, _wmod.UNDO_FILE = _rfile, _rwf
         _wmod.save_knowledge, Watcher._sweep = _rsk, _rsw
@@ -13318,8 +13313,11 @@ def _t_undo(ck):
             if f == "new" else
             {10: frozenset({"a", "b"}), 11: frozenset({"c"}),
              20: frozenset({"z"})})
+        _rlt2 = engine.load_chrome_tabs
+        engine.load_chrome_tabs = lambda *a, **k: {}
         _bd = engine.chrome_session_binding()
     finally:
+        engine.load_chrome_tabs = _rlt2
         engine.session_history, engine.chrome_window_tabs = _rsh, _rwt
     ck("the-session-binding-covers-every-window-of-the-last-run",
        _bd == {10: 20, 11: 21})
@@ -15728,101 +15726,17 @@ def _t_displays(ck):
             w.transition_until = 0.0
             w.surface_sig, w.surface_sig_for = None, None
             w.surface_grid = None
-        # ---- A CHROME WINDOW WITH NO SLOT IS PAIRED BY SIZE ----------------
-        # Two browser restarts in 90s left nothing for the session-file
-        # re-key to bind across (dragonfly 2026-11-18 20:11).
-        _G = "google-chrome"
-        _kbz = {
-            engine.kkey(_G, "chrome:win:1"): {"size": [2160, 1702],
-                                              "last_seen": 1000.0},
-            engine.kkey(_G, "chrome:win:2"): {"size": [2312, 1633],
-                                              "last_seen": 990.0},
-            engine.kkey(_G, "chrome:win:3"): {"size": [2312, 1633],
-                                              "last_seen": 100.0},
-            engine.kkey(_G, "titan:aaaa"): {"size": [2517, 1659],
-                                            "source": "titan",
-                                            "last_seen": 1000.0},
-        }
-        _z = lambda i, sz, src="", riv=(), live=(): engine.stale_by_size(
-            _kbz, _G, i, src, sz, list(riv), set(live))
-        ck("a-unique-size-pairs-with-the-stale-slot",
-           _z("chrome:win:9", [2161, 1700]) == engine.kkey(_G,
-                                                            "chrome:win:1"))
-        ck("a-slot-from-an-older-run-is-not-a-candidate",
-           _z("chrome:win:9", [2312, 1633])
-           == engine.kkey(_G, "chrome:win:2"))
-        ck("a-rival-of-the-same-size-pairs-neither",
-           _z("chrome:win:9", [2160, 1702], riv=[[2160, 1702]]) is None)
-        ck("a-slot-a-live-window-holds-is-not-a-candidate",
-           _z("chrome:win:9", [2160, 1702],
-              live=[engine.kkey(_G, "chrome:win:1")]) is None)
-        ck("a-window-that-has-a-slot-takes-none",
-           _z("chrome:win:1", [2312, 1633]) is None)
-        ck("size-pairing-keeps-to-the-account",
-           _z("titan:bbbb", [2517, 1659], src="titan")
-           == engine.kkey(_G, "titan:aaaa")
-           and _z("chrome:win:9", [2517, 1659]) is None
-           and _z("titan:bbbb", [2160, 1702], src="titan") is None)
-        ck("size-pairing-is-chrome-only",
-           engine.stale_by_size({"kitty\0kitty:/a": {"size": [5, 5],
-                                                     "last_seen": 1.0}},
-                                "kitty", "kitty:/b", "", [5, 5], [],
-                                set()) is None)
-        # and the placer asks it BEFORE it picks a slot, through a method
-        # that moves the entry and records the move for undo
+        # ---- A CHROME WINDOW WITH NO SLOT IS NOT PAIRED BY ANYTHING -------
+        # Pairing a slotless window with a stale slot of the same size once
+        # handed it a STRANGER's slot and pin (dragonfly 2026-11-19). The
+        # tab record bridges restarts instead (chrome_restart_binding), and
+        # what nothing binds is placed by its surface.
         _pv = inspect.getsource(Watcher._place_view)
-        ck("the-placer-pairs-by-size-before-it-picks-a-slot",
-           0 <= _pv.find("self._rekey_by_size(")
-           < _pv.find("engine.free_slot("))
-        _rkz = {engine.kkey(_G, "chrome:win:1"): {"size": [2160, 1702],
-                                                  "last_seen": 1000.0,
-                                                  "title": "chrome:win:1"}}
-        _rr, _rl = engine.record_rekeys, _wmod.logline
-        _recd = []
-        _kb0, _st0 = w.kb, dict(w.st)
-        try:
-            engine.record_rekeys = lambda pairs, now=None: _recd.extend(pairs)
-            _wmod.logline = lambda m: None
-            w.kb = _rkz
-            _vz = {"id": 77, "app-id": _G, "title": "x", "pid": os.getpid(),
-                   "geometry": {"width": 2160, "height": 1702}}
-            _wid = _wmod.identity
-            _wmod.identity = lambda v: "chrome:win:9"
-            try:
-                _old_k = w._rekey_by_size(_vz, _G, "", [_vz])
-            finally:
-                _wmod.identity = _wid
-            ck("a-size-re-key-moves-the-entry-and-records-it",
-               _old_k == engine.kkey(_G, "chrome:win:1")
-               and engine.kkey(_G, "chrome:win:9") in w.kb
-               and w.kb[engine.kkey(_G, "chrome:win:9")]["title"]
-               == "chrome:win:9"
-               and _recd == [("chrome:win:1", "chrome:win:9")])
-            # a window REMEMBERED ON ANOTHER DESK is not paired by size:
-            # its own entry there decides, through the surface rule
-            _ope = engine.other_profile_entries
-            w.kb = {engine.kkey(_G, "chrome:win:1"): {
-                "size": [2160, 1702], "last_seen": 1000.0,
-                "title": "chrome:win:1"}}
-            _recd.clear()
-            engine.other_profile_entries = (
-                lambda *a, **k: [{"surface": "personnel"}])
-            _wmod.identity = lambda v: "chrome:win:9"
-            try:
-                _old_k2 = w._rekey_by_size(_vz, _G, "", [_vz])
-            except Exception as _e:                        # noqa: BLE001
-                _old_k2 = "RAISED %s" % _e
-            finally:
-                _wmod.identity = _wid
-                engine.other_profile_entries = _ope
-            ck("a-window-known-on-another-desk-is-not-paired-by-size",
-               _old_k2 is None and not _recd
-               and engine.kkey(_G, "chrome:win:1") in w.kb)
-        finally:
-            engine.record_rekeys, _wmod.logline = _rr, _rl
-            w.kb = _kb0
-            w.st.clear()
-            w.st.update(_st0)
+        ck("the-placer-never-pairs-a-window-by-size",
+           "_by_size(" not in _pv and "engine.free_slot(" in _pv)
+        ck("nothing-pairs-by-size-anywhere",
+           not hasattr(engine, "stale_by_size")
+           and not hasattr(Watcher, "_rekey_by_size"))
         # desk_grid PARSES hwdp's answer, and anything else is no answer.
         _rrun, _rwh = engine.subprocess.run, engine.shutil.which
 
@@ -16646,21 +16560,30 @@ def _t_displays(ck):
         _said5 = []
         _rrc, _rsk, _rlg = _wmod.rekey_chrome, _wmod.save_knowledge, \
             _wmod.logline
+        _rcrb, _rsct2 = engine.chrome_restart_binding, engine.save_chrome_tabs
+        _rc_args = []
         try:
-            _stub_rc = lambda kb: 2                            # noqa: E731
-            _wmod.rekey_chrome = _stub_rc
+            _BND = ({2: frozenset()}, {1: 2}, {})
+            engine.chrome_restart_binding = lambda: _BND
+            engine.save_chrome_tabs = lambda *a, **k: None
+            _wmod.rekey_chrome = (lambda kb, *a: _rc_args.append(a) or 2)
             _wmod.save_knowledge = lambda kb, p: None
             _wmod.logline = _said5.append
             engine.rekey_other_stores = (
                 lambda fn, prof: _calls.append((fn, prof)) or 3)
             _rc_ok = w._rekey_chrome()
+            # the other desks get the SAME binding as the loaded one
+            _other_n = _calls[0][0]({}) if _calls else None
         finally:
             _wmod.rekey_chrome, _wmod.save_knowledge = _rrc, _rsk
             _wmod.logline = _rlg
             engine.rekey_other_stores = _ros
+            engine.chrome_restart_binding = _rcrb
+            engine.save_chrome_tabs = _rsct2
         ck("a-chrome-rekey-reaches-the-other-desks",
-           _rc_ok is True and len(_calls) == 1
-           and _calls[0][0] is _stub_rc and _calls[0][1] == "DESK")
+           _rc_ok is True and len(_calls) == 1 and _other_n == 2
+           and _calls[0][1] == "DESK"
+           and _rc_args == [(_BND[1], _BND[0])] * 2)
         # AND IT SAYS SO: this line once sat below a `return` and printed
         # nothing for a week while the re-key did its work unseen.
         ck("a-chrome-rekey-is-logged",
@@ -17034,81 +16957,6 @@ def _t_contracts(ck):
         engine.watcher_pid = _rwp2
         shutil.rmtree(_tmpd, ignore_errors=True)
 
-    # ELIMINATION OVER THE RECORDED IDS, which never compares title content.
-    # The titles below are DELIBERATELY unrelated to each other: if the claim
-    # depended on the strings at all, no fixture here would resolve.
-    _rst = chrome.chrome_session_titles
-    try:
-        def _titles(m):
-            chrome.chrome_session_titles = lambda: m
-        T = {"Alpha": (11, "u1"), "Beta": (22, "u2"), "Gamma": (33, "u3")}
-        _titles(T)
-        # two views match exactly, the third's title matches NOTHING -> forced
-        chrome._slot_cache.clear()
-        got = chrome.claim_by_elimination(
-            [(1, "Alpha - Google Chrome"), (2, "Beta - Google Chrome"),
-             (3, "something the file has never heard of - Google Chrome")])
-        ck("elim-claims-the-forced-view", got == 3)
-        ck("elim-writes-the-slot-cache",
-           chrome._slot_cache.get(3) == "chrome:win:33")
-        # TWO unmatched views could pair either way: refuse.
-        chrome._slot_cache.clear()
-        ck("elim-refuses-two-unmatched",
-           chrome.claim_by_elimination(
-               [(1, "Alpha - Google Chrome"), (2, "nope - Google Chrome"),
-                (3, "also nope - Google Chrome")]) is None)
-        ck("elim-refuses-leave-cache-alone", not chrome._slot_cache)
-        # ONE unmatched view but TWO free ids: equally unforced.
-        chrome._slot_cache.clear()
-        ck("elim-refuses-two-free-ids",
-           chrome.claim_by_elimination(
-               [(1, "Alpha - Google Chrome"),
-                (2, "nope - Google Chrome")]) is None)
-        # AN INCOGNITO WINDOW is a view Chrome never recorded, so it shows up
-        # as one more view than id and must decline rather than steal the id.
-        chrome._slot_cache.clear()
-        ck("elim-refuses-with-an-unrecorded-window",
-           chrome.claim_by_elimination(
-               [(1, "Alpha - Google Chrome"), (2, "Beta - Google Chrome"),
-                (3, "Gamma - Google Chrome"),
-                (4, "incognito - Google Chrome")]) is None)
-        # NOTHING LEFT OVER is not a claim either.
-        chrome._slot_cache.clear()
-        ck("elim-nothing-to-do-when-all-match",
-           chrome.claim_by_elimination(
-               [(1, "Alpha - Google Chrome"), (2, "Beta - Google Chrome"),
-                (3, "Gamma - Google Chrome")]) is None)
-
-        # AN ID A LIVE VIEW ALREADY HOLDS IS NOT FREE. The manifold incident
-        # of 2026-10-13: view 1 was resolved and cached, then its title went
-        # stale, so it was neither matched nor unmatched and its OWN id read
-        # as free. View 2, a window Chrome never recorded, was handed it.
-        # ONE recorded id here, so the cache is the only thing standing
-        # between the stranger and the owner's slot.
-        _titles({"Alpha": (11, "u1")})
-        chrome._slot_cache.clear()
-        chrome._slot_cache[1] = "chrome:win:11"
-        ck("elim-an-id-a-live-view-holds-is-not-free",
-           chrome.claim_by_elimination(
-               [(1, "a title the file no longer carries - Google Chrome"),
-                (2, "never recorded at all - Google Chrome")]) is None)
-        ck("elim-leaves-the-cached-owner-alone",
-           chrome._slot_cache == {1: "chrome:win:11"})
-        # ...and it still claims a genuinely free id with a cached sibling
-        # present, or the guard above would have made the whole thing inert.
-        _titles({"Alpha": (11, "u1"), "Beta": (22, "u2")})
-        chrome._slot_cache.clear()
-        chrome._slot_cache[1] = "chrome:win:11"
-        ck("elim-still-claims-beside-a-cached-view",
-           chrome.claim_by_elimination(
-               [(1, "stale - Google Chrome"),
-                (2, "also stale - Google Chrome")]) == 2)
-        ck("elim-claimed-the-unheld-id",
-           chrome._slot_cache.get(2) == "chrome:win:22")
-    finally:
-        chrome.chrome_session_titles = _rst
-        chrome._slot_cache.clear()
-
     # THE AGENT QUESTION IS ABOUT THE DAEMON'S ENVIRONMENT, not the caller's.
     # Our own pid stands in for the daemon, which gives a REAL
     # /proc/<pid>/environ to read. That file is the EXEC-TIME environment, so
@@ -17444,24 +17292,23 @@ def _t_contracts(ck):
     ck("doctor-blind-keeps-the-store-report",
        "== store ==" in _rep and "== contracts ==" in _rep)
 
-    # parse_snss recovers the active-tab url from a synthetic session file
+    # the tab reader recovers every window's tabs from a synthetic file, by
+    # WINDOW ID, which is what the restart binding rests on
     fd, path = tempfile.mkstemp()
     try:
         os.write(fd, snss_build([(11, 22, "https://example.com/x",
                                   "Example")]))
         os.close(fd)
-        m = parse_snss(path)
-        # the WINDOW ID is what identity now rests on, so assert it, not just
-        # the url: dropping it is the bug this whole change undoes.
-        ck("snss-parse", m.get("Example") == (11, "https://example.com/x"))
-        ck("snss-window-id", m["Example"][0] == 11)
+        ck("snss-tabs-by-window",
+           chrome_window_tabs(path) == {11: frozenset(
+               {"https://example.com/x"})})
     finally:
         os.remove(path)
 
     # any real session file present must parse without raising
     try:
         for p in session_files():
-            parse_snss(p)
+            chrome_window_tabs(p)
         ck("snss-live", True)
     except Exception:
         ck("snss-live", False)

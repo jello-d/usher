@@ -1150,12 +1150,6 @@ class Watcher:
                     self.slot_held[_k] = _id
             except Exception as _e:                      # noqa: BLE001
                 logline(f"slot occupancy: {_e}")
-            # A CHROME WINDOW NOTHING IS STORED UNDER is paired with a stale
-            # slot of the same browser run by its exact size, before it is
-            # given a fresh one (engine.stale_by_size): two browser restarts
-            # leave the session-file re-key nothing to bind across.
-            if chrome.is_chrome(app):
-                self._rekey_by_size(v, app, _src or "", _views)
             skey, e = engine.free_slot(
                 self.kb, self.slot_held, app, identity(v), _src or "", vid,
                 _live, **engine.slot_hints(
@@ -2170,19 +2164,11 @@ class Watcher:
         except Exception as e:
             logline(f"recheck: {e}")
             return
-        # ELIMINATION NEEDS THE WHOLE SET, which is why it runs here and not
-        # in the plugin: a plugin is handed ONE view and cannot see what the
-        # other titles already account for. Done before the placement loop so
-        # a view it claims is placeable on this very pass.
-        # OURS ONLY: the ids come from the OWNER's session files, so a
-        # foreign chrome view is not a candidate for any of them. One got
-        # handed an owner id here, live, with its title as the label.
+        # THE SIZE NEEDS THE WHOLE SET, which is why it runs here and not in
+        # the plugin: a plugin is handed ONE view and cannot see which sizes
+        # the others share. Done before the placement loop so a view it names
+        # is placeable on this very pass.
         engine.note_chrome_sizes(views)
-        _claimed = chrome.claim_by_elimination(
-            engine.chrome_elimination_pool(views))
-        if _claimed is not None:
-            logline("chrome: the one unmatched window is settled by "
-                    "elimination over the recorded ids")
         n = 0
         for v in views:
             try:
@@ -2262,49 +2248,6 @@ class Watcher:
             except Exception as e:
                 errstreak += 1
                 cap = self._capture_failed(e, cap, errstreak)
-
-    def _rekey_by_size(self, v, app, src, views):
-        """Move a stale slot onto window `v`'s identity when only size can
-        pair them, log it, and record the move for undo. Call with the lock
-        held. Returns the old key, or None."""
-        ident = identity(v)
-        # A SIZE MATCH IS A GUESS, so it is the last resort for a window
-        # remembered NOWHERE. One known on another desk has its own entry
-        # there, and the surface rule places it from that: pairing it by
-        # size instead handed a work window a dead slot of another window
-        # and that window's pin, which beat the surface (dragonfly
-        # 2026-11-19). Read without `_left_entry`, whose lock we hold.
-        _lk = self.left_keys.get(v.get("id"))
-        if ((_lk and engine.slot_base(_lk) == engine.kkey(app, ident)
-             and engine.left_entry(self.left_from, _lk))
-                or engine.other_profile_entries(app, ident, self.kb_profile,
-                                                src)):
-            return None
-        g = v.get("geometry") or {}
-        size = [g.get("width") or 0, g.get("height") or 0]
-        live_keys, rivals = set(), []
-        for w in views:
-            if app_of(w) != app:
-                continue
-            ws = engine.source_of(w) or ""
-            wi = identity(w)
-            live_keys.update(engine.slot_keys(self.kb, app, wi, ws))
-            if (w.get("id") != v.get("id") and ws == src and wi
-                    and not engine.slot_keys(self.kb, app, wi, ws)):
-                wg = w.get("geometry") or {}
-                rivals.append([wg.get("width") or 0, wg.get("height") or 0])
-        old = engine.stale_by_size(self.kb, app, ident, src, size, rivals,
-                                   live_keys)
-        if not old:
-            return None
-        new = engine.kkey(app, ident)
-        self.kb[new] = dict(self.kb.pop(old), title=ident)
-        self.st["dirty"] = True
-        _was = engine.slot_base(old).partition("\0")[2]
-        engine.record_rekeys([(_was, ident)])
-        logline(f"re-keyed by size: {app[:18]} | {engine.log_title(v)[:30]}"
-                f" ({size[0]}x{size[1]})")
-        return old
 
     def _follow_pins(self, why):
         """Move the loaded store's pins to where their surfaces are now
@@ -2699,17 +2642,24 @@ class Watcher:
         i.e. exactly when the re-key is the thing that saves every chrome
         window's slot."""
         try:
+            # ONE BINDING FOR THE PASS, over the session files AND the tab
+            # record (engine.chrome_restart_binding), so every store, the log
+            # and the record agree on it.
+            cur, bound, rec = engine.chrome_restart_binding()
             # THE WHOLE BINDING INTO THE LOG FIRST, so a snapshot naming a
             # window this store has forgotten can still be carried forward.
             engine.record_rekeys(
                 [(engine.chrome_slot(o), engine.chrome_slot(n))
-                 for o, n in engine.chrome_session_binding().items()])
+                 for o, n in bound.items()])
             with self.lock:
-                moved = rekey_chrome(self.kb)
+                moved = rekey_chrome(self.kb, bound, cur)
                 if moved:
                     save_knowledge(self.kb, self.kb_profile)
-                other = engine.rekey_other_stores(rekey_chrome,
-                                                  self.kb_profile)
+                other = engine.rekey_other_stores(
+                    lambda kb: rekey_chrome(kb, bound, cur), self.kb_profile)
+            # THE RECORD IS COMMITTED LAST, once the binding has been applied,
+            # so a pass that raised above is simply repeated next time.
+            engine.save_chrome_tabs(rec)
         except Exception as e:
             logline(f"chrome re-key error: {e}")
             return False

@@ -47,9 +47,9 @@ from datetime import date
 from .chrome import (CHROME_FLAGS, CHROME_STAGGER, browser_pids,
                      strip_counts, after_browser, app_window_argv,
                      is_app_window_argv,
-                     claim_by_elimination, claim_by_size,
+                     claim_by_size,
                      browser_started, chrome_bind_windows, chrome_profile_map,
-                     chrome_slot, chrome_window_for, chrome_window_tabs,
+                     chrome_slot, chrome_window_tabs,
                      is_chrome, is_chrome_slot, recorded_window_ids,
                      seed_slots, session_history, window_slot)
 
@@ -1041,60 +1041,6 @@ def carry_surface(new, old, surfaces, outputs):
     new["surface"] = name
     new["surface_frac"] = old.get("surface_frac")
     return new
-
-
-def stale_by_size(kb, app, ident, src, size, rivals, live_keys):
-    """The stale slot a Chrome window whose identity has NO slot should
-    take, paired by exact size, or None. PURE.
-
-    A SessionID IS PER BROWSER RUN, and the re-key binds the old ids to the
-    new through the previous session file's tabs. Two restarts in quick
-    succession leave nothing to bind across: on dragonfly 2026-11-18 a
-    compositor that went down twice in 90s restarted the work account's
-    browser twice, and all ten of its windows came back as strangers, were
-    left at Chrome's cascade, and were learned there. Chrome restores every
-    window's size EXACTLY, so size pairs them with no session file at all.
-
-    UNAMBIGUOUS OR NOTHING, on both sides: exactly one candidate within
-    SIZE_MATCH, and no other live window of the same app and account
-    wanting a slot at that size (`rivals`, their sizes). Candidates are
-    slots of the same app whose identity is per run AND this account's (a
-    chrome slot for the owner, `<source>:` digests for another account, so
-    the identity alone keeps the accounts apart), held by no live window
-    (`live_keys`), and from the most recent browser run, i.e. within
-    SPARE_SPAN of the newest of them, so a slot from a week ago cannot be
-    handed out."""
-    if not is_chrome(app) or not ident or not size:
-        return None
-    if slot_keys(kb, app, ident, src):
-        return None
-    cand = []
-    for k, e in kb.items():
-        a = k.partition("\0")[0]
-        if a != app or k in live_keys or not isinstance(e, dict):
-            continue
-        i = slot_base(k).partition("\0")[2]
-        if not (source_ident(src, i) if src else is_chrome_slot(i)):
-            continue
-        if i == ident:
-            continue
-        cand.append((k, e))
-    if not cand:
-        return None
-    newest = max(float(e.get("last_seen") or 0) for _k, e in cand)
-    cand = [(k, e) for k, e in cand
-            if newest - float(e.get("last_seen") or 0) <= SPARE_SPAN]
-
-    def near(a, b):
-        return (abs(a[0] - b[0]) <= SIZE_MATCH
-                and abs(a[1] - b[1]) <= SIZE_MATCH)
-    hit = [(k, e) for k, e in cand
-           if near((e.get("size") or [0, 0]), size)]
-    if len(hit) != 1:
-        return None
-    if any(near(r, hit[0][1]["size"]) for r in rivals):
-        return None
-    return hit[0][0]
 
 
 def surface_region(w, surfaces, default=None):
@@ -2816,8 +2762,9 @@ def source_of(v):
 
 def chrome_size_pool(views):
     """[(view id, (width, height))] for OUR live Chrome views, which is what
-    `claim_by_size` matches against our own session files: ours only, for
-    chrome_elimination_pool's reason."""
+    `claim_by_size` matches against our own session files: ours only,
+    since another account's windows are not in those files and would only
+    make a tie or a wrong match."""
     out = []
     for v in views:
         if not is_chrome(app_of(v)) or source_of(v):
@@ -2830,41 +2777,12 @@ def chrome_size_pool(views):
 
 def note_chrome_sizes(views):
     """Name what our Chrome windows' sizes can name, before anything asks a
-    title. Returns the view ids claimed. Never raises: a failure here costs
-    the size its say, and the title join still runs."""
+    title. Returns the view ids claimed. Never raises: a failure here leaves
+    the windows unnamed (PENDING) for this pass."""
     try:
         return claim_by_size(chrome_size_pool(views))
     except Exception:                                      # noqa: BLE001
         return []
-
-
-def chrome_elimination_pool(views):
-    """The chrome views `claim_by_elimination` may consider: OURS ONLY.
-
-    THE ID SET IT MATCHES AGAINST IS THE OWNER'S, read out of the owner's own
-    session files, so the VIEW set has to be the owner's too. A foreign
-    chrome view is not a candidate for any of those ids, and offering it one
-    is how it gets handed somebody else's slot.
-
-    PRODUCT, LIVE on manifold 2026-11-02, found while testing the enclave
-    restore. The call site filtered on `is_chrome` alone, so a work account's
-    Chrome view sat in the pool, and one second after a capture the log read
-
-        chrome: the one unmatched window is settled by elimination
-
-    leaving `google-chrome\0chrome:win:327657740` in the owner's store with
-    the WORK window's title as its label and no `source` field, under an id
-    the owner's current session does not record. `window_slot` then caches
-    that pairing for the view's life, so it is a sticky wrong slot and a
-    disclosure in one.
-
-    THE SAME SHAPE AS `d5798da` ONE LEVEL OUT. That fix stopped elimination
-    consulting the unreliable TITLES for its own preconditions; this stops it
-    considering windows that were never its to pair. A mechanism that forces
-    a pairing must have the right candidates before the forcing is sound.
-    """
-    return [(v.get("id"), v.get("title") or "") for v in views
-            if is_chrome(app_of(v)) and not source_of(v)]
 
 
 def log_title(v):
@@ -3008,9 +2926,9 @@ def resolution(v):
     # joined the OWNER's recorded session ids and was learned into the slot of
     # a personal window, overwriting its workspace and position with the work
     # window's. A title is not a discriminator between two BROWSERS owned by
-    # two users, and `claim_by_elimination` forces a pairing when one view and
-    # one id are left free, which an unidentifiable stranger in the pool makes
-    # likely rather than rare.
+    # two users, and the elimination of the day (since retired) forced a
+    # pairing when one view and one id were left free, which an
+    # unidentifiable stranger in the pool made likely rather than rare.
     #
     # NEVER RATHER THAN PENDING, and the reason is honest: waiting cannot
     # help, because the state usher would need is behind a uid wall. It costs
@@ -3571,7 +3489,7 @@ class ChromePlugin(WindowPlugin):
         # verbs that need it is a SELECTOR, and a listed selector silently
         # covers less the moment something is added.
         adopt_snapshot_slots()
-        slot = window_slot(v.get("id"), v["title"])
+        slot = window_slot(v.get("id"))
         if slot:
             return Resolution.ready(slot)
         # PENDING, NOT NEVER, and the reason names BOTH causes because usher
@@ -4062,19 +3980,13 @@ def held_slot(keys, app, ident, src=""):
     """Of the keys the placer's ledger says this window HOLDS, the one its
     identity may write: (key, key-title), or (None, None). PURE.
 
-    A KEY IN ITS OWN FAMILY, or a per-window slot of its own source that it
-    was placed into as a SPARE (see spare_source_slots), whose key-title is
-    that slot's own identity: `entry_matches` reads the entry's title, so
-    writing the family's title under a per-window key would make the slot
-    unmatchable."""
+    A KEY IN ITS OWN FAMILY, and nothing else: a window is never placed into
+    another identity's slot (the spare slots that once allowed it were a
+    guess by size, and are retired). `src` is kept for the callers."""
     base = kkey(app, ident)
-    pre = kkey(app, src + ":") if src and ident == src else None
     for k in sorted(keys):
-        b = slot_base(k)
-        if b == base:
+        if slot_base(k) == base:
             return k, ident
-        if pre and b.startswith(pre):
-            return k, b.partition("\x00")[2]
     return None, None
 
 
@@ -4182,9 +4094,10 @@ def size_nudges(views, prev, tried):
     return out
 
 
-SPARE_SPAN = 600  # s: how far behind the account's newest slot a spare
-#                   may be. A reboot or a lost name is minutes; a slot an
-#                   hour behind belongs to a window that was closed.
+SIBLING_SPAN = 600  # s: how far behind its family's newest slot a sibling
+#                     may be and still answer to a size. A reboot is
+#                     minutes; a slot an hour behind belongs to a window
+#                     that was closed.
 
 
 def size_matches(e, size, tol=SIZE_MATCH):
@@ -4196,40 +4109,7 @@ def size_matches(e, size, tol=SIZE_MATCH):
         return False
 
 
-def spare_source_slots(kb, app, src, claimed):
-    """`src`'s own per-window slots for `app` that NO live window claims.
-    PURE.
-
-    A WINDOW ITS ACCOUNT COULD NOT NAME THIS TIME may still be the window one
-    of these was learned from: the account names a Chrome window by joining
-    its title to the session file, and two windows sharing a title are
-    refused by design. Measured on dragonfly 2026-11-12: after a reboot two
-    work windows wore one title, so the one that had its own
-    slot before the reboot came back unnamed, took the shared slot of the
-    other, and the other was left at the cascade. These are what `free_slot`
-    may offer such a window, and only on an exact SIZE match."""
-    if not src:
-        return []
-    pre = kkey(app, src + ":")
-    # ONLY THE RECENT ONES. A per-window slot outlives its window by up to
-    # the TTL, and Chrome's ids die with the browser run, so most of an
-    # account's per-window slots name windows long closed: measured on
-    # dragonfly 2026-11-12, six of them all 2500 wide and up to a day old.
-    # Offered as spares, any one could take a window of that size to a
-    # rect it has not been at since. A window whose name was lost at THIS
-    # login was live at the last capture, so its slot is as recent as the
-    # newest the account has (forgive_dormancy shifts a whole store by its
-    # downtime, so a reboot does not age it).
-    fam = [kb[k].get("last_seen", 0) for k in kb
-           if k.startswith(kkey(app, src)) and isinstance(kb[k], dict)]
-    floor = max(fam, default=0) - SPARE_SPAN
-    return sorted(k for k in kb
-                  if k.startswith(pre) and slot_base(k) == k
-                  and k.partition("\x00")[2] not in claimed
-                  and kb[k].get("last_seen", 0) >= floor)
-
-
-def free_slot(kb, held, app, ident, src, vid, live, size=None, spare=(),
+def free_slot(kb, held, app, ident, src, vid, live, size=None,
               rivals=()):
     """The slot this window may take: (key, entry).
 
@@ -4259,9 +4139,9 @@ def free_slot(kb, held, app, ident, src, vid, live, size=None, spare=(),
     # size, which is the size its stale slot was learned at too: measured on
     # dragonfly 2026-11-14, two work shells, three slots, and the size rule
     # sent one to the slot unseen since 10:39 over a fresh one seen at the
-    # last capture. The same recency floor the spares use.
+    # last capture.
     seen = [kb.get(k, {}).get("last_seen", 0) for k in cands if kb.get(k)]
-    floor = max(seen, default=0) - SPARE_SPAN
+    floor = max(seen, default=0) - SIBLING_SPAN
     cands = ([k for k in cands if kb.get(k, {}).get("last_seen", 0) >= floor]
              + [k for k in cands if kb.get(k, {}).get("last_seen", 0) < floor])
     recent = {k for k in cands if kb.get(k, {}).get("last_seen", 0) >= floor}
@@ -4272,7 +4152,7 @@ def free_slot(kb, held, app, ident, src, vid, live, size=None, spare=(),
     # rects. The layout is identical either way, since the rects are a
     # bijection, but a visible shuffle that changes nothing is still worth not
     # doing.
-    for k in list(cands) + [s for s in spare if s not in cands]:
+    for k in cands:
         if held.get(k) == vid:
             return k, kb[k]
     # THE SLOT THAT REMEMBERS THIS WINDOW'S SIZE, when exactly one free one
@@ -4283,9 +4163,9 @@ def free_slot(kb, held, app, ident, src, vid, live, size=None, spare=(),
     # window's. AMBIGUITY FALLS BACK to the order below, which is the old
     # behaviour, so windows of one size are unaffected.
     if size:
-        fit = [k for k in list(cands) + [s for s in spare if s not in cands]
+        fit = [k for k in cands
                if kb.get(k) and size_matches(kb[k], size)
-               and (k in recent or k in spare)
+               and k in recent
                and live_holder(held.get(k), vid, live) != "held"]
         if len(fit) == 1:
             return fit[0], kb[fit[0]]
@@ -4306,7 +4186,7 @@ def free_slot(kb, held, app, ident, src, vid, live, size=None, spare=(),
 
 
 def slot_hints(kb, me, peers):
-    """free_slot's size, spare and rivals for window `me`. PURE.
+    """free_slot's size and rivals for window `me`. PURE.
 
     `me` and each of `peers` are (vid, app, src, ident, size). ONE
     DEFINITION for the placer and the learner's hold gate, which both ask
@@ -4315,9 +4195,7 @@ def slot_hints(kb, me, peers):
     vid, app, src, ident, size = me
     same = [p for p in peers if p[0] != vid and p[1] == app and p[2] == src]
     rivals = [p[4] for p in same if p[3] == ident and p[4]]
-    spare = (spare_source_slots(kb, app, src, {p[3] for p in same})
-             if src and ident == src else [])
-    return {"size": size, "spare": spare, "rivals": rivals}
+    return {"size": size, "rivals": rivals}
 
 
 def slot_squatters(kb, held, app, ident, src, vid, views, outs, panels=None,
@@ -4651,49 +4529,171 @@ def _migrate_wholesale(app):
     return is_chrome(app) or app in _MIGRATE_APPS
 
 
-def rekey_chrome(kb):
-    """Move the store's chrome slots onto the CURRENT session's window ids,
-    and return how many moved.
+def chrome_tabs_path():
+    """The tab record: every Chrome window id this account has seen, with
+    the tabs it last showed. In STATE, so an enclave account keeps its own in
+    its own home."""
+    return os.path.join(STATE, "chrome-tabs.json")
 
-    CHROME DOES NOT KEEP A WINDOW'S SessionID ACROSS A RESTART. It mints a
-    fresh block for the restored windows: measured twice on 2026-09-29, on
-    the clean-exit and the crash path, zero overlap either way, so after any
-    browser restart every `chrome:win:<id>` in the store is a dead key and
-    every Chrome window is a stranger with no remembered place. That is not a
-    small thing: it is the whole of why Chrome windows stopped being placed at
-    login.
 
-    The identity is still right; only the boundary was missing. Chrome leaves
-    the PREVIOUS session file beside the new one, so the two can be joined on
-    the tabs a window came back with (chrome_bind_windows), and the slot
-    follows the window. No new stored state: both sides are files usher
-    already parses.
+def load_chrome_tabs(path=None):
+    """{id (str): {"tabs": [url, ...], "seen": t, "bound": new id?}}, or {}
+    when there is none or it is not an object."""
+    d = json_object(path or chrome_tabs_path()) or {}
+    w = d.get("windows")
+    if not isinstance(w, dict):
+        return {}
+    return {str(k): v for k, v in w.items()
+            if isinstance(v, dict) and isinstance(v.get("tabs"), list)}
 
-    CONSERVATIVE BY CONSTRUCTION, because this rewrites the store:
-      - only slots the current session does NOT know are candidates, so a
-        run with nothing stale is a no-op and running it twice is safe;
-      - a current window that ALREADY has a slot is left alone: the store's
-        own answer for it is at least as good as this guess;
-      - nothing binds unless the tab sets agree, and not binding is the safe
-        outcome (the slot stays put and ages out on the TTL).
+
+def save_chrome_tabs(rec, path=None):
+    """Write the tab record back. Never fatal: a lost write costs one
+    restart's bridge, which the older session files usually still cover."""
+    try:
+        os.makedirs(STATE, exist_ok=True)
+        write_json(path or chrome_tabs_path(),
+                   json.dumps({"windows": rec}, sort_keys=True))
+    except OSError as e:
+        logline(f"chrome tab record write failed: {e}")
+
+
+def _chrome_generations(hist, tabs):
+    """{profile: [{id: (mtime, frozenset)}, ...]}: each profile's session
+    files, OLDEST FIRST, so the last generation is what the windows are now.
     """
-    hist = session_history()
-    cur, prev = {}, {}
-    for files in hist.values():
-        cur.update(chrome_window_tabs(files[0]))
-        for f in files[1:]:
-            for w, urls in chrome_window_tabs(f).items():
-                prev.setdefault(w, urls)     # the newest previous file wins
-    if not cur or not prev:
+    out = {}
+    for prof, files in (hist or {}).items():
+        gens = []
+        for f in reversed(files):
+            try:
+                t = os.path.getmtime(f)
+            except OSError:
+                t = 0.0
+            gens.append({w: (t, urls) for w, urls in tabs(f).items()})
+        if gens:
+            out[prof] = gens
+    return out
+
+
+def _chain_to(binding_steps, cur):
+    """{old: id in `cur`} by following every step's links to its end. PURE.
+    A link whose chain does not end in `cur` is left out."""
+    nxt = {}
+    for o, n in binding_steps:
+        nxt.setdefault(o, n)
+    out = {}
+    for o in nxt:
+        seen, n = {o}, nxt[o]
+        while n not in cur and n in nxt and n not in seen:
+            seen.add(n)
+            n = nxt[n]
+        if n in cur and n != o:
+            out[o] = n
+    return out
+
+
+def chrome_restart_binding(hist=None, tabs=None, rec=None, now=None):
+    """(cur, binding, rec): this run's windows {id: tabs}, the binding
+    {old id: new id} that follows windows across browser restarts, and the
+    tab record updated with both. The CALLER commits `rec`
+    (save_chrome_tabs) once it has applied the binding, so a pass that fails
+    halfway is simply repeated.
+
+    THE TAB RECORD IS WHAT BRIDGES MORE THAN ONE RESTART. Chrome keeps only
+    the previous session file or two, so a window whose id changed twice
+    before anything looked (two restarts in 90s, measured 2026-11-18), or
+    whose old file Chrome had already deleted, could not be followed, and
+    the fallback that filled the gap was a guess by size that once handed a
+    window a stranger's slot and pin (2026-11-19). Every pass records every
+    window's tabs, so an id that has died is still known by its last tabs.
+
+    ONE GENERATION AT A TIME, oldest first: the record's dead ids, then each
+    older session file, then the current one. Collapsing them into one
+    "previous" set would put A and B (one window, two restarts) side by side
+    against C, and the rule's uniqueness would rightly refuse both. Each step
+    binds a generation to the next and the chains are followed to the
+    current ids, so A and B both land on C.
+
+    AN OLD ID WITH A KNOWN SUCCESSOR IS NOT A CANDIDATE AGAIN: it is marked
+    `bound` and reached through its link instead. The answer is therefore the
+    same on every pass (idempotent), which the re-key log and the stores
+    need, since they apply it and dedupe.
+
+    PRUNED AT KNOWLEDGE_TTL: an id unseen that long names a window no store
+    can still hold a slot for."""
+    now = time.time() if now is None else now
+    _tabs = chrome_window_tabs if tabs is None else tabs
+    gens = _chrome_generations(
+        session_history() if hist is None else hist, _tabs)
+    rec = load_chrome_tabs() if rec is None else rec
+    rec = {k: dict(v) for k, v in rec.items()}
+    cur, steps = {}, []
+    for prof, files in gens.items():
+        infile = {w for g in files for w in g}
+        oldest = {int(k): (float(v.get("seen") or 0),
+                           frozenset(v.get("tabs") or ()))
+                  for k, v in rec.items()
+                  if k.isdigit() and v.get("profile") in (None, prof)
+                  and int(k) not in infile}
+        chain = ([oldest] if oldest else []) + files
+        for g0, g1 in zip(chain, chain[1:]):
+            # A BOUND ID IS LEFT OUT of every generation, the record's
+            # included: it is reached through its link, and offered again
+            # it would tie with its own successor.
+            prev = {w: u for w, (_t, u) in g0.items()
+                    if w not in g1 and not (rec.get(str(w)) or {})
+                    .get("bound")}
+            nxt = {w: u for w, (_t, u) in g1.items()}
+            if prev and nxt:
+                steps.extend(chrome_bind_windows(nxt, prev).items())
+        cur.update({w: u for w, (_t, u) in files[-1].items()})
+        for g in files:
+            for w, (t, urls) in g.items():
+                e = rec.setdefault(str(w), {})
+                if t >= float(e.get("seen") or 0):
+                    e.update(tabs=sorted(urls), seen=t, profile=prof)
+    for o, n in steps:
+        rec.setdefault(str(o), {"tabs": [], "seen": now})["bound"] = str(n)
+    links = [(int(k), int(v["bound"])) for k, v in rec.items()
+             if k.isdigit() and str(v.get("bound") or "").isdigit()]
+    binding = _chain_to(links, set(cur))
+    floor = now - KNOWLEDGE_TTL
+    rec = {k: v for k, v in rec.items()
+           if float(v.get("seen") or 0) >= floor}
+    return cur, binding, rec
+
+
+def chrome_session_binding():
+    """{old id: new id} for every window of a previous browser run that binds
+    to one of this run's, whether or not any store holds it: the re-key log
+    needs the whole binding, since a snapshot may hold a window the live
+    store has since forgotten. Commits nothing."""
+    return chrome_restart_binding()[1]
+
+
+def rekey_chrome(kb, binding=None, cur=None):
+    """Move the store's chrome slots onto the CURRENT session's window ids,
+    and return how many moved. `binding` and `cur` are
+    chrome_restart_binding's, computed here when not given.
+
+    CHROME DOES NOT KEEP A WINDOW'S SessionID ACROSS A RESTART (a fresh block
+    each time, measured on the clean-exit and the crash path), so after a
+    restart every `chrome:win:<id>` in the store is a dead key until it is
+    bound by its tabs (chrome_bind_windows).
+
+    CONSERVATIVE BY CONSTRUCTION, because this rewrites the store: only
+    slots the current session does NOT know are candidates, a current window
+    that already has a slot is left alone, and nothing binds unless the tab
+    sets agree. Not binding is the safe outcome."""
+    if binding is None or cur is None:
+        cur, binding, _rec = chrome_restart_binding()
+    if not cur or not binding:
         return 0
     # A LIST PER OLD ID, not one key, and through `slot_base`: several entries
     # can share one identity now (see next_slot_key). Keyed on the id alone, a
     # family collapsed to whichever member was seen last and the rest stayed
-    # under the dead id, which is an entry nothing can match. `is_chrome_slot`
-    # refuses an indexed key outright, so the old scan SKIPPED the siblings
-    # rather than choking on them: measured 1 of 3, no raise. LATENT, since a
-    # SessionID is per window and so a chrome family cannot arise today, but
-    # the shape is wrong and the failure is silent.
+    # under the dead id, which is an entry nothing can match.
     stale = {}
     for k in kb:
         key = slot_base(k).split("\x00", 1)[-1]
@@ -4701,28 +4701,11 @@ def rekey_chrome(kb):
             stale.setdefault(int(key.rsplit(":", 1)[1]), []).append(k)
     if not stale:
         return 0
-    bound = chrome_bind_windows(
-        cur, {w: u for w, u in prev.items() if w in stale})
-    return _rekey_chrome_apply(kb, stale, bound)
-
-
-def chrome_session_binding():
-    """{old id: new id} for EVERY window of the previous browser run that
-    binds to one of this run's, whether or not any store holds it. The
-    re-key log needs the whole binding, since a snapshot may hold a window
-    the live store has since forgotten; `rekey_chrome` binds only what is
-    stale in the store it is given, so the two are separate questions."""
-    hist = session_history()
-    cur, prev = {}, {}
-    for files in hist.values():
-        cur.update(chrome_window_tabs(files[0]))
-        for f in files[1:]:
-            for w, urls in chrome_window_tabs(f).items():
-                prev.setdefault(w, urls)
-    if not cur or not prev:
-        return {}
-    return chrome_bind_windows(
-        cur, {w: u for w, u in prev.items() if w not in cur})
+    # THE WHOLE BINDING WAS DECIDED OVER EVERY KNOWN WINDOW, and only then
+    # narrowed to what this store holds: deciding over the stored ones alone
+    # would hide a tie with a window the store happens not to have.
+    return _rekey_chrome_apply(
+        kb, stale, {o: n for o, n in binding.items() if o in stale})
 
 
 def _rekey_chrome_apply(kb, stale, bound):
@@ -7203,7 +7186,7 @@ def source_views(rows, pids=None, uid=None):
             continue
         # THE IDENTIFIER STANDS IN FOR THE VIEW ID, which this account does
         # not have: it is unique per window for this session, so chrome's
-        # per-view cache and elimination can key on it (source_window_lines).
+        # per-view cache can key on it (source_window_lines).
         yield tlid, {"app-id": r.get("app_id") or "",
                      "title": r.get("title") or "",
                      "pid": pid, "id": tlid}
@@ -7246,22 +7229,14 @@ def source_window_lines(rows, pids=None, resolve=None, uid=None,
     res = _single_id if resolve is None else resolve
     out = []
     views = list(source_views(rows, pids, uid))
-    # ELIMINATION, as the daemon does for the owner's own windows: when this
-    # account's Chrome has exactly one window the titles cannot join and
-    # exactly one recorded id left, the pairing is forced. Every view here is
-    # this account's own, so the pool is right by construction.
+    # A CHROME WINDOW IS NAMED BY ITS SIZE OR NOT AT ALL (see
+    # chrome.window_slot): no title join and no elimination, both retired.
     if resolve is None:
         # SIZES FIRST, relayed by the owner (this side's protocol has no
         # geometry): see chrome.claim_by_size.
         try:
             claim_by_size([(tl, (sizes or {})[tl]) for tl, v in views
                            if is_chrome(v["app-id"]) and tl in (sizes or {})])
-        except Exception:                                  # noqa: BLE001
-            pass
-        try:
-            claim_by_elimination(
-                [(tl, v["title"]) for tl, v in views
-                 if is_chrome(v["app-id"])])
         except Exception:                                  # noqa: BLE001
             pass
     for tlid, v in views:
@@ -7319,48 +7294,40 @@ def source_roster_rows(rows, pids=None, resolve=None, cmd_of=None,
     return out
 
 
-def source_rekey_lines(hist=None, tabs=None, bind=None):
-    """`rekey <old> <new>` for THIS account's own browser restart.
+def source_rekey_lines(hist=None, tabs=None, rec=None, save=None):
+    """`rekey <old> <new>` for THIS account's own browser restarts.
 
     A SessionID is per browser RUN, so every per-window key the owner stored
     for this account before a restart names a dead id. The owner cannot do
-    the join that fixes that: it needs this account's two session files, and
-    they are in a home it may not read. So the account does it, with exactly
-    the machinery `rekey_chrome` uses on the owner's own store, and reports
-    the binding as a pair of opaque ids.
+    the join that fixes that: it needs this account's session files and its
+    tab record, and they are in a home it may not read. So the account does
+    it, with exactly the machinery the owner uses on its own store
+    (chrome_restart_binding), and reports the binding as opaque ids.
 
     THE PAIRS ARE REPORTED UNFILTERED, because only the owner knows which of
     its stored keys are stale. Reporting more than it needs costs a line;
     guessing on this side would need the owner's store.
 
-    NOTHING BINDS UNLESS THE TAB SETS AGREE, which is `chrome_bind_windows`'s
-    own more-than-half rule, and not binding is the safe outcome: the slot
-    stays where it is and ages out on the TTL.
+    NOTHING BINDS UNLESS THE TABS AGREE (chrome_bind_windows), and not
+    binding is the safe outcome: the slot stays where it is and ages out.
+
+    THE RECORD IS COMMITTED AFTER THE LINES ARE BUILT, the owner's own
+    order: a pass that fails before it reports is simply repeated, with the
+    record as it was.
     """
-    _hist = session_history if hist is None else hist
-    _tabs = chrome_window_tabs if tabs is None else tabs
-    _bind = chrome_bind_windows if bind is None else bind
-    cur, prev = {}, {}
-    for files in (_hist() or {}).values():
-        if not files:
-            continue
-        cur.update(_tabs(files[0]))
-        for f in files[1:]:
-            for w, urls in _tabs(f).items():
-                prev.setdefault(w, urls)     # the newest previous file wins
-    # NO EMPTY-SIDE GUARD HERE, deliberately: `chrome_bind_windows` already
-    # answers {} when either side is empty (measured), so one would be dead
-    # code, which a planted regression removing it demonstrated by changing
-    # nothing. `rekey_chrome` keeps its own because there the early return
-    # also skips building a dict over the whole store.
+    _cur, bound, _rec = chrome_restart_binding(hist=None if hist is None
+                                               else hist(),
+                                               tabs=tabs, rec=rec)
     # DIGESTS ON BOTH SIDES, because these rewrite store KEYS and the keys
     # are digests now. The pair is still exactly as opaque as it was: a
     # SessionID disclosed nothing either, but hashing it keeps ONE shape
     # crossing the boundary rather than two, so the owner's validator carries
     # no per-app knowledge at all.
-    return [f"{SOURCE_REKEY_WORD} {identity_digest(chrome_slot(old))} "
-            f"{identity_digest(chrome_slot(new))}"
-            for old, new in sorted(_bind(cur, prev).items())]
+    lines = [f"{SOURCE_REKEY_WORD} {identity_digest(chrome_slot(old))} "
+             f"{identity_digest(chrome_slot(new))}"
+             for old, new in sorted(bound.items())]
+    (save_chrome_tabs if save is None else save)(_rec)
+    return lines
 
 
 def parse_source_rekey(text):
@@ -9714,8 +9681,14 @@ def _unlayout_split(unlayout, recorded=None):
 
     NO EVIDENCE COLLAPSES NOTHING. An empty `recorded` means no session file
     was parsed, not that every slot is dead, and reading it the other way
-    would hide exactly the slots a browser about to start is going to claim."""
-    recorded = recorded_window_ids() if recorded is None else recorded
+    would hide exactly the slots a browser about to start is going to claim.
+
+    AND THE TAB RECORD COUNTS AS A FILE: an id it still holds is one
+    chrome_restart_binding can bind after the session file naming it is
+    gone, so it is reachable too."""
+    if recorded is None:
+        recorded = recorded_window_ids() | {
+            int(k) for k in load_chrome_tabs() if k.isdigit()}
     if not recorded:
         return list(unlayout), []
     listed, gone = [], []

@@ -2,9 +2,9 @@
 
 The DOMAIN KNOWLEDGE, kept apart from the engine that consumes it: how an SNSS
 session file is framed, which file belongs to which profile, how a live window
-title joins to a session window, and which of the fifty-odd chrome processes is
-the browser. A LEAF: it imports nothing from the rest of the package, so the
-engine can import it at module level with no cycle.
+is named by the size Chrome records for it, and which of the fifty-odd chrome
+processes is the browser. A LEAF: it imports nothing from the rest of the
+package, so the engine can import it at module level with no cycle.
 
 The adapter that makes any of this reachable is ChromePlugin, which stays in
 the engine beside the mux and kitty plugins: a plugin is the engine's view of
@@ -19,20 +19,21 @@ matched, so Chrome was never restored; keying on the active-tab URL matched, and
 then dragged a window to another desktop whenever an old page was revisited, and
 left 1053 store entries describing six windows. The handle that works is the
 SessionID Chrome itself gives the window. We read the session file (read-only;
-no --remote-debugging-port, no new attack surface), join a live window to its
-session window by the momentary page title (wayland and SNSS reflect the same
-Chrome state at any instant), and key on the window id.
+no --remote-debugging-port, no new attack surface), name a live window by the
+one recorded window its size matches exactly (claim_by_size), and key on the
+window id. The title was that join for years and is retired: it is a page's,
+not a window's.
 
 IT DOES NOT SURVIVE A RESTART, which an earlier version of this comment claimed
 on the strength of one observation. It is a monotonic per-session counter:
 every restore mints a fresh block, measured twice on both the clean-exit and
-the crash path. chrome_bind_windows is what carries a window across that
-boundary, and the id is durable for exactly as long as the browser runs, which
-is all identity needs it to be.
+the crash path. chrome_bind_windows, over every window's TABS, is what
+carries a window across that boundary, and the id is durable for exactly as
+long as the browser runs, which is all identity needs it to be.
 
-A window not yet in the session file has NO identity here: chrome_window_for
-returns None and usher declines to remember it at all, rather than falling back
-to the raw title it happens to be wearing. That fallback was 86% of a real
+A window nothing names exactly has NO identity here: window_slot returns
+None and usher declines to remember it at all, rather than falling back to the
+raw title it happens to be wearing. That fallback was 86% of a real
 store, none of it matchable.
 """
 import glob
@@ -160,10 +161,6 @@ def after_browser(launched_at, pids, sleep, now, stagger=None):
     if left > 0:
         sleep(left)
     return now() - t0
-# Wayland titles Chrome sets are "<page title> - Google Chrome"; strip that
-# browser suffix to recover the page title the session file stores.
-CHROME_SUFFIXES = (" - Google Chrome", " - Chromium")
-
 # SNSS command ids (Chromium components/sessions/core/session_service_commands
 # .cc). Framing is fixed: int16 size, then a 1-byte id + payload of size-1; we
 # always advance by size, so a payload we cannot decode never desyncs the
@@ -217,9 +214,9 @@ def _snss_records(d):
 
 def _snss_scan(path):
     """Walk one session file's records into raw tables, or None if it is not a
-    session file. Split from parse_snss because the two halves fail differently:
-    this one must survive a malformed record mid-stream, while resolving the
-    tables afterwards is pure dict work that cannot."""
+    session file. Split from its readers because the two halves fail
+    differently: this one must survive a malformed record mid-stream, while
+    resolving the tables afterwards is pure dict work that cannot."""
     d = open(path, "rb").read()
     if d[:4] != b"SNSS":
         return None
@@ -259,56 +256,6 @@ def _snss_scan(path):
         except Exception:
             pass
     return tab_win, tab_idx, win_sel, tab_nav, nav, closed_tabs, closed_wins
-
-
-def parse_snss(path):
-    """Parse one SNSS session file into {active_page_title: (window_id, url)}
-    for its open windows: each window's selected tab, at that tab's current
-    navigation. Never raises: a malformed record is skipped, a bad file
-    yields {}.
-
-    THE WINDOW ID IS THE POINT, and it was parsed and discarded here for a
-    long time. Chrome's SessionID for a window is STABLE ACROSS A RESTART:
-    measured on manifestor, all six windows kept their ids through a
-    --restore-last-session cycle. So it is a durable per-window handle, which
-    the active-tab URL is not: a URL changes every time you switch tab, which
-    is how one browser accumulated 1053 store entries describing 73 places."""
-    tabs = _snss_scan(path)
-    if tabs is None:
-        return {}
-    tab_win, tab_idx, win_sel, tab_nav, nav, closed_tabs, closed_wins = tabs
-    wins = {}
-    for t, w in tab_win.items():
-        if t in closed_tabs or w in closed_wins:
-            continue
-        wins.setdefault(w, []).append(t)
-    out, ambiguous = {}, set()
-    for w, tabs_in_win in wins.items():
-        sel = win_sel.get(w)
-        active = next((t for t in tabs_in_win if tab_idx.get(t) == sel), None)
-        if active is None:
-            continue
-        entry = nav.get((active, tab_nav.get(active)))
-        if not entry:
-            continue
-        url, title = entry
-        if not (title and url):
-            continue
-        # A TITLE TWO WINDOWS SHARE IS NOT A DISCRIMINATOR, and silently
-        # letting the last one win would hand both live windows the same slot.
-        # Two "New Tab" windows is all it takes. The same rule learn() applies
-        # to its title groups, for the same reason; refusing to answer is the
-        # only safe answer, and it matters more now that window_slot REMEMBERS
-        # what it resolved.
-        if title in out and out[title][0] != w:
-            ambiguous.add(title)
-        out[title] = (w, url)
-    for title in ambiguous:
-        del out[title]
-    return out
-
-
-_snss_cache = {"sig": None, "map": {}}
 
 
 def session_history():
@@ -401,9 +348,10 @@ def session_files():
     WHY IT MATTERS: a profile Chrome has not opened this run still has a
     newest session file, so it contributed phantom windows to the live id set.
     Measured on manifestor 2026-10-09, where Profile 4's month-old file put a
-    dead Gmail window in the set, which left claim_by_elimination with two
-    free ids for one unresolved view and made it (correctly) refuse. One real
-    window went unplaceable for want of excluding a window that did not exist.
+    dead window in the set, which left the (since retired) elimination with
+    two free ids for one unresolved view and made it (correctly) refuse. One
+    real window went unplaceable for want of excluding a window that did not
+    exist.
 
     UNFILTERED WHEN NO BROWSER IS RUNNING, which is not a special case so much
     as the same rule with nothing to compare against: every file is then the
@@ -434,73 +382,15 @@ def session_sig():
         return None
 
 
-def chrome_session_titles():
-    """Merged {page_title: (window_id, raw_url)} across profiles' current
-    sessions, cached and re-read only when a session file's mtime changes."""
-    files = session_files()
-    sig = session_sig()
-    if sig != _snss_cache["sig"]:
-        merged, clash = {}, set()
-        for f in files:
-            try:
-                got = parse_snss(f)
-            except Exception:
-                continue
-            for raw, hit in got.items():
-                # NORMALISED HERE AS WELL AS ON THE LIVE SIDE, so the two
-                # are the same key; two windows that differ only by an
-                # unread count collide and are dropped as ambiguous.
-                k = _chrome_page_title(raw)
-                if k in merged and str(merged[k][0]) != str(hit[0]):
-                    clash.add(k)
-                merged[k] = hit
-        for k in clash:
-            merged.pop(k, None)
-        _snss_cache["sig"] = sig
-        _snss_cache["map"] = merged
-    return _snss_cache["map"]
-
-
 _COUNT_RE = re.compile(r"\(\d+\+?\)")
 
 
 def strip_counts(title):
     """`title` with every parenthesised NUMBER removed and the spacing
     closed up: "(2) Team Notes" and "Signal (1)" are a page and an app
-    with an UNREAD COUNT, which changes without the window changing. The
-    one definition, used by the Chrome title join and by verify's label
-    fallback."""
+    with an UNREAD COUNT, which changes without the window changing. Used
+    by verify's label fallback."""
     return " ".join(_COUNT_RE.sub("", title or "").split())
-
-
-def _chrome_page_title(title):
-    """The page title as a JOIN KEY: the browser-name suffix stripped, and
-    every parenthesised NUMBER removed.
-
-    THE NUMBERS ARE UNREAD COUNTS, which a web app rewrites without
-    navigating, while Chrome records a title only AT navigation: so the
-    session file says "Team Notes | Notion" and the screen says "(2) Team
-    Notes | Notion", and the join misses. Measured on dragonfly 2026-11-12:
-    five of an account's ten windows unidentified 43s after a login, the
-    Team Notes window among them. Applied to BOTH sides, so two windows
-    whose titles differ ONLY by such a number collide and are dropped as
-    ambiguous (chrome_session_titles) rather than paired wrongly."""
-    for suf in CHROME_SUFFIXES:
-        if title.endswith(suf):
-            title = title[:-len(suf)]
-            break
-    return strip_counts(title)
-
-
-def chrome_window_for(title):
-    """The SLOT of a live Chrome window titled `title`: `chrome:win:<id>`,
-    joined through the session file on the ACTIVE TAB's page title.
-
-    Keyed by the WINDOW, not by what it is displaying. Switching tab no longer
-    makes a window a stranger, and revisiting a page seen weeks ago on another
-    desktop no longer drags the window there, which the URL key did."""
-    hit = chrome_session_titles().get(_chrome_page_title(title))
-    return chrome_slot(hit[0]) if hit else None
 
 
 # wayfire view id -> the slot we resolved for it, for the LIFE of that view.
@@ -533,113 +423,33 @@ def seed_slots(pairs):
             continue
         if vid not in _slot_cache:
             # THE SLOT VERBATIM. This cache holds the whole `chrome:win:<id>`
-            # string, which `window_slot` returns and `claim_by_elimination`
-            # reads back with `held[len(_CHROME_SLOT):]`: storing the bare id
-            # here would hand every caller a key the matcher never looks up.
+            # string, which `window_slot` returns and `claim_by_size` reads
+            # back with `[len(_CHROME_SLOT):]`: storing the bare id here would
+            # hand every caller a key the matcher never looks up.
             _slot_cache[vid] = slot
             n += 1
     return n
 
 
-def window_slot(vid, title):
-    """The slot for a LIVE window: resolved ONCE from the title, then
-    remembered for as long as the window exists.
+def window_slot(vid):
+    """The slot a LIVE window has been NAMED, or None. A name comes only from
+    an exact match against Chrome's own record of that window (claim_by_size)
+    or from the daemon's published snapshot (seed_slots), and lasts the
+    view's life.
 
-    THE TITLE IS A BOOTSTRAP, NOT AN IDENTITY. Of everything wayfire reports
-    about a view, the only field that distinguishes two Chrome windows AND
-    that Chrome also knows about is the title (app-id and pid are shared,
-    geometry is ours to change), so the first join has to go through it.
-    RESOLVING ON EVERY LOOKUP WOULD MAKE IDENTITY AS VOLATILE AS THE STRING: a
-    Gmail window is `Inbox (1)` in the session file and `Inbox (2)` on screen
-    the moment mail arrives, which makes it flicker between known and stranger
-    for its whole life.
+    THE TITLE IS NOT ASKED, AT ALL. It was a bootstrap join for years, and it
+    is a page's, not a window's: two windows showing one page share it, a web
+    app rewrites it without navigating, and Chrome records it only at
+    navigation, so the join named the wrong window or none often enough to
+    cost placements at every login. Elimination (the one unnamed window must
+    be the one free id) was retired with it: it misbound whenever a window
+    Chrome never records was in the pool. A window nothing names is PENDING
+    and waits; a wait costs a placement, a guess moves someone else's window.
 
-    A Chrome window's SessionID is fixed for as long as the browser runs, and
-    a wayfire view is one Chrome window for its whole life, so the answer
-    cannot go stale while the view exists. Cached only on SUCCESS, so a window
-    Chrome has not recorded yet is retried until it is.
-
-    Pass vid=None (a stored entry, which has no live view) to get the plain
-    lookup with no caching."""
+    vid=None (a stored entry, which has no live view) answers None."""
     if vid is None:
-        return chrome_window_for(title)
-    hit = _slot_cache.get(vid)
-    if hit:
-        return hit
-    hit = chrome_window_for(title)
-    # A TITLE JOIN THE SIZE CONTRADICTS IS REFUSED. The title is the last
-    # resort (see claim_by_size), and a stale or shared title can name the
-    # wrong window outright; Chrome's record of that window's size is the
-    # cheap witness against it.
-    if hit and size_disagrees(vid, hit[len(_CHROME_SLOT):]):
         return None
-    if hit:
-        _slot_cache[vid] = hit
-    return hit
-
-
-def claim_by_elimination(views):
-    """Resolve the ONE view an exact title match cannot, when the id SET
-    forces the answer. `views` is [(vid, raw_title)] for every live Chrome
-    view. Returns the vid it claimed, or None.
-
-    THE TITLE'S CONTENT IS NOT RELIABLE, which is why this exists. Chrome
-    records a tab's title at NAVIGATION time, so a web app that rewrites
-    document.title without navigating leaves the session file holding the old
-    one indefinitely: measured on manifold, a window read "Google Messages for
-    web: Conversations" on screen and "Google Messages for web" in a session
-    file rewritten SECONDS earlier, and the two disagreed for two and a half
-    hours across many rewrites. Reading the file more often cannot fix that,
-    because it is stale by design rather than by lag.
-
-    SO DECIDE BY THE ID SET. Every window Chrome recorded has an id and every
-    live view is one of them, so match what the titles DO resolve and look at
-    what is left: if exactly one view and exactly one id remain, the pairing
-    is FORCED. There is nothing else either could be, which makes this exact
-    rather than a guess, and it never compares title content.
-
-    IT REFUSES ON ANY OTHER COUNT, and that is the whole safety argument. Two
-    unmatched views against two free ids could pair either way. An INCOGNITO
-    window is a live view Chrome never records at all, so it leaves one more
-    view than id and this declines, which is the same answer usher gives
-    today. Declining costs a placement; pairing wrongly moves someone else's
-    window.
-
-    AN ID A LIVE VIEW ALREADY HOLDS IS NOT FREE, and the cache is the only
-    honest record of that. A view resolved earlier keeps its slot for life
-    while its TITLE goes on changing, so asking the titles alone which ids are
-    taken misses exactly the windows this function exists to work around.
-    Measured on manifold 2026-10-13: a cached window whose title had gone
-    stale was neither matched nor unmatched, its own id read as free, and the
-    one genuinely unrecorded window was handed it. Both sides then cached, so
-    one slot described two windows until a browser restart carried the wrong
-    geometry onto the real one.
-
-    Writes the SAME cache window_slot reads, so the claim is remembered for
-    the view's life and dropped by forget_window on unmap."""
-    t = chrome_session_titles()
-    claimed, unmatched = set(), []
-    for vid, raw in views:
-        held = _slot_cache.get(vid)
-        if held:
-            claimed.add(held[len(_CHROME_SLOT):])
-            continue
-        hit = t.get(_chrome_page_title(raw))
-        if hit:
-            claimed.add(str(hit[0]))
-        elif vid is not None:
-            unmatched.append(vid)
-    # THE ID SET IS EVERY RECORDED WINDOW, not only those with a usable
-    # title: a window whose title it shares with another is dropped from
-    # the title map, and was therefore invisible here too, so two windows
-    # sharing a title could never be settled even when one was forced.
-    ids = {str(w) for _ti, (w, _u) in t.items()}
-    ids |= set(chrome_session_sizes())
-    free = sorted(i for i in ids if i not in claimed)
-    if len(unmatched) == 1 and len(free) == 1:
-        _slot_cache[unmatched[0]] = chrome_slot(free[0])
-        return unmatched[0]
-    return None
+    return _slot_cache.get(vid)
 
 
 def resolved(vid):
@@ -659,11 +469,11 @@ def chrome_window_tabs(path):
     """{window id: frozenset of the URL each of its open tabs is showing}, for
     one session file. Never raises; a bad file yields {}.
 
-    parse_snss keeps only the ACTIVE tab, which is all an identity needs. This
-    keeps the WHOLE SET, because it answers a different question: which window
-    in the new session is the one that used to be that window in the old? One
-    URL per side is far too thin to decide that; the full tab set is a
-    fingerprint.
+    The WHOLE SET, because it answers the question a restart asks: which
+    window in the new session is the one that used to be that window in the
+    old? One URL per side is far too thin to decide that; the full tab set is
+    a fingerprint (chrome_bind_windows, and the tab record that bridges more
+    than one restart).
 
     A tab's URL is the navigation it has SELECTED. If that record is missing
     (a half-written file, a tab mid-navigation) fall back to its highest
@@ -719,7 +529,7 @@ _size_cache = {"sig": None, "map": {}}
 
 def chrome_session_sizes():
     """{window id (str): (width, height)} across profiles' current sessions,
-    cached like chrome_session_titles."""
+    cached on the session signature."""
     sig = session_sig()
     if sig != _size_cache["sig"]:
         merged = {}
@@ -757,9 +567,8 @@ def chrome_frame(live, recorded):
     return ranked[0][0]
 
 
-# The frame last derived, for verifying a title join when this pass could
-# not derive one (one window, say), and our live chrome views' sizes, by
-# view id, as last listed.
+# The frame last derived, for a pass that cannot derive one (one window,
+# say), and our live chrome views' sizes, by view id, as last listed.
 _frame = [None]
 _live_sizes = {}
 SIZE_TOL = 1    # px: Chrome restores and records a window's size exactly
@@ -774,10 +583,11 @@ def claim_by_size(views):
     [(view id, (width, height))] for EVERY one of our live Chrome views.
     Returns the view ids it claimed.
 
-    THE SIZE BEFORE THE TITLE. The title is a page's, not a window's: two
+    THE SIZE, AND NOT THE TITLE. The title is a page's, not a window's: two
     windows showing one page share it, a web app rewrites it without
-    navigating, and Chrome records it only at navigation, so the join was
-    wrong or refused often enough to cost placements at every login.
+    navigating, and Chrome records it only at navigation, so the title join
+    (retired) was wrong or refused often enough to cost placements at every
+    login.
     Measured on dragonfly 2026-11-12: two work windows wore one title and
     neither could be named, while their sizes (2527 and 2498
     wide) told them apart outright. The session file records every window's
@@ -785,10 +595,10 @@ def claim_by_size(views):
     recorded window, and which no other unnamed live window shares, IS that
     window.
 
-    IT REFUSES ON ANY TIE, which is the safety argument, as for
-    elimination: two windows of one size are told apart by the title or by
-    nothing. Writes the cache `window_slot` reads, so a claim lasts the
-    view's life."""
+    IT REFUSES ON ANY TIE, which is the safety argument: two windows of one
+    size are not told apart here at all, and stay PENDING. The size
+    uniqueness nudge is what keeps that rare. Writes the cache
+    `window_slot` reads, so a claim lasts the view's life."""
     rec = chrome_session_sizes()
     sizes = {vid: (round(s[0]), round(s[1])) for vid, s in views
              if vid is not None and s and s[0] and s[1]}
@@ -817,51 +627,69 @@ def claim_by_size(views):
     return out
 
 
-def size_disagrees(vid, wid):
-    """Does view `vid`'s live size contradict Chrome's record of window
-    `wid`? False when either is unknown: a check with no evidence passes."""
-    f, sz = _frame[0], _live_sizes.get(vid)
-    rec = chrome_session_sizes().get(str(wid))
-    if not (f and sz and rec):
-        return False
-    return not _fits(rec, (sz[0] - f[0], sz[1] - f[1]), tol=2)
+BIND_MIN_SHARED = 3   # tabs a PARTIAL match must have in common
 
 
 def chrome_bind_windows(cur, prev):
-    """Bind PREVIOUS window ids to the CURRENT ones that restored them, by the
-    tabs they have in common: {old id: new id}. Both arguments are
-    chrome_window_tabs output.
+    """Bind PREVIOUS window ids to the CURRENT ones that restored them, by
+    their tabs: {old id: new id}. Both arguments are {id: frozenset of the
+    URL each open tab shows}. PURE.
 
     WHY THIS HAS TO EXIST. Chrome mints FRESH SessionIDs for every restored
-    window: measured twice on 2026-09-29, on the clean-exit and the crash
-    path, six windows each time, zero overlap either way, so a slot
-    remembered against the old id matches nothing after a restart, and every
-    Chrome window comes back a stranger. What survives a restore is the
-    CONTENT: the window comes back with its tabs. Chrome leaves the previous
-    session file on disk next to the new one, so both sides are readable and
-    the join needs no new stored state.
+    window (measured twice on 2026-09-29, clean exit and crash, zero overlap),
+    so a slot remembered against the old id matches nothing after a restart.
+    What survives a restore is the CONTENT: the window comes back with its
+    tabs, and a window's tab set is its fingerprint.
 
-    Greedy by overlap, largest first, each id used once, ties broken by id so
-    the answer is deterministic. A pair must ALSO carry MOST OF THE OLD
-    window's tabs (more than half) because that is the actual question: is
-    most of what that window was showing here again? Measuring the smaller of
-    the two instead lets a ten-tab window claim a two-tab one on a single
-    shared page, which two unrelated windows can easily have. Unmatched is the
-    safe outcome: the slot stays where it was and ages out on the TTL."""
-    pairs = []
-    for old, ourls in prev.items():
-        for new, nurls in cur.items():
-            n = len(ourls & nurls)
-            if n * 2 > len(ourls):
-                pairs.append((n, old, new))
-    pairs.sort(key=lambda p: (-p[0], p[1], p[2]))
-    used_old, used_new, out = set(), set(), {}
-    for _n, old, new in pairs:
-        if old in used_old or new in used_new:
+    TWO TIERS, AND NEITHER GUESSES:
+
+    EXACT first: the same set of URLs, and no other window on EITHER side
+    with that set. A restore brings a window back with exactly its tabs, so
+    this is the ordinary case.
+
+    PARTIAL only for what is left, because tabs come and go between the last
+    record and the restore: at least BIND_MIN_SHARED tabs in common, MORE
+    THAN HALF of the old window's tabs, and each the OTHER'S UNIQUE best. A
+    tie on either side binds nothing (it used to be broken by id order, which
+    is a guess wearing a sort key). Measuring the old window rather than the
+    smaller set is deliberate: a ten-tab window must not claim a two-tab one
+    on one shared page.
+
+    Unbound is the safe outcome: the window is placed by its surface and its
+    old slot ages out."""
+    out, used_new = {}, set()
+    sets_new, sets_old = {}, {}
+    for w, u in cur.items():
+        if u:
+            sets_new.setdefault(u, []).append(w)
+    for w, u in prev.items():
+        if u:
+            sets_old.setdefault(u, []).append(w)
+    for u, olds in sets_old.items():
+        news = sets_new.get(u, [])
+        if len(olds) == 1 and len(news) == 1:
+            out[olds[0]] = news[0]
+            used_new.add(news[0])
+
+    def best(scores):
+        top = max(scores.values(), default=0)
+        hits = [k for k, n in scores.items() if n == top]
+        return hits[0] if top and len(hits) == 1 else None
+
+    ok_old = {o: u for o, u in prev.items() if u and o not in out}
+    ok_new = {n: u for n, u in cur.items() if u and n not in used_new}
+    score = {}
+    for o, ou in ok_old.items():
+        for n, nu in ok_new.items():
+            k = len(ou & nu)
+            if k >= BIND_MIN_SHARED and k * 2 > len(ou):
+                score[(o, n)] = k
+    for o in ok_old:
+        n = best({nn: k for (oo, nn), k in score.items() if oo == o})
+        if n is None:
             continue
-        used_old.add(old)
-        used_new.add(new)
-        out[old] = new
+        if best({oo: k for (oo, nn), k in score.items() if nn == n}) == o:
+            out[o] = n
     return out
 
 
@@ -956,10 +784,9 @@ def chrome_profile_map():
     how Chrome restores itself, so this is answerable at login before Chrome
     has started.
 
-    Reads the WINDOW table directly rather than going through parse_snss, which
-    answers a different question and drops a window whose active-tab title is
-    ambiguous or missing. Losing a window here would lose the PROFILE it names,
-    and usher would then not start that profile at all."""
+    Reads every window of the newest file, whatever its titles: losing a
+    window here would lose the PROFILE it names, and usher would then not
+    start that profile at all."""
     out = {}
     for prof, files in session_history().items():
         name = os.path.basename(prof)
@@ -973,7 +800,7 @@ def snss_build(tabs, ver=3, bounds=None):
     selftest: the inverse of the parser, Pickle 4-byte alignment and all.
 
     Tabs are indexed within their window in the order given, and each window's
-    FIRST tab is the selected one, which is the tab parse_snss reads. Takes a
+    FIRST tab is the selected one. Takes a
     LIST because the interesting cases are plural: several windows, several
     tabs each, which is what chrome_bind_windows has to tell apart."""
     def wi(x):
