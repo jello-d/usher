@@ -1059,13 +1059,59 @@ class Watcher:
 
     def _place_view(self, v):
         """Decide whether this view may be placed right now, and where. Returns
-        True only if it was actually moved."""
+        True only if it was actually moved.
+
+        IN PHASES, each its own method, in the order the decision is made:
+        may this view be considered at all (_place_gate), which slot is its
+        (_pick_slot), may it be placed NOW (_place_allowed), which entry it
+        goes to (_choose_entry), is that slot free (_claim_slot), and the
+        placement itself (_seat_and_record). A phase answering None stops."""
+        g = self._place_gate(v)
+        if g is None:
+            return None
+        vid, app, title, renamed = g
+        # THE SOURCE GATES WHICH KEYS THIS WINDOW MAY MATCH. Without it a
+        # window from another account would be offered `kkey(app, "")`, the
+        # app_id-only key, which is the OWNER's and matches every window of
+        # that app: a work Slack would be placed onto the owner's Slack slot
+        # and the owner's onto the work one. match_keys is the one definition.
+        _src = engine.window_origin(v.get("pid"))[0] or ""
+        skey, e, _views, _live = self._pick_slot(v, vid, app, _src)
+        # A STICKY WINDOW IS PLACED BY MONITOR AND POSITION, never onto a
+        # workspace (see engine.sticky_entry): the slot is marked sticky when
+        # the live window is, so the arithmetic and the read-back both skip
+        # the workspace and `place()` keeps it sticky.
+        # A PIN IS WHERE THE USER PUT IT and is placed exactly; anything
+        # else is only where the window was last seen, which the layout
+        # below may improve on (engine.placement_entry, pin_of).
+        pinned = engine.pin_of(e) is not None
+        if e is not None:
+            e = engine.placement_entry(e)
+        e = engine.sticky_entry(v, e)
+        dock_chance = self._place_allowed(vid, app, title, e, renamed)
+        if dock_chance is None:
+            return None
+        ch = self._choose_entry(v, vid, app, title, _src, e, skey, _views)
+        if ch is None:
+            return None
+        e, skey, seeded, _mine, _ident = ch
+        c = self._claim_slot(v, vid, app, title, _src, e, skey, seeded,
+                             _mine, _ident, _live)
+        if c is None:
+            return None
+        e, skey, seeded = c
+        return self._seat_and_record(v, vid, app, title, e, skey, seeded,
+                                     pinned, dock_chance, _ident)
+
+    def _place_gate(self, v):
+        """_place_view's first phase: may this view be considered at all?
+        (vid, app, title, renamed), or None."""
         vid = v.get("id")
         if vid is None:
-            return
+            return None
         renamed = vid in self.placed and self._renamed_from_seed(v)
         if vid in self.placed and not renamed:
-            return
+            return None
         if v.get("parent", -1) != -1:
             return   # a dialog / child view (a file picker, a "Save As" sheet):
             # it MUST stay on its parent's output. Issuing an output
@@ -1086,7 +1132,7 @@ class Watcher:
             with self.lock:
                 self.pending[vid] = {"v": v, "refetch": True,
                                      "due": time.time() + TITLE_QUIET}
-            return
+            return None
         app = app_of(v)
         # REDACTED FOR ANOTHER ACCOUNT. Every log line below renders
         # this value, and watch.log is the session user's readable
@@ -1118,13 +1164,12 @@ class Watcher:
                 with self.lock:
                     self.pending[vid] = {"v": v, "refetch": True,
                                          "due": time.time() + TITLE_QUIET}
-            return
-        # THE SOURCE GATES WHICH KEYS THIS WINDOW MAY MATCH. Without it a
-        # window from another account would be offered `kkey(app, "")`, the
-        # app_id-only key, which is the OWNER's and matches every window of
-        # that app: a work Slack would be placed onto the owner's Slack slot
-        # and the owner's onto the work one. match_keys is the one definition.
-        _src = engine.window_origin(v.get("pid"))[0]
+            return None
+        return vid, app, title, renamed
+
+    def _pick_slot(self, v, vid, app, _src):
+        """_place_view's slot pick: (slot key, entry, live views, live
+        ids)."""
         # ONE SLOT PER WINDOW, so this asks for a FREE one rather than for
         # the identity's only one. N windows sharing an identity now have N
         # entries (see next_slot_key), and `free_slot` is the one definition
@@ -1156,17 +1201,11 @@ class Watcher:
                     self.kb, _slot_peer(v, _src or ""),
                     [_slot_peer(w, engine.source_of(w) or "")
                      for w in _views if app_of(w) == app]))
-        # A STICKY WINDOW IS PLACED BY MONITOR AND POSITION, never onto a
-        # workspace (see engine.sticky_entry): the slot is marked sticky when
-        # the live window is, so the arithmetic and the read-back both skip
-        # the workspace and `place()` keeps it sticky.
-        # A PIN IS WHERE THE USER PUT IT and is placed exactly; anything
-        # else is only where the window was last seen, which the layout
-        # below may improve on (engine.placement_entry, pin_of).
-        pinned = engine.pin_of(e) is not None
-        if e is not None:
-            e = engine.placement_entry(e)
-        e = engine.sticky_entry(v, e)
+        return skey, e, _views, _live
+
+    def _place_allowed(self, vid, app, title, e, renamed):
+        """_place_view's timing gate: may this window be placed NOW? Its dock
+        entitlement (a bool) if so, else None."""
         # CAPTURED BEFORE _recognise, which is what records the identification:
         # read it afterwards and this is always False.
         first_look = e is not None and vid not in self.identified
@@ -1217,6 +1256,12 @@ class Watcher:
         if late_chance and not self._placing_now():
             logline(f"late chance (present at login, identifiable only now): "
                     f"{app[:18]} | {title[:30]}")
+        return dock_chance
+
+    def _choose_entry(self, v, vid, app, title, _src, e, skey, _views):
+        """_place_view's choice of entry: this desk's slot, the surface's
+        placement, or a seed. (entry, slot key, seeded, its entry on the desk
+        it came from, identity); the entry is None when there is nothing."""
         # A PER-WINDOW IDENTITY THIS DESK NEVER LEARNED is not the same as
         # "nothing learned": free_slot then answers the account's SHARED
         # source-alone fallback, which describes some other window of that
@@ -1285,6 +1330,12 @@ class Watcher:
                 e, skey, seeded = s, None, True
         if not e:
             return   # never seen this identity -> we don't know where it goes
+        return e, skey, seeded, _mine, _ident
+
+    def _claim_slot(self, v, vid, app, title, _src, e, skey, seeded, _mine,
+                    _ident, _live):
+        """_place_view's slot ledger: is the slot free for this window?
+        (entry, slot key, seeded), or None when another window holds it."""
         # ONE WINDOW PER SLOT. Whoever got here first owns it until it
         # unmaps; a second window with the same key is LEFT WHERE IT OPENED,
         # which is the same answer place-vs-settled already gives a window
@@ -1336,7 +1387,7 @@ class Watcher:
                     self.slot_said.add((vid, skey))
             if _first:
                 logline(f"slot taken, left in place: {app} | {title[:34]}")
-            return
+            return None
         if own == "stale":
             # The holder is GONE and its unmap never reached us. Drop it only
             # if it is still the holder we just read, so a concurrent seating
@@ -1346,10 +1397,16 @@ class Watcher:
                     del self.slot_held[skey]
             logline(f"slot holder {holder} is gone, releasing: {app} | "
                     f"{title[:30]}")
+        return e, skey, seeded
+
+    def _seat_and_record(self, v, vid, app, title, e, skey, seeded, pinned,
+                         dock_chance, _ident):
+        """_place_view's last phase: lay the window out among the others if
+        windows are being laid out together, seat it, and record the slot."""
         outs = {o["name"]: o for o in self.place_sock.list_outputs()}
         o = entry_output(e, outs)
         if not o:
-            return
+            return None
         # ONLY WHILE WINDOWS ARE BEING LAID OUT TOGETHER: a desk change's
         # sweep, or place mode (a login). Outside those nothing is placed
         # beside anything, and a window opened mid-session stays where it

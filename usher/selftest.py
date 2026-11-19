@@ -4526,6 +4526,16 @@ def _t_slots(ck):
                                                       "width": 1, "height": 1}}
 
     try:
+        # A DIALOG IS NEVER PLACED, whatever slot its app has: moving one to
+        # another output aborts the whole compositor (wayfire's
+        # move_view_to_output asserts a dialog stays on its parent's). The
+        # placer's first gate; with it gone this window takes the slot.
+        w.deadline[9] = now + PLACE_GRACE
+        w.identified.add(9)
+        w._try_place(dict(V(9), parent=1))
+        ck("a-dialog-is-never-placed", seated == [] and not w.slot_held)
+        w.deadline.pop(9, None)
+        w.identified.discard(9)
         for vid in (1, 2, 3):
             w.deadline[vid] = now + PLACE_GRACE
             w.identified.add(vid)
@@ -15818,7 +15828,10 @@ def _t_displays(ck):
         # handed it a STRANGER's slot and pin (dragonfly 2026-11-19). The
         # tab record bridges restarts instead (chrome_restart_binding), and
         # what nothing binds is placed by its surface.
-        _pv = inspect.getsource(Watcher._place_view)
+        # ALL OF _place_view's PHASES, since the slot pick is one of them
+        _pv = "".join(inspect.getsource(getattr(Watcher, _ph)) for _ph in (
+            "_place_view", "_place_gate", "_pick_slot", "_place_allowed",
+            "_choose_entry", "_claim_slot", "_seat_and_record"))
         ck("the-placer-never-pairs-a-window-by-size",
            "_by_size(" not in _pv and "engine.free_slot(" in _pv)
         ck("nothing-pairs-by-size-anywhere",
