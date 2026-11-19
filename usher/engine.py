@@ -4751,6 +4751,56 @@ def chrome_restart_binding(hist=None, tabs=None, rec=None, now=None):
     return cur, binding, {"salt": salt, "windows": wins}
 
 
+def chrome_bind_misses(cur, rec):
+    """The windows of each profile's PREVIOUS run that were open when it
+    ended and that nothing bound: [(old id, its tab count, the most tabs it
+    shares with any current window, that window's id or None, that window's
+    tab count)]. Marks each one `told` in `rec`, so a miss is reported once
+    rather than at every pass. Pure but for that mark.
+
+    WHY IT EXISTS: a window the binding misses keeps its slot and pin under a
+    dead id and comes back as a stranger, and the binding's own answer cannot
+    say why: too few tabs for the partial rule, a page whose address changed
+    as it reloaded, or a tie. Counts and ids say which, and they are safe to
+    carry to the owner's log, where a URL or a title would not be.
+
+    ONLY THE PREVIOUS RUN, i.e. the newest file whose windows were read in
+    their final state: an older run's misses were reported when it was the
+    previous one."""
+    wins = rec.get("windows") or {}
+    last = {}
+    for e in wins.values():
+        if e.get("final") and e.get("open"):
+            p = e.get("profile")
+            if float(e.get("seen") or 0) >= last.get(p, (-1.0, None))[0]:
+                last[p] = (float(e.get("seen") or 0), e.get("file"))
+    out = []
+    for k, e in sorted(wins.items()):
+        if (not k.isdigit() or int(k) in cur or e.get("bound")
+                or e.get("told") or not e.get("final") or not e.get("open")
+                or e.get("file") != last.get(e.get("profile"), (0, None))[1]):
+            continue
+        tabs = frozenset(e.get("tabs") or ())
+        best, bid = 0, None
+        for n, fp in sorted(cur.items()):
+            k2 = len(tabs & fp)
+            if k2 > best:
+                best, bid = k2, n
+        out.append((int(k), len(tabs), best, bid,
+                    len(cur[bid]) if bid is not None else 0))
+        e["told"] = True
+    return out
+
+
+def chrome_bind_miss_text(miss, name=str):
+    """One miss as a log phrase, with each window named by `name`."""
+    old, n, best, bid, m = miss
+    if bid is None:
+        return f"{name(old)} ({n} tab(s)) shares no tab with any window now"
+    return (f"{name(old)} ({n} tab(s)) shares at most {best} with "
+            f"{name(bid)} ({m} tab(s))")
+
+
 def rekey_chrome(kb, binding=None, cur=None):
     """Move the store's chrome slots onto the CURRENT session's window ids,
     and return how many moved. `binding` and `cur` are
@@ -7404,6 +7454,11 @@ def source_rekey_lines(hist=None, tabs=None, rec=None, save=None):
     lines = [f"{SOURCE_REKEY_WORD} {identity_digest(chrome_slot(old))} "
              f"{identity_digest(chrome_slot(new))}"
              for old, new in sorted(bound.items())]
+    # AND WHAT IT COULD NOT BIND, which the owner cannot work out: these
+    # tabs are in a home it may not read. Digests and counts only.
+    lines += ["usher: could not follow window " + chrome_bind_miss_text(
+        m, lambda i: identity_digest(chrome_slot(i)))
+        for m in chrome_bind_misses(_cur, _rec)]
     (save_chrome_tabs if save is None else save)(_rec)
     return lines
 

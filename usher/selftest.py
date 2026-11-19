@@ -2732,6 +2732,18 @@ def _t_resolution(ck):
                 engine.source_rekey_lines(
                     hist=lambda: {"P": [_rc1, _rp1]}, rec={},
                     save=_saved_rk.append)
+            # AND THE ACCOUNT SAYS WHICH WINDOW IT COULD NOT FOLLOW, by
+            # digest and counts: its tabs are in a home the owner cannot read.
+            with _tsnss([(95, 1, "u1", "A")]) as _rc2, \
+                    _tsnss([(15, 1, "u1", "A"), (15, 2, "u9", "B")]) as _rp2:
+                _rkl = engine.source_rekey_lines(
+                    hist=lambda: {"P": [_rc2, _rp2]}, rec={},
+                    save=lambda _r: None)
+            _d15 = engine.identity_digest(chrome.chrome_slot(15))
+            ck("the-account-reports-a-window-it-could-not-follow",
+               any(ln.startswith("usher: could not follow window " + _d15)
+                   for ln in _rkl)
+               and not any("u1" in ln or "u9" in ln for ln in _rkl))
             ck("source-rekey-lines-commit-the-tab-record",
                len(_saved_rk) == 1 and "91" in _saved_rk[0]["windows"]
                and _saved_rk[0]["windows"].get("11", {}).get("bound")
@@ -10569,6 +10581,34 @@ def _t_chrome(ck):
     ck("the-record-forgets-a-dead-entry-it-can-never-follow",
        "5" not in _rk["windows"] and "6" in _rk["windows"]
        and "7" in _rk["windows"])
+    # A WINDOW THE BINDING MISSED IS SAID, ONCE, by counts and ids: an old
+    # window of the PREVIOUS run, open when it ended, that nothing bound.
+    _f2 = lambda *u: sorted(_tfp(set(u), _S))
+    _rm = {"salt": _S, "windows": {
+        # the miss: 2 tabs, 1 of them still showing in window 9
+        "5": {"tabs": _f2("https://p/a", "https://p/b"), "seen": 900.0,
+              "profile": "P", "file": "prev", "final": True, "open": True},
+        # bound: not a miss
+        "6": {"tabs": _f2("https://q/a"), "seen": 900.0, "profile": "P",
+              "file": "prev", "final": True, "open": True, "bound": "8"},
+        # closed before its run ended: Chrome would not restore it
+        "7": {"tabs": _f2("https://r/a"), "seen": 900.0, "profile": "P",
+              "file": "prev", "final": True, "open": False},
+        # an OLDER run's: reported when that run was the previous one
+        "3": {"tabs": _f2("https://s/a"), "seen": 100.0, "profile": "P",
+              "file": "older", "final": True, "open": True}}}
+    _cm = {9: _tfp({"https://p/a", "https://z/"}, _S),
+           8: _tfp({"https://q/a"}, _S)}
+    _ms = engine.chrome_bind_misses(_cm, _rm)
+    ck("a-missed-window-is-reported-with-its-counts",
+       _ms == [(5, 2, 1, 9, 2)])
+    ck("a-missed-window-is-reported-once",
+       _rm["windows"]["5"].get("told") is True
+       and engine.chrome_bind_misses(_cm, _rm) == [])
+    ck("a-miss-sharing-nothing-says-so",
+       "shares no tab" in engine.chrome_bind_miss_text((5, 2, 0, None, 0))
+       and "at most 1 with 9 (2 tab(s))"
+       in engine.chrome_bind_miss_text((5, 2, 1, 9, 2)))
     # THE RECORD ROUND-TRIPS THROUGH ITS FILE, and a non-object is none.
     import tempfile as _tfr
     _rd = _tfr.mkdtemp(prefix="usher-tabs-")
@@ -13328,6 +13368,30 @@ def _t_undo(ck):
            _order2 == ["log", "store", "others", "record"])
         ck("a-failed-re-key-commits-no-tab-record",
            "record" not in _order)
+        # AND THE DAEMON SAYS WHICH OF ITS OWN WINDOWS IT COULD NOT FOLLOW.
+        _said6 = []
+        _rlg6 = _wmod.logline
+        _MREC = {"salt": "s", "windows": {"5": {
+            "tabs": ["d1"], "seen": 1.0, "profile": "P", "file": "f",
+            "final": True, "open": True}}}
+        try:
+            engine.chrome_restart_binding = lambda: ({9: frozenset()}, {},
+                                                     _MREC)
+            _wmod.rekey_chrome = lambda kb, *a: 0
+            engine.rekey_other_stores = lambda *a, **k: 0
+            engine.save_chrome_tabs = lambda *a, **k: None
+            engine.record_rekeys = lambda *a, **k: 0
+            _wmod.logline = _said6.append
+            w._rekey_chrome()
+        finally:
+            engine.chrome_restart_binding = _rcb
+            engine.record_rekeys = _rrr2
+            _wmod.rekey_chrome, engine.rekey_other_stores = _rrc, _ros
+            engine.save_chrome_tabs = _rsct
+            _wmod.logline = _rlg6
+        ck("the-daemon-logs-a-window-it-could-not-follow",
+           any(m.startswith("chrome: could not follow window 5")
+               for m in _said6))
     finally:
         engine.UNDO_FILE, _wmod.UNDO_FILE = _rfile, _rwf
         _wmod.save_knowledge, Watcher._sweep = _rsk, _rsw

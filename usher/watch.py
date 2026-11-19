@@ -2714,6 +2714,7 @@ class Watcher:
                     save_knowledge(self.kb, self.kb_profile)
                 other = engine.rekey_other_stores(
                     lambda kb: rekey_chrome(kb, bound, cur), self.kb_profile)
+            misses = engine.chrome_bind_misses(cur, rec)
             # THE RECORD IS COMMITTED LAST, once the binding has been applied,
             # so a pass that raised above is simply repeated next time.
             engine.save_chrome_tabs(rec)
@@ -2723,6 +2724,9 @@ class Watcher:
         # SAID AFTER THE PASS, NOT AFTER THE RETURN. This line sat below a
         # `return True` and was unreachable, so a re-key that saved every
         # chrome window's slot left nothing in watch.log to say it had run.
+        for m in misses:
+            logline("chrome: could not follow window "
+                    + engine.chrome_bind_miss_text(m))
         if moved:
             logline(f"chrome: re-keyed {moved} window slot(s) onto the"
                     f" restarted browser's session ids")
