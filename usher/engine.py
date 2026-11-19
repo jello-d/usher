@@ -2084,8 +2084,8 @@ def stable_views(sock, tries=STABLE_TRIES):
 
 def snapshot(sock):
     _outs, _views, _stable = stable_views(sock)
-    # SIZES FIRST, so every identity stamped below that a size can decide
-    # never consults a title (chrome.claim_by_size).
+    # SIZES FIRST, so every Chrome window its size names is stamped with
+    # its slot below (chrome.claim_by_size).
     note_chrome_sizes(_views)
     outputs = {o["name"]: o for o in _outs}
     inverts = load_inverts()
@@ -3976,13 +3976,12 @@ def next_slot_key(app, ident, used):
         n += 1
 
 
-def held_slot(keys, app, ident, src=""):
+def held_slot(keys, app, ident):
     """Of the keys the placer's ledger says this window HOLDS, the one its
     identity may write: (key, key-title), or (None, None). PURE.
 
     A KEY IN ITS OWN FAMILY, and nothing else: a window is never placed into
-    another identity's slot (the spare slots that once allowed it were a
-    guess by size, and are retired). `src` is kept for the callers."""
+    another identity's slot."""
     base = kkey(app, ident)
     for k in sorted(keys):
         if slot_base(k) == base:
@@ -4028,10 +4027,10 @@ def size_nudges(views, prev, tried):
 
     WHY. A window's SIZE is how usher tells apart windows that share an
     identity: Chrome restores each window at its exact size and records it,
-    so `claim_by_size` names a window by it before any title is asked, and
-    `free_slot` uses it to pick which of a family's slots is this window's.
-    Two windows of one app at one size defeat both, and the only remaining
-    witness is the title. Measured on dragonfly 2026-11-12: two pairs of work
+    so `claim_by_size` names a window by it, and `free_slot` uses it to
+    pick which of a family's slots is this window's. Two windows of one app
+    at one size defeat both, and nothing else tells them apart: such a
+    window stays unnamed. Measured on dragonfly 2026-11-12: two pairs of work
     Chrome windows at identical sizes, named only because their titles
     happened to differ that login. Nobody notices six pixels; the store
     does.
@@ -4750,14 +4749,6 @@ def chrome_restart_binding(hist=None, tabs=None, rec=None, now=None):
         return bool(e.get("final") and e.get("open"))
     wins = {k: v for k, v in wins.items() if keep(v)}
     return cur, binding, {"salt": salt, "windows": wins}
-
-
-def chrome_session_binding():
-    """{old id: new id} for every window of a previous browser run that binds
-    to one of this run's, whether or not any store holds it: the re-key log
-    needs the whole binding, since a snapshot may hold a window the live
-    store has since forgotten. Commits nothing."""
-    return chrome_restart_binding()[1]
 
 
 def rekey_chrome(kb, binding=None, cur=None):
@@ -5487,8 +5478,7 @@ def _learn_stamp(kb, groups, windows, counts, when, hold=(), refused=None,
         decided = stamp_key(w, app, key, counts)
         if decided is not None:
             _i, _kt, _only = decided
-            _k, _ht = held_slot(mine.get(vid, ()), app, _i,
-                                w.get("source") or "")
+            _k, _ht = held_slot(mine.get(vid, ()), app, _i)
             if _k is None or _k in used:
                 _k, _ht = next_slot_key(app, _i, used | reserved), None
             used.add(_k)
@@ -7056,7 +7046,7 @@ SOURCE_REKEY_WORD = "rekey"
 SOURCE_PID_WORD = "pid"
 # `size <identifier> <width> <height>`, beside the pid lines and for the same
 # reason: the account's window protocol carries no geometry, and its Chrome
-# windows are named by size before title (chrome.claim_by_size). Its own
+# windows are named by their size (chrome.claim_by_size). Its own
 # word, so a parser that predates it ignores the line rather than losing
 # the pid line it would otherwise have had to share.
 SOURCE_SIZE_WORD = "size"
@@ -7318,7 +7308,7 @@ def source_window_lines(rows, pids=None, resolve=None, uid=None,
     out = []
     views = list(source_views(rows, pids, uid))
     # A CHROME WINDOW IS NAMED BY ITS SIZE OR NOT AT ALL (see
-    # chrome.window_slot): no title join and no elimination, both retired.
+    # chrome.window_slot).
     if resolve is None:
         # SIZES FIRST, relayed by the owner (this side's protocol has no
         # geometry): see chrome.claim_by_size.
@@ -7863,13 +7853,6 @@ def source_window_state(src, v, tlid=None):
     if ident and vid is not None:
         _SOURCE_SLOT[(src, vid)] = ident
     return ident
-
-
-def source_window_identity(src, v, tlid=None):
-    """The per-window digest `src` gave this window, or None. The
-    two-state reading of source_window_state, for callers that only want a
-    digest."""
-    return source_window_state(src, v, tlid) or None
 
 
 def source_pending(src, v, tlid):

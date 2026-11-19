@@ -3307,9 +3307,10 @@ class Watcher:
         ones. Measured by classifying each loop statement: the capture
         thread's `_poll_files`, `_poll_outputs` and `_write_status` all sat
         OUTSIDE its try, and the placer's `_recheck_all` guards its own
-        `list_views` and its own place loop and not the elimination step
-        between them. Auditing every raise path of every callee is an
-        invariant nobody can hold, and the sweep says it was not held.
+        `list_views` and its own place loop and not the step between them
+        (an elimination pass, since retired). Auditing every raise path of
+        every callee is an invariant nobody can hold, and the sweep says it
+        was not held.
 
         THE POLICY IS THE CAPTURE STEP'S, deliberately, rather than a second
         one: log with the streak, and at the limit EXIT so the supervisor

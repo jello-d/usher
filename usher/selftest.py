@@ -4409,13 +4409,13 @@ def _t_size_slots(ck):
     ck("the-measured-reboot-lands-every-window-in-every-order", ok)
     # held_slot, pure
     ck("held-slot-own-family",
-       engine.held_slot([fam1], app, src, src) == (fam1, src))
+       engine.held_slot([fam1], app, src) == (fam1, src))
     ck("held-slot-not-another-window-of-its-own-account",
-       engine.held_slot([bg], app, src, src) == (None, None))
+       engine.held_slot([bg], app, src) == (None, None))
     ck("held-slot-not-another-identitys-key",
-       engine.held_slot([bg], app, "kitty:/x", src) == (None, None))
+       engine.held_slot([bg], app, "kitty:/x") == (None, None))
     ck("held-slot-no-other-identity-for-a-named-window",
-       engine.held_slot([bg], app, "titan:other", src) == (None, None))
+       engine.held_slot([bg], app, "titan:other") == (None, None))
     _now = _t.time()
 
     # A WINDOW NAMED SINCE IT WAS PLACED INTO THE SHARED SLOT releases it:
@@ -9429,6 +9429,10 @@ def _t_cli_split(ck):
 
 def _t_relaunch(ck):
     """the relaunch paths, RUN with the spawn stubbed."""
+    def _swi(src, v, tlid=None):
+        """The per-window digest `src` gave `v`, or None."""
+        return engine.source_window_state(src, v, tlid) or None
+
     # RUN the relaunch paths end to end with the spawn stubbed. Checking
     # mux_candidates alone is not enough: a NameError in the announce after the
     # spawn shipped undetected precisely because nothing executed these
@@ -9864,14 +9868,14 @@ def _t_relaunch(ck):
                 _TL2: engine.identity_digest("chrome:win:22")})
             _SAME = "Inbox - Google Chrome"
             ck("two-windows-wearing-ONE-title-get-different-identities",
-               engine.source_window_identity(
+               _swi(
                    "titan", {"title": _SAME, "id": 401}, _TL1)
-               != engine.source_window_identity(
+               != _swi(
                    "titan", {"title": _SAME, "id": 402}, _TL2))
             ck("one-window-under-TWO-titles-gets-one-identity",
-               engine.source_window_identity(
+               _swi(
                    "titan", {"title": "Before", "id": 403}, _TL1)
-               == engine.source_window_identity(
+               == _swi(
                    "titan", {"title": "After", "id": 404}, _TL1))
             engine._SOURCE_WINDOWS.clear()
             engine._SOURCE_SLOT.clear()
@@ -9975,12 +9979,12 @@ def _t_relaunch(ck):
             engine._SOURCE_WINDOWS.clear()
             engine._SOURCE_SLOT.clear()
             ck("the-cache-starts-empty-so-the-next-check-is-not-vacuous",
-               engine.source_window_identity(
+               _swi(
                    "titan", {"title": _T1, "id": 301}, _TL1) is None)
             engine.source_trigger(["titan"], "capture", run=_sr_win,
                                   hook=_hk)
             ck("source-trigger-fills-the-cache-resolution-reads",
-               engine.source_window_identity(
+               _swi(
                    "titan", {"title": _T1, "id": 302}, _TL1)
                == engine.identity_digest("chrome:win:11"))
             engine._SOURCE_WINDOWS.clear()
@@ -13398,7 +13402,7 @@ def _t_undo(ck):
              20: frozenset({"z"})})
         _rlt2 = engine.load_chrome_tabs
         engine.load_chrome_tabs = lambda *a, **k: {}
-        _bd = engine.chrome_session_binding()
+        _bd = engine.chrome_restart_binding()[1]
     finally:
         engine.load_chrome_tabs = _rlt2
         engine.session_history, engine.chrome_window_tabs = _rsh, _rwt
