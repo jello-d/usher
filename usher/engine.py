@@ -950,15 +950,151 @@ def slot_drifted(e, surfaces, output=None):
     follows the PANEL), when the caller knows it: a slot names its monitor
     by panel, and a connector renamed under it (another dock port) is the
     same monitor, not a drift."""
-    # A PIN is where the user put the window, wherever the map has moved.
-    if pin_of(e):
-        return False
+    # A PIN IS WHERE THE USER PUT THE WINDOW IN ITS SURFACE, so it is the
+    # pin that is asked, and it follows the surface like any slot. It used
+    # to be exempt ("wherever the map has moved"), which left five pinned
+    # windows in their old cells when a desk's map was re-laid out
+    # (dragonfly 2026-11-18 20:02): the user had placed them in a SURFACE,
+    # not in a cell number. follow_pins moves the pin itself at a map change.
+    e = placement_entry(e)
     name = (e or {}).get("surface") or ""
     if not name or name not in (surfaces or {}):
         return False
     if output:
         e = dict(e, output=output)
     return surface_of(e, surfaces) != name
+
+
+def follow_pin(p, surfaces):
+    """The pin `p` moved to where its surface is NOW, or None when it need
+    not move. PURE.
+
+    EXACT WHEN THE SURFACE KEPT ITS SIZE, which a re-laid-out map usually
+    does (a surface moved to another cell): the window keeps its offset
+    inside the surface to the pixel, overhang included, so a window the user
+    put snug in a corner stays snug in that corner. Otherwise it is laid
+    out the way a seed is (surface_seed), from the same name and fraction."""
+    if not slot_drifted(p, surfaces):
+        return None
+    name = p.get("surface") or ""
+    s = (surfaces or {}).get(name)
+    if not s:
+        return None
+    frac = p.get("surface_frac")
+    sw, sh = s["size"]
+    moved = None
+    if frac and len(frac) == 4 and frac[2] > 0 and frac[3] > 0:
+        ow, oh = p["size"][0] / frac[2], p["size"][1] / frac[3]
+        if abs(ow - sw) <= 2 and abs(oh - sh) <= 2:
+            moved = dict(p, pos=[s["pos"][0] + round(frac[0] * ow),
+                                 s["pos"][1] + round(frac[1] * oh)])
+    if moved is None:
+        seed = surface_seed([dict(p)], {name: s})
+        if not seed:
+            return None
+        moved = dict(p, pos=seed["pos"], size=seed["size"])
+    moved.update(output=s["output"], workspace=list(s["workspace"]),
+                 panel="", surface=name)
+    moved["surface_frac"] = surface_frac(moved, s)
+    return moved
+
+
+def follow_pins(kb, surfaces):
+    """Move every pin in `kb` whose surface the map has moved, in place, and
+    return how many moved. Run at a map change and when a store is loaded,
+    so a pin follows its surface whether or not the daemon was there to see
+    the edit."""
+    n = 0
+    for e in kb.values():
+        p = pin_of(e)
+        if not p:
+            continue
+        q = follow_pin(p, surfaces)
+        if q:
+            e["pinned"] = q
+            n += 1
+    return n
+
+
+def carry_surface(new, old, surfaces, outputs):
+    """Keep `old`'s surface name on a freshly learned entry while that
+    surface sits on a cell the live grid does not have. PURE apart from
+    `new`, which it fills.
+
+    A MAP AND ITS GRID ARRIVE SEPARATELY: on dragonfly 2026-11-18 the map
+    named a fourth column at 20:02 and the grid had it minutes later. In
+    between, every capture labelled a window by whichever surface now covers
+    the spot it stood on, so a window that belonged in `personal-main` was
+    recorded as `work-comms` and the intent was gone by the time the grid
+    could honour it. Not overwriting a name the grid cannot place yet keeps
+    the intent until it can be acted on."""
+    name = (old or {}).get("surface") or ""
+    if not name or name == new.get("surface"):
+        return new
+    s = (surfaces or {}).get(name)
+    if not s:
+        return new
+    omap = outputs if isinstance(outputs, dict) else {
+        o.get("name"): o for o in (outputs or []) if isinstance(o, dict)}
+    if not omap or cell_fits(s, omap):
+        return new
+    new["surface"] = name
+    new["surface_frac"] = old.get("surface_frac")
+    return new
+
+
+def stale_by_size(kb, app, ident, src, size, rivals, live_keys):
+    """The stale slot a Chrome window whose identity has NO slot should
+    take, paired by exact size, or None. PURE.
+
+    A SessionID IS PER BROWSER RUN, and the re-key binds the old ids to the
+    new through the previous session file's tabs. Two restarts in quick
+    succession leave nothing to bind across: on dragonfly 2026-11-18 a
+    compositor that went down twice in 90s restarted the work account's
+    browser twice, and all ten of its windows came back as strangers, were
+    left at Chrome's cascade, and were learned there. Chrome restores every
+    window's size EXACTLY, so size pairs them with no session file at all.
+
+    UNAMBIGUOUS OR NOTHING, on both sides: exactly one candidate within
+    SIZE_MATCH, and no other live window of the same app and account
+    wanting a slot at that size (`rivals`, their sizes). Candidates are
+    slots of the same app whose identity is per run AND this account's (a
+    chrome slot for the owner, `<source>:` digests for another account, so
+    the identity alone keeps the accounts apart), held by no live window
+    (`live_keys`), and from the most recent browser run, i.e. within
+    SPARE_SPAN of the newest of them, so a slot from a week ago cannot be
+    handed out."""
+    if not is_chrome(app) or not ident or not size:
+        return None
+    if slot_keys(kb, app, ident, src):
+        return None
+    cand = []
+    for k, e in kb.items():
+        a = k.partition("\0")[0]
+        if a != app or k in live_keys or not isinstance(e, dict):
+            continue
+        i = slot_base(k).partition("\0")[2]
+        if not (source_ident(src, i) if src else is_chrome_slot(i)):
+            continue
+        if i == ident:
+            continue
+        cand.append((k, e))
+    if not cand:
+        return None
+    newest = max(float(e.get("last_seen") or 0) for _k, e in cand)
+    cand = [(k, e) for k, e in cand
+            if newest - float(e.get("last_seen") or 0) <= SPARE_SPAN]
+
+    def near(a, b):
+        return (abs(a[0] - b[0]) <= SIZE_MATCH
+                and abs(a[1] - b[1]) <= SIZE_MATCH)
+    hit = [(k, e) for k, e in cand
+           if near((e.get("size") or [0, 0]), size)]
+    if len(hit) != 1:
+        return None
+    if any(near(r, hit[0][1]["size"]) for r in rivals):
+        return None
+    return hit[0][0]
 
 
 def surface_region(w, surfaces, default=None):
@@ -5190,8 +5326,10 @@ def upsert(kb, windows, when, outputs=None, refused=None):
             _i, _kt, _only = decided
             _k = next_slot_key(app, _i, used)
             used.add(_k)
-            kb[_k] = carry_pin(kb_entry(w, _kt, _only, when), kb.get(_k),
-                               False, when)
+            kb[_k] = carry_surface(
+                carry_pin(kb_entry(w, _kt, _only, when), kb.get(_k),
+                          False, when),
+                kb.get(_k), surface_map()[0], outputs)
         # NO TITLE FALLBACK, because there is no longer a shape that
         # reaches one. `is_appid_keyed` answers True for every unowned app and
         # `resolution` answers NEVER for a window with no app-id, so a window
@@ -5202,7 +5340,7 @@ def upsert(kb, windows, when, outputs=None, refused=None):
 
 
 def _learn_stamp(kb, groups, windows, counts, when, hold=(), refused=None,
-                 ledger=None, assigned=None, pin=()):
+                 ledger=None, assigned=None, pin=(), outputs=None):
     """Write each live view's placement under the right key. `hold` is the set
     of view ids whose CURRENT position must not be believed yet: see the
     watcher's _held: a window the placer has not got to is sitting where its
@@ -5283,8 +5421,10 @@ def _learn_stamp(kb, groups, windows, counts, when, hold=(), refused=None,
             if _k is None or _k in used:
                 _k, _ht = next_slot_key(app, _i, used | reserved), None
             used.add(_k)
-            kb[_k] = carry_pin(kb_entry(w, _ht or _kt, _only, when),
-                               kb.get(_k), vid in pin, when)
+            kb[_k] = carry_surface(
+                carry_pin(kb_entry(w, _ht or _kt, _only, when),
+                          kb.get(_k), vid in pin, when),
+                kb.get(_k), surface_map()[0], outputs)
             if assigned is not None and vid is not None:
                 assigned[vid] = _k
             # A WINDOW NAMED SINCE IT WAS PLACED INTO ITS ACCOUNT'S SHARED
@@ -5492,7 +5632,7 @@ def learn(kb, groups, windows, when, hold=(), seen=None, outputs=None,
     # discriminator") is answered at the source now: a title is not a key at
     # all, so there is nothing for two windows to share.
     _learn_stamp(kb, groups, windows, counts, when, hold, refused, ledger,
-                 assigned, pin)
+                 assigned, pin, outputs)
     # `hold` deliberately does NOT reach the terminal purge: that asks "is
     # this window still HERE", which a held window plainly is. Hiding it
     # would drop the very entry we are protecting.
@@ -10588,7 +10728,7 @@ def restore_by_surface(pairs, unlive, live, outs, profile):
                 slot_drifted(e, surface_map()[0],
                              _o["name"] if _o else None):
             seed, _why = surface_target(app, ident, _src(lv), profile,
-                                        outs, [e])
+                                        outs, [placement_entry(e)])
             if seed:
                 e = seed
         out.append((lv, e))

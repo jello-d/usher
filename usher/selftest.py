@@ -9420,8 +9420,11 @@ def _t_cli_split(ck):
         "panel": {"kb_entry", "surface_seed"},
         # kb_entry's helper, which stamps the name and WHERE IN that region
         # the window sits together, so the two cannot describe two regions
-        "surface": {"_entry_surface"},
-        "surface_frac": {"_entry_surface"},
+        "surface": {"_entry_surface", "carry_surface"},
+        "surface_frac": {"_entry_surface", "carry_surface", "follow_pin"},
+        # carry_surface KEEPS the old name and fraction together while the
+        # grid cannot place that surface; follow_pin rewrites a PIN's
+        # fraction for the place its surface moved to. Both decisions.
         # snapshot stamps the live fact; kb_entry CARRIES it into the store
         # rather than re-deriving, since a replayed row's pid is long dead
         "source": {"snapshot", "kb_entry"},
@@ -15614,9 +15617,192 @@ def _t_displays(ck):
             w.transition_until = 0.0
             w.surface_sig, w.surface_sig_for = None, None
             w.kb_profile = "DESK"
-        _pos = _cl_src.find("self._poll_surfaces()")
+        _pos = _cl_src.find("self._poll_surfaces(cap)")
         ck("the-capture-loop-polls-the-map-before-it-captures",
            0 <= _pos < _cl_src.find("self._capture_once(cap)"))
+
+        # ---- A PIN FOLLOWS ITS SURFACE (dragonfly 2026-11-18 20:02) -------
+        # A pin is where the user put the window IN A SURFACE. When the map
+        # moves that surface the pin goes with it, keeping its offset inside
+        # the surface exactly where the surface kept its size.
+        _pin = {"surface": "ref", "output": "DP-1", "workspace": [0, 0],
+                "pos": [-16, 40], "size": [500, 300], "when": 1.0}
+        _pin["surface_frac"] = engine.surface_frac(_pin, _sA["ref"])
+        _pe = dict(_in_ref, pinned=dict(_pin))
+        ck("a-pinned-slot-whose-surface-moved-has-drifted",
+           engine.slot_drifted(_pe, _sB)
+           and not engine.slot_drifted(_pe, _sA))
+        # the PIN decides, not the last-seen rect beside it
+        ck("a-pin-is-asked-rather-than-the-rect-beside-it",
+           engine.slot_drifted(dict(_pe, output="DP-2"), _sB)
+           and not engine.slot_drifted(dict(_in_ref, output="DP-2"), _sB))
+        _sC = {"ref": {"output": "DP-1", "workspace": [2, 1],
+                       "pos": [100, 50], "size": [1000, 500]}}
+        _fp = engine.follow_pin(_pin, _sC)
+        ck("a-pin-keeps-its-offset-in-a-surface-that-kept-its-size",
+           _fp is not None and _fp["workspace"] == [2, 1]
+           and _fp["pos"] == [84, 90] and _fp["size"] == [500, 300]
+           and _fp["output"] == "DP-1" and _fp["surface"] == "ref")
+        ck("a-pin-in-its-surface-does-not-move",
+           engine.follow_pin(_pin, _sA) is None)
+        _sS = {"ref": {"output": "DP-2", "workspace": [0, 0],
+                       "pos": [0, 0], "size": [400, 200]}}
+        _fs = engine.follow_pin(_pin, _sS)
+        ck("a-pin-into-a-smaller-surface-is-laid-out-inside-it",
+           _fs is not None and _fs["output"] == "DP-2"
+           and _fs["size"][0] <= 400 and _fs["size"][1] <= 200)
+        _kbp = {"a\0": dict(_in_ref, pinned=dict(_pin)),
+                "b\0": dict(_in_ref),
+                "c\0": dict(_in_ref, pinned=dict(_pin, surface="gone"))}
+        ck("follow-pins-moves-only-pins-whose-surface-moved",
+           engine.follow_pins(_kbp, _sC) == 1
+           and _kbp["a\0"]["pinned"]["workspace"] == [2, 1]
+           and "pinned" not in _kbp["b\0"]
+           and _kbp["c\0"]["pinned"]["workspace"] == [0, 0])
+        _wsrc = {n: inspect.getsource(getattr(Watcher, n))
+                 for n in ("run", "_adopt_profile", "_take_undo",
+                           "_poll_surfaces")
+                 if hasattr(Watcher, n)}
+        ck("pins-follow-at-start-desk-change-undo-and-map-change",
+           len(_wsrc) == 4
+           and all("_follow_pins(" in s for s in _wsrc.values()))
+        # ---- A LABEL THE GRID CANNOT PLACE YET IS KEPT ---------------------
+        _s4 = {"main": {"output": "eDP-1", "workspace": [3, 0],
+                        "pos": [0, 0], "size": [2880, 1800]},
+               "comms": {"output": "eDP-1", "workspace": [2, 0],
+                         "pos": [0, 0], "size": [2880, 1800]}}
+        _g = lambda gw: [{"name": "eDP-1", "geometry": {"x": 0, "y": 0,
+                          "width": 2880, "height": 1800},
+                          "workspace": {"x": 0, "y": 0, "grid_width": gw,
+                                        "grid_height": 3}}]
+        _old = {"surface": "main", "surface_frac": [0.1, 0.1, 0.5, 0.5]}
+        _nw = lambda: {"surface": "comms", "surface_frac": [0, 0, 1, 1]}
+        ck("a-label-on-a-cell-the-grid-lacks-is-kept",
+           engine.carry_surface(_nw(), _old, _s4, _g(3))["surface"]
+           == "main"
+           and engine.carry_surface(_nw(), _old, _s4, _g(3))[
+               "surface_frac"] == [0.1, 0.1, 0.5, 0.5])
+        ck("a-label-the-grid-can-place-is-relearned",
+           engine.carry_surface(_nw(), _old, _s4, _g(4))["surface"]
+           == "comms"
+           and engine.carry_surface(_nw(), _old, _s4, [])["surface"]
+           == "comms"
+           and engine.carry_surface(_nw(), {"surface": "gone"}, _s4,
+                                    _g(3))["surface"] == "comms")
+        ck("both-learners-carry-the-label",
+           "carry_surface(" in inspect.getsource(engine.upsert)
+           and "carry_surface(" in inspect.getsource(engine._learn_stamp)
+           and "assigned, pin, outputs)" in inspect.getsource(engine.learn))
+        # ---- A GRID CHANGE UNDER AN UNCHANGED MAP RE-PLACES ----------------
+        class _GSock:
+            def __init__(self):
+                self.gw = 3
+            def list_outputs(self):
+                return _g(self.gw)
+        _gs = _GSock()
+        _swept3 = []
+        try:
+            engine.surface_map = lambda fresh=False: (_s4, "")
+            engine.surface_default = lambda fresh=False: None
+            engine.profile_id = lambda *a, **k: "DESK"
+            Watcher._sweep = lambda self, vids=None: (
+                _swept3.append(1) or 2)
+            _wmod.logline = lambda m: None
+            w.kb_profile = "DESK"
+            w.surface_sig, w.surface_sig_for = None, None
+            w.surface_grid = None
+            w.transition_until = 0.0
+            w._poll_surfaces(_gs)
+            w._poll_surfaces(_gs)
+            ck("an-unchanged-grid-sweeps-nothing", _swept3 == [])
+            _gs.gw = 4
+            w._poll_surfaces(_gs)
+            ck("a-grid-change-under-the-map-sweeps", _swept3 == [1])
+            w._poll_surfaces(_gs)
+            ck("the-new-grid-is-the-baseline", _swept3 == [1])
+            w._poll_surfaces(None)
+            ck("an-unreadable-grid-concludes-nothing", _swept3 == [1])
+        finally:
+            (engine.surface_map, engine.surface_default,
+             engine.profile_id, Watcher._sweep, _wmod.logline) = _rps
+            w.transition_until = 0.0
+            w.surface_sig, w.surface_sig_for = None, None
+            w.surface_grid = None
+        # ---- A CHROME WINDOW WITH NO SLOT IS PAIRED BY SIZE ----------------
+        # Two browser restarts in 90s left nothing for the session-file
+        # re-key to bind across (dragonfly 2026-11-18 20:11).
+        _G = "google-chrome"
+        _kbz = {
+            engine.kkey(_G, "chrome:win:1"): {"size": [2160, 1702],
+                                              "last_seen": 1000.0},
+            engine.kkey(_G, "chrome:win:2"): {"size": [2312, 1633],
+                                              "last_seen": 990.0},
+            engine.kkey(_G, "chrome:win:3"): {"size": [2312, 1633],
+                                              "last_seen": 100.0},
+            engine.kkey(_G, "titan:aaaa"): {"size": [2517, 1659],
+                                            "source": "titan",
+                                            "last_seen": 1000.0},
+        }
+        _z = lambda i, sz, src="", riv=(), live=(): engine.stale_by_size(
+            _kbz, _G, i, src, sz, list(riv), set(live))
+        ck("a-unique-size-pairs-with-the-stale-slot",
+           _z("chrome:win:9", [2161, 1700]) == engine.kkey(_G,
+                                                            "chrome:win:1"))
+        ck("a-slot-from-an-older-run-is-not-a-candidate",
+           _z("chrome:win:9", [2312, 1633])
+           == engine.kkey(_G, "chrome:win:2"))
+        ck("a-rival-of-the-same-size-pairs-neither",
+           _z("chrome:win:9", [2160, 1702], riv=[[2160, 1702]]) is None)
+        ck("a-slot-a-live-window-holds-is-not-a-candidate",
+           _z("chrome:win:9", [2160, 1702],
+              live=[engine.kkey(_G, "chrome:win:1")]) is None)
+        ck("a-window-that-has-a-slot-takes-none",
+           _z("chrome:win:1", [2312, 1633]) is None)
+        ck("size-pairing-keeps-to-the-account",
+           _z("titan:bbbb", [2517, 1659], src="titan")
+           == engine.kkey(_G, "titan:aaaa")
+           and _z("chrome:win:9", [2517, 1659]) is None
+           and _z("titan:bbbb", [2160, 1702], src="titan") is None)
+        ck("size-pairing-is-chrome-only",
+           engine.stale_by_size({"kitty\0kitty:/a": {"size": [5, 5],
+                                                     "last_seen": 1.0}},
+                                "kitty", "kitty:/b", "", [5, 5], [],
+                                set()) is None)
+        # and the placer asks it BEFORE it picks a slot, through a method
+        # that moves the entry and records the move for undo
+        _pv = inspect.getsource(Watcher._place_view)
+        ck("the-placer-pairs-by-size-before-it-picks-a-slot",
+           0 <= _pv.find("self._rekey_by_size(")
+           < _pv.find("engine.free_slot("))
+        _rkz = {engine.kkey(_G, "chrome:win:1"): {"size": [2160, 1702],
+                                                  "last_seen": 1000.0,
+                                                  "title": "chrome:win:1"}}
+        _rr, _rl = engine.record_rekeys, _wmod.logline
+        _recd = []
+        _kb0, _st0 = w.kb, dict(w.st)
+        try:
+            engine.record_rekeys = lambda pairs, now=None: _recd.extend(pairs)
+            _wmod.logline = lambda m: None
+            w.kb = _rkz
+            _vz = {"id": 77, "app-id": _G, "title": "x", "pid": os.getpid(),
+                   "geometry": {"width": 2160, "height": 1702}}
+            _wid = _wmod.identity
+            _wmod.identity = lambda v: "chrome:win:9"
+            try:
+                _old_k = w._rekey_by_size(_vz, _G, "", [_vz])
+            finally:
+                _wmod.identity = _wid
+            ck("a-size-re-key-moves-the-entry-and-records-it",
+               _old_k == engine.kkey(_G, "chrome:win:1")
+               and engine.kkey(_G, "chrome:win:9") in w.kb
+               and w.kb[engine.kkey(_G, "chrome:win:9")]["title"]
+               == "chrome:win:9"
+               and _recd == [("chrome:win:1", "chrome:win:9")])
+        finally:
+            engine.record_rekeys, _wmod.logline = _rr, _rl
+            w.kb = _kb0
+            w.st.clear()
+            w.st.update(_st0)
         # desk_grid PARSES hwdp's answer, and anything else is no answer.
         _rrun, _rwh = engine.subprocess.run, engine.shutil.which
 

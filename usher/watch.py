@@ -551,6 +551,8 @@ class Watcher:
         # capture after a display change overwrote the other desk's store.
         self.kb, self.kb_profile = kb_for_profile()
         engine.publish_desk_clock(self.kb_profile)
+        # The live grid _poll_surfaces last saw, per output, or None.
+        self.surface_grid = None
         # WHEN THE DISPLAY TRANSITION ENDS. Nothing is learned before then:
         # see DOCK_HOLD.
         self.transition_until = 0.0
@@ -757,6 +759,10 @@ class Watcher:
         # the dead ids and must be moved across before the first placement or
         # the first capture.
         self._rekey_chrome()
+        # AND A MAP EDITED WHILE NO WORKER WAS UP has moved surfaces out
+        # from under their pins: move them before the first placement.
+        with self.lock:
+            self._follow_pins("start")
         # READ THE SAVED LAYOUT BEFORE ANYTHING CAN OVERWRITE IT. The relaunch
         # is driven by the last snapshot, and it does not run until _init_launch
         # below, eleven lines and a socket connect later. The capture loop
@@ -1144,6 +1150,12 @@ class Watcher:
                     self.slot_held[_k] = _id
             except Exception as _e:                      # noqa: BLE001
                 logline(f"slot occupancy: {_e}")
+            # A CHROME WINDOW NOTHING IS STORED UNDER is paired with a stale
+            # slot of the same browser run by its exact size, before it is
+            # given a fresh one (engine.stale_by_size): two browser restarts
+            # leave the session-file re-key nothing to bind across.
+            if chrome.is_chrome(app):
+                self._rekey_by_size(v, app, _src or "", _views)
             skey, e = engine.free_slot(
                 self.kb, self.slot_held, app, identity(v), _src or "", vid,
                 _live, **engine.slot_hints(
@@ -2229,7 +2241,7 @@ class Watcher:
                 if not self._in_transition():
                     self._profile_drift()
                 if not self._in_transition():
-                    self._poll_surfaces()
+                    self._poll_surfaces(cap)
                 self._write_status()
                 pollstreak = 0
             except Exception as e:                         # noqa: BLE001
@@ -2251,7 +2263,54 @@ class Watcher:
                 errstreak += 1
                 cap = self._capture_failed(e, cap, errstreak)
 
-    def _poll_surfaces(self):
+    def _rekey_by_size(self, v, app, src, views):
+        """Move a stale slot onto window `v`'s identity when only size can
+        pair them, log it, and record the move for undo. Call with the lock
+        held. Returns the old key, or None."""
+        ident = identity(v)
+        g = v.get("geometry") or {}
+        size = [g.get("width") or 0, g.get("height") or 0]
+        live_keys, rivals = set(), []
+        for w in views:
+            if app_of(w) != app:
+                continue
+            ws = engine.source_of(w) or ""
+            wi = identity(w)
+            live_keys.update(engine.slot_keys(self.kb, app, wi, ws))
+            if (w.get("id") != v.get("id") and ws == src and wi
+                    and not engine.slot_keys(self.kb, app, wi, ws)):
+                wg = w.get("geometry") or {}
+                rivals.append([wg.get("width") or 0, wg.get("height") or 0])
+        old = engine.stale_by_size(self.kb, app, ident, src, size, rivals,
+                                   live_keys)
+        if not old:
+            return None
+        new = engine.kkey(app, ident)
+        self.kb[new] = dict(self.kb.pop(old), title=ident)
+        self.st["dirty"] = True
+        _was = engine.slot_base(old).partition("\0")[2]
+        engine.record_rekeys([(_was, ident)])
+        logline(f"re-keyed by size: {app[:18]} | {engine.log_title(v)[:30]}"
+                f" ({size[0]}x{size[1]})")
+        return old
+
+    def _follow_pins(self, why):
+        """Move the loaded store's pins to where their surfaces are now
+        (engine.follow_pins), and say so. Call with the lock held. A map
+        that cannot be read moves nothing."""
+        try:
+            m, bad = engine.surface_map()
+        except Exception:                                  # noqa: BLE001
+            return 0
+        if bad or not m:
+            return 0
+        n = engine.follow_pins(self.kb, m)
+        if n:
+            self.st["dirty"] = True
+            logline(f"{why}: {n} pin(s) moved with their surface")
+        return n
+
+    def _poll_surfaces(self, sock=None):
         """Act on an edit to THIS desk's surface map like a desk change:
         hold learning and re-place every window, so each goes to its
         surface where the map now puts it (slot_drifted, in _place_view).
@@ -2277,16 +2336,38 @@ class Watcher:
             prof = engine.profile_id()
         except Exception:                                  # noqa: BLE001
             return
+        # AND THE GRID, because a map and its grid arrive separately: a map
+        # naming a cell the grid lacks cannot be honoured until the grid
+        # has it, and nothing else re-places when the grid arrives with the
+        # map unchanged (dragonfly 2026-11-18: the 4x3 map at 20:02, the
+        # grid minutes later, and only a hand repair put the windows in).
+        grid = None
+        if sock is not None:
+            try:
+                grid = tuple(sorted(
+                    (o["name"], (o.get("workspace") or {}).get("grid_width"),
+                     (o.get("workspace") or {}).get("grid_height"))
+                    for o in sock.list_outputs()))
+            except Exception:                              # noqa: BLE001
+                grid = None
         with self.lock:
             was, was_for = self.surface_sig, self.surface_sig_for
             self.surface_sig, self.surface_sig_for = sig, prof
             ours = prof == self.kb_profile
-        if was is None or was_for != prof or not ours or was == sig:
+            gwas = self.surface_grid
+            if grid is not None:
+                self.surface_grid = grid
+        if was is None or was_for != prof or not ours:
             return
+        if was == sig and (grid is None or gwas is None or gwas == grid):
+            return
+        what = ("surface map changed" if was != sig
+                else "grid changed under the surface map")
         with self.lock:
             self.transition_until = time.time() + LEARN_HOLD
+            self._follow_pins(what)
         n = self._sweep()
-        logline(f"surface map changed: re-placing {n} window(s)")
+        logline(f"{what}: re-placing {n} window(s)")
 
     def _poll_outputs(self, cap):
         """Notice an output arriving or leaving, because the COMPOSITOR DOES
@@ -2562,6 +2643,7 @@ class Watcher:
             merged, restored = engine.snapshot_merge(
                 self.kb, snap, req.get("sel") or None)
             self.kb = merged
+            self._follow_pins("undo")
             save_knowledge(self.kb, prof)
             self.transition_until = time.time() + LEARN_HOLD
         n = self._sweep()
@@ -2854,6 +2936,7 @@ class Watcher:
             self.left_keys, self.left_from = dict(self.learned), was
             self.learned = {}
             self.kb = load_knowledge(prof)
+            self._follow_pins("desk change")
             engine.publish_desk_clock(prof)
             self.profile_drift_at = 0.0
             self.st["dirty"] = True
