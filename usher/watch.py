@@ -2268,6 +2268,18 @@ class Watcher:
         pair them, log it, and record the move for undo. Call with the lock
         held. Returns the old key, or None."""
         ident = identity(v)
+        # A SIZE MATCH IS A GUESS, so it is the last resort for a window
+        # remembered NOWHERE. One known on another desk has its own entry
+        # there, and the surface rule places it from that: pairing it by
+        # size instead handed a work window a dead slot of another window
+        # and that window's pin, which beat the surface (dragonfly
+        # 2026-11-19). Read without `_left_entry`, whose lock we hold.
+        _lk = self.left_keys.get(v.get("id"))
+        if ((_lk and engine.slot_base(_lk) == engine.kkey(app, ident)
+             and engine.left_entry(self.left_from, _lk))
+                or engine.other_profile_entries(app, ident, self.kb_profile,
+                                                src)):
+            return None
         g = v.get("geometry") or {}
         size = [g.get("width") or 0, g.get("height") or 0]
         live_keys, rivals = set(), []

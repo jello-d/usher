@@ -15798,6 +15798,26 @@ def _t_displays(ck):
                and w.kb[engine.kkey(_G, "chrome:win:9")]["title"]
                == "chrome:win:9"
                and _recd == [("chrome:win:1", "chrome:win:9")])
+            # a window REMEMBERED ON ANOTHER DESK is not paired by size:
+            # its own entry there decides, through the surface rule
+            _ope = engine.other_profile_entries
+            w.kb = {engine.kkey(_G, "chrome:win:1"): {
+                "size": [2160, 1702], "last_seen": 1000.0,
+                "title": "chrome:win:1"}}
+            _recd.clear()
+            engine.other_profile_entries = (
+                lambda *a, **k: [{"surface": "personnel"}])
+            _wmod.identity = lambda v: "chrome:win:9"
+            try:
+                _old_k2 = w._rekey_by_size(_vz, _G, "", [_vz])
+            except Exception as _e:                        # noqa: BLE001
+                _old_k2 = "RAISED %s" % _e
+            finally:
+                _wmod.identity = _wid
+                engine.other_profile_entries = _ope
+            ck("a-window-known-on-another-desk-is-not-paired-by-size",
+               _old_k2 is None and not _recd
+               and engine.kkey(_G, "chrome:win:1") in w.kb)
         finally:
             engine.record_rekeys, _wmod.logline = _rr, _rl
             w.kb = _kb0
