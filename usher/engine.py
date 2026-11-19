@@ -4531,20 +4531,54 @@ def _migrate_wholesale(app):
 
 def chrome_tabs_path():
     """The tab record: every Chrome window id this account has seen, with
-    the tabs it last showed. In STATE, so an enclave account keeps its own in
-    its own home."""
+    a fingerprint of the tabs it last showed. In STATE, so an enclave account
+    keeps its own in its own home."""
     return os.path.join(STATE, "chrome-tabs.json")
 
 
+# A page the browser draws itself (a new tab, settings, an extension's own
+# page) says nothing about WHICH window it is in: every window can show one.
+CHROME_INTERNAL = ("chrome://", "chrome-untrusted://", "chrome-search://",
+                   "chrome-extension://", "devtools://", "about:")
+
+
+def tab_fingerprint(urls, salt):
+    """frozenset of salted digests of the tabs that say which window this
+    is. PURE.
+
+    DIGESTS, NOT URLS, because the record is a new copy of every window's
+    open tabs kept for a month, and matching only ever compares sets: a
+    salted digest compares exactly as a URL does and leaves nothing readable
+    on disk. The salt is the record's own, so a digest means nothing outside
+    it.
+
+    THE BROWSER'S OWN PAGES ARE LEFT OUT (CHROME_INTERNAL): a window showing
+    only a new tab has an EMPTY fingerprint, and an empty one binds nothing,
+    rather than matching every other window that showed a new tab."""
+    out = set()
+    for u in urls or ():
+        if u and not u.startswith(CHROME_INTERNAL):
+            out.add(hashlib.sha256(
+                (salt + "\0" + u).encode("utf-8")).hexdigest()[:16])
+    return frozenset(out)
+
+
 def load_chrome_tabs(path=None):
-    """{id (str): {"tabs": [url, ...], "seen": t, "bound": new id?}}, or {}
-    when there is none or it is not an object."""
+    """{"salt": str, "windows": {id (str): entry}}. An entry is {"tabs":
+    [digest, ...], "seen": t, "profile": p, "file": session file name,
+    "open": bool, "final": bool, "bound": new id?}.
+
+    A record with no salt is no record: its digests could not be compared
+    with anything, so it is read as empty and rebuilt."""
     d = json_object(path or chrome_tabs_path()) or {}
+    salt = d.get("salt")
     w = d.get("windows")
-    if not isinstance(w, dict):
-        return {}
-    return {str(k): v for k, v in w.items()
-            if isinstance(v, dict) and isinstance(v.get("tabs"), list)}
+    if not isinstance(salt, str) or not salt or not isinstance(w, dict):
+        return {"salt": "", "windows": {}}
+    return {"salt": salt,
+            "windows": {str(k): v for k, v in w.items()
+                        if isinstance(v, dict)
+                        and isinstance(v.get("tabs"), list)}}
 
 
 def save_chrome_tabs(rec, path=None):
@@ -4553,15 +4587,15 @@ def save_chrome_tabs(rec, path=None):
     try:
         os.makedirs(STATE, exist_ok=True)
         write_json(path or chrome_tabs_path(),
-                   json.dumps({"windows": rec}, sort_keys=True))
+                   json.dumps(rec, sort_keys=True))
     except OSError as e:
         logline(f"chrome tab record write failed: {e}")
 
 
-def _chrome_generations(hist, tabs):
-    """{profile: [{id: (mtime, frozenset)}, ...]}: each profile's session
-    files, OLDEST FIRST, so the last generation is what the windows are now.
-    """
+def _chrome_generations(hist, tabs, salt):
+    """{profile: [(file name, mtime, {id: fingerprint}), ...]}: each
+    profile's session files, OLDEST FIRST, so the last is what the windows
+    are now."""
     out = {}
     for prof, files in (hist or {}).items():
         gens = []
@@ -4570,7 +4604,9 @@ def _chrome_generations(hist, tabs):
                 t = os.path.getmtime(f)
             except OSError:
                 t = 0.0
-            gens.append({w: (t, urls) for w, urls in tabs(f).items()})
+            gens.append((os.path.basename(f), t,
+                         {w: tab_fingerprint(urls, salt)
+                          for w, urls in tabs(f).items()}))
         if gens:
             out[prof] = gens
     return out
@@ -4593,8 +4629,62 @@ def _chain_to(binding_steps, cur):
     return out
 
 
+def _record_read(wins, prof, files):
+    """Fold this pass's read of a profile's session files into the record's
+    entries, in place. A window present is `open`; one its own file no
+    longer holds was CLOSED in that run. A read of a file a newer one has
+    superseded is a read of that run's FINAL state, since Chrome does not
+    write a file after it rotates, so its windows are marked `final`."""
+    newest = files[-1][0]
+    for name, t, g in files:
+        for w, fp in g.items():
+            e = wins.setdefault(str(w), {})
+            e.update(tabs=sorted(fp), seen=t, profile=prof, file=name,
+                     open=True)
+            if name != newest:
+                e["final"] = True
+        for k, e in wins.items():
+            if (e.get("profile") == prof and e.get("file") == name
+                    and k.isdigit() and int(k) not in g):
+                e["open"] = False
+
+
+def _record_candidates(wins, prof, names):
+    """The record's dead windows that may still be followed: {id: tabs}.
+
+    ONLY A WINDOW OPEN WHEN ITS RUN ENDED. Chrome restores the windows open
+    at exit and no others, and never reuses an id within a run, so a window
+    closed during its run, or one of the CURRENT run, can never be a later
+    window: binding one to a newcomer would hand the newcomer a stranger's
+    slot and pin. So an entry qualifies only if its file is gone (a retained
+    file speaks for itself), it was read in its run's final state (`final`)
+    and it was still open then.
+
+    AND IT SAYS ENOUGH: a fingerprint of one tab is too thin to follow
+    across a run boundary the files no longer witness, so the record offers
+    only windows with BIND_MIN_RECORD tabs or more. A one-tab window is
+    still followed while both session files are on disk.
+
+    A BOUND ID IS LEFT OUT: it is reached through its link, and offered
+    again it would tie with its own successor. (The session files need no
+    such test: an id they still hold rebinds to the same successor.)
+
+    AND A RETAINED FILE'S WINDOWS ARE THAT FILE'S TO OFFER: offered here as
+    well, they would be put before the OLDEST file and bound backwards in
+    time, to an earlier run's window, breaking the chain they belong to."""
+    return {int(k): frozenset(e.get("tabs") or ())
+            for k, e in wins.items()
+            if k.isdigit() and e.get("profile") == prof
+            and e.get("file") not in names
+            and e.get("final") and e.get("open") and not e.get("bound")
+            and len(e.get("tabs") or ()) >= BIND_MIN_RECORD}
+
+
+BIND_MIN_RECORD = 2
+
+
 def chrome_restart_binding(hist=None, tabs=None, rec=None, now=None):
-    """(cur, binding, rec): this run's windows {id: tabs}, the binding
+    """(cur, binding, rec): this run's windows {id: fingerprint}, the binding
     {old id: new id} that follows windows across browser restarts, and the
     tab record updated with both. The CALLER commits `rec`
     (save_chrome_tabs) once it has applied the binding, so a pass that fails
@@ -4607,9 +4697,10 @@ def chrome_restart_binding(hist=None, tabs=None, rec=None, now=None):
     the fallback that filled the gap was a guess by size that once handed a
     window a stranger's slot and pin (2026-11-19). Every pass records every
     window's tabs, so an id that has died is still known by its last tabs.
+    Which dead ids may still be followed is _record_candidates'.
 
-    ONE GENERATION AT A TIME, oldest first: the record's dead ids, then each
-    older session file, then the current one. Collapsing them into one
+    ONE GENERATION AT A TIME, oldest first: the record's candidates, then
+    each older session file, then the current one. Collapsing them into one
     "previous" set would put A and B (one window, two restarts) side by side
     against C, and the rule's uniqueness would rightly refuse both. Each step
     binds a generation to the next and the chains are followed to the
@@ -4620,48 +4711,45 @@ def chrome_restart_binding(hist=None, tabs=None, rec=None, now=None):
     same on every pass (idempotent), which the re-key log and the stores
     need, since they apply it and dedupe.
 
-    PRUNED AT KNOWLEDGE_TTL: an id unseen that long names a window no store
-    can still hold a slot for."""
+    PRUNED AT KNOWLEDGE_TTL, and a dead entry that can never be a candidate
+    or a link goes as soon as its file does."""
     now = time.time() if now is None else now
     _tabs = chrome_window_tabs if tabs is None else tabs
-    gens = _chrome_generations(
-        session_history() if hist is None else hist, _tabs)
     rec = load_chrome_tabs() if rec is None else rec
-    rec = {k: dict(v) for k, v in rec.items()}
-    cur, steps = {}, []
+    salt = rec.get("salt") or ""
+    wins = ({k: dict(v) for k, v in (rec.get("windows") or {}).items()}
+            if salt else {})
+    salt = salt or os.urandom(16).hex()
+    gens = _chrome_generations(
+        session_history() if hist is None else hist, _tabs, salt)
+    cur, steps, kept = {}, [], {}
     for prof, files in gens.items():
-        infile = {w for g in files for w in g}
-        oldest = {int(k): (float(v.get("seen") or 0),
-                           frozenset(v.get("tabs") or ()))
-                  for k, v in rec.items()
-                  if k.isdigit() and v.get("profile") in (None, prof)
-                  and int(k) not in infile}
-        chain = ([oldest] if oldest else []) + files
+        names = {n for n, _t, _g in files}
+        kept[prof] = names
+        oldest = _record_candidates(wins, prof, names)
+        _record_read(wins, prof, files)
+        chain = ([oldest] if oldest else []) + [g for _n, _t, g in files]
         for g0, g1 in zip(chain, chain[1:]):
-            # A BOUND ID IS LEFT OUT of every generation, the record's
-            # included: it is reached through its link, and offered again
-            # it would tie with its own successor.
-            prev = {w: u for w, (_t, u) in g0.items()
-                    if w not in g1 and not (rec.get(str(w)) or {})
-                    .get("bound")}
-            nxt = {w: u for w, (_t, u) in g1.items()}
-            if prev and nxt:
-                steps.extend(chrome_bind_windows(nxt, prev).items())
-        cur.update({w: u for w, (_t, u) in files[-1].items()})
-        for g in files:
-            for w, (t, urls) in g.items():
-                e = rec.setdefault(str(w), {})
-                if t >= float(e.get("seen") or 0):
-                    e.update(tabs=sorted(urls), seen=t, profile=prof)
+            prev = {w: u for w, u in g0.items() if w not in g1}
+            if prev and g1:
+                steps.extend(chrome_bind_windows(g1, prev).items())
+        cur.update(files[-1][2])
     for o, n in steps:
-        rec.setdefault(str(o), {"tabs": [], "seen": now})["bound"] = str(n)
-    links = [(int(k), int(v["bound"])) for k, v in rec.items()
+        wins.setdefault(str(o), {"tabs": [], "seen": now})["bound"] = str(n)
+    links = [(int(k), int(v["bound"])) for k, v in wins.items()
              if k.isdigit() and str(v.get("bound") or "").isdigit()]
     binding = _chain_to(links, set(cur))
     floor = now - KNOWLEDGE_TTL
-    rec = {k: v for k, v in rec.items()
-           if float(v.get("seen") or 0) >= floor}
-    return cur, binding, rec
+
+    def keep(e):
+        if float(e.get("seen") or 0) < floor:
+            return False
+        names = kept.get(e.get("profile"))
+        if names is None or e.get("file") in names or e.get("bound"):
+            return True
+        return bool(e.get("final") and e.get("open"))
+    wins = {k: v for k, v in wins.items() if keep(v)}
+    return cur, binding, {"salt": salt, "windows": wins}
 
 
 def chrome_session_binding():
@@ -9688,7 +9776,7 @@ def _unlayout_split(unlayout, recorded=None):
     gone, so it is reachable too."""
     if recorded is None:
         recorded = recorded_window_ids() | {
-            int(k) for k in load_chrome_tabs() if k.isdigit()}
+            int(k) for k in load_chrome_tabs()["windows"] if k.isdigit()}
     if not recorded:
         return list(unlayout), []
     listed, gone = [], []

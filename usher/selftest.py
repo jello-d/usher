@@ -2733,8 +2733,9 @@ def _t_resolution(ck):
                     hist=lambda: {"P": [_rc1, _rp1]}, rec={},
                     save=_saved_rk.append)
             ck("source-rekey-lines-commit-the-tab-record",
-               len(_saved_rk) == 1 and "91" in _saved_rk[0]
-               and _saved_rk[0].get("11", {}).get("bound") == "91")
+               len(_saved_rk) == 1 and "91" in _saved_rk[0]["windows"]
+               and _saved_rk[0]["windows"].get("11", {}).get("bound")
+               == "91")
             # AND THE IDENTITY NEVER CROSSES IN THE CLEAR, which is the
             # whole reason the pairs are digests: a chrome slot is harmless
             # and a terminal's identity names a work host and session, so
@@ -10419,11 +10420,25 @@ def _t_chrome(ck):
     # session file and no state dir are touched.
     _X = frozenset({"https://x1/", "https://x2/", "https://x3/"})
     _Y = frozenset({"https://y1/", "https://y2/", "https://y3/"})
-    _crb = engine.chrome_restart_binding
+    _crb, _tfp = engine.chrome_restart_binding, engine.tab_fingerprint
+    _S = "fixture-salt"
 
     def _rb(files, rec=None, now=1000.0):
         return _crb(hist={"P": list(files)},
-                    tabs=lambda f: _gen[f], rec=rec or {}, now=now)
+                    tabs=lambda f: _gen[f],
+                    rec=rec or {"salt": _S, "windows": {}}, now=now)
+
+    def _dead(tabs, **kw):
+        """A record entry whose session file is gone, read in its run's
+        final state and still open then, unless `kw` says otherwise."""
+        e = {"tabs": sorted(_tfp(tabs, _S)), "seen": 900.0, "profile": "P",
+             "file": "gone", "final": True, "open": True}
+        e.update(kw)
+        return e
+
+    def _R(**wins):
+        return {"salt": _S, "windows": {k.lstrip("w"): v
+                                        for k, v in wins.items()}}
     # TWO RESTARTS BEFORE ANYTHING LOOKED: one window, three ids. Collapsing
     # the older files into one "previous" set would tie A and B against C.
     _gen = {"c": {3: _X}, "b": {2: _X}, "a": {1: _X}}
@@ -10432,14 +10447,18 @@ def _t_chrome(ck):
        _bnd == {1: 3, 2: 3} and set(_cur) == {3})
     ck("restart-binding-is-idempotent",
        _rb(["c", "b", "a"], rec=_rec)[1] == _bnd)
+    # AND A ONE-TAB WINDOW IS FOLLOWED while both files are on disk.
+    _gen = {"c": {9: frozenset({"https://x1/"})},
+            "b": {2: frozenset({"https://x1/"})}}
+    ck("restart-binding-follows-one-tab-between-two-files",
+       _rb(["c", "b"])[1] == {2: 9})
     # THE RECORD ALONE: the file naming the old id is gone.
     _gen = {"c": {9: _X, 8: _Y}}
-    _r0 = {"5": {"tabs": sorted(_X), "seen": 900.0, "profile": "P"}}
-    _cur, _bnd, _rec = _rb(["c"], rec=_r0)
+    _cur, _bnd, _rec = _rb(["c"], rec=_R(w5=_dead(_X)))
     ck("restart-binding-bridges-from-the-record-alone", _bnd == {5: 9})
     ck("the-record-learns-the-current-windows",
-       sorted(_rec.get("9", {}).get("tabs", [])) == sorted(_X)
-       and _rec.get("5", {}).get("bound") == "9")
+       _rec["windows"].get("9", {}).get("tabs") == sorted(_tfp(_X, _S))
+       and _rec["windows"].get("5", {}).get("bound") == "9")
     # A BOUND ID IS NOT A CANDIDATE AGAIN, it is reached through its link:
     # the next restart moves 9 to 12, and 5 follows the chain rather than
     # tying with 9 against 12.
@@ -10450,29 +10469,92 @@ def _t_chrome(ck):
     # one must still be left out, or it ties with its own successor.
     _gen = {"d": {12: _X}}
     ck("a-bound-id-does-not-tie-with-its-successor",
-       _rb(["d"], rec=_rec)[1] == {5: 12, 9: 12})
+       _rb(["d"], rec=_R(w5=_dead(_X, bound="9"),
+                         w9=_dead(_X, file="c")))[1] == {5: 12, 9: 12})
+    # ONLY A WINDOW OPEN WHEN ITS RUN ENDED. Chrome restores those and no
+    # others and never reuses an id within a run, so a window CLOSED in this
+    # run (its entry names the current file), or closed in its own run, or
+    # read only mid-run, is never a newcomer's old self.
+    _gen = {"c": {9: _X}}
+    ck("a-window-closed-this-run-is-not-a-newcomer",
+       _rb(["c"], rec=_R(w4=_dead(_X, file="c", final=False)))[1] == {})
+    _cur, _b2, _r2 = _rb(["c"], rec=_R(w4=_dead(_X, file="c",
+                                                final=False)))
+    ck("the-record-marks-a-window-closed-in-its-run",
+       _r2["windows"]["4"].get("open") is False)
+    ck("a-window-closed-in-its-own-run-is-not-followed",
+       _rb(["c"], rec=_R(w4=_dead(_X, open=False)))[1] == {})
+    ck("a-window-never-read-in-its-final-state-is-not-followed",
+       _rb(["c"], rec=_R(w4=_dead(_X, final=False)))[1] == {})
+    # A RETAINED FILE'S WINDOW IS NOT OFFERED FROM THE RECORD TOO: put
+    # before the oldest file it would bind backwards, to an earlier run's
+    # window, and break the very chain it is part of.
+    _gen = {"a": {1: _X}, "b": {5: _X}, "c": {9: _X}}
+    ck("a-retained-files-window-is-not-a-record-candidate",
+       _rb(["c", "b", "a"], rec=_R(w5=_dead(_X, file="b")))[1]
+       == {1: 9, 5: 9})
+    # ...and where no later file takes it forward, it is not left marked as
+    # bound to the earlier run, which would cost it its bridge for good.
+    _gen = {"a": {1: _X}, "b": {5: _X}, "c": {9: _Y}}
+    ck("a-retained-files-window-is-never-bound-backwards",
+       "bound" not in _rb(["c", "b", "a"], rec=_R(w5=_dead(
+           _X, file="b")))[2]["windows"]["5"])
+    # AND A FILE A NEWER ONE HAS SUPERSEDED IS READ AS FINAL, which is what
+    # turns a window the files witnessed into one the record can follow.
+    _gen = {"c": {9: _Y}, "b": {2: _X}}
+    _r3 = _rb(["c", "b"])[2]["windows"]
+    ck("a-superseded-file-is-read-final",
+       _r3["2"].get("final") is True and not _r3["9"].get("final"))
+    # A ONE-TAB FINGERPRINT IS TOO THIN for the record alone, though the
+    # files still follow it (above).
+    _gen = {"c": {9: frozenset({"https://x1/"})}}
+    ck("the-record-does-not-follow-a-one-tab-window",
+       _rb(["c"], rec=_R(w5=_dead({"https://x1/"})))[1] == {})
+    # THE BROWSER'S OWN PAGES SAY NOTHING: two new-tab windows bind nothing,
+    # where an exact match on them would pair any two such windows.
+    ck("a-new-tab-page-has-no-fingerprint",
+       _tfp({"chrome://newtab/", "about:blank"}, _S) == frozenset())
+    _gen = {"c": {9: frozenset({"chrome://newtab/"})},
+            "b": {2: frozenset({"chrome://newtab/"})}}
+    ck("new-tab-windows-bind-nothing", _rb(["c", "b"])[1] == {})
     # AND EVERY TIE IS A REFUSAL: two dead windows of the same tabs.
     _gen = {"c": {9: _X}}
-    _rt = {"5": {"tabs": sorted(_X), "seen": 900.0, "profile": "P"},
-           "6": {"tabs": sorted(_X), "seen": 900.0, "profile": "P"}}
-    ck("restart-binding-refuses-a-record-tie", _rb(["c"], rec=_rt)[1] == {})
+    ck("restart-binding-refuses-a-record-tie",
+       _rb(["c"], rec=_R(w5=_dead(_X), w6=_dead(_X)))[1] == {})
     # ANOTHER PROFILE'S RECORD IS NOT THIS PROFILE'S HISTORY.
-    _rq = {"5": {"tabs": sorted(_X), "seen": 900.0, "profile": "Q"}}
     ck("restart-binding-keeps-to-the-profile",
-       _rb(["c"], rec=_rq)[1] == {})
+       _rb(["c"], rec=_R(w5=_dead(_X, profile="Q")))[1] == {})
     # A PARTIAL MATCH FROM THE RECORD, by the rule: three shared, over half.
     _gen = {"c": {9: frozenset(sorted(_X) + ["https://new/"])}}
-    _rp = {"5": {"tabs": sorted(_X) + ["https://gone/"], "seen": 900.0,
-                 "profile": "P"}}
     ck("restart-binding-takes-a-partial-match-by-the-rule",
-       _rb(["c"], rec=_rp)[1] == {5: 9})
-    # PRUNED AT THE TTL: an id unseen that long names a window no store
-    # can still hold a slot for.
+       _rb(["c"], rec=_R(w5=_dead(sorted(_X) + ["https://gone/"])))[1]
+       == {5: 9})
+    # DIGESTS, NOT URLS: the record holds nothing readable, and its salt is
+    # its own.
+    _gen = {"c": {9: _X}}
+    _rr = _rb(["c"])[2]
+    ck("the-record-holds-no-url",
+       "x1" not in json.dumps(_rr) and _rr["salt"] == _S)
+    ck("a-fingerprint-depends-on-the-salt",
+       _tfp(_X, "a") != _tfp(_X, "b") and len(_tfp(_X, "a")) == 3)
+    _ur = _crb(hist={"P": ["c"]}, tabs=lambda f: _gen[f],
+               rec={"windows": {"5": _dead(_X)}}, now=1000.0)
+    ck("an-unsalted-record-is-a-fresh-one",
+       _ur[1] == {} and "5" not in _ur[2]["windows"]
+       and len(_crb(hist={}, tabs=lambda f: {}, rec={}, now=1.0)[2]
+               ["salt"]) == 32)
+    # PRUNED AT THE TTL, and a dead entry that can never be followed goes as
+    # soon as its file does.
     _now = 10.0 * engine.KNOWLEDGE_TTL
     _gen = {"c": {9: _Y}}
-    _ro = {"5": {"tabs": sorted(_X), "seen": 1.0, "profile": "P"}}
     ck("the-record-forgets-an-id-past-the-ttl",
-       "5" not in _rb(["c"], rec=_ro, now=_now)[2])
+       "5" not in _rb(["c"], rec=_R(w5=_dead(_X, seen=1.0)),
+                      now=_now)[2]["windows"])
+    _rk = _rb(["c"], rec=_R(w5=_dead(_X, open=False),
+                            w6=_dead(_X, bound="9"), w7=_dead(_X)))[2]
+    ck("the-record-forgets-a-dead-entry-it-can-never-follow",
+       "5" not in _rk["windows"] and "6" in _rk["windows"]
+       and "7" in _rk["windows"])
     # THE RECORD ROUND-TRIPS THROUGH ITS FILE, and a non-object is none.
     import tempfile as _tfr
     _rd = _tfr.mkdtemp(prefix="usher-tabs-")
@@ -10483,14 +10565,15 @@ def _t_chrome(ck):
         with open(_rp2, "w") as f:
             f.write("[1, 2]")
         ck("a-record-that-is-not-an-object-is-empty",
-           engine.load_chrome_tabs(_rp2) == {})
+           engine.load_chrome_tabs(_rp2) == {"salt": "", "windows": {}})
     finally:
         shutil.rmtree(_rd, ignore_errors=True)
     # AND THE DRY RUN COUNTS AN ID THE RECORD HOLDS AS REACHABLE, or it
     # would collapse a slot the binding can still move.
     _rlt3, _rrw = engine.load_chrome_tabs, engine.recorded_window_ids
     try:
-        engine.load_chrome_tabs = lambda *a, **k: {"5": {"tabs": ["u"]}}
+        engine.load_chrome_tabs = lambda *a, **k: {
+            "salt": _S, "windows": {"5": {"tabs": ["u"]}}}
         engine.recorded_window_ids = lambda: {9}
         _ls, _gs = engine._unlayout_split(
             [{"title": "chrome:win:5"}, {"title": "chrome:win:4"}])
