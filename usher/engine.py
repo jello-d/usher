@@ -49,7 +49,7 @@ from .chrome import (CHROME_FLAGS, CHROME_STAGGER, browser_pids,
                      is_app_window_argv,
                      claim_by_size,
                      browser_started, chrome_bind_windows, chrome_profile_map,
-                     chrome_slot, chrome_window_groups, chrome_window_tabs,
+                     chrome_slot, chrome_window_group_ids, chrome_window_tabs,
                      is_chrome, is_chrome_slot, recorded_window_ids,
                      seed_slots, session_history, window_slot)
 
@@ -4562,14 +4562,13 @@ def tab_fingerprint(urls, salt):
     return frozenset(out)
 
 
-def group_fingerprint(names, salt):
-    """frozenset of salted digests of a window's TAB GROUP NAMES. PURE.
+def group_fingerprint(ids, salt):
+    """frozenset of salted digests of a window's SAVED TAB GROUP ids. PURE.
     Digests for the same reason as tab_fingerprint, and in their own domain
-    (a `group` prefix), so a group named like a page can never be taken for
-    one."""
+    (a `group` prefix)."""
     return frozenset(
         hashlib.sha256(("group\0" + salt + "\0" + n).encode("utf-8"))
-        .hexdigest()[:16] for n in names or () if n)
+        .hexdigest()[:16] for n in ids or () if n)
 
 
 def load_chrome_tabs(path=None):
@@ -4605,7 +4604,7 @@ def _chrome_generations(hist, tabs, salt, groups=None):
     """{profile: [(file name, mtime, {id: fingerprint}, {id: group
     fingerprint}), ...]}: each profile's session files, OLDEST FIRST, so the
     last is what the windows are now."""
-    _groups = chrome_window_groups if groups is None else groups
+    _groups = chrome_window_group_ids if groups is None else groups
     out = {}
     for prof, files in (hist or {}).items():
         gens = []
@@ -4674,11 +4673,11 @@ def _record_candidates(wins, prof, names):
 
     AND IT SAYS ENOUGH: a fingerprint of one tab is too thin to follow
     across a run boundary the files no longer witness, so the record offers
-    only windows with BIND_MIN_RECORD tabs or more, OR a named tab group,
-    which is a label rather than a fingerprint. A one-tab window is still
-    followed while both session files are on disk.
+    only windows with BIND_MIN_RECORD tabs or more, OR a saved tab group,
+    whose id is Chrome's own rather than a fingerprint. A one-tab window is
+    still followed while both session files are on disk.
 
-    Answers ({id: tabs}, {id: group names}).
+    Answers ({id: tabs}, {id: saved group ids}).
 
     A BOUND ID IS LEFT OUT: it is reached through its link, and offered
     again it would tie with its own successor. (The session files need no

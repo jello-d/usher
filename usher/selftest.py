@@ -10394,7 +10394,8 @@ def _t_chrome(ck):
         ck("chrome-bind-empty", chrome_bind_windows({}, _old) == {}
            and chrome_bind_windows(_new, {}) == {})
 
-        # TAB GROUP NAMES COME FIRST. The case that made them: a three-tab
+        # SAVED TAB GROUP IDS COME FIRST (the sets below stand for them).
+        # The case that made them: a three-tab
         # window one of whose tabs reloads at a new address shares two, which
         # the partial rule refuses at every restart (2026-11-20).
         _g = {1: _f({"people"})}
@@ -10439,8 +10440,11 @@ def _t_chrome(ck):
            chrome_bind_windows(_hr_new, _hr_old,
                                {2: _f({"people", "new"})}, _g) == {1: 2})
 
-        # THE GROUP NAMES ARE READ FROM THE FILE, as Chrome writes them: a
-        # token per restart, the name in the metadata, an unnamed group ignored.
+        # THE SAVED GROUP IDS ARE READ FROM THE FILE, as Chrome writes them:
+        # a token per restart, the saved id in the metadata; a group with no
+        # saved id, and a tab taken back out of its group, say nothing.
+        _U1 = "11111111-2222-3333-4444-555555555555"
+        _U2 = "66666666-7777-8888-9999-aaaaaaaaaaaa"
         import tempfile as _tf
         _gd = _tf.mkdtemp(prefix="usher-groups-", dir="/var/tmp")
         try:
@@ -10450,15 +10454,48 @@ def _t_chrome(ck):
                                       (7, 2, "https://b/", "B"),
                                       (8, 3, "https://c/", "C"),
                                       (9, 4, "https://d/", "D"),
-                                      (9, 5, "https://e/", "E")],
-                                     groups={1: "people", 2: "people",
-                                             3: "ops", 4: "", 5: "gone"},
+                                      (9, 5, "https://e/", "E"),
+                                      (9, 6, "https://f/", "F")],
+                                     groups={1: ("people", _U1),
+                                             2: ("people", _U1),
+                                             3: ("ops", _U2),
+                                             4: ("unsaved", ""),
+                                             5: ("gone", "77777777-0000-"
+                                                 "0000-0000-000000000000"),
+                                             6: ""},
                                      token_salt="r1", ungroup=[5]))
-            ck("chrome-window-groups-reads-the-names",
-               chrome.chrome_window_groups(_gp)
-               == {7: frozenset({"people"}), 8: frozenset({"ops"})})
-            ck("chrome-window-groups-never-raises",
-               chrome.chrome_window_groups(os.path.join(_gd, "nope")) == {})
+            ck("chrome-window-group-ids-reads-the-saved-ids",
+               chrome.chrome_window_group_ids(_gp)
+               == {7: frozenset({_U1}), 8: frozenset({_U2})})
+            ck("chrome-window-group-ids-never-raises",
+               chrome.chrome_window_group_ids(os.path.join(_gd, "nope"))
+               == {})
+            # END TO END over two real files: the window's third tab came
+            # back at a new address AND the group was renamed, the window's
+            # id and the group's token are new, and it is followed by the
+            # saved id alone (the tabs refuse: two of three).
+            _ga, _gb = os.path.join(_gd, "a"), os.path.join(_gd, "b")
+            with open(_ga, "wb") as _fh:
+                _fh.write(snss_build([(7, 1, "https://h1/", "A"),
+                                      (7, 2, "https://h2/", "B"),
+                                      (7, 3, "https://h3/", "C")],
+                                     groups={1: ("people", _U1)},
+                                     token_salt="run1"))
+            with open(_gb, "wb") as _fh:
+                _fh.write(snss_build([(91, 11, "https://h1/", "A"),
+                                      (91, 12, "https://h2/", "B"),
+                                      (91, 13, "https://h9/", "C")],
+                                     groups={11: ("renamed", _U1)},
+                                     token_salt="run2"))
+            _erec = {"salt": "s", "windows": {}}
+            ck("restart-binding-follows-a-saved-group-across-a-rename",
+               engine.chrome_restart_binding(
+                   hist={"P": [_gb, _ga]}, rec=_erec, now=1.0)[1]
+               == {7: 91})
+            ck("restart-binding-control-the-tabs-alone-refuse",
+               engine.chrome_restart_binding(
+                   hist={"P": [_gb, _ga]}, rec=_erec, now=1.0,
+                   groups=lambda f: {})[1] == {})
         finally:
             for _n in os.listdir(_gd):
                 os.unlink(os.path.join(_gd, _n))

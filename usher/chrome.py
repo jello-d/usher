@@ -182,9 +182,11 @@ _SNSS_SET_WINDOW_BOUNDS3 = 14
 # SetTabGroup: a 32-byte struct, int32 tab, pad, the group token (two uint64)
 # at 8..24, then a has-group byte at 24 (0 takes the tab OUT of its group,
 # with a zero token, so the token alone answers).
-# SetTabGroupMetadata2: a Pickle, the token at 4..20, then the group's TITLE
-# as a String16. The token is minted afresh at every restart (measured
-# 2026-11-20, 0 of 3 shared across one); the TITLE survives (3 of 3).
+# SetTabGroupMetadata2: a Pickle, the token at 4..20, the group's TITLE as a
+# String16, a uint32 colour, a collapsed bool, then a bool and, when it is
+# set, the SAVED GROUP's id as a String (a UUID). The token is minted afresh
+# at every restart (measured 2026-11-20, 0 of 3 shared across one); the
+# saved id is Chrome's own persistent one and survives (3 of 3).
 _SNSS_SET_TAB_GROUP = 25
 _SNSS_SET_TAB_GROUP_META = 27
 
@@ -507,16 +509,35 @@ def chrome_window_tabs(path):
     return {w: frozenset(u) for w, u in out.items()}
 
 
-def chrome_window_groups(path):
-    """{window id: frozenset of the NAMES of the tab groups it holds}, for
-    one session file's open windows. Never raises; a bad or missing file
-    yields {}.
+_UUID_RE = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
 
-    A GROUP NAME IS THE USER'S OWN LABEL, so unlike a tab's address it does
-    not change when a page reloads or redirects, and it comes back with the
-    window at a restart where the group's token does not. An UNNAMED group
-    says nothing about which window it is in, so it is left out. The last
-    record for a tab or a group wins, as it does for Chrome."""
+
+def _group_saved_id(p):
+    """The saved-group id in one SetTabGroupMetadata2 payload, or None. Never
+    raises."""
+    try:
+        _title, o = _snss_str16(p, 20)
+        # colour, collapsed, has-saved-id: a group with no saved id ends
+        # its record there (measured), so the read below fails and answers
+        # None, and only a value shaped like Chrome's id is taken
+        gid, _o = _snss_str(p, o + 12)
+    except Exception:
+        return None
+    return gid if _UUID_RE.fullmatch(gid) else None
+
+
+def chrome_window_group_ids(path):
+    """{window id: frozenset of the SAVED-GROUP ids of the tab groups it
+    holds}, for one session file's open windows. Never raises; a bad or
+    missing file yields {}.
+
+    THE ONE ID CHROME KEEPS ACROSS A RESTART. A window's id, its tabs' ids
+    and a group's token are all minted afresh when the browser starts and
+    nothing in the new file names the old ones (measured 2026-11-20: 0 of 2
+    window ids, 0 of 28 tab ids, 0 of 3 tokens). A saved group's id is
+    Chrome's own persistent handle for the group, and survives the restart
+    and a rename. A group with no saved id says nothing, so it is left out.
+    The last record for a tab or a group wins, as it does for Chrome."""
     try:
         d = open(path, "rb").read()
         tabs = _snss_scan(path)
@@ -525,7 +546,7 @@ def chrome_window_groups(path):
     if tabs is None:
         return {}
     tab_win, _ti, _ws, _tn, _nav, closed_tabs, closed_wins = tabs
-    tab_tok, title = {}, {}
+    tab_tok, gid = {}, {}
     for cid, p in _snss_records(d):
         try:
             if cid == _SNSS_SET_TAB_GROUP and len(p) >= 24:
@@ -534,17 +555,16 @@ def chrome_window_groups(path):
                 t, _o = _snss_i32(p, 0)
                 tab_tok[t] = p[8:24]
             elif cid == _SNSS_SET_TAB_GROUP_META and len(p) >= 24:
-                title[p[4:20]], _o = _snss_str16(p, 20)
+                gid[p[4:20]] = _group_saved_id(p)
         except Exception:
             pass
     out = {}
     for t, tok in tab_tok.items():
         w = tab_win.get(t)
-        name = title.get(tok) if tok else None
-        if (w is None or not name or t in closed_tabs
-                or w in closed_wins):
+        g = gid.get(tok)
+        if w is None or not g or t in closed_tabs or w in closed_wins:
             continue
-        out.setdefault(w, set()).add(name)
+        out.setdefault(w, set()).add(g)
     return {w: frozenset(n) for w, n in out.items()}
 
 
@@ -681,14 +701,14 @@ BIND_MIN_SHARED = 3   # tabs a PARTIAL match must have in common
 
 
 def _bind_by_groups(cur, prev):
-    """{old: new} by tab group names. PURE. Both arguments are {id: frozenset
-    of group-name fingerprints}.
+    """{old: new} by saved tab group ids. PURE. Both arguments are {id:
+    frozenset of group-id fingerprints}.
 
-    A NAME HELD BY EXACTLY ONE WINDOW ON EACH SIDE links those two windows,
-    and a pair binds only if EVERY such name of either window points at the
-    other: a window whose names point at two different windows (a group moved
-    between windows) binds nothing. A name two windows share on either side
-    is no label at all and is simply not used."""
+    AN ID HELD BY EXACTLY ONE WINDOW ON EACH SIDE links those two windows,
+    and a pair binds only if EVERY such id of either window points at the
+    other: a window whose groups point at two different windows (a group
+    moved between windows) binds nothing. An id two windows hold on one side
+    cannot happen in Chrome, and if it does it is simply not used."""
     def owners(side):
         by = {}
         for w, names in side.items():
@@ -730,11 +750,13 @@ def chrome_bind_windows(cur, prev, cur_groups=None, prev_groups=None):
     smaller set is deliberate: a ten-tab window must not claim a two-tab one
     on one shared page.
 
-    TAB GROUP NAMES COME FIRST, when the caller has them (_bind_by_groups):
-    a group's name is the user's own label and survives a reload that
-    changes a tab's address, which is how a three-tab window with one such
-    tab fell below the partial rule at every restart (2026-11-20). The tab
-    tiers then decide only the windows the names did not.
+    SAVED TAB GROUP IDS COME FIRST, when the caller has them
+    (_bind_by_groups): they are the one id Chrome itself carries across a
+    restart, so they are not a fingerprint at all. The tabs are the
+    fallback for a window with no saved group: a three-tab window one of
+    whose tabs changed address on reload fell below the partial rule at
+    every restart (2026-11-20). The tab tiers decide only the windows the
+    ids did not.
 
     Unbound is the safe outcome: the window is placed by its surface and its
     old slot ages out."""
@@ -917,16 +939,25 @@ def snss_build(tabs, ver=3, bounds=None, groups=None, token_salt="",
     for window, (w, h) in (bounds or {}).items():
         out += cmd(_SNSS_SET_WINDOW_BOUNDS3,
                    wi(window) + wi(10) + wi(10) + wi(w) + wi(h) + wi(1))
-    # groups: {tab: group name}. The token is per FILE (token_salt), as
-    # Chrome mints one afresh at every restart.
+    # groups: {tab: key or (title, saved id)}. A bare key is the group's
+    # title and its saved id is derived from it, the same in every file; an
+    # empty one is a group with no saved id. The token is per FILE
+    # (token_salt), as Chrome mints one afresh at every restart.
     named = set()
-    for tab, name in (groups or {}).items():
-        tok = hashlib.sha256((token_salt + "\0" + name).encode()).digest()[:16]
+    for tab, g in (groups or {}).items():
+        name, sid = g if isinstance(g, tuple) else (g, None)
+        if sid is None and name:
+            h = hashlib.sha256(name.encode()).hexdigest()
+            sid = "-".join((h[:8], h[8:12], h[12:16], h[16:20], h[20:32]))
+        tok = hashlib.sha256(
+            (token_salt + "\0" + name + "\0" + (sid or "")).encode()
+        ).digest()[:16]
         out += cmd(_SNSS_SET_TAB_GROUP,
                    wi(tab) + wi(0) + tok + b"\x01" + b"\x00" * 7)
-        if name not in named:
-            named.add(name)
-            pk = tok + ws16(name) + struct.pack("<I", 0)
+        if tok not in named:
+            named.add(tok)
+            pk = tok + ws16(name) + struct.pack("<I", 0) + wi(0)
+            pk += wi(1) + ws(sid) if sid else wi(0)
             out += cmd(_SNSS_SET_TAB_GROUP_META, wi(len(pk)) + pk)
     for tab in ungroup:      # taken back out of its group, as Chrome records
         out += cmd(_SNSS_SET_TAB_GROUP, wi(tab) + wi(0) + b"\x00" * 24)
