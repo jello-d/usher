@@ -17066,6 +17066,113 @@ def _t_displays(ck):
         shutil.rmtree(_rd, ignore_errors=True)
 
 
+def _t_focus(ck):
+    """Where focus was just before a display change, for whoever follows the
+    person across a dock (tackup T14). The property that matters: the
+    answer describes the moment BEFORE the change, never the focus the
+    compositor assigns once a panel has gone."""
+    from .watch import Watcher
+    # THESE CELLS WRITE FOCUS_FILE, so they refuse to run unless the driver
+    # sandboxed it: the real one is the answer a dock left for its hook.
+    _sandboxed = not engine.FOCUS_FILE.startswith(
+        os.path.join(engine.RUNTIME_DIR, ""))
+    ck("the-focus-file-is-sandboxed", _sandboxed)
+    if not _sandboxed:
+        return
+    S = {"DP-9": (2160, 3840), "eDP-1": (2880, 1800)}
+
+    def V(vid, out, x, y, w, h):
+        return {"id": vid, "output-name": out,
+                "geometry": {"x": x, "y": y, "width": w, "height": h}}
+    # THE POINT: the centre as a fraction of its output, enough to tell the
+    # bottom half of a split portrait from its top.
+    ck("focus-point-is-the-centre-as-a-fraction",
+       engine.focus_point(V(1, "DP-9", 80, 2000, 2000, 1600), S)
+       == ("DP-9", round(1080 / 2160, 4), round(2800 / 3840, 4)))
+    ck("focus-point-clamps-an-overhang",
+       engine.focus_point(V(1, "eDP-1", 2800, -900, 400, 400), S)[1:]
+       == (1.0, 0.0))
+    ck("focus-point-of-a-parked-or-unknown-output-is-none",
+       engine.focus_point(V(1, "null", 0, 0, 9, 9), S) is None
+       and engine.focus_point(V(1, "HDMI-A-1", 0, 0, 9, 9), S) is None
+       and engine.focus_point({"id": 1, "output-name": "DP-9"}, S) is None)
+    # BEFORE, NOT LATEST: the compositor's reassignment to the surviving
+    # panel may arrive just ahead of the output event.
+    _a, _b = ("DP-9", 0.5, 0.75), ("eDP-1", 0.5, 0.5)
+    ck("focus-before-skips-a-reassignment-just-before-the-change",
+       engine.focus_before([(90.0, _a), (99.8, _b)], 100.0) == _a)
+    ck("focus-before-takes-the-newest-settled-record",
+       engine.focus_before([(50.0, _b), (90.0, _a)], 100.0) == _a)
+    ck("focus-before-falls-back-to-the-oldest-prior-record",
+       engine.focus_before([(99.5, _a), (99.9, _b)], 100.0) == _a)
+    ck("focus-before-ignores-a-record-after-the-change",
+       engine.focus_before([(100.5, _b)], 100.0) is None
+       and engine.focus_before([], 100.0) is None)
+    # PUBLISHED, READ, AND CLEARED when there is no answer, so a reader
+    # cannot be handed one from an earlier change.
+    engine.publish_focus(_a, 1234)
+    ck("focus-round-trips", engine.read_focus() == ("DP-9", 0.5, 0.75, 1234))
+    _o = io.StringIO()
+    with contextlib.redirect_stdout(_o):
+        _rc = engine.do_last_focus()
+    ck("last-focus-prints-the-contract-line",
+       _rc == engine.EXIT_OK and _o.getvalue() == "DP-9 0.5000 0.7500 1234\n")
+    engine.publish_focus(None, 1235)
+    _o = io.StringIO()
+    with contextlib.redirect_stdout(_o):
+        _rc = engine.do_last_focus()
+    ck("no-answer-exits-1-and-prints-nothing",
+       _rc == engine.EXIT_FAIL and _o.getvalue() == ""
+       and not os.path.exists(engine.FOCUS_FILE))
+    for _bad in ({"connector": "DP-9", "fx": 1.5, "fy": 0.1, "serial": 1},
+                 {"connector": "DP-9", "fx": 0.5, "fy": 0.1, "serial": True},
+                 {"connector": "", "fx": 0.5, "fy": 0.1, "serial": 1}):
+        engine.write_json(engine.FOCUS_FILE, json.dumps(_bad))
+        ck(f"a-malformed-answer-is-none-{list(_bad.values())}",
+           engine.read_focus() is None)
+    # THE WIRING: focus events are recorded, the focused view's moves too,
+    # and a change STARTING freezes the pre-change answer; one already in
+    # progress does not replace it.
+    from . import cli, watch as _wmod
+    w = Watcher(launch=False)
+    w.out_sizes = dict(S)
+    _rlog = _wmod.logline
+    _wmod.logline = lambda m: None
+    try:
+        w._on_event({"event": "view-focused",
+                     "view": V(5, "DP-9", 80, 100, 2000, 1600)})
+        w._on_event({"event": "view-geometry-changed",
+                     "view": V(5, "DP-9", 80, 2000, 2000, 1600)})
+        w._on_event({"event": "view-geometry-changed",
+                     "view": V(6, "eDP-1", 0, 0, 100, 100)})
+        ck("focus-events-are-recorded-and-the-focused-view-followed",
+           [p for _t, p in w.focus_log]
+           == [("DP-9", 0.5, round(900 / 3840, 4)),
+               ("DP-9", 0.5, round(2800 / 3840, 4))])
+        # age the records, then let the compositor reassign focus to the
+        # laptop just before the output event, as an undock can
+        w.focus_log = [(t - 30.0, p) for t, p in w.focus_log]
+        w._on_event({"event": "view-focused",
+                     "view": V(7, "eDP-1", 0, 0, 2880, 1800)})
+        w.transition_until = 0.0
+        w._on_event({"event": "output-removed", "output": {"name": "DP-9"}})
+        _f1 = engine.read_focus()
+        ck("an-undock-publishes-the-focus-before-it",
+           _f1 is not None and _f1[:3] == ("DP-9", 0.5,
+                                           round(2800 / 3840, 4)))
+        w.focus_log = [(t - 30.0, p) for t, p in w.focus_log]
+        w._on_event({"event": "output-removed", "output": {"name": "DP-7"}})
+        ck("a-change-in-progress-does-not-replace-the-answer",
+           engine.read_focus() == _f1)
+    finally:
+        _wmod.logline = _rlog
+        w.transition_until = 0.0
+        if os.path.exists(engine.FOCUS_FILE):
+            os.remove(engine.FOCUS_FILE)
+    ck("last-focus-is-a-service-verb",
+       cli.VERBS.get("last-focus", ("",))[0] == "mgr")
+
+
 def _t_contracts(ck):
     """the cross-tool contracts and the SNSS reader."""
     # THE EXIT CONTRACT, with the allowed set DERIVED from the declaration
@@ -17851,6 +17958,10 @@ def selftest():
     engine.STATE = _scratch_state
     engine.SOURCES_FILE = _scratch_sources
     engine.DESK_FILE = _scratch_desk
+    # AND WHERE FOCUS WAS BEFORE A DISPLAY CHANGE: a fixture's transition
+    # must not replace the answer a dock on this box left for its hook.
+    _real_focus = engine.FOCUS_FILE
+    engine.FOCUS_FILE = os.path.join(_scratch_root, "usher.focus")
     engine._SOURCES_ADOPTED = False
     # AND THE NETWORK HOLD's two runtime files and its witness: a real hold
     # on this box would otherwise be carried into every fixture's persist,
@@ -17872,7 +17983,8 @@ def selftest():
                      _t_relaunch, _t_chrome, _t_chrome_sizes, _t_learn,
                      _t_geometry, _t_placement, _t_snapshots, _t_undo,
                      _t_profiles,
-                     _t_migration, _t_watcher, _t_displays, _t_contracts):
+                     _t_migration, _t_watcher, _t_displays, _t_focus,
+                     _t_contracts):
             # WHEN A DESK WAS LAST USED is module state a store load
             # records, so one area's fixture stores must not decide another
             # area's surface_dictates.
@@ -17897,6 +18009,7 @@ def selftest():
         engine.STATE = _real_state
         engine.SOURCES_FILE = _real_sources
         engine.DESK_FILE = _real_desk
+        engine.FOCUS_FILE = _real_focus
         engine._SOURCES_ADOPTED = False
         (engine.HELD_FILE, engine.RELEASE_FILE, engine.connectivity,
          engine.NEEDS_NETWORK_FILE) = _real_held

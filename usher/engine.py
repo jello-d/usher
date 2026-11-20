@@ -11040,6 +11040,96 @@ DESK_FILE = os.path.join(RUNTIME_DIR, "usher.desk")
 # daemon). Runtime state, so a hold is about this boot and no other.
 HELD_FILE = os.path.join(RUNTIME_DIR, "usher.held")
 RELEASE_FILE = os.path.join(RUNTIME_DIR, "usher.release")
+# AND WHERE FOCUS WAS JUST BEFORE THE LATEST DISPLAY CHANGE, a fact for
+# whoever follows the person across a dock (tackup T14). See focus_before.
+FOCUS_FILE = os.path.join(RUNTIME_DIR, "usher.focus")
+# A focus record younger than this at the moment a change is first seen is
+# not trusted to describe the moment BEFORE it (see focus_before).
+FOCUS_SETTLE = 1.0
+FOCUS_KEEP = 16
+
+
+def focus_point(v, sizes):
+    """(connector, fx, fy) for a view: the output it is on and its centre as
+    a fraction of that output (0..1), enough to tell the top of a split
+    panel from its bottom. None when it is on no output we know the size
+    of, which covers a parked view: it reads `null`, and no output is named
+    that. PURE.
+
+    A VIEW'S GEOMETRY IS OUTPUT-LOCAL, relative to the workspace on show,
+    and a focused window is on the workspace on show, so its centre lies
+    within the output; clamped anyway, since a window can overhang."""
+    out = v.get("output-name")
+    g = v.get("geometry") or {}
+    wh = (sizes or {}).get(out)
+    if (not out or not wh or wh[0] <= 0 or wh[1] <= 0
+            or not all(isinstance(g.get(k), (int, float))
+                       for k in ("x", "y", "width", "height"))):
+        return None
+
+    def frac(a):
+        return round(min(1.0, max(0.0, a)), 4)
+    return (out, frac((g["x"] + g["width"] / 2) / wh[0]),
+            frac((g["y"] + g["height"] / 2) / wh[1]))
+
+
+def focus_before(records, at, settle=FOCUS_SETTLE):
+    """Of [(time, point)], oldest first, the point that describes focus
+    BEFORE a display change first seen at `at`. PURE.
+
+    NOT SIMPLY THE LATEST. An output leaving takes focus with it and wayfire
+    hands focus to a surviving output, and nothing promises which of the two
+    events arrives first. So a record younger than `settle` at `at` is not
+    trusted: the answer is the newest one at least that old, which a person
+    cannot have changed in the instant before unplugging. Failing that, the
+    oldest one that predates `at`, which is the best evidence left."""
+    old = [p for t, p in records if t <= at - settle]
+    if old:
+        return old[-1]
+    prior = [p for t, p in records if t <= at]
+    return prior[0] if prior else None
+
+
+def publish_focus(point, serial):
+    """Publish where focus was before the change numbered `serial`, or
+    remove the answer when there is none, so a reader cannot be handed one
+    from an earlier change. Never fatal."""
+    try:
+        if point is None:
+            if os.path.exists(FOCUS_FILE):
+                os.remove(FOCUS_FILE)
+            return
+        write_json(FOCUS_FILE, json.dumps(
+            {"connector": point[0], "fx": point[1], "fy": point[2],
+             "serial": int(serial)}))
+    except OSError as e:
+        logline(f"focus publish failed: {e}")
+
+
+def read_focus(path=None):
+    """(connector, fx, fy, serial) as published, or None."""
+    d = json_object(path or FOCUS_FILE)
+    if not d:
+        return None
+    c, fx, fy, s = (d.get("connector"), d.get("fx"), d.get("fy"),
+                    d.get("serial"))
+    if (not isinstance(c, str) or not c or isinstance(s, bool)
+            or not isinstance(s, int)
+            or not all(isinstance(x, (int, float)) and not isinstance(x, bool)
+                       and 0 <= x <= 1 for x in (fx, fy))):
+        return None
+    return c, float(fx), float(fy), s
+
+
+def do_last_focus():
+    """`usher-mgr last-focus`: where focus was just before the latest
+    display change, as `CONNECTOR FX FY SERIAL`. Exit 1, printing nothing,
+    when there is no answer."""
+    f = read_focus()
+    if f is None:
+        return EXIT_FAIL
+    print(f"{f[0]} {f[1]:.4f} {f[2]:.4f} {f[3]}")
+    return EXIT_OK
 
 
 LOG_CAP = 256 * 1024   # rotate watch.log past this; bounds it to ~2x LOG_CAP

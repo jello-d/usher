@@ -6,7 +6,7 @@ usher \- record the Wayland window layout and place windows back
 .I save | restore | doctor | status | toggle | cleanly | ...
 .br
 .B usher-mgr
-.I watch | resume | display-changed
+.I watch | resume | display-changed | last-focus
 .SH DESCRIPTION
 .B usher
 seats windows into a steady arrangement on a wlroots/Wayfire session. Instead of
@@ -288,6 +288,18 @@ argument for the idiom above.
 .B display-changed
 For a display-change hook. Re-places against the profile for the new monitor
 set, and does nothing at all when the set has not actually changed.
+.TP
+.B last-focus
+Where focus was just before the latest display change, for a hook that
+follows the person across a dock:
+.I connector fx fy serial
+on one line, the output the focused window was on, its centre as a fraction
+of that output (0 to 1, so the top and bottom halves of a split panel differ),
+and the change it describes (milliseconds since the epoch at which the change
+was first seen). Recorded continuously and frozen when a change starts, so
+it never reports the focus the compositor assigns afterwards; a focus change
+in the second before the change is not trusted for that reason. Exits 1 and
+prints nothing when there is no answer.
 .TP
 .B place | settle | toggle
 Place every window that maps for a while, settle now so new

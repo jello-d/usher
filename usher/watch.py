@@ -630,6 +630,11 @@ class Watcher:
         self.user_placed = set()
         self.grabbing = set()
         self.focused = None
+        # WHERE FOCUS HAS BEEN, as [(time, (connector, fx, fy))], and the
+        # outputs' sizes it is measured against: frozen into FOCUS_FILE when
+        # a display change starts (see _freeze_focus).
+        self.focus_log = []
+        self.out_sizes = {}
         # THE WINDOW A DRAG HOLDS: the focused view at the moment `move` or
         # `resize` switched on. Focus itself cannot answer during the drag,
         # since the grab CLEARS it (a `view-focused` with no view follows the
@@ -2419,7 +2424,12 @@ class Watcher:
         away" would start a transition on every blip.
         """
         try:
-            now = frozenset(o.get("name") for o in cap.list_outputs())
+            _outs = cap.list_outputs()
+            now = frozenset(o.get("name") for o in _outs)
+            self.out_sizes = {
+                o.get("name"): ((o.get("geometry") or {}).get("width") or 0,
+                                (o.get("geometry") or {}).get("height") or 0)
+                for o in _outs}
         except Exception as e:                                 # noqa: BLE001
             return self._capture_failed(e, cap, 1)
         was, self.outputs_seen = self.outputs_seen, now
@@ -2857,6 +2867,31 @@ class Watcher:
         self.transition_until = time.time() + DOCK_HOLD
         logline(f"displays changing ({why}): holding capture for "
                 f"{DOCK_HOLD:.0f}s")
+        self._freeze_focus(time.time())
+
+    def _note_focus(self, v):
+        """Record where the focused view is. A view with no known output (a
+        parked one) records nothing."""
+        p = engine.focus_point(v, self.out_sizes)
+        if p is None:
+            return
+        with self.lock:
+            self.focus_log.append((time.time(), p))
+            del self.focus_log[:-engine.FOCUS_KEEP]
+
+    def _freeze_focus(self, at):
+        """Publish where focus was just before the display change first seen
+        at `at`, for whoever follows the person across it (tackup T14). Only
+        when a change STARTS: a burst of output events is one change, and the
+        answer must not be replaced by focus the compositor assigned while
+        it settled. It stands until the next change."""
+        with self.lock:
+            recs = list(self.focus_log)
+        p = engine.focus_before(recs, at)
+        engine.publish_focus(p, int(at * 1000))
+        if p is not None:
+            logline(f"focus before the change: {p[0]} "
+                    f"{p[1]:.2f},{p[2]:.2f}")
 
     def _take_redisplay(self):
         """Adopt a new display profile on hwdp's request, and re-place.
@@ -3447,6 +3482,10 @@ class Watcher:
                     self.grab_vid = None
         if ev == "view-focused":
             self.focused = v.get("id")
+            self._note_focus(v)
+        elif (ev == "view-geometry-changed" and v.get("id") is not None
+              and v.get("id") == self.focused):
+            self._note_focus(v)
         if v.get("id") is not None and (
                 (ev == "view-geometry-changed"
                  and self.grabbing & USER_PLACE_PLUGINS

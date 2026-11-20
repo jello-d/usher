@@ -35,6 +35,7 @@ VERBS = {
     "watch":           ("mgr", "start the daemon in RESTORE mode"),
     "resume":          ("mgr", "start the daemon in ADOPT mode (no restore)"),
     "display-changed": ("mgr", "hwdp changed hook; no-op if the set matches"),
+    "last-focus":      ("mgr", "where focus was before the display change"),
     "_super":          ("mgr", None),   # internal: the re-exec'd supervisor
     "_worker":         ("mgr", None),   # internal: the supervised worker
     # INTERNAL, AND REACHED THROUGH A SUDOERS GRANT. An enclave account runs
@@ -635,6 +636,8 @@ def _dispatch(verb, args):
         sys.exit(engine.do_wind_down())
     elif verb == "display-changed":   # hwdp's changed hook; no-op if same set
         sys.exit(engine.do_display_changed())
+    elif verb == "last-focus":    # for whoever follows a person across a dock
+        sys.exit(engine.do_last_focus())
     elif verb == "doctor":        # what is it doing, and what is it NOT doing
         sys.exit(doctor.do_doctor())
     elif verb == "selftest":      # offline unit checks (no compositor needed)
