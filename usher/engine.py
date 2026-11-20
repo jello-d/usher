@@ -49,7 +49,7 @@ from .chrome import (CHROME_FLAGS, CHROME_STAGGER, browser_pids,
                      is_app_window_argv,
                      claim_by_size,
                      browser_started, chrome_bind_windows, chrome_profile_map,
-                     chrome_slot, chrome_window_tabs,
+                     chrome_slot, chrome_window_groups, chrome_window_tabs,
                      is_chrome, is_chrome_slot, recorded_window_ids,
                      seed_slots, session_history, window_slot)
 
@@ -4562,10 +4562,20 @@ def tab_fingerprint(urls, salt):
     return frozenset(out)
 
 
+def group_fingerprint(names, salt):
+    """frozenset of salted digests of a window's TAB GROUP NAMES. PURE.
+    Digests for the same reason as tab_fingerprint, and in their own domain
+    (a `group` prefix), so a group named like a page can never be taken for
+    one."""
+    return frozenset(
+        hashlib.sha256(("group\0" + salt + "\0" + n).encode("utf-8"))
+        .hexdigest()[:16] for n in names or () if n)
+
+
 def load_chrome_tabs(path=None):
     """{"salt": str, "windows": {id (str): entry}}. An entry is {"tabs":
     [digest, ...], "seen": t, "profile": p, "file": session file name,
-    "open": bool, "final": bool, "bound": new id?}.
+    "open": bool, "final": bool, "bound": new id?, "groups": [digest, ...]}.
 
     A record with no salt is no record: its digests could not be compared
     with anything, so it is read as empty and rebuilt."""
@@ -4591,10 +4601,11 @@ def save_chrome_tabs(rec, path=None):
         logline(f"chrome tab record write failed: {e}")
 
 
-def _chrome_generations(hist, tabs, salt):
-    """{profile: [(file name, mtime, {id: fingerprint}), ...]}: each
-    profile's session files, OLDEST FIRST, so the last is what the windows
-    are now."""
+def _chrome_generations(hist, tabs, salt, groups=None):
+    """{profile: [(file name, mtime, {id: fingerprint}, {id: group
+    fingerprint}), ...]}: each profile's session files, OLDEST FIRST, so the
+    last is what the windows are now."""
+    _groups = chrome_window_groups if groups is None else groups
     out = {}
     for prof, files in (hist or {}).items():
         gens = []
@@ -4605,7 +4616,9 @@ def _chrome_generations(hist, tabs, salt):
                 t = 0.0
             gens.append((os.path.basename(f), t,
                          {w: tab_fingerprint(urls, salt)
-                          for w, urls in tabs(f).items()}))
+                          for w, urls in tabs(f).items()},
+                         {w: group_fingerprint(n, salt)
+                          for w, n in _groups(f).items()}))
         if gens:
             out[prof] = gens
     return out
@@ -4635,11 +4648,11 @@ def _record_read(wins, prof, files):
     superseded is a read of that run's FINAL state, since Chrome does not
     write a file after it rotates, so its windows are marked `final`."""
     newest = files[-1][0]
-    for name, t, g in files:
+    for name, t, g, gg in files:
         for w, fp in g.items():
             e = wins.setdefault(str(w), {})
             e.update(tabs=sorted(fp), seen=t, profile=prof, file=name,
-                     open=True)
+                     open=True, groups=sorted(gg.get(w) or ()))
             if name != newest:
                 e["final"] = True
         for k, e in wins.items():
@@ -4661,8 +4674,11 @@ def _record_candidates(wins, prof, names):
 
     AND IT SAYS ENOUGH: a fingerprint of one tab is too thin to follow
     across a run boundary the files no longer witness, so the record offers
-    only windows with BIND_MIN_RECORD tabs or more. A one-tab window is
-    still followed while both session files are on disk.
+    only windows with BIND_MIN_RECORD tabs or more, OR a named tab group,
+    which is a label rather than a fingerprint. A one-tab window is still
+    followed while both session files are on disk.
+
+    Answers ({id: tabs}, {id: group names}).
 
     A BOUND ID IS LEFT OUT: it is reached through its link, and offered
     again it would tie with its own successor. (The session files need no
@@ -4671,18 +4687,22 @@ def _record_candidates(wins, prof, names):
     AND A RETAINED FILE'S WINDOWS ARE THAT FILE'S TO OFFER: offered here as
     well, they would be put before the OLDEST file and bound backwards in
     time, to an earlier run's window, breaking the chain they belong to."""
-    return {int(k): frozenset(e.get("tabs") or ())
-            for k, e in wins.items()
-            if k.isdigit() and e.get("profile") == prof
-            and e.get("file") not in names
-            and e.get("final") and e.get("open") and not e.get("bound")
-            and len(e.get("tabs") or ()) >= BIND_MIN_RECORD}
+    ok = {k: e for k, e in wins.items()
+          if k.isdigit() and e.get("profile") == prof
+          and e.get("file") not in names
+          and e.get("final") and e.get("open") and not e.get("bound")
+          and (len(e.get("tabs") or ()) >= BIND_MIN_RECORD
+               or e.get("groups"))}
+    return ({int(k): frozenset(e.get("tabs") or ()) for k, e in ok.items()},
+            {int(k): frozenset(e.get("groups") or ())
+             for k, e in ok.items()})
 
 
 BIND_MIN_RECORD = 2
 
 
-def chrome_restart_binding(hist=None, tabs=None, rec=None, now=None):
+def chrome_restart_binding(hist=None, tabs=None, rec=None, now=None,
+                           groups=None):
     """(cur, binding, rec): this run's windows {id: fingerprint}, the binding
     {old id: new id} that follows windows across browser restarts, and the
     tab record updated with both. The CALLER commits `rec`
@@ -4720,18 +4740,21 @@ def chrome_restart_binding(hist=None, tabs=None, rec=None, now=None):
             if salt else {})
     salt = salt or os.urandom(16).hex()
     gens = _chrome_generations(
-        session_history() if hist is None else hist, _tabs, salt)
+        session_history() if hist is None else hist, _tabs, salt, groups)
     cur, steps, kept = {}, [], {}
     for prof, files in gens.items():
-        names = {n for n, _t, _g in files}
+        names = {n for n, _t, _g, _gg in files}
         kept[prof] = names
         oldest = _record_candidates(wins, prof, names)
         _record_read(wins, prof, files)
-        chain = ([oldest] if oldest else []) + [g for _n, _t, g in files]
-        for g0, g1 in zip(chain, chain[1:]):
+        chain = (([oldest] if oldest[0] else [])
+                 + [(g, gg) for _n, _t, g, gg in files])
+        for (g0, q0), (g1, q1) in zip(chain, chain[1:]):
             prev = {w: u for w, u in g0.items() if w not in g1}
             if prev and g1:
-                steps.extend(chrome_bind_windows(g1, prev).items())
+                steps.extend(chrome_bind_windows(
+                    g1, prev, q1,
+                    {w: q for w, q in q0.items() if w in prev}).items())
         cur.update(files[-1][2])
     for o, n in steps:
         wins.setdefault(str(o), {"tabs": [], "seen": now})["bound"] = str(n)

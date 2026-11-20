@@ -10394,6 +10394,76 @@ def _t_chrome(ck):
         ck("chrome-bind-empty", chrome_bind_windows({}, _old) == {}
            and chrome_bind_windows(_new, {}) == {})
 
+        # TAB GROUP NAMES COME FIRST. The case that made them: a three-tab
+        # window one of whose tabs reloads at a new address shares two, which
+        # the partial rule refuses at every restart (2026-11-20).
+        _g = {1: _f({"people"})}
+        _hr_old, _hr_new = {1: _f(_u[:3])}, {2: _f(_u[:2] + _u[8:9])}
+        ck("chrome-bind-group-control-tabs-alone-refuse",
+           chrome_bind_windows(_hr_new, _hr_old) == {})
+        ck("chrome-bind-group-name-follows-a-changed-tab",
+           chrome_bind_windows(_hr_new, _hr_old, {2: _f({"people"})}, _g)
+           == {1: 2})
+        # a name two windows hold on either side is no label at all
+        ck("chrome-bind-group-shared-name-binds-nothing",
+           chrome_bind_windows(_hr_new | {3: _f(_u[5:6])}, _hr_old,
+                               {2: _f({"people"}), 3: _f({"people"})}, _g)
+           == {}
+           and chrome_bind_windows(_hr_new, _hr_old | {4: _f(_u[6:7])},
+                                   {2: _f({"people"})},
+                                   {1: _f({"people"}), 4: _f({"people"})})
+           == {})
+        # a window whose names point at two windows (a group moved) binds
+        # nothing by name, and the tabs still get their say
+        ck("chrome-bind-group-split-binds-nothing-by-name",
+           chrome_bind_windows({2: _f(_u[5:6]), 3: _f(_u[6:7])},
+                               {1: _f(_u[7:8])},
+                               {2: _f({"a"}), 3: _f({"b"})},
+                               {1: _f({"a", "b"})}) == {})
+        # two old windows whose names now meet in ONE window (groups moved
+        # together) bind nothing by name: the new window is not both of them
+        ck("chrome-bind-group-two-windows-into-one-binds-nothing",
+           chrome_bind_windows({3: _f(_u[5:6])},
+                               {1: _f(_u[6:7]), 2: _f(_u[7:8])},
+                               {3: _f({"a", "b"})},
+                               {1: _f({"a"}), 2: _f({"b"})}) == {})
+        # the name OUTRANKS the tabs: the window holding the group is the
+        # window, whatever another's tabs look like, and that other is not
+        # then free to take it
+        ck("chrome-bind-group-outranks-the-tabs",
+           chrome_bind_windows({2: _f(_u[5:6]), 3: _f(_u[:3])},
+                               {1: _f(_u[:3])},
+                               {2: _f({"people"})}, _g) == {1: 2})
+        # an extra group on the new side does not stop the one that matches
+        ck("chrome-bind-group-a-new-group-does-not-stop-the-match",
+           chrome_bind_windows(_hr_new, _hr_old,
+                               {2: _f({"people", "new"})}, _g) == {1: 2})
+
+        # THE GROUP NAMES ARE READ FROM THE FILE, as Chrome writes them: a
+        # token per restart, the name in the metadata, an unnamed group ignored.
+        import tempfile as _tf
+        _gd = _tf.mkdtemp(prefix="usher-groups-", dir="/var/tmp")
+        try:
+            _gp = os.path.join(_gd, "s")
+            with open(_gp, "wb") as _fh:
+                _fh.write(snss_build([(7, 1, "https://a/", "A"),
+                                      (7, 2, "https://b/", "B"),
+                                      (8, 3, "https://c/", "C"),
+                                      (9, 4, "https://d/", "D"),
+                                      (9, 5, "https://e/", "E")],
+                                     groups={1: "people", 2: "people",
+                                             3: "ops", 4: "", 5: "gone"},
+                                     token_salt="r1", ungroup=[5]))
+            ck("chrome-window-groups-reads-the-names",
+               chrome.chrome_window_groups(_gp)
+               == {7: frozenset({"people"}), 8: frozenset({"ops"})})
+            ck("chrome-window-groups-never-raises",
+               chrome.chrome_window_groups(os.path.join(_gd, "nope")) == {})
+        finally:
+            for _n in os.listdir(_gd):
+                os.unlink(os.path.join(_gd, _n))
+            os.rmdir(_gd)
+
         # and the store move itself: a stale slot follows its window, one the
         # CURRENT session still knows is untouched, a second run is a no-op.
         _kb = {kkey("google-chrome", "chrome:win:7"):
@@ -10449,10 +10519,13 @@ def _t_chrome(ck):
     _crb, _tfp = engine.chrome_restart_binding, engine.tab_fingerprint
     _S = "fixture-salt"
 
+    _grp = {}
+
     def _rb(files, rec=None, now=1000.0):
         return _crb(hist={"P": list(files)},
                     tabs=lambda f: _gen[f],
-                    rec=rec or {"salt": _S, "windows": {}}, now=now)
+                    rec=rec or {"salt": _S, "windows": {}}, now=now,
+                    groups=lambda f: _grp.get(f, {}))
 
     def _dead(tabs, **kw):
         """A record entry whose session file is gone, read in its run's
@@ -10485,6 +10558,35 @@ def _t_chrome(ck):
     ck("the-record-learns-the-current-windows",
        _rec["windows"].get("9", {}).get("tabs") == sorted(_tfp(_X, _S))
        and _rec["windows"].get("5", {}).get("bound") == "9")
+    # GROUP NAMES THROUGH THE RECORD: the window's tab changed address, so
+    # only its group can follow it, from the files and from the record.
+    _hrA = frozenset({"https://h1/", "https://h2/", "https://h3/"})
+    _hrB = frozenset({"https://h1/", "https://h2/", "https://h9/"})
+    _gen = {"c": {9: _hrB}, "b": {2: _hrA}}
+    _grp = {"c": {9: {"people"}}, "b": {2: {"people"}}}
+    _cg, _bg, _rg = _rb(["c", "b"])
+    ck("restart-binding-follows-a-group-between-two-files", _bg == {2: 9})
+    ck("the-record-keeps-group-digests-not-names",
+       _rg["windows"]["9"].get("groups")
+       == sorted(engine.group_fingerprint({"people"}, _S))
+       and "people" not in json.dumps(_rg))
+    _gen, _grp = {"c": {9: _hrB}}, {"c": {9: {"people"}}}
+    ck("restart-binding-follows-a-group-from-the-record-alone",
+       _rb(["c"], rec=_R(w2=_dead(_hrA, groups=sorted(
+           engine.group_fingerprint({"people"}, _S)))))[1] == {2: 9})
+    # a one-tab window with a named group is a record candidate: the name
+    # is a label, not a thin fingerprint
+    _one = frozenset({"https://h1/"})
+    _gen = {"c": {9: frozenset({"https://h7/"})}}
+    ck("a-one-tab-window-with-a-group-is-a-record-candidate",
+       _rb(["c"], rec=_R(w2=_dead(_one, groups=sorted(
+           engine.group_fingerprint({"people"}, _S)))))[1] == {2: 9})
+    # (the same tabs exactly, so only the candidate rule can refuse it)
+    _gen = {"c": {9: _one}}
+    ck("a-one-tab-window-without-a-group-is-not",
+       _rb(["c"], rec=_R(w2=_dead(_one)))[1] == {})
+    _grp = {}
+
     # A BOUND ID IS NOT A CANDIDATE AGAIN, it is reached through its link:
     # the next restart moves 9 to 12, and 5 follows the chain rather than
     # tying with 9 against 12.

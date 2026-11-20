@@ -37,6 +37,7 @@ raw title it happens to be wearing. That fallback was 86% of a real
 store, none of it matchable.
 """
 import glob
+import hashlib
 import os
 import re
 import shlex
@@ -178,6 +179,14 @@ _SNSS_WINDOW_CLOSED = 17
 # POSITION is a placeholder (a Wayland client is never told where it is, so
 # Chrome writes 0,0 or 10,10), and the SIZE is real.
 _SNSS_SET_WINDOW_BOUNDS3 = 14
+# SetTabGroup: a 32-byte struct, int32 tab, pad, the group token (two uint64)
+# at 8..24, then a has-group byte at 24 (0 takes the tab OUT of its group,
+# with a zero token, so the token alone answers).
+# SetTabGroupMetadata2: a Pickle, the token at 4..20, then the group's TITLE
+# as a String16. The token is minted afresh at every restart (measured
+# 2026-11-20, 0 of 3 shared across one); the TITLE survives (3 of 3).
+_SNSS_SET_TAB_GROUP = 25
+_SNSS_SET_TAB_GROUP_META = 27
 
 
 def _snss_i32(b, o):
@@ -498,6 +507,47 @@ def chrome_window_tabs(path):
     return {w: frozenset(u) for w, u in out.items()}
 
 
+def chrome_window_groups(path):
+    """{window id: frozenset of the NAMES of the tab groups it holds}, for
+    one session file's open windows. Never raises; a bad or missing file
+    yields {}.
+
+    A GROUP NAME IS THE USER'S OWN LABEL, so unlike a tab's address it does
+    not change when a page reloads or redirects, and it comes back with the
+    window at a restart where the group's token does not. An UNNAMED group
+    says nothing about which window it is in, so it is left out. The last
+    record for a tab or a group wins, as it does for Chrome."""
+    try:
+        d = open(path, "rb").read()
+        tabs = _snss_scan(path)
+    except OSError:
+        return {}
+    if tabs is None:
+        return {}
+    tab_win, _ti, _ws, _tn, _nav, closed_tabs, closed_wins = tabs
+    tab_tok, title = {}, {}
+    for cid, p in _snss_records(d):
+        try:
+            if cid == _SNSS_SET_TAB_GROUP and len(p) >= 24:
+                # taken OUT of a group, Chrome writes an all-zero token
+                # (measured, 10 of 10), which no group's metadata names
+                t, _o = _snss_i32(p, 0)
+                tab_tok[t] = p[8:24]
+            elif cid == _SNSS_SET_TAB_GROUP_META and len(p) >= 24:
+                title[p[4:20]], _o = _snss_str16(p, 20)
+        except Exception:
+            pass
+    out = {}
+    for t, tok in tab_tok.items():
+        w = tab_win.get(t)
+        name = title.get(tok) if tok else None
+        if (w is None or not name or t in closed_tabs
+                or w in closed_wins):
+            continue
+        out.setdefault(w, set()).add(name)
+    return {w: frozenset(n) for w, n in out.items()}
+
+
 def chrome_window_sizes(path):
     """{window id: (width, height)} for one session file's OPEN windows, as
     Chrome last recorded them. Never raises; a bad file yields {}.
@@ -630,7 +680,32 @@ def claim_by_size(views):
 BIND_MIN_SHARED = 3   # tabs a PARTIAL match must have in common
 
 
-def chrome_bind_windows(cur, prev):
+def _bind_by_groups(cur, prev):
+    """{old: new} by tab group names. PURE. Both arguments are {id: frozenset
+    of group-name fingerprints}.
+
+    A NAME HELD BY EXACTLY ONE WINDOW ON EACH SIDE links those two windows,
+    and a pair binds only if EVERY such name of either window points at the
+    other: a window whose names point at two different windows (a group moved
+    between windows) binds nothing. A name two windows share on either side
+    is no label at all and is simply not used."""
+    def owners(side):
+        by = {}
+        for w, names in side.items():
+            for n in names or ():
+                by.setdefault(n, []).append(w)
+        return {n: ws[0] for n, ws in by.items() if len(ws) == 1}
+    po, co = owners(prev), owners(cur)
+    links = {n: (po[n], co[n]) for n in po.keys() & co.keys()}
+    fwd, back = {}, {}
+    for o, w in links.values():
+        fwd.setdefault(o, set()).add(w)
+        back.setdefault(w, set()).add(o)
+    return {o: next(iter(ws)) for o, ws in fwd.items()
+            if len(ws) == 1 and back[next(iter(ws))] == {o}}
+
+
+def chrome_bind_windows(cur, prev, cur_groups=None, prev_groups=None):
     """Bind PREVIOUS window ids to the CURRENT ones that restored them, by
     their tabs: {old id: new id}. Both arguments are {id: frozenset of the
     URL each open tab shows}. PURE.
@@ -655,9 +730,16 @@ def chrome_bind_windows(cur, prev):
     smaller set is deliberate: a ten-tab window must not claim a two-tab one
     on one shared page.
 
+    TAB GROUP NAMES COME FIRST, when the caller has them (_bind_by_groups):
+    a group's name is the user's own label and survives a reload that
+    changes a tab's address, which is how a three-tab window with one such
+    tab fell below the partial rule at every restart (2026-11-20). The tab
+    tiers then decide only the windows the names did not.
+
     Unbound is the safe outcome: the window is placed by its surface and its
     old slot ages out."""
-    out, used_new = {}, set()
+    out = _bind_by_groups(cur_groups or {}, prev_groups or {})
+    used_new = set(out.values())
     sets_new, sets_old = {}, {}
     for w, u in cur.items():
         if u:
@@ -667,7 +749,8 @@ def chrome_bind_windows(cur, prev):
             sets_old.setdefault(u, []).append(w)
     for u, olds in sets_old.items():
         news = sets_new.get(u, [])
-        if len(olds) == 1 and len(news) == 1:
+        if (len(olds) == 1 and len(news) == 1 and olds[0] not in out
+                and news[0] not in used_new):
             out[olds[0]] = news[0]
             used_new.add(news[0])
 
@@ -795,7 +878,8 @@ def chrome_profile_map():
     return out
 
 
-def snss_build(tabs, ver=3, bounds=None):
+def snss_build(tabs, ver=3, bounds=None, groups=None, token_salt="",
+                ungroup=()):
     """Build a minimal SNSS blob from [(window, tab, url, title), ...], for
     selftest: the inverse of the parser, Pickle 4-byte alignment and all.
 
@@ -833,4 +917,17 @@ def snss_build(tabs, ver=3, bounds=None):
     for window, (w, h) in (bounds or {}).items():
         out += cmd(_SNSS_SET_WINDOW_BOUNDS3,
                    wi(window) + wi(10) + wi(10) + wi(w) + wi(h) + wi(1))
+    # groups: {tab: group name}. The token is per FILE (token_salt), as
+    # Chrome mints one afresh at every restart.
+    named = set()
+    for tab, name in (groups or {}).items():
+        tok = hashlib.sha256((token_salt + "\0" + name).encode()).digest()[:16]
+        out += cmd(_SNSS_SET_TAB_GROUP,
+                   wi(tab) + wi(0) + tok + b"\x01" + b"\x00" * 7)
+        if name not in named:
+            named.add(name)
+            pk = tok + ws16(name) + struct.pack("<I", 0)
+            out += cmd(_SNSS_SET_TAB_GROUP_META, wi(len(pk)) + pk)
+    for tab in ungroup:      # taken back out of its group, as Chrome records
+        out += cmd(_SNSS_SET_TAB_GROUP, wi(tab) + wi(0) + b"\x00" * 24)
     return out
